@@ -25,6 +25,7 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    ParamSupport,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
@@ -134,6 +135,9 @@ class PiRuntime:
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
+            # System prompt is composed into the user message, not passed as a
+            # native system directive.
+            system_prompt_support=ParamSupport.TRANSLATED,
         )
 
     # -- CLI resolution ----------------------------------------------------

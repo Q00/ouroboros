@@ -60,6 +60,33 @@ These capabilities depend on the runtime backend's native features and execution
 | **Cost model**            |        Included in Max Plan         | Per-token API charges |              Depends on configured provider               |                            Depends on API/Local                            | Depends on Google account/API usage          |    Included in Kiro plan     | Included in Copilot subscription                                          | Depends on Pi account/provider  | See [OpenAI pricing](https://openai.com/pricing) for Codex costs |
 | **Declared capabilities** | skill_dispatch, targeted_resume, structured_output | all three | all three | all three | skill_dispatch and structured_output; `targeted_resume=False` (no native resume API) | skill_dispatch only; `targeted_resume=False` (headless does not surface session ids), `structured_output=False` (plain-text stdio) | skill_dispatch only; `targeted_resume=False` (no resume API); `structured_output=False` (no `--output-schema`, JSON via prompt directive) | all three | See `RuntimeCapabilities` on the adapter |
 
+### Parameter handling (negotiation)
+
+Beyond the feature flags above, `RuntimeCapabilities` declares how each runtime honors the
+execution **parameters** Ouroboros passes to `execute_task` — `system_prompt`, the `tools`
+allow-list, and `permission_mode`. Each is one of:
+
+- **`native`** — honored directly (e.g. a separate system-prompt field, a real tool allow-list).
+- **`translated`** — honored only through a lossy adaptation (the intent is partially preserved,
+  but not in the form supplied).
+- **`ignored`** — silently dropped.
+
+| Parameter       | Claude Code | Codex / Gemini / Goose / Copilot | OpenCode | Hermes | Pi | Kiro |
+| --------------- | :---------: | :------------------------------: | :------: | :----: | :-: | :--: |
+| `system_prompt` | native | translated | translated | translated | translated | translated |
+| `permission_mode` | native | native | native | native | native | translated |
+| `tools` (allow-list) | native | native | native | native | native | native |
+
+> Most CLI runtimes compose the system prompt **into the user message** (e.g.
+> `## System Instructions\n...`) rather than passing a native system directive, and Kiro
+> additionally maps `permission_mode` onto coarse `--trust-*` flags. This is honored work, but
+> not in the form supplied.
+
+**Observability:** when a workflow supplies a parameter the active runtime does not honor
+natively, the orchestrator surfaces a one-time notice (console + a structured
+`orchestrator.parallel_executor.param_degraded` log) so the degradation is visible instead of
+silent. This is **informational only** — it does not change what is passed to the runtime.
+
 ### Integration Surface (UX differences)
 
 | Aspect                      | Claude Code                                   | Codex CLI                                                                                                                                                                                                                                                    | OpenCode                                           | Hermes                                           | Gemini CLI                                      | Kiro CLI                                                                                      | Copilot CLI                                                                                                                                                  | Pi CLI                                      |

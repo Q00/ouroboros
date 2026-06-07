@@ -21,7 +21,12 @@ from uuid import uuid4
 
 from ouroboros.config import get_goose_cli_path
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeCapabilities, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 
 log = get_logger(__name__)
@@ -101,6 +106,9 @@ class GooseCliRuntime(CodexCliRuntime):
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
+            # System prompt is composed into the user message (inherited Codex
+            # prompt builder), not passed as a native system directive.
+            system_prompt_support=ParamSupport.TRANSLATED,
         )
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:

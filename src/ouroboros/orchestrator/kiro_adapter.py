@@ -21,6 +21,7 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    ParamSupport,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
@@ -45,6 +46,11 @@ _KIRO_CAPABILITIES = RuntimeCapabilities(
     skill_dispatch=True,
     targeted_resume=False,
     structured_output=False,
+    # System prompt is wrapped into the prompt as <system>...</system>, and
+    # permission_mode is mapped onto coarse --trust-* flags — both lossy
+    # adaptations rather than native handling.
+    system_prompt_support=ParamSupport.TRANSLATED,
+    permission_mode_support=ParamSupport.TRANSLATED,
 )
 
 log = get_logger(__name__)

@@ -11,8 +11,11 @@ import pytest
 
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
+    FULL_CAPABILITIES,
     AgentMessage,
     ClaudeAgentAdapter,
+    ParamSupport,
+    RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
@@ -67,6 +70,50 @@ def _build_mock_claude_agent_sdk(
         "claude_agent_sdk": module,
         "claude_agent_sdk.types": types_module,
     }
+
+
+class TestRuntimeCapabilitiesParamSupport:
+    """The param-support fields are additive and default to NATIVE."""
+
+    def test_param_support_defaults_to_native(self) -> None:
+        caps = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+        )
+
+        assert caps.system_prompt_support is ParamSupport.NATIVE
+        assert caps.tool_restriction_support is ParamSupport.NATIVE
+        assert caps.permission_mode_support is ParamSupport.NATIVE
+
+    def test_full_capabilities_is_all_native(self) -> None:
+        assert FULL_CAPABILITIES.system_prompt_support is ParamSupport.NATIVE
+        assert FULL_CAPABILITIES.tool_restriction_support is ParamSupport.NATIVE
+        assert FULL_CAPABILITIES.permission_mode_support is ParamSupport.NATIVE
+
+    def test_claude_adapter_honors_system_prompt_natively(self) -> None:
+        adapter = ClaudeAgentAdapter(api_key="test-key")
+
+        assert adapter.capabilities.system_prompt_support is ParamSupport.NATIVE
+
+
+class TestCliRuntimesDeclareTranslatedSystemPrompt:
+    """CLI runtimes that fold the system prompt into the user message say so."""
+
+    def test_hermes_declares_translated_system_prompt(self) -> None:
+        runtime = HermesCliRuntime()
+
+        assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+
+    def test_codex_declares_translated_system_prompt(self) -> None:
+        runtime = CodexCliRuntime()
+
+        assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+
+    def test_opencode_declares_translated_system_prompt(self) -> None:
+        runtime = OpenCodeRuntime()
+
+        assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
 
 
 class TestAgentMessage:

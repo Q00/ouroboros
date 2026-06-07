@@ -46,7 +46,9 @@ from rich.console import Console
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    FULL_CAPABILITIES,
     AgentMessage,
+    RuntimeCapabilities,
     RuntimeHandle,
     runtime_handle_tool_catalog,
 )
@@ -108,6 +110,10 @@ from ouroboros.orchestrator.policy import (
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
+)
+from ouroboros.orchestrator.runtime_param_negotiation import (
+    ParamDegradation,
+    negotiate_execution_params,
 )
 from ouroboros.orchestrator.verifier import (
     Verifier,
@@ -2462,6 +2468,59 @@ class ParallelACExecutor:
         self._ac_runtime_handles: dict[str, RuntimeHandle] = {}
         self._checkpoint_store = checkpoint_store
         self._execution_counters_lock = asyncio.Lock()
+        declared_capabilities = getattr(adapter, "capabilities", FULL_CAPABILITIES)
+        # Guard the adapter boundary: a runtime without a real capabilities
+        # contract (a test double, or a future runtime that omits it) falls back
+        # to the all-native default so negotiation never sees a
+        # non-``RuntimeCapabilities`` value.
+        self._runtime_capabilities: RuntimeCapabilities = (
+            declared_capabilities
+            if isinstance(declared_capabilities, RuntimeCapabilities)
+            else FULL_CAPABILITIES
+        )
+        # Param degradations already surfaced this run, keyed by (param, support),
+        # so the operator is told once rather than on every dispatch.
+        self._announced_param_degradations: set[tuple[str, str]] = set()
+
+    def _announce_param_degradations(
+        self,
+        *,
+        system_prompt: str | None,
+        tools: list[str] | None,
+    ) -> None:
+        """Surface (once per run) execution params the runtime won't honor natively.
+
+        Observability only — nothing here changes what is passed to the runtime.
+        It makes previously silent degradation (e.g. a CLI runtime folding the
+        system prompt into the user message) visible in logs and the console.
+        """
+        degradations = negotiate_execution_params(
+            self._runtime_capabilities,
+            system_prompt=system_prompt,
+            tools=tools,
+            permission_mode=getattr(self._adapter, "permission_mode", None),
+        )
+        for degradation in degradations:
+            key = (degradation.parameter, degradation.support.value)
+            if key in self._announced_param_degradations:
+                continue
+            self._announced_param_degradations.add(key)
+            self._surface_param_degradation(degradation)
+
+    def _surface_param_degradation(self, degradation: ParamDegradation) -> None:
+        """Emit a structured log line and a one-time console notice."""
+        backend = getattr(self._adapter, "runtime_backend", "unknown")
+        log.info(
+            "orchestrator.parallel_executor.param_degraded",
+            runtime_backend=backend,
+            parameter=degradation.parameter,
+            support=degradation.support.value,
+            detail=degradation.detail,
+        )
+        self._console.print(
+            f"[yellow]Note:[/yellow] runtime '{backend}' does not natively honor "
+            f"'{degradation.parameter}' ({degradation.support.value}): {degradation.detail}."
+        )
 
     def _flush_console(self) -> None:
         """Flush console output to ensure progress is visible immediately."""
@@ -4604,6 +4663,10 @@ Each Sub-AC should be:
 Respond with either "ATOMIC" or the JSON array only, nothing else.
 """
 
+        self._announce_param_degradations(
+            system_prompt=decomposition_system_prompt,
+            tools=None,
+        )
         try:
             response_text = ""
             # NOTE: Do NOT use `break` or `aclosing` with the SDK generator.
@@ -5366,6 +5429,7 @@ Files present:
         exec_start = time.monotonic()
 
         await self._wait_for_memory(label)
+        self._announce_param_degradations(system_prompt=system_prompt, tools=tools)
 
         try:
             with anyio.CancelScope(
