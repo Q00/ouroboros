@@ -107,7 +107,7 @@ jobs:
           cp crates/ouroboros-tui/target/${{ matrix.target }}/release/ouroboros-tui.exe ouroboros-tui-${{ matrix.target }}.exe
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ouroboros-tui-${{ matrix.target }}
           path: ouroboros-tui-${{ matrix.target }}*
