@@ -130,7 +130,7 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp>=1.26.0,<2.0.0 --with claude-agent-sdk>=0.1.0,<1.0.0 --with anthropic>=0.52.0,<1.0.0"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.26.0 --with claude-agent-sdk==0.1.50 --with anthropic==0.107.0"
         in calls
     )
     assert "ouroboros setup --runtime claude --non-interactive" in calls
