@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import contextlib
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -629,10 +630,28 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
+                # SQLite's planner mis-selects ix_events_timestamp here: to
+                # satisfy ORDER BY timestamp it scans *every* event row and
+                # applies the LIKE filter inline, turning this into a 30s+
+                # query on large stores (the session events are a tiny subset).
+                # SQLAlchemy/SQLite ignores with_hint(), so pin the selective
+                # ix_events_event_type index explicitly via raw SQL. The
+                # 'orchestrator.session.%' prefix is index-friendly; the small
+                # matched set is then ordered in a temp b-tree.
+                # ``.columns(*events_table.c)`` re-attaches the ORM column
+                # types so SQLAlchemy applies the same result processing as a
+                # ``select(events_table)`` would (notably JSON payload
+                # deserialization and timestamp coercion); without it the raw
+                # text result yields the payload as a JSON *string* and
+                # BaseEvent.from_db_row rejects it.
                 query = (
-                    select(events_table)
-                    .where(events_table.c.event_type.like("orchestrator.session.%"))
-                    .order_by(events_table.c.timestamp.asc())
+                    text(
+                        "SELECT * FROM events INDEXED BY ix_events_event_type "
+                        "WHERE event_type LIKE :pattern "
+                        "ORDER BY timestamp ASC"
+                    )
+                    .bindparams(pattern="orchestrator.session.%")
+                    .columns(*events_table.c)
                 )
 
                 result = await conn.execute(query)
@@ -1278,6 +1297,25 @@ class EventStore:
     async def close(self) -> None:
         """Close the database connection."""
         if self._engine is not None:
+            # Collapse the WAL back into the main DB before disposing. Without
+            # an explicit TRUNCATE checkpoint, long-lived multi-connection
+            # setups (many concurrent MCP/TUI sessions) let the -wal file grow
+            # unbounded: passive autocheckpoints cannot truncate while any
+            # other reader is active, so the file only ever appends. Best
+            # effort — ignore failures (read-only stores, lock contention).
+            #
+            # Use a short per-connection busy_timeout instead of the 30s default
+            # (set in initialize()): the checkpoint needs the write lock, and a
+            # peer process mid-write could otherwise stall this shutdown path for
+            # up to 30s. A missed checkpoint is harmless — the next clean close
+            # retries — so we cap the wait at ~2s. ``connect()`` (not ``begin()``)
+            # avoids an upfront BEGIN IMMEDIATE; the checkpoint acquires its own
+            # lock under the bounded timeout.
+            if not self._read_only:
+                with contextlib.suppress(Exception):
+                    async with self._engine.connect() as conn:
+                        await conn.exec_driver_sql("PRAGMA busy_timeout=2000")
+                        await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
             await self._engine.dispose()
             self._engine = None
 
