@@ -857,6 +857,11 @@ class ClaudeAgentAdapter:
     _runtime_backend = "claude"
     _provider_name = "claude"
 
+    #: This adapter runs its own shared RPM/TPM bucket
+    #: (:meth:`_build_rate_limit_bucket`), so the parallel executor must NOT add a
+    #: second dispatch-level rate gate for it (that would double-limit Claude).
+    self_governs_rate_limit = True
+
     def __init__(
         self,
         api_key: str | None = None,

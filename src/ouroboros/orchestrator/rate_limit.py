@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import time
+from typing import Any
 
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_HEARTBEAT_SECONDS = 30.0
@@ -129,6 +130,126 @@ class SharedRateLimitBucket:
             return self._snapshot()
 
 
+@dataclass(frozen=True, slots=True)
+class RateLimitBackoff:
+    """Observability record for one gate backoff or forced-reserve event."""
+
+    wait_seconds: float
+    total_waited: float
+    max_wait_seconds: float
+    snapshot: RateLimitSnapshot
+    forced: bool
+
+
+class RateLimitGate:
+    """Backend-agnostic dispatch gate around a :class:`SharedRateLimitBucket`.
+
+    Wraps the acquire/heartbeat/force-reserve wait loop so any caller — not just
+    the native Claude adapter — can pace dispatch within a shared RPM/TPM budget.
+    When the underlying bucket carries no limits the gate is *dormant*:
+    :meth:`acquire` returns immediately, so wiring it onto a path that has no
+    configured limits is a no-op.
+
+    Observability is delivered through an optional ``on_backoff`` callback rather
+    than by yielding messages, keeping the gate independent of any UI/event type.
+    """
+
+    def __init__(
+        self,
+        bucket: SharedRateLimitBucket,
+        *,
+        max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS,
+        heartbeat_seconds: float = RATE_LIMIT_HEARTBEAT_SECONDS,
+        sleep: Callable[[float], Any] | None = None,
+    ) -> None:
+        self._bucket = bucket
+        self._max_wait_seconds = max_wait_seconds
+        self._heartbeat_seconds = heartbeat_seconds
+        self._sleep = sleep or asyncio.sleep
+
+    @property
+    def enabled(self) -> bool:
+        """Return True when the underlying budget is active."""
+        return self._bucket.enabled
+
+    async def acquire(
+        self,
+        estimated_tokens: int,
+        *,
+        on_backoff: Callable[[RateLimitBackoff], None] | None = None,
+    ) -> None:
+        """Block until shared budget headroom is available (or forced).
+
+        Returns immediately when the gate is dormant. Otherwise waits in
+        heartbeat-sized sleeps until capacity is reserved, force-reserving once
+        the cumulative wait exceeds ``max_wait_seconds`` so concurrent
+        timeout-fallbacks cannot bypass the bucket in lockstep (an N× burst).
+        """
+        if not self._bucket.enabled:
+            return
+
+        total_waited = 0.0
+        while True:
+            wait_seconds, snapshot = await self._bucket.acquire(estimated_tokens)
+            if wait_seconds <= 0:
+                return
+
+            if total_waited >= self._max_wait_seconds:
+                snapshot = await self._bucket.force_reserve(estimated_tokens)
+                if on_backoff is not None:
+                    on_backoff(
+                        RateLimitBackoff(
+                            wait_seconds=0.0,
+                            total_waited=total_waited,
+                            max_wait_seconds=self._max_wait_seconds,
+                            snapshot=snapshot,
+                            forced=True,
+                        )
+                    )
+                return
+
+            sleep_seconds = min(wait_seconds, self._heartbeat_seconds)
+            if on_backoff is not None:
+                on_backoff(
+                    RateLimitBackoff(
+                        wait_seconds=sleep_seconds,
+                        total_waited=total_waited,
+                        max_wait_seconds=self._max_wait_seconds,
+                        snapshot=snapshot,
+                        forced=False,
+                    )
+                )
+            await self._sleep(sleep_seconds)
+            total_waited += sleep_seconds
+
+
+def build_rate_limit_gate(
+    runtime_backend: str,
+    *,
+    request_limit: int | None,
+    token_limit: int | None,
+    max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS,
+    heartbeat_seconds: float = RATE_LIMIT_HEARTBEAT_SECONDS,
+    sleep: Callable[[float], Any] | None = None,
+) -> RateLimitGate:
+    """Build a :class:`RateLimitGate` over a fresh shared bucket.
+
+    With ``request_limit`` and ``token_limit`` both ``None`` the resulting gate
+    is dormant — the intended default for backends with no configured limits.
+    """
+    bucket = SharedRateLimitBucket(
+        runtime_backend=runtime_backend,
+        request_limit=request_limit,
+        token_limit=token_limit,
+    )
+    return RateLimitGate(
+        bucket,
+        max_wait_seconds=max_wait_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+        sleep=sleep,
+    )
+
+
 def estimate_runtime_request_tokens(
     prompt: str,
     *,
@@ -147,7 +268,10 @@ __all__ = [
     "RATE_LIMIT_HEARTBEAT_SECONDS",
     "RATE_LIMIT_MAX_WAIT_SECONDS",
     "RATE_LIMIT_WINDOW_SECONDS",
+    "RateLimitBackoff",
+    "RateLimitGate",
     "RateLimitSnapshot",
     "SharedRateLimitBucket",
+    "build_rate_limit_gate",
     "estimate_runtime_request_tokens",
 ]

@@ -50,6 +50,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     runtime_handle_tool_catalog,
 )
+from ouroboros.orchestrator.backend_limits import resolve_backend_limits
 from ouroboros.orchestrator.capabilities import (
     build_capability_graph,
     serialize_capability_graph,
@@ -106,6 +107,12 @@ from ouroboros.orchestrator.policy import (
     evaluate_capability_policy,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile
+from ouroboros.orchestrator.rate_limit import (
+    RateLimitBackoff,
+    RateLimitGate,
+    build_rate_limit_gate,
+    estimate_runtime_request_tokens,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
@@ -2462,6 +2469,65 @@ class ParallelACExecutor:
         self._ac_runtime_handles: dict[str, RuntimeHandle] = {}
         self._checkpoint_store = checkpoint_store
         self._execution_counters_lock = asyncio.Lock()
+        self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
+
+    @staticmethod
+    def _build_dispatch_rate_gate(adapter: AgentRuntime) -> RateLimitGate:
+        """Build the shared dispatch rate gate for non-self-governing backends.
+
+        Ouroboros — not the runtime — paces delivery within the backend's
+        declared RPM/TPM budget. Native adapters that already run their own
+        shared bucket (Claude) advertise ``self_governs_rate_limit`` and are left
+        alone so they are never double-limited. Every other backend gets a gate
+        that stays dormant until an RPM/TPM is configured for it (registry,
+        ``~/.ouroboros/backend_limits.yaml``, or ``OUROBOROS_<BACKEND>_RPM/TPM``),
+        so the default behavior is unchanged.
+        """
+        backend_attr = getattr(adapter, "runtime_backend", "")
+        backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
+
+        if getattr(adapter, "self_governs_rate_limit", False):
+            return build_rate_limit_gate(backend, request_limit=None, token_limit=None)
+
+        limits = resolve_backend_limits(backend)
+        return build_rate_limit_gate(
+            backend,
+            request_limit=limits.requests_per_minute,
+            token_limit=limits.tokens_per_minute,
+        )
+
+    async def _await_dispatch_rate_budget(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str | None,
+    ) -> None:
+        """Wait for shared rate-limit headroom before dispatching a runtime call.
+
+        No-op when the gate is dormant (the default for backends with no
+        configured RPM/TPM). When active, paces dispatch across all concurrent
+        workers (they share this executor's single gate instance) and logs each
+        backoff for observability.
+        """
+        if not self._dispatch_rate_gate.enabled:
+            return
+
+        estimated_tokens = estimate_runtime_request_tokens(prompt, system_prompt=system_prompt)
+
+        def _log_backoff(backoff: RateLimitBackoff) -> None:
+            log.info(
+                "orchestrator.parallel_executor.rate_limit_backoff",
+                runtime_backend=backoff.snapshot.runtime_backend,
+                forced=backoff.forced,
+                wait_seconds=backoff.wait_seconds,
+                total_waited=backoff.total_waited,
+                requests_in_window=backoff.snapshot.requests_in_window,
+                request_limit=backoff.snapshot.request_limit,
+                tokens_in_window=backoff.snapshot.tokens_in_window,
+                token_limit=backoff.snapshot.token_limit,
+            )
+
+        await self._dispatch_rate_gate.acquire(estimated_tokens, on_backoff=_log_backoff)
 
     def _flush_console(self) -> None:
         """Flush console output to ensure progress is visible immediately."""
@@ -4604,6 +4670,13 @@ Each Sub-AC should be:
 Respond with either "ATOMIC" or the JSON array only, nothing else.
 """
 
+        # Pace this backend request within the shared budget before starting the
+        # decomposition timeout, so rate-limit waiting never eats into it.
+        await self._await_dispatch_rate_budget(
+            prompt=decompose_prompt,
+            system_prompt=decomposition_system_prompt,
+        )
+
         try:
             response_text = ""
             # NOTE: Do NOT use `break` or `aclosing` with the SDK generator.
@@ -5366,6 +5439,9 @@ Files present:
         exec_start = time.monotonic()
 
         await self._wait_for_memory(label)
+        # Pace delivery within the backend's shared rate budget (dormant unless
+        # an RPM/TPM is configured for this backend) before the stall-scoped run.
+        await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
 
         try:
             with anyio.CancelScope(

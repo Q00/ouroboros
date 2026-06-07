@@ -40,12 +40,114 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+from ouroboros.orchestrator.rate_limit import RateLimitGate, SharedRateLimitBucket
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
     """The default stall watchdog should not kill long quiet test commands too early."""
     assert STALL_TIMEOUT_SECONDS == 900.0
+
+
+class _RateGateStubAdapter:
+    """Minimal adapter exposing only what the dispatch rate gate inspects."""
+
+    def __init__(self, *, runtime_backend: str, self_governs: bool) -> None:
+        self.runtime_backend = runtime_backend
+        self.self_governs_rate_limit = self_governs
+        self.working_directory = "/workspace"
+        self.permission_mode = "acceptEdits"
+
+
+def _make_rate_gate_executor(adapter: _RateGateStubAdapter) -> ParallelACExecutor:
+    return ParallelACExecutor(
+        adapter=adapter,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+
+class TestDispatchRateGate:
+    """The executor governs delivery fan-out within the backend's rate budget."""
+
+    def test_gate_dormant_for_self_governing_adapter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        # Claude self-governs via its own bucket — the executor must not add a
+        # second gate, even though "claude" declares an RPM in the registry.
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        adapter = _RateGateStubAdapter(runtime_backend="claude", self_governs=True)
+
+        executor = _make_rate_gate_executor(adapter)
+
+        assert executor._dispatch_rate_gate.enabled is False
+
+    def test_gate_dormant_for_cli_backend_without_configuration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        # Default behavior is unchanged: no configured RPM/TPM → no pacing.
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        monkeypatch.delenv("OUROBOROS_OPENCODE_RPM", raising=False)
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+
+        executor = _make_rate_gate_executor(adapter)
+
+        assert executor._dispatch_rate_gate.enabled is False
+
+    def test_gate_activates_for_cli_backend_with_configured_rpm(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        monkeypatch.setenv("OUROBOROS_OPENCODE_RPM", "2")
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+
+        executor = _make_rate_gate_executor(adapter)
+
+        assert executor._dispatch_rate_gate.enabled is True
+
+    @pytest.mark.asyncio
+    async def test_await_dispatch_rate_budget_no_op_when_dormant(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+        executor = _make_rate_gate_executor(adapter)
+
+        # Dormant gate: returns immediately, no error.
+        await executor._await_dispatch_rate_budget(prompt="hello", system_prompt=None)
+
+    @pytest.mark.asyncio
+    async def test_await_dispatch_rate_budget_paces_through_active_gate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+        executor = _make_rate_gate_executor(adapter)
+
+        # Swap in a deterministic gate (rpm=1, fake clock + sleep) to prove the
+        # executor's dispatch hook actually waits on the shared budget.
+        clock = {"now": 0.0}
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock["now"] += seconds
+
+        bucket = SharedRateLimitBucket(
+            runtime_backend="opencode",
+            request_limit=1,
+            token_limit=None,
+            time_provider=lambda: clock["now"],
+        )
+        executor._dispatch_rate_gate = RateLimitGate(
+            bucket, heartbeat_seconds=120.0, sleep=fake_sleep
+        )
+
+        await executor._await_dispatch_rate_budget(prompt="a", system_prompt=None)
+        await executor._await_dispatch_rate_budget(prompt="b", system_prompt=None)
+
+        assert slept == [60.0]  # second dispatch waited a full window
 
 
 def _make_seed(*acceptance_criteria: str) -> Seed:

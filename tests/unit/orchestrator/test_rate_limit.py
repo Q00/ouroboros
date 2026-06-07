@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.orchestrator.rate_limit import SharedRateLimitBucket, estimate_runtime_request_tokens
+from ouroboros.orchestrator.rate_limit import (
+    RateLimitBackoff,
+    RateLimitGate,
+    SharedRateLimitBucket,
+    build_rate_limit_gate,
+    estimate_runtime_request_tokens,
+)
 
 
 @pytest.mark.asyncio
@@ -94,3 +100,77 @@ async def test_force_reserve_reports_snapshot_reflecting_new_reservation() -> No
     assert snapshot.tokens_in_window == 1_250
     assert snapshot.request_limit == 1
     assert snapshot.token_limit == 4_096
+
+
+class TestRateLimitGate:
+    """The reusable dispatch gate around a shared bucket."""
+
+    @pytest.mark.asyncio
+    async def test_dormant_gate_acquires_immediately(self) -> None:
+        # No limits → dormant: acquire must return without sleeping.
+        slept: list[float] = []
+        gate = build_rate_limit_gate(
+            "hermes_cli",
+            request_limit=None,
+            token_limit=None,
+            sleep=lambda seconds: slept.append(seconds),
+        )
+
+        assert gate.enabled is False
+        await gate.acquire(estimated_tokens=10_000)
+        assert slept == []
+
+    @pytest.mark.asyncio
+    async def test_gate_paces_dispatch_when_request_budget_exhausted(self) -> None:
+        clock = {"now": 0.0}
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock["now"] += seconds  # advance the window so the next acquire frees
+
+        bucket = SharedRateLimitBucket(
+            runtime_backend="hermes_cli",
+            request_limit=1,
+            token_limit=None,
+            time_provider=lambda: clock["now"],
+        )
+        # Heartbeat larger than the wait so the 60s wait is a single sleep chunk.
+        gate = RateLimitGate(bucket, heartbeat_seconds=120.0, sleep=fake_sleep)
+
+        backoffs: list[RateLimitBackoff] = []
+        await gate.acquire(estimated_tokens=100, on_backoff=backoffs.append)  # first: free
+        await gate.acquire(estimated_tokens=100, on_backoff=backoffs.append)  # second: waits 60s
+
+        assert slept == [60.0]
+        assert len(backoffs) == 1
+        assert backoffs[0].forced is False
+        assert backoffs[0].wait_seconds == 60.0
+
+    @pytest.mark.asyncio
+    async def test_gate_force_reserves_after_max_wait(self) -> None:
+        clock = {"now": 0.0}
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            # Do NOT advance the clock: the budget never frees, forcing timeout.
+
+        bucket = SharedRateLimitBucket(
+            runtime_backend="hermes_cli",
+            request_limit=1,
+            token_limit=None,
+            time_provider=lambda: clock["now"],
+        )
+        # Small wait budget + heartbeat so the loop force-reserves quickly.
+        gate = RateLimitGate(bucket, max_wait_seconds=60.0, heartbeat_seconds=30.0, sleep=fake_sleep)
+
+        await gate.acquire(estimated_tokens=100)  # consume the only slot
+
+        backoffs: list[RateLimitBackoff] = []
+        await gate.acquire(estimated_tokens=100, on_backoff=backoffs.append)
+
+        # Two 30s heartbeats reach the 60s ceiling, then a forced reservation.
+        assert slept == [30.0, 30.0]
+        assert backoffs[-1].forced is True
+        assert len(bucket._reservations) == 2  # force_reserve appended despite saturation

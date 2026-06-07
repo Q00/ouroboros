@@ -600,6 +600,9 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Permission mode when using OpenCode runtime. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
 | `OUROBOROS_MAX_CONCURRENCY` | _(fan-out cap)_ | Caps the effective delivery fan-out for the connected backend, overriding Ouroboros' backend-aware default. Use it to raise CLI runtimes (`hermes`, `codex`, ...) above their serialized-by-default ceiling of 1. Must be a positive integer; blank/invalid values are ignored so the safety cap is never silently disabled. |
+| `OUROBOROS_<BACKEND>_RPM` | _(rate budget)_ | Per-backend requests-per-minute ceiling for the shared dispatch rate bucket. `<BACKEND>` is the runtime backend upper-cased with non-alphanumerics collapsed to `_` (e.g. `OUROBOROS_HERMES_CLI_RPM`, `OUROBOROS_OPENCODE_RPM`). Dormant unless set — declaring it is how you safely raise `OUROBOROS_MAX_CONCURRENCY` on a CLI runtime. Must be a positive integer; blank/invalid values are ignored. |
+| `OUROBOROS_<BACKEND>_TPM` | _(rate budget)_ | Per-backend tokens-per-minute ceiling for the shared dispatch rate bucket (same naming as `_RPM`). Dormant unless set. Must be a positive integer; blank/invalid values are ignored. |
+| `OUROBOROS_BACKEND_LIMITS` | _(config path)_ | Path to the backend-limits YAML file (default `~/.ouroboros/backend_limits.yaml`). See [Backend concurrency & rate limits](#backend-concurrency--rate-limits). |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary. |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary. |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
@@ -664,6 +667,61 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OPENAI_API_KEY` | OpenAI API key (Codex CLI, GPT models). |
 | `GOOGLE_API_KEY` | Google API key (Gemini models used in `frugal` and `standard` tiers). |
 | `OPENROUTER_API_KEY` | OpenRouter API key (multi-provider model access for consensus). |
+
+---
+
+## Backend concurrency & rate limits
+
+Ouroboros plans delivery fan-out — the parallel execution of acceptance criteria — and is
+responsible for keeping it within the connected LLM backend's concurrency and rate limits
+rather than relying on the agent runtime to throttle itself. Two independent levers govern this,
+and **every value is configurable without source-level changes**:
+
+- **Fan-out concurrency** (`max_concurrency`): how many acceptance criteria dispatch in
+  parallel. The native Claude backend is uncapped here (it is paced by its own RPM/TPM bucket);
+  every CLI runtime whose underlying LLM limits are unknown is **serialized to 1 by default**.
+- **Rate budget** (`requests_per_minute` / `tokens_per_minute`): a shared sliding-window bucket
+  that paces dispatch across all concurrent workers. For non-Claude runtimes it is **dormant
+  until you declare a budget** — declaring one is what makes raising the fan-out cap safe.
+
+### Resolution precedence
+
+Each dimension is resolved independently, highest precedence first:
+
+1. **Environment variables** — `OUROBOROS_MAX_CONCURRENCY` (cap, any backend) and per-backend
+   `OUROBOROS_<BACKEND>_RPM` / `OUROBOROS_<BACKEND>_TPM`.
+2. **Config file** — `~/.ouroboros/backend_limits.yaml` (path overridable via
+   `OUROBOROS_BACKEND_LIMITS`).
+3. **Built-in registry** — Claude's ceilings; otherwise the serialize-by-default cap of 1.
+
+The config file is loaded lazily, cached by mtime (edits apply without a restart), and is
+fully fault-tolerant: a missing, malformed, or non-regular file is ignored and resolution falls
+back to the registry. Backend keys are canonicalized, so aliases (`anthropic`, `claude_code`)
+map to `claude`. Only positive integers are honored; `0`/negative/blank values are ignored so a
+typo never silently disables a safety limit.
+
+### `~/.ouroboros/backend_limits.yaml`
+
+```yaml
+# Fallback applied to any backend without its own entry below.
+default:
+  max_concurrency: 1
+
+backends:
+  # Override the native Claude ceilings without touching source.
+  claude:
+    requests_per_minute: 40
+    tokens_per_minute: 32000
+
+  # Declare a safe budget for a CLI runtime, then raise its fan-out cap
+  # (via OUROBOROS_MAX_CONCURRENCY) knowing dispatch will be paced.
+  hermes_cli:
+    max_concurrency: 4
+    requests_per_minute: 20
+    tokens_per_minute: 60000
+```
+
+A flat top-level mapping (backend → fields, without the `backends:` wrapper) is also accepted.
 
 ---
 
