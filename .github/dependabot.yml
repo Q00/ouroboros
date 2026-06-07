@@ -1,0 +1,41 @@
+# Dependabot configuration.
+#
+# Why this exists: our AI-stack deps are exact-pinned in pyproject.toml (see the
+# rationale comment there) so a future compromised "latest" can't be auto-pulled
+# on fresh installs. The trade-off is that security patches no longer arrive
+# automatically -- Dependabot closes that gap by opening *reviewed* PRs to move
+# the pins forward, so a human vets every dependency change.
+#
+# `cooldown` deliberately delays brand-new releases: a freshly published (and
+# possibly compromised) version is not proposed the moment it lands, giving the
+# community time to catch supply-chain incidents first. This is the same lesson
+# as the 2026-03 litellm 1.82.7/1.82.8 attack -- which itself arrived via a
+# poisoned Trivy GitHub Action, hence the github-actions ecosystem below.
+version: 2
+updates:
+  # Python dependencies (pyproject.toml + uv.lock).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    groups:
+      # Batch routine minor/patch bumps into one reviewable PR; major bumps
+      # arrive as individual PRs so breaking changes get isolated review.
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions used by our workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10

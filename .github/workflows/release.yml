@@ -43,8 +43,13 @@ jobs:
 
       - name: Detect pre-release
         id: prerelease
+        # Pass the ref name via env, not direct ${{ }} interpolation into the
+        # shell: env values are provided as data, so a crafted tag name can't be
+        # parsed as shell (GitHub Actions script-injection hardening, CWE-94).
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "${{ github.ref_name }}" =~ (a|alpha|b|beta|rc|dev) ]]; then
+          if [[ "$REF_NAME" =~ (a|alpha|b|beta|rc|dev) ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
