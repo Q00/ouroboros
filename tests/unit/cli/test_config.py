@@ -190,6 +190,31 @@ class TestConfigBackend:
         assert result.exit_code == 0
         mock_setup.assert_called_once_with("/opt/goose/bin/goose")
 
+    def test_switch_to_pi_honors_configured_cli_path(self, config_dir: Path) -> None:
+        """config backend pi should honor explicit env/config path helpers."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_pi_cli_path", return_value="/opt/pi/bin/pi"),
+            patch("shutil.which", return_value=None),
+            patch("ouroboros.cli.commands.setup._setup_pi") as mock_setup,
+        ):
+            result = runner.invoke(app, ["backend", "pi"])
+
+        assert result.exit_code == 0
+        mock_setup.assert_called_once_with("/opt/pi/bin/pi")
+
+    def test_switch_to_pi_reports_missing_cli_path(self, config_dir: Path) -> None:
+        """config backend pi should surface pi-specific guidance when no CLI is found."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_pi_cli_path", return_value=None),
+            patch("shutil.which", return_value=None),
+        ):
+            result = runner.invoke(app, ["backend", "pi"])
+
+        assert result.exit_code == 1
+        assert "OUROBOROS_PI_CLI_PATH" in result.output
+
     def test_switch_warns_on_setup_print_error(self, config_dir: Path) -> None:
         """config backend should warn when setup emits print_error (non-exception failure)."""
         from ouroboros.cli.commands import setup as setup_mod

@@ -156,7 +156,7 @@ def show(
 def backend(
     new_backend: Annotated[
         str | None,
-        typer.Argument(help="Backend to switch to (claude, codex, hermes, gemini, goose)."),
+        typer.Argument(help="Backend to switch to (claude, codex, hermes, gemini, goose, pi)."),
     ] = None,
 ) -> None:
     """Show or switch the runtime backend.
@@ -173,6 +173,7 @@ def backend(
     [dim]    ouroboros config backend hermes    # switch to Hermes[/dim]
     [dim]    ouroboros config backend gemini    # switch to Gemini CLI[/dim]
     [dim]    ouroboros config backend goose     # switch to Goose[/dim]
+    [dim]    ouroboros config backend pi        # switch to Pi CLI[/dim]
     """
     data, config_path = _load_config()
     current = data.get("orchestrator", {}).get("runtime_backend", "unknown")
@@ -184,7 +185,8 @@ def backend(
         if cli_path:
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
         console.print(
-            "\n[dim]Switch with: ouroboros config backend <claude|codex|hermes|gemini|goose>[/dim]\n"
+            "\n[dim]Switch with: ouroboros config backend "
+            "<claude|codex|hermes|gemini|goose|pi>[/dim]\n"
         )
         return
 
@@ -216,6 +218,10 @@ def backend(
         from ouroboros.config import get_goose_cli_path
 
         cli_path = get_goose_cli_path()
+    elif new_backend == "pi":
+        from ouroboros.config import get_pi_cli_path
+
+        cli_path = get_pi_cli_path()
     if not cli_path:
         cli_path = shutil.which(cli_name)
     if not cli_path:
@@ -230,6 +236,12 @@ def backend(
                 "goose CLI not found.\n"
                 "Set OUROBOROS_GOOSE_CLI_PATH, configure orchestrator.goose_cli_path "
                 "in config.yaml, or install goose on PATH and retry."
+            )
+        elif new_backend == "pi":
+            print_error(
+                "pi CLI not found.\n"
+                "Set OUROBOROS_PI_CLI_PATH, configure orchestrator.pi_cli_path "
+                "in config.yaml, or install pi on PATH and retry."
             )
         else:
             print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")
@@ -247,6 +259,7 @@ def backend(
         _setup_gemini,
         _setup_goose,
         _setup_hermes,
+        _setup_pi,
     )
 
     _setup_had_errors = False
@@ -272,6 +285,8 @@ def backend(
             _setup_gemini(cli_path)
         elif new_backend == "goose":
             _setup_goose(cli_path)
+        elif new_backend == "pi":
+            _setup_pi(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet

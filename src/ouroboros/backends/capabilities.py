@@ -265,6 +265,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_runtime=True,
         supports_llm=True,
         supports_interview_driver=True,
+        switchable_runtime=True,
         cli_name="pi",
         cli_config_key="pi_cli_path",
         supports_tool_envelope=False,
