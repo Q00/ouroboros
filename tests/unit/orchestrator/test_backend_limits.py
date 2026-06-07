@@ -140,15 +140,34 @@ class TestPerBackendRateEnvOverrides:
     def test_env_declares_rpm_and_tpm_for_cli_backend(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("OUROBOROS_HERMES_CLI_RPM", "5")
-        monkeypatch.setenv("OUROBOROS_HERMES_CLI_TPM", "12000")
+        # Operators use the user-facing runtime name (matching
+        # ``orchestrator.runtime_backend: hermes``), not the adapter's internal
+        # ``hermes_cli`` handle.
+        monkeypatch.setenv("OUROBOROS_HERMES_RPM", "5")
+        monkeypatch.setenv("OUROBOROS_HERMES_TPM", "12000")
 
-        limits = resolve_backend_limits("hermes_cli")
+        limits = resolve_backend_limits("hermes")
 
         assert limits.requests_per_minute == 5
         assert limits.tokens_per_minute == 12000
         # Declaring a rate budget does not change the fan-out cap.
         assert limits.max_concurrency == DEFAULT_UNKNOWN_MAX_CONCURRENCY
+
+    def test_cli_handle_name_resolves_to_user_facing_env_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression guard: the executor passes ``adapter.runtime_backend``, which
+        # is the ``*_cli`` handle (``hermes_cli``). A budget declared under the
+        # user-facing ``OUROBOROS_HERMES_RPM`` must still apply, or the gate would
+        # silently stay dormant while fan-out is raised.
+        monkeypatch.setenv("OUROBOROS_HERMES_RPM", "4")
+
+        assert resolve_backend_limits("hermes_cli").requests_per_minute == 4
+        # ...and the bare and handle names resolve identically.
+        assert (
+            resolve_backend_limits("hermes_cli").requests_per_minute
+            == resolve_backend_limits("hermes").requests_per_minute
+        )
 
     def test_env_prefix_canonicalizes_backend_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # "opencode" → OUROBOROS_OPENCODE_RPM
@@ -158,9 +177,9 @@ class TestPerBackendRateEnvOverrides:
 
     @pytest.mark.parametrize("value", ["0", "-1", "nope", ""])
     def test_invalid_rate_env_is_ignored(self, value: str, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("OUROBOROS_HERMES_CLI_RPM", value)
+        monkeypatch.setenv("OUROBOROS_HERMES_RPM", value)
 
-        assert resolve_backend_limits("hermes_cli").requests_per_minute is None
+        assert resolve_backend_limits("hermes").requests_per_minute is None
 
 
 class TestConfigFileLimits:
@@ -220,6 +239,16 @@ class TestConfigFileLimits:
         # "claude_code" alias in config applies to the canonical "claude" backend.
         assert resolve_backend_limits("claude").requests_per_minute == 55
 
+    def test_user_facing_config_key_applies_to_cli_handle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Operators declare ``backends: hermes:`` (matching the runtime selector);
+        # the executor resolves the ``hermes_cli`` adapter handle — both canonicalize
+        # to "hermes", so the declared budget applies.
+        _write_config(tmp_path, monkeypatch, "backends:\n  hermes:\n    requests_per_minute: 6\n")
+
+        assert resolve_backend_limits("hermes_cli").requests_per_minute == 6
+
     @pytest.mark.parametrize("value", ["0", "-2"])
     def test_non_positive_config_values_are_ignored(
         self, value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -264,10 +293,8 @@ class TestResolutionPrecedence:
     def test_env_rpm_beats_config_rpm(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _write_config(
-            tmp_path, monkeypatch, "backends:\n  hermes_cli:\n    requests_per_minute: 2\n"
-        )
-        monkeypatch.setenv("OUROBOROS_HERMES_CLI_RPM", "9")
+        _write_config(tmp_path, monkeypatch, "backends:\n  hermes:\n    requests_per_minute: 2\n")
+        monkeypatch.setenv("OUROBOROS_HERMES_RPM", "9")
 
         assert resolve_backend_limits("hermes_cli").requests_per_minute == 9
 

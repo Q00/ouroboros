@@ -86,9 +86,24 @@ class BackendConcurrencyLimits:
 
 
 # Canonical aliases for backend identifiers seen on adapters / config.
+#
+# Operators select a runtime by its user-facing name (``orchestrator.runtime_backend``
+# / ``OUROBOROS_AGENT_RUNTIME``: ``hermes``, ``codex``, ``gemini``, ``copilot``, ...),
+# but several adapters report a ``*_cli`` *handle* name from ``runtime_backend``
+# (``HermesCliRuntime`` → ``"hermes_cli"``, ``CodexCliRuntime`` → ``"codex_cli"``,
+# ``GeminiCLIRuntime`` → ``"gemini_cli"``, ``CopilotCliRuntime`` → ``"copilot_cli"``).
+# Canonicalizing the handle names back to the user-facing IDs keeps one identity
+# across operator config, env keys, and the value the executor actually passes in,
+# so ``OUROBOROS_HERMES_RPM`` / ``backends: hermes:`` apply to the real Hermes
+# runtime instead of silently leaving the dispatch gate dormant.
 _BACKEND_ALIASES = {
     "anthropic": "claude",
     "claude_code": "claude",
+    "hermes_cli": "hermes",
+    "codex_cli": "codex",
+    "gemini_cli": "gemini",
+    "copilot_cli": "copilot",
+    "opencode_cli": "opencode",
 }
 
 # Backends with Ouroboros-known governance. Only the native Claude adapter is

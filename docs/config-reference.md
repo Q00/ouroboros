@@ -600,7 +600,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Permission mode when using OpenCode runtime. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
 | `OUROBOROS_MAX_CONCURRENCY` | _(fan-out cap)_ | Caps the effective delivery fan-out for the connected backend, overriding Ouroboros' backend-aware default. Use it to raise CLI runtimes (`hermes`, `codex`, ...) above their serialized-by-default ceiling of 1. Must be a positive integer; blank/invalid values are ignored so the safety cap is never silently disabled. |
-| `OUROBOROS_<BACKEND>_RPM` | _(rate budget)_ | Per-backend requests-per-minute ceiling for the shared dispatch rate bucket. `<BACKEND>` is the runtime backend upper-cased with non-alphanumerics collapsed to `_` (e.g. `OUROBOROS_HERMES_CLI_RPM`, `OUROBOROS_OPENCODE_RPM`). Dormant unless set — declaring it is how you safely raise `OUROBOROS_MAX_CONCURRENCY` on a CLI runtime. Must be a positive integer; blank/invalid values are ignored. |
+| `OUROBOROS_<BACKEND>_RPM` | _(rate budget)_ | Per-backend requests-per-minute ceiling for the shared dispatch rate bucket. `<BACKEND>` is the runtime name (the same value you set for `runtime_backend` / `OUROBOROS_AGENT_RUNTIME`) upper-cased with non-alphanumerics collapsed to `_` (e.g. `OUROBOROS_HERMES_RPM`, `OUROBOROS_CODEX_RPM`, `OUROBOROS_OPENCODE_RPM`). Internal `*_cli` adapter handles (`hermes_cli`, `codex_cli`, `gemini_cli`, `copilot_cli`) canonicalize to these names, so the user-facing key always applies. Dormant unless set — declaring it is how you safely raise `OUROBOROS_MAX_CONCURRENCY` on a CLI runtime. Must be a positive integer; blank/invalid values are ignored. |
 | `OUROBOROS_<BACKEND>_TPM` | _(rate budget)_ | Per-backend tokens-per-minute ceiling for the shared dispatch rate bucket (same naming as `_RPM`). Dormant unless set. Must be a positive integer; blank/invalid values are ignored. |
 | `OUROBOROS_BACKEND_LIMITS` | _(config path)_ | Path to the backend-limits YAML file (default `~/.ouroboros/backend_limits.yaml`). See [Backend concurrency & rate limits](#backend-concurrency--rate-limits). |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary. |
@@ -715,7 +715,10 @@ backends:
 
   # Declare a safe budget for a CLI runtime, then raise its fan-out cap
   # (via OUROBOROS_MAX_CONCURRENCY) knowing dispatch will be paced.
-  hermes_cli:
+  # Use the runtime name you select with `runtime_backend` (hermes, codex,
+  # gemini, copilot, opencode, goose, pi, kiro) — the `*_cli` adapter handles
+  # canonicalize to these, so either form resolves to the same entry.
+  hermes:
     max_concurrency: 4
     requests_per_minute: 20
     tokens_per_minute: 60000
