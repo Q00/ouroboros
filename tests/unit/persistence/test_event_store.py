@@ -1177,6 +1177,89 @@ class TestGetAllSessions:
         with pytest.raises(PersistenceError):
             await store.get_all_sessions()
 
+    async def test_falls_back_when_forced_index_missing(self, event_store: EventStore) -> None:
+        """``INDEXED BY ix_events_event_type`` makes the index mandatory; if a
+        store lacks it, get_all_sessions must fall back to the planner's choice
+        and still return correct, ordered results instead of erroring."""
+        for suffix in ("started", "completed"):
+            await event_store.append(
+                BaseEvent(
+                    type=f"orchestrator.session.{suffix}",
+                    aggregate_type="session",
+                    aggregate_id="sess-fallback",
+                    data={"seed_goal": "g"},
+                )
+            )
+
+        # Drop the index the fast path pins so a raw INDEXED BY would error.
+        async with event_store._engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.exec_driver_sql("DROP INDEX IF EXISTS ix_events_event_type")
+
+        result = await event_store.get_all_sessions()
+        sess = [e for e in result if e.aggregate_id == "sess-fallback"]
+        assert len(sess) == 2
+        assert sess[0].type == "orchestrator.session.started"
+        assert sess[1].type == "orchestrator.session.completed"
+        # Payload is still deserialized into a dict (column types preserved).
+        assert sess[0].data.get("seed_goal") == "g"
+
+
+class TestEventStoreClose:
+    """Close-time behavior: WAL checkpoint, idempotency, read-only safety."""
+
+    async def test_close_collapses_wal(self, tmp_path) -> None:
+        """close() runs a TRUNCATE checkpoint so the ``-wal`` file is collapsed
+        instead of growing unbounded across long-lived multi-connection use."""
+        db_path = tmp_path / "wal_close.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        for i in range(200):
+            await store.append(
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id=f"s{i}",
+                    data={"blob": "x" * 1000},
+                )
+            )
+
+        wal = db_path.with_name(db_path.name + "-wal")
+        assert wal.exists() and wal.stat().st_size > 0
+
+        await store.close()
+
+        # TRUNCATE checkpoint shrinks the WAL to empty (or SQLite removes it on
+        # the final connection close).
+        assert (not wal.exists()) or wal.stat().st_size == 0
+
+    async def test_close_is_idempotent(self, tmp_path) -> None:
+        """Calling close() twice must be safe (engine already disposed)."""
+        db_path = tmp_path / "wal_idem.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        await store.close()
+        await store.close()  # must not raise
+
+    async def test_close_read_only_skips_write_checkpoint(self, tmp_path) -> None:
+        """A read-only store must not attempt the (writing) WAL checkpoint —
+        doing so would raise 'attempt to write a readonly database'."""
+        db_path = tmp_path / "ro.db"
+        writer = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await writer.initialize()
+        await writer.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="s1",
+                data={},
+            )
+        )
+        await writer.close()
+
+        ro = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+        await ro.initialize()
+        await ro.close()  # must not raise
+
 
 class TestEventStoreTransactions:
     """Test transaction handling per AC7."""

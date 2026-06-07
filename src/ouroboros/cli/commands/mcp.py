@@ -406,10 +406,16 @@ async def _run_mcp_server(
             cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup_task
+        # Route teardown through the adapter so its owned resources close in the
+        # documented order: the ControlBus reactive surface is drained first
+        # (cancelling subscriber tasks), then the EventStore (whose close()
+        # collapses the WAL) and BrownfieldStore, then the MCP bridge. Closing
+        # the stores directly here would bypass that contract and leave
+        # control-bus tasks and upstream bridge connections dangling. Best
+        # effort — a drain/close failure is already logged inside shutdown();
+        # never let it escape the cleanup path.
         with contextlib.suppress(Exception):
-            await brownfield_store.close()
-        with contextlib.suppress(Exception):
-            await event_store.close()
+            await server.shutdown()
         _cleanup_pid_file()
         # Surface an abnormal serve-loop termination. A cancellation is the
         # intended shutdown path (SIGTERM/orphan-exit/stdin EOF), but any other

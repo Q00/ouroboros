@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, event, func, or_, select, text
+from sqlalchemy.exc import OperationalError
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
@@ -628,35 +629,45 @@ class EventStore:
                 operation="get_all_sessions",
             )
 
+        # Pin the selective ix_events_event_type index. SQLite's planner
+        # otherwise satisfies ORDER BY timestamp by scanning *every* event row
+        # via ix_events_timestamp and filtering inline — a 30s+ query on large
+        # stores, even though session events are a tiny subset. SQLAlchemy/SQLite
+        # ignores with_hint(), so the hint is pinned via raw SQL.
+        # ``.columns(*events_table.c)`` re-attaches the ORM column types so the
+        # raw result gets the same processing as ``select(events_table)`` (notably
+        # JSON payload deserialization); without it from_db_row rejects the
+        # payload string.
+        indexed_query = (
+            text(
+                "SELECT * FROM events INDEXED BY ix_events_event_type "
+                "WHERE event_type LIKE :pattern "
+                "ORDER BY timestamp ASC"
+            )
+            .bindparams(pattern="orchestrator.session.%")
+            .columns(*events_table.c)
+        )
+        fallback_query = (
+            select(events_table)
+            .where(events_table.c.event_type.like("orchestrator.session.%"))
+            .order_by(events_table.c.timestamp.asc())
+        )
         try:
-            async with self._engine.begin() as conn:
-                # SQLite's planner mis-selects ix_events_timestamp here: to
-                # satisfy ORDER BY timestamp it scans *every* event row and
-                # applies the LIKE filter inline, turning this into a 30s+
-                # query on large stores (the session events are a tiny subset).
-                # SQLAlchemy/SQLite ignores with_hint(), so pin the selective
-                # ix_events_event_type index explicitly via raw SQL. The
-                # 'orchestrator.session.%' prefix is index-friendly; the small
-                # matched set is then ordered in a temp b-tree.
-                # ``.columns(*events_table.c)`` re-attaches the ORM column
-                # types so SQLAlchemy applies the same result processing as a
-                # ``select(events_table)`` would (notably JSON payload
-                # deserialization and timestamp coercion); without it the raw
-                # text result yields the payload as a JSON *string* and
-                # BaseEvent.from_db_row rejects it.
-                query = (
-                    text(
-                        "SELECT * FROM events INDEXED BY ix_events_event_type "
-                        "WHERE event_type LIKE :pattern "
-                        "ORDER BY timestamp ASC"
-                    )
-                    .bindparams(pattern="orchestrator.session.%")
-                    .columns(*events_table.c)
-                )
-
-                result = await conn.execute(query)
-                rows = result.mappings().all()
-                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+            try:
+                async with self._engine.begin() as conn:
+                    result = await conn.execute(indexed_query)
+                    rows = result.mappings().all()
+                    return [BaseEvent.from_db_row(dict(row)) for row in rows]
+            except OperationalError:
+                # ``INDEXED BY`` makes ix_events_event_type mandatory; SQLite
+                # errors if it is absent (e.g. a store created outside the
+                # bundled schema/migrations). Fall back to the planner's choice
+                # on a fresh transaction so correctness never depends on a
+                # specific index name.
+                async with self._engine.begin() as conn:
+                    result = await conn.execute(fallback_query)
+                    rows = result.mappings().all()
+                    return [BaseEvent.from_db_row(dict(row)) for row in rows]
         except Exception as e:
             raise PersistenceError(
                 f"Failed to get all sessions: {e}",
