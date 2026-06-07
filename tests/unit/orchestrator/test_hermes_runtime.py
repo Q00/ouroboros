@@ -568,6 +568,50 @@ class TestHermesCliRuntime:
         assert messages[-1].content == "Hermes fallback completed"
 
     @pytest.mark.asyncio
+    async def test_execute_task_nonzero_exit_emits_typed_error_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A non-zero hermes exit carrying a provider 429 must surface typed
+        error metadata (issue 1.1 regression). Without it the failure lacks
+        runtime-error shape and the run hard-fails instead of pausing."""
+        self._write_skill(
+            tmp_path,
+            "run",
+            [
+                "name: run",
+                "mcp_tool: ouroboros_execute_seed",
+                "mcp_args:",
+                '  seed_path: "$1"',
+            ],
+        )
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+        )
+        process = _FakeProcess(
+            stdout="",
+            stderr="HTTP 429: Usage limit reached for 5 hour.",
+            returncode=1,
+        )
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            messages = [
+                message async for message in runtime.execute_task("please ooo run seed.yaml")
+            ]
+
+        final = messages[-1]
+        assert final.is_error
+        assert final.data["subtype"] == "error"
+        assert final.data["exit_code"] == 1
+        assert final.data["error_type"] == "RateLimitError"
+        assert final.data["http_status"] == 429
+
+    @pytest.mark.asyncio
     async def test_execute_task_maps_interview_argument_to_initial_context(
         self,
         tmp_path: Path,

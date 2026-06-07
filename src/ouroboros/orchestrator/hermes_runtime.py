@@ -31,6 +31,7 @@ from ouroboros.orchestrator.adapter import (
     SkillDispatchHandler,
     TaskResult,
 )
+from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.router import (
     InvalidInputReason,
     InvalidSkill,
@@ -523,7 +524,7 @@ class HermesCliRuntime(AgentRuntime):
             yield AgentMessage(
                 type="result",
                 content=f"Hermes execution failed:\n{failure_content}",
-                data={"subtype": "error", "exit_code": returncode},
+                data=classify_subprocess_failure(failure_content, exit_code=returncode),
                 resume_handle=handle,
             )
             return
