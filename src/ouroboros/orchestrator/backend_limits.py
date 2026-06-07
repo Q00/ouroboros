@@ -3,10 +3,10 @@
 Ouroboros plans delivery (the parallel execution of acceptance criteria) and is
 responsible for keeping that fan-out within the concurrency and rate-limit
 constraints of the connected LLM backend — it must not rely on the agent
-runtime to throttle itself. See ``docs/rca-june-2026.md`` (R3): a hermes→Z.AI
-run fanned out 14 acceptance criteria at once and stampeded an already-exhausted
+runtime to throttle itself. This policy was added after a hermes→Z.AI run
+fanned out 14 acceptance criteria at once and stampeded an already-exhausted
 quota because nothing on the Ouroboros side bounded concurrency for that
-runtime (only the native Claude adapter carries a shared rate-limit bucket).
+runtime (only the native Claude adapter carried a shared rate-limit bucket).
 
 Policy: backends whose underlying LLM limits Ouroboros cannot know — every CLI
 runtime (hermes, codex, gemini, opencode, ...) — are **serialized by default**

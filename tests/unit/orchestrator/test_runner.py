@@ -1526,6 +1526,28 @@ class TestOrchestratorRunner:
 
         assert pause is None
 
+    def test_recoverable_failure_ignores_hermes_task_text_about_usage_limits(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Hermes task text mentioning usage-limit copy is not a provider pause."""
+        failure_text = (
+            "Tests failed while updating usage limit copy. "
+            "Please try again in 5 hours after the flaky suite is fixed."
+        )
+        message = AgentMessage(
+            type="result",
+            content=f"Hermes execution failed:\n{failure_text}",
+            data=classify_subprocess_failure(failure_text, exit_code=1),
+        )
+
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        assert pause is None
+
     def test_recoverable_failure_sums_compound_retry_window(
         self,
         runner: OrchestratorRunner,

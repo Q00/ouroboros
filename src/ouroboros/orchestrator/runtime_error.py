@@ -1,15 +1,14 @@
 """Typed classification of runtime subprocess failures.
 
-CLI-backed runtimes (hermes, gemini-cli, ...) surface upstream failures as a
-non-zero process exit plus free-form stdout/stderr text. Collapsing that to
+Hermes can surface upstream failures as a non-zero process exit plus free-form
+stdout/stderr text. Collapsing that to
 ``{"subtype": "error", "exit_code": N}`` discards the provider's typed signal —
 the HTTP status and quota/usage-limit phrasing — that the orchestrator's
-recoverable-failure classifier keys on. The consequence (see
-``docs/rca-june-2026.md``, issue 1.1) is that a provider usage-limit window
-hard-fails the whole run instead of pausing it gracefully.
+recoverable-failure classifier keys on. The consequence is that a provider
+usage-limit window hard-fails the whole run instead of pausing it gracefully.
 
 ``classify_subprocess_failure`` re-derives those typed fields from the failure
-text so they can be attached to the runtime ``AgentMessage`` metadata. The
+text so Hermes can attach them to runtime ``AgentMessage`` metadata. The
 returned keys are a subset of those recognized by
 ``OrchestratorRunner._metadata_has_runtime_error_shape`` — in particular
 ``error_type`` is always present, which is what marks a failure as
@@ -36,11 +35,11 @@ _HTTP_STATUS_PATTERN = re.compile(
 
 # Phrases that indicate a rate-limit / usage-limit / quota condition.
 _RATE_LIMIT_PATTERN = re.compile(
-    r"\b(?:rate[\s_-]*limit"
-    r"|usage[\s_-]*limit"
-    r"|quota"
-    r"|too\s+many\s+requests"
-    r"|limit\s+reached)\b",
+    r"\b(?:too\s+many\s+requests"
+    r"|(?:rate[\s_-]*limit|usage[\s_-]*limit|quota)"
+    r".{0,80}(?:reached|exceeded|exhausted|depleted|hit)"
+    r"|(?:reached|exceeded|exhausted|depleted|hit)"
+    r".{0,80}(?:rate[\s_-]*limit|usage[\s_-]*limit|quota))\b",
     re.IGNORECASE,
 )
 
