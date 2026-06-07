@@ -488,21 +488,44 @@ else
   fi
 fi
 
-# Ensure ouroboros binary is in PATH (uv tool install may add to ~/.local/bin)
-if ! command -v ouroboros &>/dev/null; then
-  for p in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin"; do
-    if [ -x "$p/ouroboros" ]; then
-      export PATH="$p:$PATH"
-      break
+# Ensure setup runs the freshly-installed uv tool binary rather than a stale
+# command already on PATH. uv can install into UV_TOOL_BIN_DIR or its configured
+# tool bin directory without updating the current shell's PATH, so remember the
+# fresh executable and invoke that exact path below. For pipx/pip installs,
+# preserve the existing PATH command unless no ouroboros command is visible.
+OUROBOROS_BIN=""
+_prepend_path_if_ouroboros() {
+  local candidate="$1"
+  if [ -n "$candidate" ] && [ -x "$candidate/ouroboros" ]; then
+    export PATH="$candidate:$PATH"
+    if [ -z "$OUROBOROS_BIN" ]; then
+      OUROBOROS_BIN="$candidate/ouroboros"
     fi
+    return 0
+  fi
+  return 1
+}
+
+if [ "$INSTALL_METHOD" = "uv" ]; then
+  _prepend_path_if_ouroboros "${UV_TOOL_BIN_DIR:-}" || true
+  if command -v uv &>/dev/null; then
+    UV_TOOL_BIN="$(uv tool dir --bin 2>/dev/null || true)"
+    _prepend_path_if_ouroboros "$UV_TOOL_BIN" || true
+  fi
+fi
+
+if [ -z "$OUROBOROS_BIN" ] && ! command -v ouroboros &>/dev/null; then
+  for p in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin"; do
+    _prepend_path_if_ouroboros "$p" || true
   done
 fi
 
 # 4. Setup (ouroboros CLI configures runtime-specific integration)
 _step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
-if [ -n "$RUNTIME" ] && command -v ouroboros &>/dev/null; then
-  _info "Running: ouroboros setup --runtime $RUNTIME --non-interactive"
-  ouroboros setup --runtime "$RUNTIME" --non-interactive || true
+if [ -n "$RUNTIME" ] && { [ -n "$OUROBOROS_BIN" ] || command -v ouroboros &>/dev/null; }; then
+  OUROBOROS_SETUP_CMD="${OUROBOROS_BIN:-ouroboros}"
+  _info "Running: $OUROBOROS_SETUP_CMD setup --runtime $RUNTIME --non-interactive"
+  "$OUROBOROS_SETUP_CMD" setup --runtime "$RUNTIME" --non-interactive || true
 elif [ -n "$RUNTIME" ]; then
   _warn "ouroboros command is not on PATH yet; run setup after your shell sees the installed binary."
 else

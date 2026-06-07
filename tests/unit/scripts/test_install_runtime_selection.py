@@ -18,25 +18,41 @@ def _write_executable(path: Path, content: str) -> None:
 def _run_installer(
     tmp_path: Path,
     *,
+    include_uv: bool = True,
     local_repo: bool = True,
     env: dict[str, str] | None = None,
     fake_commands: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    tool_bin_dir = tmp_path / "uv-tool-bin"
+    tool_bin_dir.mkdir()
     calls = tmp_path / "calls.log"
 
-    _write_executable(
-        bin_dir / "uv",
-        f"""#!/bin/sh
+    if include_uv:
+        _write_executable(
+            bin_dir / "uv",
+            f"""#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "uv 0.0.0-test"
   exit 0
 fi
+if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then
+  echo "{tool_bin_dir!s}"
+  exit 0
+fi
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  cat > "{tool_bin_dir!s}/ouroboros" <<'SH'
+#!/bin/sh
+printf 'ouroboros %s\\n' "$*" >> "{calls!s}"
+exit 0
+SH
+  chmod 755 "{tool_bin_dir!s}/ouroboros"
+fi
 printf 'uv %s\\n' "$*" >> {calls!s}
 exit 0
 """,
-    )
+        )
     _write_executable(
         bin_dir / "ouroboros",
         f"""#!/bin/sh
@@ -134,6 +150,74 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
         "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0",
         "ouroboros setup --runtime pi --non-interactive",
     ]
+
+
+def test_uv_install_setup_prefers_fresh_tool_bin_over_stale_path_command(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
+        fake_commands={
+            "pi": "#!/bin/sh\nexit 0\n",
+            "ouroboros": f"#!/bin/sh\nprintf 'stale-ouroboros %s\\n' \"$*\" >> {tmp_path / 'calls.log'}\nexit 0\n",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros setup --runtime pi --non-interactive" in calls
+    assert not any(call.startswith("stale-ouroboros setup") for call in calls)
+
+
+def test_uv_install_setup_prefers_fresh_tool_bin_over_stale_home_local_bin(
+    tmp_path: Path,
+) -> None:
+    home_local_bin = tmp_path / "home" / ".local" / "bin"
+    home_local_bin.mkdir(parents=True)
+    _write_executable(
+        home_local_bin / "ouroboros",
+        f"#!/bin/sh\nprintf 'stale-local-ouroboros %s\\n' \"$*\" >> {tmp_path / 'calls.log'}\nexit 0\n",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
+        fake_commands={"pi": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros setup --runtime pi --non-interactive" in calls
+    assert not any(call.startswith("stale-local-ouroboros setup") for call in calls)
+
+
+def test_pipx_install_setup_prefers_existing_path_command_over_stale_home_local_bin(
+    tmp_path: Path,
+) -> None:
+    home_local_bin = tmp_path / "home" / ".local" / "bin"
+    home_local_bin.mkdir(parents=True)
+    _write_executable(
+        home_local_bin / "ouroboros",
+        f"#!/bin/sh\nprintf 'stale-home-ouroboros %s\\n' \"$*\" >> {tmp_path / 'calls.log'}\nexit 0\n",
+    )
+
+    python = '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.12; exit 0; fi\necho \'Python 3.12.0\'\n'
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo \'pipx 0.0.0-test\'; exit 0; fi\nprintf \'pipx %s\\n\' "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.12": python,
+            "pi": "#!/bin/sh\nexit 0\n",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros setup --runtime pi --non-interactive" in calls
+    assert not any(call.startswith("stale-home-ouroboros setup") for call in calls)
 
 
 def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
