@@ -41,7 +41,7 @@ jobs:
           uv run pytest tests/ --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v6.0.1
         if: always()
         with:
           file: ./coverage.xml
