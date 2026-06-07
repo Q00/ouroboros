@@ -1,6 +1,13 @@
 ---
 name: evaluate
 description: "Evaluate execution with three-stage verification pipeline"
+matching:
+  localized_triggers:
+    ko:
+      - 실행 결과를 평가해줘
+      - 세 단계 검증을 실행해줘
+      - 세 단계로 평가해줘
+      - 결과가 목표에 맞는지 평가해줘
 ---
 
 # /ouroboros:evaluate

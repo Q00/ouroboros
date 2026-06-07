@@ -111,6 +111,9 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
     assert "MCP `seed-ready`" in guide
     assert "### When a skill requires `restate_goal`" in guide
     assert "require explicit user approval" in guide
+    assert "### Codex App Localized Skill Matching" in guide
+    assert "`matching.localized_triggers`" in guide
+    assert "Canonical skill names" in guide
 
 
 def test_renders_generic_skill_capability_guides_for_runtime_backends() -> None:

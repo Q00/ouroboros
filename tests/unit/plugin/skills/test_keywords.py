@@ -19,6 +19,10 @@ async def _discover_registry(tmp_path: Path) -> SkillRegistry:
             f"""---
 name: {skill_name}
 description: {skill_name} skill
+matching:
+  localized_triggers:
+    ko:
+      - {skill_name} 한국어 트리거
 ---
 
 # {skill_name}
@@ -119,3 +123,38 @@ class TestExactMagicKeywordRouting:
 
         assert skill_name is None
         assert match_type == MatchType.FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_route_to_skill_matches_localized_trigger_without_renaming_skill(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Localized triggers should route to canonical skill ids only."""
+        registry = await _discover_registry(tmp_path)
+
+        try:
+            skill_name, match_type = route_to_skill("interview 한국어 트리거 부탁해", registry)
+        finally:
+            registry.stop_watcher()
+
+        assert skill_name == "interview"
+        assert match_type == MatchType.TRIGGER_KEYWORD
+
+    @pytest.mark.asyncio
+    async def test_exact_prefix_still_wins_over_localized_trigger(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Deterministic command routing must not be shadowed by localized discovery text."""
+        registry = await _discover_registry(tmp_path)
+
+        try:
+            skill_name, match_type = route_to_skill(
+                "ooo run interview 한국어 트리거",
+                registry,
+            )
+        finally:
+            registry.stop_watcher()
+
+        assert skill_name == "run"
+        assert match_type == MatchType.EXACT_PREFIX

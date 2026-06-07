@@ -201,10 +201,16 @@ class MagicKeywordDetector:
         all_metadata = self._registry.get_all_metadata()
 
         for skill_name, metadata in all_metadata.items():
-            if not metadata.trigger_keywords:
+            localized_keywords = tuple(
+                keyword
+                for triggers in metadata.localized_triggers.values()
+                for keyword in triggers
+            )
+            trigger_keywords = (*metadata.trigger_keywords, *localized_keywords)
+            if not trigger_keywords:
                 continue
 
-            for keyword in metadata.trigger_keywords:
+            for keyword in trigger_keywords:
                 keyword_lower = keyword.lower()
                 if keyword_lower in input_lower:
                     # Calculate confidence based on match specificity

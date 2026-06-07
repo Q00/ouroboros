@@ -211,6 +211,15 @@ class TestInstallCodexRules:
         assert "lateral_review_required=true" in rules
         assert "MCP `seed-ready`" in rules
 
+    def test_packaged_rules_document_localized_matching_fallback(self) -> None:
+        """Codex rules should document localized trigger metadata behavior."""
+        rules = load_packaged_codex_rules()
+
+        assert "### Codex App Localized Skill Matching" in rules
+        assert "`matching.localized_triggers`" in rules
+        assert "Canonical skill names" in rules
+        assert "fallback guidance" in rules
+
     def test_rendered_skill_capability_guide_is_idempotent(self, tmp_path: Path) -> None:
         """Refreshing from an already rendered rule source should not duplicate the guide."""
         packaged_rules_dir = tmp_path / "packaged-rules"
@@ -282,6 +291,31 @@ class TestLoadPackagedCodexSkills:
         assert "active runtime's `ask_user` capability" in skill
         assert "active runtime's tool-discovery capability" in skill
         assert "`run_lateral_review`" in skill
+
+    @pytest.mark.parametrize(
+        ("skill_name", "expected_phrase"),
+        [
+            ("interview", "요구사항을 먼저 명확히 해줘"),
+            ("seed", "시드를 생성해줘"),
+            ("run", "시드를 실행해줘"),
+            ("evaluate", "실행 결과를 평가해줘"),
+            ("qa", "품질을 검사해줘"),
+            ("status", "세션 상태를 알려줘"),
+        ],
+    )
+    def test_packaged_core_skills_include_korean_matching_metadata(
+        self,
+        skill_name: str,
+        expected_phrase: str,
+    ) -> None:
+        """Core Codex skills should expose Korean discovery triggers."""
+        skill = load_packaged_codex_skill(skill_name)
+
+        assert f"name: {skill_name}" in skill
+        assert "matching:" in skill
+        assert "localized_triggers:" in skill
+        assert "ko:" in skill
+        assert expected_phrase in skill
 
     def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
         """Missing skill entrypoints should fail fast."""
