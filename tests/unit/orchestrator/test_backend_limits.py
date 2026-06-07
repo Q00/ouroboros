@@ -25,9 +25,7 @@ from ouroboros.orchestrator.backend_limits import (
 
 
 @pytest.fixture(autouse=True)
-def _isolate_backend_limits_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _isolate_backend_limits_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point limit resolution at a non-existent config path and clear the cache.
 
     Keeps every test hermetic from a real ``~/.ouroboros/backend_limits.yaml``
@@ -152,18 +150,14 @@ class TestPerBackendRateEnvOverrides:
         # Declaring a rate budget does not change the fan-out cap.
         assert limits.max_concurrency == DEFAULT_UNKNOWN_MAX_CONCURRENCY
 
-    def test_env_prefix_canonicalizes_backend_name(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_prefix_canonicalizes_backend_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # "opencode" → OUROBOROS_OPENCODE_RPM
         monkeypatch.setenv("OUROBOROS_OPENCODE_RPM", "3")
 
         assert resolve_backend_limits("opencode").requests_per_minute == 3
 
     @pytest.mark.parametrize("value", ["0", "-1", "nope", ""])
-    def test_invalid_rate_env_is_ignored(
-        self, value: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_invalid_rate_env_is_ignored(self, value: str, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OUROBOROS_HERMES_CLI_RPM", value)
 
         assert resolve_backend_limits("hermes_cli").requests_per_minute is None

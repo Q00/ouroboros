@@ -163,7 +163,9 @@ class TestRateLimitGate:
             time_provider=lambda: clock["now"],
         )
         # Small wait budget + heartbeat so the loop force-reserves quickly.
-        gate = RateLimitGate(bucket, max_wait_seconds=60.0, heartbeat_seconds=30.0, sleep=fake_sleep)
+        gate = RateLimitGate(
+            bucket, max_wait_seconds=60.0, heartbeat_seconds=30.0, sleep=fake_sleep
+        )
 
         await gate.acquire(estimated_tokens=100)  # consume the only slot
 
