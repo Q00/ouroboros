@@ -825,15 +825,15 @@ class TestJsonSchemaHandling:
         assert "strict-mcp-config" not in (options_call_kwargs.get("extra_args") or {})
 
     def test_live_claude_agent_sdk_supports_extra_args(self) -> None:
-        """Pin invariant: every ``claude-agent-sdk`` version in the declared
-        support range (``>=0.1.0,<1.0.0``) MUST expose ``extra_args``.
+        """Pin invariant: the pinned ``claude-agent-sdk`` release MUST
+        expose ``extra_args``.
 
         Verified empirically against the published PyPI history
         (``extra_args`` is a field on ``ClaudeAgentOptions`` since the
         earliest public release ``0.0.23``).  This test locks the
-        invariant in CI so a future upper-bound bump or vendored SDK
-        swap that drops the field fails fast at test time, well before
-        the adapter's defense-in-depth fail-fast path could fire in
+        invariant in CI so a future pin bump or vendored SDK swap that
+        drops the field fails fast at test time, well before the
+        adapter's defense-in-depth fail-fast path could fire in
         production.
 
         Skipped when ``claude-agent-sdk`` is not installed — the SDK is

@@ -777,17 +777,16 @@ class ClaudeCodeAdapter:
             # Compatibility invariant (verified against the published
             # PyPI history): ``extra_args`` has been a field on
             # ``ClaudeAgentOptions`` since the earliest published release
-            # (``claude-agent-sdk==0.0.23``) and remains present at every
-            # version in the declared support range, so the
-            # ``extra_args`` branch below is the path actually taken on
-            # any pip-installed SDK in that range.  The fail-fast branch
+            # (``claude-agent-sdk==0.0.23``) and is present on the pinned
+            # release, so the ``extra_args`` branch below is the path
+            # actually taken on any pip-installed SDK.  The fail-fast branch
             # is defense-in-depth against vendored, partial, or
             # monkey-patched SDK builds where the field has been removed:
             # we MUST honor the caller's isolation request rather than
             # silently re-open the recursion path.  ``test_factory.py``
             # and ``test_claude_code_adapter.py`` lock the live-SDK
-            # invariant so any future upper-bound bump that drops
-            # ``extra_args`` fails CI before reaching production.
+            # invariant so any future pin bump that drops ``extra_args``
+            # fails CI before reaching production.
             field_names = _claude_options_field_names()
             if "strict_mcp_config" in field_names:
                 options_kwargs["strict_mcp_config"] = True
