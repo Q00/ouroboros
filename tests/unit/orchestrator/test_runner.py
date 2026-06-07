@@ -2710,6 +2710,61 @@ class TestOrchestratorRunner:
             allowed_tools=[],
         )
 
+    def test_plan_parallel_workers_serializes_cli_backend(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """A CLI backend (no known LLM limits) is serialized regardless of the
+        configured worker count (R3 stampede guard)."""
+        mock_adapter.runtime_backend = "hermes_cli"
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_parallel_workers=3,
+        )
+
+        assert runner._plan_parallel_workers() == 1
+
+    def test_plan_parallel_workers_respects_native_claude(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """The native Claude backend is governed by its rate bucket, so fan-out
+        is not concurrency-capped here."""
+        mock_adapter.runtime_backend = "claude"
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_parallel_workers=3,
+        )
+
+        assert runner._plan_parallel_workers() == 3
+
+    def test_plan_parallel_workers_honors_env_override(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Operators can raise the cap for a CLI backend via env override."""
+        monkeypatch.setenv("OUROBOROS_MAX_CONCURRENCY", "2")
+        mock_adapter.runtime_backend = "hermes_cli"
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_parallel_workers=5,
+        )
+
+        assert runner._plan_parallel_workers() == 2
+
     def test_build_dependency_analyzer_catches_expected_exceptions(
         self,
         mock_adapter: MagicMock,

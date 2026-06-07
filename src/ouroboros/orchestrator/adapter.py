@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.backend_limits import resolve_backend_limits
 from ouroboros.orchestrator.rate_limit import (
     DEFAULT_ANTHROPIC_RPM_CEILING,
     DEFAULT_ANTHROPIC_TPM_CEILING,
@@ -954,16 +955,26 @@ class ClaudeAgentAdapter:
         return parsed
 
     def _build_rate_limit_bucket(self) -> SharedRateLimitBucket:
-        """Create the shared Anthropic rate-limit bucket for orchestrator workers."""
+        """Create the shared rate-limit bucket for orchestrator workers.
+
+        RPM/TPM defaults are sourced from the backend-limits registry (the
+        single source of truth for per-backend constraints) and may be
+        overridden per deployment via the ``OUROBOROS_ANTHROPIC_*`` env knobs
+        (``0`` disables that limit). For the native Claude backend this resolves
+        to the same Anthropic ceilings as before.
+        """
+        limits = resolve_backend_limits(self._runtime_backend)
+        rpm_default = limits.requests_per_minute or DEFAULT_ANTHROPIC_RPM_CEILING
+        tpm_default = limits.tokens_per_minute or DEFAULT_ANTHROPIC_TPM_CEILING
         return SharedRateLimitBucket(
             runtime_backend=self._runtime_backend,
             request_limit=self._parse_optional_positive_int(
                 "OUROBOROS_ANTHROPIC_RPM_CEILING",
-                default=DEFAULT_ANTHROPIC_RPM_CEILING,
+                default=rpm_default,
             ),
             token_limit=self._parse_optional_positive_int(
                 "OUROBOROS_ANTHROPIC_TPM_CEILING",
-                default=DEFAULT_ANTHROPIC_TPM_CEILING,
+                default=tpm_default,
             ),
         )
 

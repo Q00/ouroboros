@@ -50,6 +50,10 @@ from ouroboros.orchestrator.adapter import (
     AgentRuntime,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.backend_limits import (
+    plan_fan_out_concurrency,
+    resolve_backend_limits,
+)
 from ouroboros.orchestrator.capabilities import (
     CapabilityGraph,
     build_capability_graph,
@@ -480,6 +484,18 @@ class OrchestratorRunner:
         self._fat_harness_mode = fat_harness_mode
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
+
+    def _plan_parallel_workers(self) -> int:
+        """Return the effective fan-out worker count for the connected backend.
+
+        Ouroboros caps delivery fan-out to the connected backend's known
+        concurrency limit so it does not stampede the LLM's rate/quota window
+        (R3). Backends whose underlying LLM limits are unknown — the CLI
+        runtimes — serialize by default and are raised only via
+        ``OUROBOROS_MAX_CONCURRENCY``.
+        """
+        limits = resolve_backend_limits(self._adapter.runtime_backend)
+        return plan_fan_out_concurrency(self._max_parallel_workers, limits)
 
     @property
     def mcp_manager(self) -> MCPClientManager | None:
@@ -2764,13 +2780,29 @@ class OrchestratorRunner:
 
         execution_profile = _execution_profile_for_seed(seed)
 
+        # Cap fan-out to the connected backend's concurrency constraints so a
+        # parallel dispatch never stampedes the LLM's rate/quota window (R3).
+        effective_workers = self._plan_parallel_workers()
+        if effective_workers < self._max_parallel_workers:
+            self._console.print(
+                f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
+                f"'{self._adapter.runtime_backend}' (requested {self._max_parallel_workers}). "
+                f"Override with OUROBOROS_MAX_CONCURRENCY.[/yellow]"
+            )
+            log.info(
+                "orchestrator.runner.fan_out_capped",
+                runtime_backend=self._adapter.runtime_backend,
+                requested_workers=self._max_parallel_workers,
+                effective_workers=effective_workers,
+            )
+
         # Execute in parallel
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
             console=self._console,
             enable_decomposition=self._enable_decomposition,
-            max_concurrent=self._max_parallel_workers,
+            max_concurrent=effective_workers,
             max_decomposition_depth=self._max_decomposition_depth,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
@@ -2845,6 +2877,7 @@ class OrchestratorRunner:
             "total_levels": execution_plan.total_stages,
             "max_decomposition_depth": self._max_decomposition_depth,
             "max_parallel_workers": self._max_parallel_workers,
+            "effective_parallel_workers": effective_workers,
             "verification_report": verification_report,
             **self._task_summary(),
         }
