@@ -18,7 +18,7 @@ dependencies = [
     "rich>=13.0.0,<16.0.0",
     "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
     "structlog>=24.0.0,<26.0.0",
-    "typer>=0.12.0,<0.26.0",
+    "typer>=0.12.0,<0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -27,12 +27,12 @@ dependencies = [
 # this metadata, NOT from uv.lock). Motivated by the 2026-03 litellm
 # 1.82.7/1.82.8 supply-chain incident. Updates land via reviewed Dependabot
 # PRs; uv.lock additionally hash-pins the full transitive graph for repo/CI.
-claude = ["claude-agent-sdk==0.1.50", "anthropic==0.105.2"]
+claude = ["claude-agent-sdk==0.2.87", "anthropic==0.105.2"]
 copilot = []
 litellm = ["litellm==1.86.2"]
 dashboard = []
-mcp = ["mcp==1.26.0"]
-tui = ["textual==8.1.1"]
+mcp = ["mcp==1.27.2"]
+tui = ["textual==8.2.7"]
 all = ["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]
 
 [project.scripts]
