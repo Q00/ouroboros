@@ -32,8 +32,10 @@ Payload structure:
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 import json
 import re
 from typing import Any
@@ -51,11 +53,17 @@ from ouroboros.mcp.types import (
 
 log = structlog.get_logger(__name__)
 
+_LATERAL_INLINE_DISPATCH_OPEN = "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
+_LATERAL_INLINE_DISPATCH_CLOSE = "\n-->"
 _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS = 600
 _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS = 200
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
+_LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
+_LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
+_LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
+_LATERAL_PANEL_FALLBACK_PARALLEL_MODE = "parallel_subagent_panel"
 
 
 def _canonical_response_json(body: dict[str, Any]) -> str:
@@ -95,12 +103,351 @@ def _default_code_investigation_confirmation_prompt(output: Mapping[str, Any]) -
     return f"Confirm before forwarding this code-derived answer: {answer_text}"
 
 
+def _payload_persona(payload: Mapping[str, Any]) -> str:
+    context = payload.get("context")
+    if isinstance(context, Mapping):
+        persona = context.get("persona")
+        if persona:
+            return str(persona)
+    title = str(payload.get("title") or "")
+    match = re.search(r"\(([^)]+)\)", title)
+    if match:
+        return match.group(1)
+    return "unknown"
+
+
+def _response_text_json_payload(result: MCPToolResult) -> dict[str, Any] | None:
+    text = result.text_content.strip()
+    if not text or not text.startswith("{"):
+        return None
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _inline_lateral_dispatch_payload(result: MCPToolResult) -> dict[str, Any] | None:
+    text = result.text_content
+    open_idx = text.rfind(_LATERAL_INLINE_DISPATCH_OPEN)
+    if open_idx == -1:
+        return None
+    close_idx = text.rfind(_LATERAL_INLINE_DISPATCH_CLOSE)
+    if close_idx <= open_idx:
+        return None
+    encoded = text[open_idx + len(_LATERAL_INLINE_DISPATCH_OPEN) : close_idx]
+    try:
+        decoded = base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+        payload = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _lateral_payload_container(result: MCPToolResult) -> tuple[dict[str, Any], str]:
+    """Return the first structured lateral dispatch container and its source."""
+    if isinstance(result.meta, dict):
+        if "_subagents" in result.meta or "_subagent" in result.meta:
+            return result.meta, "meta"
+        if "payloads" in result.meta:
+            return result.meta, "inline_meta"
+
+    content_payload = _response_text_json_payload(result)
+    if content_payload and ("_subagents" in content_payload or "_subagent" in content_payload):
+        return content_payload, "content_json"
+
+    inline_payload = _inline_lateral_dispatch_payload(result)
+    if inline_payload and "payloads" in inline_payload:
+        return inline_payload, "inline_content"
+
+    return {}, "none"
+
+
+@lru_cache(maxsize=1)
+def lateral_persona_panel_metadata_from_capability_definitions() -> dict[str, Any]:
+    """Read lateral persona panel metadata from Ouroboros tool capabilities.
+
+    The interview orchestration reader intentionally consumes the same
+    capability graph exposed to runtimes, rather than duplicating the
+    ``ouroboros_lateral_think`` panel contract in this response-normalization
+    layer.
+    """
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+    from ouroboros.orchestrator.capabilities import build_capability_graph
+    from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+    owned_tools = tuple(handler.definition for handler in get_ouroboros_tools())
+    graph = build_capability_graph(assemble_session_tool_catalog(attached_tools=owned_tools))
+    for descriptor in graph.capabilities:
+        if descriptor.name != _LATERAL_PANEL_FALLBACK_TOOL or descriptor.metadata is None:
+            continue
+        panel = descriptor.metadata.orchestration.get("lateral_panel")
+        if isinstance(panel, Mapping):
+            return dict(panel)
+    return {}
+
+
+def _lateral_panel_capability_metadata(
+    lateral_panel_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize caller-supplied or capability-derived lateral panel metadata."""
+    raw = (
+        lateral_panel_metadata
+        if lateral_panel_metadata is not None
+        else lateral_persona_panel_metadata_from_capability_definitions()
+    )
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _lateral_panel_persona_roles(
+    lateral_panel_metadata: Mapping[str, Any],
+) -> dict[str, str]:
+    raw_personas = lateral_panel_metadata.get("personas")
+    if not isinstance(raw_personas, list | tuple):
+        return {}
+    roles: dict[str, str] = {}
+    for persona in raw_personas:
+        if not isinstance(persona, Mapping):
+            continue
+        persona_id = persona.get("persona_id")
+        role = persona.get("role")
+        if persona_id and role:
+            roles[str(persona_id)] = str(role)
+    return roles
+
+
+def _lateral_panel_id(lateral_panel_metadata: Mapping[str, Any]) -> str:
+    return str(lateral_panel_metadata.get("panel_id") or _LATERAL_PANEL_FALLBACK_ID)
+
+
+def _lateral_panel_tool(lateral_panel_metadata: Mapping[str, Any]) -> str:
+    return str(lateral_panel_metadata.get("mcp_tool") or _LATERAL_PANEL_FALLBACK_TOOL)
+
+
+def _lateral_panel_requires_prose_parsing(
+    lateral_panel_metadata: Mapping[str, Any],
+) -> bool:
+    refs = lateral_panel_metadata.get("response_payload_refs")
+    if isinstance(refs, Mapping) and "requires_prose_parsing" in refs:
+        return bool(refs["requires_prose_parsing"])
+    return False
+
+
+def _lateral_panel_sequential_mode(lateral_panel_metadata: Mapping[str, Any]) -> str:
+    fallback = lateral_panel_metadata.get("sequential_fallback")
+    if isinstance(fallback, Mapping) and fallback.get("mode"):
+        return str(fallback["mode"])
+    return _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE
+
+
+def lateral_review_response_to_interview_orchestration_entries(
+    result: MCPToolResult,
+    *,
+    session_id: str | None = None,
+    runtime_supports_parallel_subagents: bool = True,
+    lateral_panel_metadata: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Convert a lateral-review MCP response into interview persona-panel entries.
+
+    ``ouroboros_lateral_think`` can return plugin-native ``_subagents``, a
+    single ``_subagent``, inline-fallback ``meta.payloads``, or a content-only
+    base64 dispatch block when a transport drops ``meta``. This helper
+    normalizes every supported shape into deterministic interview orchestration
+    metadata entries so the interview runtime can dispatch persona panels
+    without prose parsing.
+    """
+    container, source = _lateral_payload_container(result)
+    if not container:
+        return []
+
+    dispatch_mode = str(container.get("dispatch_mode") or "plugin")
+    raw_payloads: Any
+    if isinstance(container.get("_subagents"), list):
+        raw_payloads = container["_subagents"]
+    elif isinstance(container.get("payloads"), list):
+        raw_payloads = container["payloads"]
+    elif isinstance(container.get("_subagent"), Mapping):
+        raw_payloads = [container["_subagent"]]
+    else:
+        return []
+
+    payloads = [payload for payload in raw_payloads if isinstance(payload, Mapping)]
+    if not payloads:
+        return []
+
+    panel_metadata = _lateral_panel_capability_metadata(lateral_panel_metadata)
+    panel_id = _lateral_panel_id(panel_metadata)
+    mcp_tool = _lateral_panel_tool(panel_metadata)
+    sequential_mode = _lateral_panel_sequential_mode(panel_metadata)
+    requires_prose_parsing = _lateral_panel_requires_prose_parsing(panel_metadata)
+    persona_roles = _lateral_panel_persona_roles(panel_metadata)
+    execution_mode = (
+        _LATERAL_PANEL_FALLBACK_PARALLEL_MODE
+        if len(payloads) > 1 and runtime_supports_parallel_subagents
+        else sequential_mode
+    )
+    parallel_group = f"{session_id}:{panel_id}" if session_id else panel_id
+
+    entries: list[dict[str, Any]] = []
+    for index, payload in enumerate(payloads, start=1):
+        context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+        persona = _payload_persona(payload)
+        entries.append(
+            {
+                "kind": "interview_orchestration_metadata",
+                "panel_id": panel_id,
+                "panel_role": "persona",
+                "persona_id": persona,
+                "persona_role": persona_roles.get(persona, ""),
+                "session_id": session_id,
+                "mcp_tool": mcp_tool,
+                "tool_name": str(payload.get("tool_name") or mcp_tool),
+                "title": str(payload.get("title") or f"Lateral ({persona})"),
+                "agent": str(payload.get("agent") or "general"),
+                "model": payload.get("model"),
+                "prompt": str(payload.get("prompt") or ""),
+                "context": dict(context),
+                "dispatch_mode": dispatch_mode,
+                "response_payload_source": source,
+                "execution_mode": execution_mode,
+                "parallel_group": parallel_group,
+                "execution_order": index,
+                "requires_prose_parsing": requires_prose_parsing,
+                "sequential_fallback_used": execution_mode == sequential_mode,
+            }
+        )
+    return entries
+
+
+def lateral_review_response_to_interview_orchestration_metadata(
+    result: MCPToolResult,
+    *,
+    session_id: str | None = None,
+    runtime_supports_parallel_subagents: bool = True,
+    lateral_panel_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the interview metadata envelope for a lateral persona-panel result."""
+    panel_metadata = _lateral_panel_capability_metadata(lateral_panel_metadata)
+    panel_id = _lateral_panel_id(panel_metadata)
+    mcp_tool = _lateral_panel_tool(panel_metadata)
+    sequential_mode = _lateral_panel_sequential_mode(panel_metadata)
+    requires_prose_parsing = _lateral_panel_requires_prose_parsing(panel_metadata)
+    entries = lateral_review_response_to_interview_orchestration_entries(
+        result,
+        session_id=session_id,
+        runtime_supports_parallel_subagents=runtime_supports_parallel_subagents,
+        lateral_panel_metadata=panel_metadata,
+    )
+    return {
+        "lateral_panel": {
+            "panel_id": panel_id,
+            "mcp_tool": mcp_tool,
+            "entry_count": len(entries),
+            "execution_mode": (entries[0]["execution_mode"] if entries else sequential_mode),
+            "requires_prose_parsing": requires_prose_parsing,
+            "entries": entries,
+        }
+    }
+
+
+def synthesize_lateral_persona_panel_when_complete(
+    entries: list[Mapping[str, Any]],
+    persona_outputs: Mapping[str, Any],
+    synthesizer: Any,
+) -> dict[str, Any]:
+    """Aggregate lateral persona outputs and synthesize only when complete.
+
+    Parent runtimes receive one orchestration entry per persona and may get
+    child results in any order. This helper preserves dispatch order, checks
+    completion by ``persona_id``, and calls ``synthesizer`` only after every
+    dispatched persona has a corresponding output.
+    """
+    expected_personas = [
+        str(entry["persona_id"])
+        for entry in sorted(
+            entries,
+            key=lambda item: int(item.get("execution_order") or 0),
+        )
+        if entry.get("persona_id")
+    ]
+    outputs_by_persona = {
+        str(persona): output
+        for persona, output in persona_outputs.items()
+        if str(persona) in expected_personas
+    }
+    missing_personas = [
+        persona for persona in expected_personas if persona not in outputs_by_persona
+    ]
+    aggregated_outputs = [
+        {
+            "persona_id": persona,
+            "output": outputs_by_persona[persona],
+        }
+        for persona in expected_personas
+        if persona in outputs_by_persona
+    ]
+    if missing_personas:
+        return {
+            "ready_for_synthesis": False,
+            "expected_personas": expected_personas,
+            "missing_personas": missing_personas,
+            "aggregated_outputs": aggregated_outputs,
+            "synthesis": None,
+        }
+    return {
+        "ready_for_synthesis": True,
+        "expected_personas": expected_personas,
+        "missing_personas": [],
+        "aggregated_outputs": aggregated_outputs,
+        "synthesis": synthesizer(aggregated_outputs),
+    }
+
+
+def continue_interview_after_lateral_persona_synthesis(
+    entries: list[Mapping[str, Any]],
+    persona_outputs: Mapping[str, Any],
+    synthesizer: Any,
+    interview_continuation: Any,
+) -> dict[str, Any]:
+    """Run interview continuation only after lateral panel synthesis is ready.
+
+    Runtimes may collect persona panel outputs out of order. This helper keeps
+    the runtime handoff deterministic: it returns the incomplete synthesis
+    state without calling the continuation, and calls the continuation only
+    after ``synthesize_lateral_persona_panel_when_complete`` has produced a
+    synthesized lateral result.
+    """
+    synthesis_state = synthesize_lateral_persona_panel_when_complete(
+        entries,
+        persona_outputs,
+        synthesizer,
+    )
+    if not synthesis_state["ready_for_synthesis"]:
+        return {
+            **synthesis_state,
+            "continued_interview": False,
+            "interview_continuation": None,
+        }
+    return {
+        **synthesis_state,
+        "continued_interview": True,
+        "interview_continuation": interview_continuation(synthesis_state["synthesis"]),
+    }
+
+
 def synthesize_code_investigation_when_complete(
     request: Mapping[str, Any],
     investigation_results: Mapping[str, Any],
     synthesizer: Any,
 ) -> dict[str, Any]:
-    """Collect code-fact investigation outputs before interview synthesis."""
+    """Collect code-fact investigation outputs before interview synthesis.
+
+    Parent runtimes may dispatch one or more repo-inspection subagents for a
+    single interview question. This helper filters child outputs to the
+    originating request and calls ``synthesizer`` only when every required result
+    is present, so interview continuation receives factual code context rather
+    than partially collected child state.
+    """
     session_id = str(request.get("session_id") or "")
     question_identity = str(request.get("question_identity") or "")
     required_ids = request.get("required_result_ids")
@@ -111,8 +458,7 @@ def synthesize_code_investigation_when_complete(
 
     outputs_by_result_id: dict[str, Any] = {}
     for result_id, output in investigation_results.items():
-        normalized_result_id = str(result_id)
-        if normalized_result_id not in expected_result_ids:
+        if str(result_id) not in expected_result_ids:
             continue
         if not isinstance(output, Mapping):
             continue
@@ -120,7 +466,7 @@ def synthesize_code_investigation_when_complete(
             continue
         if str(output.get("question_identity") or "") != question_identity:
             continue
-        outputs_by_result_id[normalized_result_id] = output
+        outputs_by_result_id[str(result_id)] = output
 
     missing_result_ids = [
         result_id for result_id in expected_result_ids if result_id not in outputs_by_result_id
@@ -194,23 +540,6 @@ def synthesize_code_investigation_when_complete(
         "contract_violations": contract_violations,
         "ready_for_forward": not confirmation_required,
     }
-
-
-def lateral_persona_panel_metadata_from_capability_definitions() -> dict[str, Any]:
-    """Read lateral persona panel metadata from Ouroboros tool capabilities."""
-    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
-    from ouroboros.orchestrator.capabilities import build_capability_graph
-    from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
-    owned_tools = tuple(handler.definition for handler in get_ouroboros_tools())
-    graph = build_capability_graph(assemble_session_tool_catalog(attached_tools=owned_tools))
-    for descriptor in graph.capabilities:
-        if descriptor.name != "ouroboros_lateral_think" or descriptor.metadata is None:
-            continue
-        panel = descriptor.metadata.orchestration.get("lateral_panel")
-        if isinstance(panel, Mapping):
-            return dict(panel)
-    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1297,6 +1626,7 @@ def build_lateral_multi_subagent(
             build_subagent_payload(
                 tool_name="ouroboros_lateral_think",
                 title=f"Lateral ({persona.value})",
+                agent=persona.value,
                 prompt=prompt,
                 context=context,
             )
