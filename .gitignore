@@ -129,3 +129,7 @@ docs/code-surface-inventory.yaml
 docs/code-surface-lookup.yaml
 docs/cli-inventory.yaml
 
+# Eval/QA run artifact written to the repo root; never tracked
+# (recurring stray — has been accidentally committed before).
+.ouroboros_eval_artifact.md
+

@@ -877,9 +877,9 @@ class TestJsonSchemaHandling:
         """Opt-in MCP isolation forwards via ``extra_args`` on SDKs that
         expose ``extra_args`` but not ``strict_mcp_config`` as a typed field.
 
-        This matches the supported SDK pin range
-        (``claude-agent-sdk>=0.1.0,<1.0.0``) where the latest releases
-        accept the flag only through CLI passthrough.
+        This matches the behavior of published ``claude-agent-sdk``
+        releases, where the latest releases accept the flag only through
+        CLI passthrough.
         """
         from ouroboros.providers import claude_code_adapter as adapter_mod
 

@@ -76,11 +76,11 @@ _RETRYABLE_ERROR_PATTERNS = (
 def _claude_options_field_names() -> frozenset[str]:
     """Return parameter names accepted by ``ClaudeAgentOptions``.
 
-    Used to gate optional kwargs that may not exist across the supported
-    SDK pin range (``claude-agent-sdk>=0.1.0,<1.0.0``).  ``strict-mcp-config``
-    is only available via ``extra_args`` (CLI passthrough) on current SDK
-    versions; older releases may also lack ``extra_args`` itself, so we
-    detect support before forwarding instead of assuming a typed kwarg.
+    Used to gate optional kwargs that may not exist across published
+    ``claude-agent-sdk`` releases.  ``strict-mcp-config`` is only available
+    via ``extra_args`` (CLI passthrough) on current SDK versions; older
+    releases may also lack ``extra_args`` itself, so we detect support before
+    forwarding instead of assuming a typed kwarg.
     """
     try:
         from claude_agent_sdk import ClaudeAgentOptions  # noqa: PLC0415
@@ -770,9 +770,9 @@ class ClaudeCodeAdapter:
             # keep MCP-tool access intact.
             #
             # ``ClaudeAgentOptions`` does not expose ``strict_mcp_config``
-            # as a typed field across the supported SDK pin range
-            # (``claude-agent-sdk>=0.1.0,<1.0.0``); current releases accept
-            # the flag only via ``extra_args`` (CLI passthrough).
+            # as a typed field on published ``claude-agent-sdk`` releases;
+            # current releases accept the flag only via ``extra_args``
+            # (CLI passthrough).
             #
             # Compatibility invariant (verified against the published
             # PyPI history): ``extra_args`` has been a field on
