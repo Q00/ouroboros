@@ -385,11 +385,20 @@ async def _run_mcp_server(
     stop_task = asyncio.create_task(stop.wait(), name="ouroboros-mcp-stop")
     watchdog_task = asyncio.create_task(_orphan_watchdog(), name="ouroboros-mcp-watchdog")
 
+    serve_exc: BaseException | None = None
     try:
         await asyncio.wait(
             {serve_task, stop_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+        # When the serve loop itself is what finished (rather than a stop
+        # signal), preserve any failure it raised. asyncio.wait() leaves the
+        # exception parked on the task, so a bind/listen/runtime error from
+        # server.serve() would otherwise be discarded by the suppressing
+        # cleanup below and reported as a clean shutdown. A normal serve return
+        # or a stop-driven shutdown leaves serve_exc None.
+        if serve_task.done() and not serve_task.cancelled():
+            serve_exc = serve_task.exception()
     finally:
         # Runs for SIGTERM, orphan-exit and KeyboardInterrupt too, so
         # EventStore.close() always gets to collapse the WAL. Cancel the serve
@@ -426,6 +435,13 @@ async def _run_mcp_server(
             serve_exc = serve_task.exception()
             if serve_exc is not None:
                 raise serve_exc
+
+    # Surface a serve-loop failure only after cleanup has collapsed the WAL and
+    # released the stores. This restores the error-propagation contract of the
+    # prior ``await server.serve(...)`` so ``ouroboros mcp serve`` exits non-zero
+    # on startup/runtime failures instead of reporting a clean stop.
+    if serve_exc is not None:
+        raise serve_exc
 
 
 @app.command()

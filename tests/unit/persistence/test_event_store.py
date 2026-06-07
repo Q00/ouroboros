@@ -1433,3 +1433,61 @@ class TestReplayWorkflowLifecycleResilience:
             [record.getMessage(), *(str(value) for value in vars(record).values())]
         )
         assert sentinel_secret not in captured_log_text
+
+
+class TestEventStoreCloseWalCheckpoint:
+    """Test EventStore.close() WAL checkpoint behavior.
+
+    A writable store must collapse the WAL with an explicit TRUNCATE checkpoint
+    on close so the -wal file does not grow unbounded across many concurrent
+    sessions; a read-only store must skip that write entirely (it would trip
+    SQLite's read-only guard).
+    """
+
+    @staticmethod
+    def _attach_sql_capture(store: EventStore) -> list[str]:
+        """Record raw SQL executed by ``store`` until it is closed."""
+        from sqlalchemy import event as sa_event
+
+        assert store._engine is not None  # type: ignore[attr-defined]
+        executed: list[str] = []
+
+        def _capture(_conn, _cursor, statement, _params, _context, _many) -> None:
+            executed.append(statement)
+
+        sa_event.listen(
+            store._engine.sync_engine,  # type: ignore[attr-defined]
+            "before_cursor_execute",
+            _capture,
+        )
+        return executed
+
+    async def test_close_truncates_wal_for_writable_store(self, tmp_path) -> None:
+        """Writable close() issues PRAGMA wal_checkpoint(TRUNCATE)."""
+        db_path = tmp_path / "writable.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        executed = self._attach_sql_capture(store)
+        await store.close()
+
+        assert any("wal_checkpoint(truncate)" in sql.lower() for sql in executed)
+        assert store._engine is None  # type: ignore[attr-defined]
+
+    async def test_close_skips_wal_checkpoint_for_readonly_store(self, tmp_path) -> None:
+        """Read-only close() must not attempt the WAL checkpoint write."""
+        db_path = tmp_path / "readonly.db"
+        # Create the on-disk schema with a writable store first so the read-only
+        # store has an existing database file to open.
+        writable = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await writable.initialize()
+        await writable.close()
+
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+        await store.initialize()
+
+        executed = self._attach_sql_capture(store)
+        await store.close()
+
+        assert not any("wal_checkpoint" in sql.lower() for sql in executed)
+        assert store._engine is None  # type: ignore[attr-defined]
