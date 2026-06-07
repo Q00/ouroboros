@@ -161,7 +161,7 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.107.0"
+version = "0.105.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -173,9 +173,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d9/57/9eaf3d6823eba892c837a738f32a74b51193a23904a8761f6711f7714105/anthropic-0.107.0.tar.gz", hash = "sha256:e036aae37b7a9ba0a71d74663a559002c96800eeaca4e336ca1f2d10d0a33297", size = 855992, upload-time = "2026-06-06T17:13:36.755Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/46/47581b8c689c743ceabf6a0f9ff48472160900ce802d26c0fb50423997b3/anthropic-0.105.2.tar.gz", hash = "sha256:0e26b90841c2dced7cc6e98d21d5517d0be33f1876b8e779f478202e28bcaa07", size = 853789, upload-time = "2026-05-29T00:21:14.104Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/1d/f8b7f1c0344f3c1cabebc48a969f7363dba9a306fd0cca293587e2c3093a/anthropic-0.107.0-py3-none-any.whl", hash = "sha256:b28315631e8ed92eec37ff0f911e59730c6a04663d9fffd53e201e11fa6669f1", size = 838567, upload-time = "2026-06-06T17:13:38.037Z" },
+    { url = "https://files.pythonhosted.org/packages/83/75/be0c357e33a5a56c8f9db5b4212f886138d2bf59c0952d858f6b75d710ef/anthropic-0.105.2-py3-none-any.whl", hash = "sha256:e53ed5f6bf36fb1ecb9b25d8634cfd30e02fab9fb3374a0c2d5c585874757230", size = 837507, upload-time = "2026-05-29T00:21:15.528Z" },
 ]
 
 [[package]]
@@ -1059,7 +1059,7 @@ wheels = [
 
 [[package]]
 name = "litellm"
-version = "1.88.0"
+version = "1.86.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1075,9 +1075,9 @@ dependencies = [
     { name = "tiktoken" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9b/8c/6cfce5d15554e076b8438a955436e9e6e2a2bd39c76539656c1c3861c369/litellm-1.88.0.tar.gz", hash = "sha256:4ff794493e40bd86c6f13e91dcb3e1aad697403fd46a96902196d93356ba48f4", size = 13886026, upload-time = "2026-06-06T23:25:17.93Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/ee/1f6f3f5d01e0910629b6af3757e82c47b8b87dca497a661a9c63280b4bd8/litellm-1.86.2.tar.gz", hash = "sha256:7d559ad48b97d796ff325af88fd7eebbdc66e58773fb5312130ab1cac968f8f3", size = 15380548, upload-time = "2026-05-27T16:19:58.45Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/71/deb6637475253b83eb4577c058863eec4b4ddaef2d08dcd93981b1aa4209/litellm-1.88.0-py3-none-any.whl", hash = "sha256:abd3037e0bf5703f833f5565c87bdfd93578d3de46cbcb36dfa108c3ef58021c", size = 15276203, upload-time = "2026-06-06T23:25:07.257Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/37/4da1dd67157aaa11477d6c63e4725216bfc46b4661e581b490d17e5b2831/litellm-1.86.2-py3-none-any.whl", hash = "sha256:27096463be7add661513ada3d9039e8f1a6195859e604d30fde96c939efe0a03", size = 17013061, upload-time = "2026-05-27T16:19:53.219Z" },
 ]
 
 [[package]]
@@ -1429,15 +1429,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0,<1.0.0" },
-    { name = "anthropic", marker = "extra == 'all'", specifier = "==0.107.0" },
-    { name = "anthropic", marker = "extra == 'claude'", specifier = "==0.107.0" },
+    { name = "anthropic", marker = "extra == 'all'", specifier = "==0.105.2" },
+    { name = "anthropic", marker = "extra == 'claude'", specifier = "==0.105.2" },
     { name = "anyio", specifier = ">=4.0.0,<5.0.0" },
     { name = "claude-agent-sdk", marker = "extra == 'all'", specifier = "==0.1.50" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.1.50" },
     { name = "click", specifier = ">=8.1.0,<9.0.0" },
     { name = "jsonschema", specifier = ">=4.21.0,<5.0.0" },
-    { name = "litellm", marker = "extra == 'all'", specifier = "==1.88.0" },
-    { name = "litellm", marker = "extra == 'litellm'", specifier = "==1.88.0" },
+    { name = "litellm", marker = "extra == 'all'", specifier = "==1.86.2" },
+    { name = "litellm", marker = "extra == 'litellm'", specifier = "==1.86.2" },
     { name = "mcp", marker = "extra == 'all'", specifier = "==1.26.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = "==1.26.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0,<4.0.0" },

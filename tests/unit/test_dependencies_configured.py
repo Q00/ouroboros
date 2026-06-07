@@ -40,12 +40,12 @@ def test_runtime_dependencies_configured():
 
 
 def test_runtime_and_optional_dependencies_have_upper_bounds():
-    """Core/runtime-facing dependencies should carry explicit upper bounds.
+    """Dependencies must carry explicit upper bounds.
 
-    An exact pin (``==``) counts as the tightest possible upper bound: the
-    AI/runtime optional stack is exact-pinned as supply-chain hardening (see
-    the rationale comment in pyproject.toml), so ``==`` is accepted alongside
-    ``<`` ranges. Core runtime deps remain bounded ranges.
+    Core runtime deps remain bounded *ranges* and must use ``<``. The optional
+    AI/runtime extras are exact-pinned for supply-chain hardening (see the
+    rationale in pyproject.toml); an exact pin (``==``) is the tightest
+    possible upper bound, so ``==`` is accepted for optional extras only.
     """
     root = Path(__file__).parent.parent.parent
     pyproject_path = root / "pyproject.toml"
@@ -53,9 +53,10 @@ def test_runtime_and_optional_dependencies_have_upper_bounds():
     content = pyproject_path.read_text()
     pyproject = tomllib.loads(content)
 
+    # Core runtime deps must stay bounded ranges, never exact pins.
     runtime_deps = pyproject["project"]["dependencies"]
     for dep in runtime_deps:
-        assert "<" in dep or "==" in dep, f"Runtime dependency missing upper bound: {dep}"
+        assert "<" in dep, f"Runtime dependency missing upper bound: {dep}"
 
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
     for extra_name in ("claude", "litellm", "dashboard", "mcp", "tui"):
