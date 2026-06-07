@@ -171,6 +171,20 @@ def test_unsupported_parallel_subagent_runtime_gets_sequential_fallback_contract
     )
 
 
+@pytest.mark.parametrize("directive_metadata", [{}, {"sequential_fallback": "invalid"}])
+def test_subagent_orchestration_contract_handles_absent_or_malformed_fallback(
+    directive_metadata: dict[str, object],
+) -> None:
+    contract = build_runtime_subagent_orchestration_contract(
+        "codex_cli",
+        directive_metadata=directive_metadata,
+    )
+
+    assert contract.dispatch_mode == "sequential_fallback"
+    assert contract.sequential_fallback == {}
+    assert "MCP `sequential_fallback` contract" in contract.runtime_instruction_handling
+
+
 def test_subagent_orchestration_cancel_job_capability_stays_callable_in_same_envelope() -> None:
     contract = build_runtime_subagent_orchestration_contract(
         "opencode_cli",
