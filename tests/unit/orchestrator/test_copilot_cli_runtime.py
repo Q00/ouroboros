@@ -28,11 +28,11 @@ def _make_runtime(model: str | None = None, cwd: str = "/work") -> CopilotCliRun
     return CopilotCliRuntime(cli_path="/usr/bin/copilot", model=model, cwd=cwd)
 
 
-def test_capabilities_keep_native_tool_restrictions() -> None:
+def test_capabilities_report_prompt_only_tool_restrictions_as_translated() -> None:
     capabilities = _make_runtime().capabilities
 
     assert capabilities.system_prompt_support is ParamSupport.TRANSLATED
-    assert capabilities.tool_restriction_support is ParamSupport.NATIVE
+    assert capabilities.tool_restriction_support is ParamSupport.TRANSLATED
     assert capabilities.permission_mode_support is ParamSupport.NATIVE
     assert capabilities.targeted_resume is False
     assert capabilities.structured_output is False

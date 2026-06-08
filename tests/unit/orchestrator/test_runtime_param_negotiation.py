@@ -12,6 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.runtime_param_negotiation import (
     adapter_requested_permission_mode,
     announce_execution_param_degradations,
@@ -177,3 +180,27 @@ def test_shared_notice_surfaces_requested_permission_degradation_once() -> None:
 
     assert console.print.call_count == 1
     assert "permission_mode" in console.print.call_args.args[0]
+
+
+def test_prompt_only_tool_runtimes_announce_tool_degradation() -> None:
+    console = MagicMock()
+
+    runtimes = [
+        GeminiCLIRuntime(cli_path="/tmp/gemini"),
+        GooseCliRuntime(cli_path="/tmp/goose"),
+        CopilotCliRuntime(cli_path="/tmp/copilot"),
+    ]
+
+    for runtime in runtimes:
+        announce_execution_param_degradations(
+            runtime,
+            system_prompt=None,
+            tools=["Read"],
+            console=console,
+        )
+
+    assert console.print.call_count == len(runtimes)
+    notices = [call.args[0] for call in console.print.call_args_list]
+    for notice in notices:
+        assert "tools" in notice
+        assert "translated" in notice

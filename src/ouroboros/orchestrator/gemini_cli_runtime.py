@@ -278,8 +278,11 @@ class GeminiCLIRuntime(CodexCliRuntime):
             targeted_resume=False,
             structured_output=True,
             # System prompt is composed into the user message (inherited Codex
-            # prompt builder), not passed as a native system directive.
+            # prompt builder), not passed as a native system directive. The
+            # inherited builder also renders requested tool lists as prompt
+            # guidance rather than enforcing a Gemini-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
         )
 
     # -- Event parsing and normalization -----------------------------------

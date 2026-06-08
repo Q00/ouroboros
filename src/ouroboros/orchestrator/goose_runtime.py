@@ -107,8 +107,11 @@ class GooseCliRuntime(CodexCliRuntime):
             targeted_resume=True,
             structured_output=True,
             # System prompt is composed into the user message (inherited Codex
-            # prompt builder), not passed as a native system directive.
+            # prompt builder), not passed as a native system directive. The
+            # inherited builder also renders requested tool lists as prompt
+            # guidance rather than enforcing a Goose-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
         )
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
