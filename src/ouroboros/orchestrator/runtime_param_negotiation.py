@@ -58,6 +58,17 @@ def _degradation(parameter: str, support: ParamSupport) -> ParamDegradation | No
     )
 
 
+def _tool_restriction_support_for_request(
+    capabilities: RuntimeCapabilities,
+    tools: list[str],
+) -> ParamSupport:
+    """Return truthful support for this concrete tools allow-list request."""
+    support = capabilities.tool_restriction_support
+    if tools == [] and support == ParamSupport.TRANSLATED:
+        return ParamSupport.IGNORED
+    return support
+
+
 def negotiate_execution_params(
     capabilities: RuntimeCapabilities,
     *,
@@ -75,7 +86,7 @@ def negotiate_execution_params(
     if system_prompt:
         requested.append(("system_prompt", capabilities.system_prompt_support))
     if tools is not None:
-        requested.append(("tools", capabilities.tool_restriction_support))
+        requested.append(("tools", _tool_restriction_support_for_request(capabilities, tools)))
     if permission_mode:
         requested.append(("permission_mode", capabilities.permission_mode_support))
 

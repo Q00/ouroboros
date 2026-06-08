@@ -81,7 +81,10 @@ allow-list, and `permission_mode`. Each is one of:
 > `## System Instructions\n...`) rather than passing a native system directive. Codex,
 > Gemini, Goose, Copilot, OpenCode, Hermes, and Pi also render requested tool
 > allow-lists only as prompt guidance, so `tools` is translated rather than a
-> native runtime allow-list. Kiro
+> native runtime allow-list when the list is non-empty. An explicit empty
+> allow-list (`tools=[]`) cannot be translated by those prompt-only composers
+> because no tool names are rendered; the orchestrator reports that no-tools
+> restriction as `ignored` for observability. Kiro
 > additionally maps `permission_mode` onto coarse `--trust-*` flags, which is honored work but
 > not in the form supplied. OpenCode, Hermes, and Pi keep the requested mode in runtime metadata
 > but do not pass it to their CLI commands.

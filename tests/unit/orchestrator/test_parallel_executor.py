@@ -10023,6 +10023,12 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
 async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatches() -> None:
     class _CapturingRuntime:
         runtime_backend = "codex_cli"
+        capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+        )
 
         def __init__(self) -> None:
             self.dispatched_tools: list[str] | None = None
@@ -10040,13 +10046,13 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
             yield AgentMessage(type="assistant", content='["Sub-AC 1: inspect", "Sub-AC 2: test"]')
 
     runtime = _CapturingRuntime()
+    console = MagicMock()
     executor = ParallelACExecutor(
         adapter=runtime,
         event_store=AsyncMock(),
-        console=MagicMock(),
+        console=console,
         enable_decomposition=True,
     )
-    executor._announce_param_degradations = MagicMock()
 
     result = await executor._try_decompose_ac(
         ac_content="Investigate and test sub-AC behavior.",
@@ -10058,8 +10064,10 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
 
     assert result == ["Sub-AC 1: inspect", "Sub-AC 2: test"]
     assert runtime.dispatched_tools == []
-    executor._announce_param_degradations.assert_called_once()
-    assert executor._announce_param_degradations.call_args.kwargs["tools"] == []
+    console.print.assert_called_once()
+    notice = console.print.call_args.args[0]
+    assert "tools" in notice
+    assert "ignored" in notice
 
 
 class _ParamCapsStubAdapter:
@@ -10137,4 +10145,4 @@ class TestParamDegradationNotice:
         assert executor._console.print.call_count == 1
         notice = executor._console.print.call_args.args[0]
         assert "tools" in notice
-        assert "translated" in notice
+        assert "ignored" in notice

@@ -77,6 +77,34 @@ def test_ignored_tools_is_reported_when_requested() -> None:
     assert "dropped" in result[0].detail
 
 
+def test_translated_non_empty_tools_is_reported_when_requested() -> None:
+    result = negotiate_execution_params(
+        _caps(tool_restriction_support=ParamSupport.TRANSLATED),
+        system_prompt=None,
+        tools=["Read"],
+        permission_mode=None,
+    )
+
+    assert len(result) == 1
+    assert result[0].parameter == "tools"
+    assert result[0].support is ParamSupport.TRANSLATED
+    assert "translation" in result[0].detail
+
+
+def test_translated_empty_tools_allowlist_is_reported_as_ignored() -> None:
+    result = negotiate_execution_params(
+        _caps(tool_restriction_support=ParamSupport.TRANSLATED),
+        system_prompt=None,
+        tools=[],
+        permission_mode=None,
+    )
+
+    assert len(result) == 1
+    assert result[0].parameter == "tools"
+    assert result[0].support is ParamSupport.IGNORED
+    assert "dropped" in result[0].detail
+
+
 def test_absent_parameter_is_never_degraded() -> None:
     # The runtime does not honor system_prompt natively, but none was supplied.
     result = negotiate_execution_params(
@@ -204,3 +232,27 @@ def test_prompt_only_tool_runtimes_announce_tool_degradation() -> None:
     for notice in notices:
         assert "tools" in notice
         assert "translated" in notice
+
+
+def test_prompt_only_tool_runtimes_announce_empty_tools_as_ignored() -> None:
+    console = MagicMock()
+
+    runtimes = [
+        GeminiCLIRuntime(cli_path="/tmp/gemini"),
+        GooseCliRuntime(cli_path="/tmp/goose"),
+        CopilotCliRuntime(cli_path="/tmp/copilot"),
+    ]
+
+    for runtime in runtimes:
+        announce_execution_param_degradations(
+            runtime,
+            system_prompt=None,
+            tools=[],
+            console=console,
+        )
+
+    assert console.print.call_count == len(runtimes)
+    notices = [call.args[0] for call in console.print.call_args_list]
+    for notice in notices:
+        assert "tools" in notice
+        assert "ignored" in notice
