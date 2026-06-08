@@ -11,6 +11,9 @@ jobs:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +48,7 @@ jobs:
         if: always()
         with:
           file: ./coverage.xml
+          use_oidc: true
           fail_ci_if_error: false
           flags: unittests
           name: codecov-${{ matrix.python-version }}
