@@ -26,6 +26,7 @@ from ouroboros.plugin.hooks import (
     HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
     HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
     HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+    HOOK_TOOL_INTERCEPT_SCOPE,
     HOOK_TOOL_OBSERVE_RECORDED_EVENT,
     HOOK_TOOL_OBSERVE_SCOPE,
 )
@@ -113,6 +114,7 @@ class TestBeforeToolCallIntercept:
             manifest=manifest,
             event_sink=events.append,
             subprocess_runner=_runner(0),
+            tool_permissions=[],
             **_BEFORE_KW,
         )
         assert decision.allowed is True
@@ -160,6 +162,7 @@ class TestBeforeToolCallIntercept:
             manifest=manifest,
             event_sink=events.append,
             subprocess_runner=_runner(3),
+            tool_permissions=[],
             **_BEFORE_KW,
         )
         assert decision.allowed is False
@@ -175,13 +178,20 @@ class TestBeforeToolCallIntercept:
     def test_fail_open_intercept_failure_does_not_block(self, tmp_path: Path) -> None:
         manifest = _manifest_with_hooks(
             tmp_path,
-            [_tool_call_hook(name="before_tool_call", failure_policy="fail_open")],
+            [
+                _tool_call_hook(
+                    name="before_tool_call",
+                    failure_policy="fail_open",
+                    scope=HOOK_TOOL_INTERCEPT_SCOPE,
+                )
+            ],
         )
         events: list[dict] = []
         decision = dispatch_before_tool_call(
             manifest=manifest,
             event_sink=events.append,
             subprocess_runner=_runner(1),
+            tool_permissions=[],
             **_BEFORE_KW,
         )
         assert decision.allowed is True
@@ -199,11 +209,45 @@ class TestBeforeToolCallIntercept:
             manifest=manifest,
             event_sink=events.append,
             subprocess_runner=_timeout_runner,
+            tool_permissions=[],
             **_BEFORE_KW,
         )
         assert decision.allowed is False
         assert "timed out" in decision.message
         assert _types(events)[-1] == HOOK_TOOL_INTERCEPT_BLOCKED_EVENT
+
+    def test_omitted_tool_permissions_blocks_intercept_before_subprocess(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = _manifest_with_hooks(
+            tmp_path,
+            [
+                _tool_call_hook(
+                    name="before_tool_call",
+                    failure_policy="fail_open",
+                    scope=HOOK_TOOL_INTERCEPT_SCOPE,
+                )
+            ],
+        )
+        events: list[dict] = []
+
+        decision = dispatch_before_tool_call(
+            manifest=manifest,
+            event_sink=events.append,
+            subprocess_runner=_runner_must_not_execute,
+            **_BEFORE_KW,
+        )
+
+        assert decision.allowed is False
+        assert decision.status == "blocked"
+        assert "requires explicit current tool permissions" in decision.message
+        assert _types(events) == [
+            HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+            HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+        ]
+        blocked = events[-1]
+        assert blocked["result"]["status"] == "blocked"
+        assert blocked["provenance"]["missing_tool_permissions"] == "omitted"
 
     def test_unauthorized_intercept_blocks_before_subprocess_execution(
         self, tmp_path: Path

@@ -2,15 +2,16 @@
 
 ## 1. Status
 
-**Proposed — 2026-05-20.** Companion document to PR
+**Implemented in v0.4 slices — originally proposed 2026-05-20.** Companion document to PR
 [#1137](https://github.com/Q00/ouroboros/pull/1137) (PR E — `on_error` /
-`on_cancel` observability hooks). This RFC is **pure documentation**: it
-defines the dispatch contract for the deferred `before_tool_call` and
-`after_tool_call` plugin hooks so that implementation slices can be
-reviewed against a frozen contract. The original RFC PR introduced no
-runtime code, schema files, or permission scopes. Later slices may
-implement this contract incrementally; a standalone dispatcher helper is
-not the same as end-to-end production tool-mediation wiring.
+`on_cancel` observability hooks). This RFC defines the dispatch contract
+for the `before_tool_call` and `after_tool_call` plugin hooks so that
+implementation slices can be reviewed against a frozen contract. The
+original RFC was pure documentation and introduced no runtime code,
+schema files, or permission scopes; later v0.4 slices added the schema
+vocabulary, firewall dispatcher helpers, and reserved audit event names.
+Standalone dispatcher helpers are still not the same as end-to-end
+production tool-mediation wiring.
 
 This contract is the PR C deliverable from the
 [#939 scope-decision comment](https://github.com/Q00/ouroboros/issues/939#issuecomment-4477726327)
@@ -25,14 +26,10 @@ vocabulary). The intent is to specify — *before code is written* — the
 payload shape, permission scopes, failure policy, audit event names, and
 schema-version gating that PR F MUST satisfy.
 
-This document does NOT:
-
-- modify `src/ouroboros/plugin/manifest.py`,
-- add a `0.4` JSON Schema file under `src/ouroboros/plugin/schemas/`,
-- touch `src/ouroboros/plugin/firewall.py` or any dispatcher,
-- add test cases or fixtures.
-
-The only artifact introduced is this Markdown file.
+The original RFC document did not modify runtime code. Current v0.4
+implementation slices do modify `src/ouroboros/plugin/manifest.py`, add
+`src/ouroboros/plugin/schemas/0.4/`, and expose standalone dispatcher
+helpers in `src/ouroboros/plugin/firewall.py`.
 
 ## 3. Hook payload
 
@@ -72,8 +69,8 @@ boundary.
 ## 4. Permission scopes
 
 Tool-call hooks introduce two new permission scope strings. They are
-**defined here for review** but are not added to any permission table or
-firewall constant by this PR.
+part of the v0.4 hook permission vocabulary and are reflected in the
+manifest schema and hook constants.
 
 | Scope                       | Class        | Veto allowed | Failure policy default | Notes                                                                                     |
 |-----------------------------|--------------|--------------|------------------------|-------------------------------------------------------------------------------------------|

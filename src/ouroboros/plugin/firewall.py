@@ -1486,7 +1486,7 @@ def dispatch_before_tool_call(
     correlation_id: str,
     invocation_id: str,
     event_sink: EventSink,
-    tool_permissions: Iterable[str] = (),
+    tool_permissions: Iterable[str] | None = None,
     namespace: str = "",
     command_name: str = "",
     trust_state: str = "trusted",
@@ -1507,7 +1507,8 @@ def dispatch_before_tool_call(
     """
     emitted: list[dict] = []
     runner = subprocess_runner or subprocess.run
-    current_tool_permissions = tuple(tool_permissions)
+    tool_permissions_were_provided = tool_permissions is not None
+    current_tool_permissions = tuple(tool_permissions or ())
 
     def _emit(event: dict) -> None:
         emitted.append(event)
@@ -1553,6 +1554,33 @@ def dispatch_before_tool_call(
                     schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
                 )
             )
+            if not tool_permissions_were_provided:
+                hook_error = (
+                    "intercept hook requires explicit current tool permissions; "
+                    "pass tool_permissions=... or use observe-only hooks for "
+                    "permissionless dispatch"
+                )
+                provenance["missing_tool_permissions"] = "omitted"
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=None,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={"status": "blocked", "message": hook_error},
+                        provenance=provenance,
+                        schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                return ToolCallDecision(
+                    allowed=False,
+                    status="blocked",
+                    message=hook_error,
+                    events=tuple(emitted),
+                )
             unauthorized_permissions = _unauthorized_intercept_tool_permissions(
                 manifest, current_tool_permissions
             )
