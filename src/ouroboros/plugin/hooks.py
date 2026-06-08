@@ -76,9 +76,11 @@ class HookKind(StrEnum):
     #: Tool-call observation / intercept hook promoted out of
     #: :class:`DeferredHookKind` by #939 PR F-1. Manifests at
     #: ``schema_version >= "0.4"`` may declare it. Payload, permission
-    #: scopes, failure policy, audit event names, and runtime dispatch
-    #: are locked in ``docs/rfc/plugin-tool-call-hook-contract.md`` and
-    #: implemented by ``ouroboros.plugin.firewall``.
+    #: scopes, failure policy, audit event names, and helper dispatch
+    #: semantics are locked in ``docs/rfc/plugin-tool-call-hook-contract.md``.
+    #: ``ouroboros.plugin.firewall`` exposes dispatcher helpers for
+    #: tool-mediation callers, but the production ``invoke_plugin`` path does
+    #: not call those helpers end-to-end yet.
     BEFORE_TOOL_CALL = "before_tool_call"
 
     #: Tool-call after-call observation hook promoted out of
@@ -217,7 +219,9 @@ HOOK_LIFECYCLE_SCOPES: Final[frozenset[str]] = frozenset(
 #: Frozen subset of :class:`HookKind` that observes plugin-mediated
 #: tool calls. Promoted out of :class:`DeferredHookKind` by #939 PR F-1.
 #: Manifests at ``schema_version >= "0.4"`` may declare these names, and
-#: runtime dispatch is owned by ``ouroboros.plugin.firewall``.
+#: helper dispatch is exposed by ``ouroboros.plugin.firewall``. Production
+#: tool-mediation paths must call those helpers explicitly before these hooks
+#: fire end-to-end.
 TOOL_CALL_HOOK_KINDS: Final[frozenset[HookKind]] = frozenset(
     {HookKind.BEFORE_TOOL_CALL, HookKind.AFTER_TOOL_CALL}
 )
@@ -230,14 +234,15 @@ TOOL_CALL_HOOK_NAMES: Final[frozenset[str]] = frozenset(hook.value for hook in T
 #: explicitly veto via the dispatch return value). Holders of this
 #: scope MUST also hold the tool-specific permission declared in the
 #: manifest's ``commands[].permissions`` / ``tools.allowed`` surface;
-#: that enforcement remains the firewall's responsibility and is
-#: tracked under PR F-2.
+#: that enforcement remains the helper dispatcher's responsibility. The
+#: current production ``invoke_plugin`` path is not yet wired through that
+#: tool-call boundary.
 HOOK_TOOL_INTERCEPT_SCOPE: Final[str] = "plugin:tool:intercept"
 
 #: Hook permission scope reserved for observation-only tool-call
 #: hooks. Holders may never veto a tool call; the v0.4 schema constrains
-#: them to ``failure_policy='fail_open'`` and PR F-2's dispatcher will
-#: reject any blocked return value coming from an observe-only hook.
+#: them to ``failure_policy='fail_open'`` and the dispatcher helper treats
+#: observe-only hooks as non-blocking.
 HOOK_TOOL_OBSERVE_SCOPE: Final[str] = "plugin:tool:observe"
 
 #: Frozen set of v0.4 tool-call permission scopes. Validators reference
@@ -250,8 +255,10 @@ HOOK_TOOL_CALL_SCOPES: Final[frozenset[str]] = frozenset(
 #: Reserved audit event names for the tool-call hook family.
 #: Locked in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6 and
 #: vendored in the v0.4 JSON Schema's ``audit.events`` enum.
-#: **PR F-1 does not emit any of these events**; emission is owned by
-#: PR F-2's firewall dispatcher.
+#: The standalone firewall dispatcher helpers emit these events when a
+#: tool-mediation caller invokes them. They are not emitted by the production
+#: ``invoke_plugin`` command path until that path is wired through the
+#: tool-call dispatch boundary.
 HOOK_TOOL_INTERCEPT_REQUESTED_EVENT: Final[str] = "plugin.tool.intercept.requested"
 HOOK_TOOL_INTERCEPT_COMPLETED_EVENT: Final[str] = "plugin.tool.intercept.completed"
 HOOK_TOOL_INTERCEPT_BLOCKED_EVENT: Final[str] = "plugin.tool.intercept.blocked"
@@ -330,11 +337,11 @@ def is_hook_lifecycle_scope(value: str) -> bool:
 def is_tool_call_hook_kind(value: str) -> bool:
     """Return True iff ``value`` names a v0.4 tool-call hook.
 
-    Use this in manifest validators and runtime dispatchers so the
+    Use this in manifest validators and dispatcher helpers so the
     boundary between lifecycle and tool-call hooks stays explicit. The
-    v0.4 schema accepts these names but PR F-1 does not yet wire them
-    into the firewall's dispatch path; PR F-2 will use this helper to
-    select tool-call hooks at the tool-call boundary.
+    v0.4 schema accepts these names and the firewall exposes helper
+    dispatchers, but production command invocation remains inert unless
+    a tool-mediation caller explicitly invokes those helpers.
     """
     return value in TOOL_CALL_HOOK_NAMES
 

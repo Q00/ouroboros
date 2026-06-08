@@ -71,9 +71,10 @@ except ImportError as exc:  # pragma: no cover
 # v1 ``HookKind`` vocabulary at the JSON Schema layer; v0.4 promotes the
 # tool-call hook family (``before_tool_call`` / ``after_tool_call``) into
 # the same JSON Schema enum and reserves the matching ``plugin.tool.*``
-# audit event names. Runtime dispatch of tool-call hooks is still
-# deferred to #939 PR F-2; v0.4 manifests may declare them but the
-# firewall will not invoke them until that follow-up ships.
+# audit event names. Standalone dispatcher helpers exist in the firewall, but
+# production command invocation is still not wired through the tool-call
+# boundary; v0.4 manifests may declare these hooks, yet they remain inert until
+# a tool-mediation caller invokes the helpers.
 SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3", "0.4")
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
@@ -210,7 +211,9 @@ class AuditSpec:
             # v0.4 keeps the v0.3 hook event family and additively
             # reserves the four ``plugin.tool.*`` event names locked
             # in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6.
-            # PR F-1 only reserves the names; PR F-2 owns emission.
+            # Firewall dispatcher helpers emit these events only when
+            # an explicit tool-mediation caller invokes them; production
+            # ``invoke_plugin`` command dispatch does not emit them yet.
             return AuditSpec(
                 events=(
                     *AuditSpec.standard_four_events().events,
@@ -772,8 +775,8 @@ def _validate_tool_call_hook_permission(
     ``plugin:tool:intercept`` in ``hooks[].permissions``); this loader
     check is the orthogonal half that JSON Schema cannot express:
     whichever tool-call scope the hook declares, the same scope must be
-    a top-level *required* permission. Without this, PR F-2's firewall
-    dispatcher — which only inspects required top-level permissions —
+    a top-level *required* permission. Without this, the firewall
+    helper dispatcher — which only inspects required top-level permissions —
     would invoke a tool-call hook whose authority was granted at
     install-time as merely optional, bypassing the trust grant
     boundary.
@@ -982,10 +985,9 @@ def _validate_hook_audit_events(
         required_events.update(HOOK_EVENT_TYPES)
     # v0.4 additionally reserves the four plugin.tool.* audit event names
     # whenever a tool-call hook is declared, mirroring
-    # AuditSpec.standard_events_for_schema("0.4"). PR F-1 only reserves
-    # the names; PR F-2 owns emission. Requiring them in an explicit
-    # audit.events block keeps the narrowed runtime contract honest once
-    # dispatch lands, exactly as the v0.3 lifecycle invariant does.
+    # AuditSpec.standard_events_for_schema("0.4"). Requiring them in an
+    # explicit audit.events block keeps the helper-dispatch contract honest
+    # without implying production ``invoke_plugin`` dispatch is wired.
     if schema_version == "0.4" and any(is_tool_call_hook_kind(hook.name) for hook in hooks):
         required_events.update(HOOK_TOOL_CALL_AUDIT_EVENTS)
     missing_events = required_events.difference(audit.events)

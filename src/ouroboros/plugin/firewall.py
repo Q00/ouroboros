@@ -1279,21 +1279,24 @@ def invoke_plugin(
 
 
 # ---------------------------------------------------------------------------
-# #939 PR F-2 — tool-call hook dispatch
+# #939 PR F-2 — tool-call hook dispatcher helpers
 #
 # F-1 (#1277) reserved the ``before_tool_call`` / ``after_tool_call`` hook
 # kinds, the ``plugin:tool:intercept`` / ``plugin:tool:observe`` scopes, and
-# the four ``plugin.tool.*`` audit event names, but left runtime dispatch a
-# no-op. This section wires the dispatcher specified by
+# the four ``plugin.tool.*`` audit event names, but left end-to-end tool-call
+# hook firing inert. This section provides the dispatcher specified by
 # ``docs/rfc/plugin-tool-call-hook-contract.md`` (§3 payload, §4 scopes,
 # §5 failure policy, §6 audit events).
 #
 # Unlike ``invoke_plugin`` (which wraps a single plugin command subprocess),
 # tool-call hooks fire *during* a plugin-mediated tool invocation, so the
-# dispatcher is a module-level entry point a tool-mediation caller invokes
-# per tool call. It correlates back to the parent ``plugin.invoked`` run via
-# ``correlation_id`` and pairs ``before``/``after`` callbacks via
-# ``invocation_id``.
+# dispatcher is a module-level helper a tool-mediation caller must invoke per
+# tool call. ``invoke_plugin`` does not call these helpers yet, so v0.4
+# manifests can declare the hooks and tests can exercise the helper contract,
+# but production command dispatch remains inert until the real mediation path
+# is wired through this boundary. The helpers correlate back to the parent
+# ``plugin.invoked`` run via ``correlation_id`` and pair ``before``/``after``
+# callbacks via ``invocation_id``.
 # ---------------------------------------------------------------------------
 
 TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION = "0.4"
@@ -1529,7 +1532,11 @@ def dispatch_before_tool_call(
             "hook_name": hook.name,
             "tool": tool,
             "args_digest": args_digest,
+            "args_preview": payload["args_preview"],
             "failure_policy": hook.failure_policy,
+            "permissions": json.dumps(
+                payload["permissions"], sort_keys=True, separators=(",", ":")
+            ),
             "scope": "intercept" if intercept else "observe",
         }
         if intercept:

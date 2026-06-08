@@ -6,10 +6,11 @@
 [#1137](https://github.com/Q00/ouroboros/pull/1137) (PR E — `on_error` /
 `on_cancel` observability hooks). This RFC is **pure documentation**: it
 defines the dispatch contract for the deferred `before_tool_call` and
-`after_tool_call` plugin hooks so that the implementation slice can be
-reviewed against a frozen contract. **No runtime code, schema files, or
-permission scopes are introduced by this PR.** Implementation lands in a
-future Wave 3+ slice referred to here as **PR F**.
+`after_tool_call` plugin hooks so that implementation slices can be
+reviewed against a frozen contract. The original RFC PR introduced no
+runtime code, schema files, or permission scopes. Later slices may
+implement this contract incrementally; a standalone dispatcher helper is
+not the same as end-to-end production tool-mediation wiring.
 
 This contract is the PR C deliverable from the
 [#939 scope-decision comment](https://github.com/Q00/ouroboros/issues/939#issuecomment-4477726327)
@@ -100,19 +101,19 @@ event.
 The schema constraint pattern is the same `if` / `then` shape already
 present in v0.3 for `on_error` and `on_cancel` (see
 `src/ouroboros/plugin/schemas/0.3/plugin.schema.json` §
-`allOf.failure_policy`); PR F simply extends it to the two new hook
-names without rewriting the constraint family.
+`allOf.failure_policy`); later implementation slices extend it to the two new
+hook names without rewriting the constraint family.
 
 ## 6. Audit event names
 
 Audit events mirror the existing `plugin.invoked` / `plugin.hook.failed`
 naming style used by `src/ouroboros/plugin/firewall.py`. They are
-**reserved names** in this RFC and MUST be emitted (and only emitted)
-by PR F's dispatcher.
+**reserved names** in this RFC and MUST be emitted (and only emitted) by a
+tool-call dispatcher when that dispatcher is invoked by a tool-mediation path.
 
 | Event name                              | When                                                                              | Notes                                                                                              |
 |-----------------------------------------|-----------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| `plugin.tool.intercept.requested`       | The firewall has selected an `intercept` hook for a tool call, immediately before invoking the hook process. | Carries `before_tool_call` payload fields.                                                          |
+| `plugin.tool.intercept.requested`       | The firewall has selected an `intercept` hook for a tool call, immediately before invoking the hook process. | Carries the bounded `before_tool_call` payload fields in audit provenance.                           |
 | `plugin.tool.intercept.completed`       | The `intercept` hook returned a non-blocking decision and the tool call proceeded.| Final decision recorded with the original `args_digest`.                                            |
 | `plugin.tool.intercept.blocked`         | The `intercept` hook explicitly vetoed the tool call (or its failure policy was `fail_closed` and it errored). | The tool call MUST NOT be dispatched; the parent plugin sees a `tool blocked` failure mode.        |
 | `plugin.tool.observe.recorded`          | An `observe`-class `after_tool_call` hook recorded a successful observation event.| Never blocks; emitted at most once per tool invocation per `observe` hook.                          |

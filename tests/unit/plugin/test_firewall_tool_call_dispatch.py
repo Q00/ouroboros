@@ -1,11 +1,12 @@
-"""Tests for #939 PR F-2 tool-call hook dispatch in the plugin firewall.
+"""Tests for #939 PR F-2 tool-call dispatcher helpers in the plugin firewall.
 
 F-1 (#1277) reserved the ``before_tool_call`` / ``after_tool_call`` hook
 kinds, the ``plugin:tool:intercept`` / ``plugin:tool:observe`` scopes, and
-the four ``plugin.tool.*`` audit event names but left runtime dispatch a
-no-op. These tests pin the dispatcher behavior specified by
-``docs/rfc/plugin-tool-call-hook-contract.md`` (§3 payload, §5 failure
-policy, §6 audit events).
+the four ``plugin.tool.*`` audit event names but left runtime dispatch inert.
+These tests pin the standalone dispatcher-helper behavior specified by
+``docs/rfc/plugin-tool-call-hook-contract.md`` (§3 payload, §5 failure policy,
+§6 audit events). Production command invocation does not call these helpers
+until a tool-mediation path is wired through them.
 """
 
 from __future__ import annotations
@@ -121,6 +122,36 @@ class TestBeforeToolCallIntercept:
             HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
         ]
         assert decision.events == tuple(events)
+
+    def test_intercept_requested_event_carries_bounded_before_payload(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = _manifest_with_hooks(
+            tmp_path, [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
+        )
+        events: list[dict] = []
+        kw = dict(_BEFORE_KW)
+        raw_token = "ghp_thisIsClearlyASecretValue123456789"
+        kw["args_preview"] = json.dumps({"token": raw_token, "title": "hi"})
+
+        dispatch_before_tool_call(
+            manifest=manifest,
+            event_sink=events.append,
+            subprocess_runner=_runner(0),
+            tool_permissions=["github:write"],
+            **kw,
+        )
+
+        requested = events[0]
+        provenance = requested["provenance"]
+        assert requested["event_type"] == HOOK_TOOL_INTERCEPT_REQUESTED_EVENT
+        assert provenance["tool"] == "github.create_pr"
+        assert provenance["args_digest"] == "sha256:abc123"
+        assert provenance["correlation_id"] == "corr-1"
+        assert provenance["invocation_id"] == "inv-1"
+        assert json.loads(provenance["permissions"]) == ["github:write"]
+        assert raw_token not in provenance["args_preview"]
+        assert "[redacted]" in provenance["args_preview"]
 
     def test_fail_closed_intercept_nonzero_blocks_the_call(self, tmp_path: Path) -> None:
         manifest = _manifest_with_hooks(
