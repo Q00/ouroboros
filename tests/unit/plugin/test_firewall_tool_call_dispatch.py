@@ -58,6 +58,10 @@ def _timeout_runner(argv, **kwargs):
     raise subprocess.TimeoutExpired(cmd=argv, timeout=5)
 
 
+def _runner_must_not_execute(argv, **kwargs):
+    raise AssertionError("unauthorized intercept hook subprocess was invoked")
+
+
 def _manifest_with_hooks(tmp_path: Path, hooks: list[dict]):
     payload = _v04_manifest()
     payload["hooks"] = hooks
@@ -172,6 +176,45 @@ class TestBeforeToolCallIntercept:
         assert "timed out" in decision.message
         assert _types(events)[-1] == HOOK_TOOL_INTERCEPT_BLOCKED_EVENT
 
+    def test_unauthorized_intercept_blocks_before_subprocess_execution(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _v04_manifest()
+        payload["permissions"].append(
+            {
+                "scope": "github:write",
+                "risk": "write",
+                "required": False,
+                "reason": "Optional write access not granted by the trust gate.",
+            }
+        )
+        payload["hooks"] = [
+            _tool_call_hook(name="before_tool_call", failure_policy="fail_closed")
+        ]
+        target = tmp_path / "ouroboros.plugin.json"
+        target.write_text(json.dumps(payload))
+        manifest = load_manifest(target)
+        events: list[dict] = []
+
+        decision = dispatch_before_tool_call(
+            manifest=manifest,
+            event_sink=events.append,
+            subprocess_runner=_runner_must_not_execute,
+            tool_permissions=["github:write"],
+            **_BEFORE_KW,
+        )
+
+        assert decision.allowed is False
+        assert decision.status == "blocked"
+        assert "github:write" in decision.message
+        assert _types(events) == [
+            HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+            HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+        ]
+        blocked = events[-1]
+        assert blocked["result"]["status"] == "blocked"
+        assert blocked["provenance"]["missing_tool_permissions"] == '["github:write"]'
+
 
 # ---------------------------------------------------------------------------
 # before_tool_call — observe-only (never vetoes)
@@ -200,6 +243,44 @@ class TestBeforeToolCallObserve:
         assert decision.allowed is True
         assert _types(events) == [HOOK_TOOL_OBSERVE_RECORDED_EVENT]
         assert HOOK_TOOL_INTERCEPT_REQUESTED_EVENT not in _types(events)
+
+    def test_observe_only_still_runs_without_current_tool_authorization(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _v04_manifest()
+        payload["permissions"].append(
+            {
+                "scope": "github:write",
+                "risk": "write",
+                "required": False,
+                "reason": "Optional write access not granted by the trust gate.",
+            }
+        )
+        payload["hooks"] = [
+            _tool_call_hook(
+                name="before_tool_call",
+                failure_policy="fail_open",
+                scope=HOOK_TOOL_OBSERVE_SCOPE,
+            )
+        ]
+        target = tmp_path / "ouroboros.plugin.json"
+        target.write_text(json.dumps(payload))
+        manifest = load_manifest(target)
+        env_sink: list[dict] = []
+        events: list[dict] = []
+
+        decision = dispatch_before_tool_call(
+            manifest=manifest,
+            event_sink=events.append,
+            subprocess_runner=_runner(0, env_sink=env_sink),
+            tool_permissions=["github:write"],
+            **_BEFORE_KW,
+        )
+
+        assert decision.allowed is True
+        assert _types(events) == [HOOK_TOOL_OBSERVE_RECORDED_EVENT]
+        payload = json.loads(env_sink[0][TOOL_CALL_HOOK_PAYLOAD_ENV])
+        assert payload["permissions"] == ["github:write"]
 
 
 # ---------------------------------------------------------------------------

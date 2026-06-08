@@ -1354,6 +1354,21 @@ def _is_intercept_hook(hook: HookSpec) -> bool:
     return HOOK_TOOL_INTERCEPT_SCOPE in hook.permissions
 
 
+def _unauthorized_intercept_tool_permissions(
+    manifest: PluginManifest, tool_permissions: Iterable[str]
+) -> tuple[str, ...]:
+    """Return current tool scopes not covered by the firewall trust gate.
+
+    Tool-call intercept authority is two-part: a hook must hold
+    ``plugin:tool:intercept`` and the plugin invocation must already be
+    authorized for every permission required by the current tool call. The
+    firewall trust gate authorizes required top-level manifest permissions, so
+    an intercept subprocess cannot run for scopes outside that required set.
+    """
+    required_permissions = frozenset(_required_permissions(manifest))
+    return tuple(scope for scope in tool_permissions if scope not in required_permissions)
+
+
 def _coerce_bytes(value: object) -> bytes:
     """Normalize a runner's stdout/stderr return shape to ``bytes``."""
     if isinstance(value, bytes):
@@ -1450,14 +1465,17 @@ def dispatch_before_tool_call(
 
     Mirrors the lifecycle-hook precedent (``_run_lifecycle_hooks``): an
     ``intercept`` hook (holding ``plugin:tool:intercept``) may veto the call
-    when it returns non-zero, but only blocks the call when its failure
-    policy is ``fail_closed``; a ``fail_open`` intercept failure is recorded
-    as ``plugin.hook.failed`` and the call proceeds. ``observe``-only hooks
-    never block. Raw arguments never reach the hook — only the digest and the
-    bounded preview cross the trust boundary (RFC § 3).
+    when it returns non-zero, but only after the current tool permission set is
+    covered by required top-level permissions that passed the firewall trust
+    gate. A ``fail_closed`` intercept authorization or subprocess failure
+    blocks; a ``fail_open`` intercept failure is recorded as
+    ``plugin.hook.failed`` and the call proceeds. ``observe``-only hooks never
+    block. Raw arguments never reach the hook — only the digest and the bounded
+    preview cross the trust boundary (RFC § 3).
     """
     emitted: list[dict] = []
     runner = subprocess_runner or subprocess.run
+    current_tool_permissions = tuple(tool_permissions)
 
     def _emit(event: dict) -> None:
         emitted.append(event)
@@ -1469,7 +1487,7 @@ def dispatch_before_tool_call(
         "args_preview": _bounded_preview(args_preview),
         "correlation_id": correlation_id,
         "invocation_id": invocation_id,
-        "permissions": list(tool_permissions),
+        "permissions": list(current_tool_permissions),
     }
     payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     env = _tool_hook_runtime_env(manifest, plugin_home, payload_json)
@@ -1499,6 +1517,53 @@ def dispatch_before_tool_call(
                     schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
                 )
             )
+            unauthorized_permissions = _unauthorized_intercept_tool_permissions(
+                manifest, current_tool_permissions
+            )
+            if unauthorized_permissions:
+                hook_error = (
+                    "intercept hook is not authorized for current tool permissions: "
+                    + ", ".join(unauthorized_permissions)
+                )
+                provenance["missing_tool_permissions"] = json.dumps(
+                    list(unauthorized_permissions), sort_keys=True, separators=(",", ":")
+                )
+                if hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value:
+                    _emit(
+                        _event_envelope(
+                            event_type=HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                            manifest=manifest,
+                            namespace=namespace,
+                            command_name=command_name,
+                            argv=None,
+                            trust_state=trust_state,
+                            permissions_used=hook.permissions,
+                            result={"status": "blocked", "message": hook_error},
+                            provenance=provenance,
+                            schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                        )
+                    )
+                    return ToolCallDecision(
+                        allowed=False,
+                        status="blocked",
+                        message=hook_error,
+                        events=tuple(emitted),
+                    )
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_FAILED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=None,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={"status": "failed", "message": hook_error},
+                        provenance=provenance,
+                        schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                continue
         hook_error, run_provenance = _run_tool_call_hook(
             hook, plugin_home=plugin_home, runner=runner, env=env
         )

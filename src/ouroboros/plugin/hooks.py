@@ -76,19 +76,16 @@ class HookKind(StrEnum):
     #: Tool-call observation / intercept hook promoted out of
     #: :class:`DeferredHookKind` by #939 PR F-1. Manifests at
     #: ``schema_version >= "0.4"`` may declare it. Payload, permission
-    #: scopes, failure policy, and audit event names are locked in
-    #: ``docs/rfc/plugin-tool-call-hook-contract.md``. **Runtime
-    #: dispatch is not enabled by PR F-1**: declaring this hook in a
-    #: v0.4 manifest is currently a no-op at runtime, and the firewall
-    #: will not invoke it until PR F-2 ships the dispatch wiring.
+    #: scopes, failure policy, audit event names, and runtime dispatch
+    #: are locked in ``docs/rfc/plugin-tool-call-hook-contract.md`` and
+    #: implemented by ``ouroboros.plugin.firewall``.
     BEFORE_TOOL_CALL = "before_tool_call"
 
     #: Tool-call after-call observation hook promoted out of
-    #: :class:`DeferredHookKind` by #939 PR F-1. See
-    #: :data:`BEFORE_TOOL_CALL` for the dispatch caveat. The schema
-    #: pins this hook to ``failure_policy='fail_open'`` because the
-    #: after-call payload describes a tool result that has already
-    #: been observed by the caller.
+    #: :class:`DeferredHookKind` by #939 PR F-1. The schema pins this
+    #: hook to ``failure_policy='fail_open'`` because the after-call
+    #: payload describes a tool result that has already been observed
+    #: by the caller.
     AFTER_TOOL_CALL = "after_tool_call"
 
 
@@ -219,10 +216,8 @@ HOOK_LIFECYCLE_SCOPES: Final[frozenset[str]] = frozenset(
 
 #: Frozen subset of :class:`HookKind` that observes plugin-mediated
 #: tool calls. Promoted out of :class:`DeferredHookKind` by #939 PR F-1.
-#: Manifests at ``schema_version >= "0.4"`` may declare these names.
-#: Runtime dispatch wiring is deferred to PR F-2; until that ships,
-#: declaring a tool-call hook is accepted by the schema and the
-#: manifest validator but never invoked by the firewall.
+#: Manifests at ``schema_version >= "0.4"`` may declare these names, and
+#: runtime dispatch is owned by ``ouroboros.plugin.firewall``.
 TOOL_CALL_HOOK_KINDS: Final[frozenset[HookKind]] = frozenset(
     {HookKind.BEFORE_TOOL_CALL, HookKind.AFTER_TOOL_CALL}
 )
