@@ -1823,6 +1823,16 @@ def _interview_code_investigation_answer_contract() -> dict[str, Any]:
                 },
                 "then": {"required": ["user_confirmation_prompt"]},
             },
+            {
+                "if": {
+                    "properties": {"answer_prefix": {"const": "[from-code]"}},
+                    "required": ["answer_prefix"],
+                },
+                "then": {
+                    "properties": {"requires_user_confirmation": {"const": True}},
+                    "required": ["user_confirmation_prompt"],
+                },
+            },
         ],
     }
     return {

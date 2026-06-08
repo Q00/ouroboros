@@ -284,6 +284,132 @@ async def test_code_investigation_results_are_collected_before_synthesis(
     assert synthesis_calls == [[{"result_id": "code_facts", "output": code_fact_output}]]
 
 
+def test_code_investigation_synthesis_fails_closed_for_stale_from_code_output() -> None:
+    """A stale inferred [from-code] answer cannot become forwardable by flag drift."""
+    question_identity = stable_code_investigation_question_identity("Which framework is used?")
+    request = {
+        "session_id": "sess-123",
+        "question_identity": question_identity,
+        "answer_contract": interview_code_investigation_answer_contract(),
+    }
+    stale_output = {
+        "session_id": "sess-123",
+        "question_identity": question_identity,
+        "answer_prefix": "[from-code]",
+        "answer_text": "The project appears to use FastAPI.",
+        "confidence": "medium_inferred",
+        "evidence": [
+            {
+                "source": "src/app.py",
+                "locator": "imports",
+                "claim": "The inspected imports resemble a FastAPI application.",
+            }
+        ],
+        "requires_user_confirmation": False,
+    }
+    synthesis_calls: list[list[dict[str, Any]]] = []
+
+    result = synthesize_code_investigation_when_complete(
+        request,
+        {"code_facts": stale_output},
+        lambda outputs: synthesis_calls.append(outputs) or {"answer": "unsafe"},
+    )
+
+    assert result["ready_for_synthesis"] is True
+    assert result["ready_for_forward"] is False
+    assert result["requires_user_confirmation"] is True
+    assert result["confirmation_required_result_ids"] == ["code_facts"]
+    assert result["synthesis"] is None
+    assert result["contract_violations"][0]["result_id"] == "code_facts"
+    assert any(
+        "True was expected" in error for error in result["contract_violations"][0]["errors"]
+    )
+    assert result["user_confirmation_prompts"] == [
+        "Confirm before forwarding this code-derived answer: "
+        "The project appears to use FastAPI."
+    ]
+    assert synthesis_calls == []
+
+
+def test_code_investigation_synthesis_requires_confirmation_for_from_code_prefix() -> None:
+    question_identity = stable_code_investigation_question_identity("Is there a router?")
+    request = {
+        "session_id": "sess-123",
+        "question_identity": question_identity,
+        "answer_contract": interview_code_investigation_answer_contract(),
+    }
+    output = {
+        "session_id": "sess-123",
+        "question_identity": question_identity,
+        "answer_prefix": "[from-code]",
+        "answer_text": "No router was found in the inspected files.",
+        "confidence": "medium_inferred",
+        "evidence": [
+            {
+                "source": "rg --files",
+                "locator": "workspace root",
+                "claim": "No router file was found during repository inspection.",
+            }
+        ],
+        "requires_user_confirmation": True,
+        "user_confirmation_prompt": "Confirm whether this repository has no router.",
+    }
+
+    result = synthesize_code_investigation_when_complete(
+        request,
+        {"code_facts": output},
+        lambda outputs: {"answer": outputs[0]["output"]["answer_text"]},
+    )
+
+    assert result["ready_for_synthesis"] is True
+    assert result["ready_for_forward"] is False
+    assert result["requires_user_confirmation"] is True
+    assert result["confirmation_required_result_ids"] == ["code_facts"]
+    assert result["user_confirmation_prompts"] == [
+        "Confirm whether this repository has no router."
+    ]
+    assert result["contract_violations"] == []
+    assert result["synthesis"] == {"answer": "No router was found in the inspected files."}
+
+
+def test_code_investigation_synthesis_forwards_auto_confirmed_output() -> None:
+    question_identity = stable_code_investigation_question_identity("Which manifest exists?")
+    request = {
+        "session_id": "sess-123",
+        "question_identity": question_identity,
+        "answer_contract": interview_code_investigation_answer_contract(),
+    }
+    output = {
+        "session_id": "sess-123",
+        "question_identity": question_identity,
+        "answer_prefix": "[from-code][auto-confirmed]",
+        "answer_text": "pyproject.toml declares the package metadata.",
+        "confidence": "high_exact_match",
+        "evidence": [
+            {
+                "source": "pyproject.toml",
+                "locator": "project.name",
+                "claim": "The package name is declared in pyproject.toml.",
+            }
+        ],
+        "requires_user_confirmation": False,
+    }
+
+    result = synthesize_code_investigation_when_complete(
+        request,
+        {"code_facts": output},
+        lambda outputs: {"answer": outputs[0]["output"]["answer_text"]},
+    )
+
+    assert result["ready_for_synthesis"] is True
+    assert result["ready_for_forward"] is True
+    assert result["requires_user_confirmation"] is False
+    assert result["confirmation_required_result_ids"] == []
+    assert result["user_confirmation_prompts"] == []
+    assert result["contract_violations"] == []
+    assert result["synthesis"] == {"answer": "pyproject.toml declares the package metadata."}
+
+
 @pytest.mark.asyncio
 async def test_interview_answer_records_only_after_code_investigation_synthesis(
     tmp_path: Path,
