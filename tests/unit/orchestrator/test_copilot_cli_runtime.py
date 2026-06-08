@@ -16,6 +16,7 @@ from dataclasses import replace
 
 import pytest
 
+from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.copilot_cli_runtime import (
     _MAX_OUROBOROS_DEPTH,
     CopilotCliRuntime,
@@ -25,6 +26,16 @@ from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
 
 def _make_runtime(model: str | None = None, cwd: str = "/work") -> CopilotCliRuntime:
     return CopilotCliRuntime(cli_path="/usr/bin/copilot", model=model, cwd=cwd)
+
+
+def test_capabilities_keep_native_tool_restrictions() -> None:
+    capabilities = _make_runtime().capabilities
+
+    assert capabilities.system_prompt_support is ParamSupport.TRANSLATED
+    assert capabilities.tool_restriction_support is ParamSupport.NATIVE
+    assert capabilities.permission_mode_support is ParamSupport.NATIVE
+    assert capabilities.targeted_resume is False
+    assert capabilities.structured_output is False
 
 
 # ---------------------------------------------------------------------------

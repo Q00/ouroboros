@@ -37,7 +37,12 @@ from ouroboros.copilot_permissions import (
     build_copilot_exec_permission_args,
     resolve_copilot_permission_mode,
 )
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
@@ -86,6 +91,18 @@ class CopilotCliRuntime(CodexCliRuntime):
     _skills_package_uri = "packaged://ouroboros.copilot/skills"
     _process_shutdown_timeout_seconds = 5.0
     _max_resume_retries = 0  # Copilot CLI does not support session resumption
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        """Report Copilot CLI semantics without inheriting Codex degradations."""
+        return RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=False,
+            structured_output=False,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.NATIVE,
+            permission_mode_support=ParamSupport.NATIVE,
+        )
 
     def __init__(
         self,

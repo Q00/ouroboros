@@ -86,7 +86,7 @@ def test_absent_parameter_is_never_degraded() -> None:
     assert result == ()
 
 
-def test_empty_collections_count_as_absent() -> None:
+def test_empty_strings_count_as_absent_but_empty_tools_is_requested() -> None:
     result = negotiate_execution_params(
         _caps(
             system_prompt_support=ParamSupport.IGNORED,
@@ -97,7 +97,9 @@ def test_empty_collections_count_as_absent() -> None:
         permission_mode="",
     )
 
-    assert result == ()
+    assert len(result) == 1
+    assert result[0].parameter == "tools"
+    assert result[0].support is ParamSupport.IGNORED
 
 
 def test_multiple_non_native_params_are_all_reported() -> None:

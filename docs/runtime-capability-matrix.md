@@ -71,14 +71,16 @@ allow-list, and `permission_mode`. Each is one of:
   but not in the form supplied).
 - **`ignored`** — silently dropped.
 
-| Parameter       | Claude Code | Codex / Gemini / Goose / Copilot | OpenCode | Hermes | Pi | Kiro |
-| --------------- | :---------: | :------------------------------: | :------: | :----: | :-: | :--: |
-| `system_prompt` | native | translated | translated | translated | translated | translated |
-| `permission_mode` | native | native | ignored | ignored | ignored | translated |
-| `tools` (allow-list) | native | native | native | native | native | native |
+| Parameter       | Claude Code | Codex | Gemini / Goose / Copilot | OpenCode | Hermes | Pi | Kiro |
+| --------------- | :---------: | :---: | :----------------------: | :------: | :----: | :-: | :--: |
+| `system_prompt` | native | translated | translated | translated | translated | translated | translated |
+| `permission_mode` | native | native | native | ignored | ignored | ignored | translated |
+| `tools` (allow-list) | native | translated | native | translated | translated | translated | native |
 
 > Most CLI runtimes compose the system prompt **into the user message** (e.g.
-> `## System Instructions\n...`) rather than passing a native system directive. Kiro
+> `## System Instructions\n...`) rather than passing a native system directive. Codex,
+> OpenCode, Hermes, and Pi also render requested tool allow-lists only as prompt
+> guidance, so `tools` is translated rather than a native runtime allow-list. Kiro
 > additionally maps `permission_mode` onto coarse `--trust-*` flags, which is honored work but
 > not in the form supplied. OpenCode, Hermes, and Pi keep the requested mode in runtime metadata
 > but do not pass it to their CLI commands.

@@ -10019,6 +10019,49 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatches() -> None:
+    class _CapturingRuntime:
+        runtime_backend = "codex_cli"
+
+        def __init__(self) -> None:
+            self.dispatched_tools: list[str] | None = None
+
+        async def execute_task(
+            self,
+            prompt: str,
+            tools: list[str] | None = None,
+            system_prompt: str | None = None,
+            resume_handle: RuntimeHandle | None = None,
+            resume_session_id: str | None = None,
+        ):
+            del prompt, system_prompt, resume_handle, resume_session_id
+            self.dispatched_tools = tools
+            yield AgentMessage(type="assistant", content='["Sub-AC 1: inspect", "Sub-AC 2: test"]')
+
+    runtime = _CapturingRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+    executor._announce_param_degradations = MagicMock()
+
+    result = await executor._try_decompose_ac(
+        ac_content="Investigate and test sub-AC behavior.",
+        ac_index=0,
+        seed_goal="Verify decomposition tool handling",
+        tools=["Read"],
+        system_prompt="system",
+    )
+
+    assert result == ["Sub-AC 1: inspect", "Sub-AC 2: test"]
+    assert runtime.dispatched_tools == []
+    executor._announce_param_degradations.assert_called_once()
+    assert executor._announce_param_degradations.call_args.kwargs["tools"] == []
+
+
 class _ParamCapsStubAdapter:
     """Minimal adapter exposing the attributes the param-degradation hook reads."""
 
@@ -10078,3 +10121,20 @@ class TestParamDegradationNotice:
         executor._announce_param_degradations(system_prompt=None, tools=None)
 
         executor._console.print.assert_not_called()
+
+    def test_empty_tools_allowlist_surfaces_one_notice(self) -> None:
+        caps = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+        )
+        executor = _make_param_executor(caps)
+
+        executor._announce_param_degradations(system_prompt=None, tools=[])
+        executor._announce_param_degradations(system_prompt=None, tools=[])
+
+        assert executor._console.print.call_count == 1
+        notice = executor._console.print.call_args.args[0]
+        assert "tools" in notice
+        assert "translated" in notice

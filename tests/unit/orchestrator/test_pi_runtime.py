@@ -88,6 +88,7 @@ def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None
     assert requested_runtime.permission_mode == "acceptEdits"
     assert requested_runtime.permission_mode_requested is True
     assert requested_runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+    assert requested_runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
     assert requested_runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
 
 

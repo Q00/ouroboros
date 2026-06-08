@@ -135,6 +135,7 @@ class TestHermesCliRuntime:
         assert runtime.permission_mode == "acceptEdits"
         assert runtime.permission_mode_requested is True
         assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+        assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
 
     def test_constructor_accepts_llm_backend(self) -> None:

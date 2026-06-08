@@ -4633,7 +4633,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         self._announce_param_degradations(
             system_prompt=decomposition_system_prompt,
-            tools=None,
+            tools=[],
         )
         try:
             response_text = ""

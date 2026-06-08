@@ -153,6 +153,7 @@ class TestOpenCodeRuntimeProperties:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
 
         assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+        assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
 
 

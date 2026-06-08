@@ -225,12 +225,14 @@ class HermesCliRuntime(AgentRuntime):
 
     @property
     def capabilities(self) -> RuntimeCapabilities:
-        # Hermes composes the system prompt into the user message rather than
-        # passing a native system directive, and hermes chat has no
-        # permission-mode flag. Surface both truthfully for degradation notices.
+        # Hermes composes the system prompt and tool guidance into the user
+        # message rather than passing native runtime parameters, and hermes chat
+        # has no permission-mode flag. Surface both truthfully for degradation
+        # notices.
         return replace(
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.IGNORED,
         )
 

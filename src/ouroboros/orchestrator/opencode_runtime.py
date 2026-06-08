@@ -197,12 +197,13 @@ class OpenCodeRuntime:
 
     @property
     def capabilities(self) -> RuntimeCapabilities:
-        # OpenCode composes the system prompt into the user message rather than
-        # passing a native system directive; surface that as TRANSLATED while
-        # preserving the default feature flags.
+        # OpenCode composes the system prompt and tool guidance into the user
+        # message rather than passing native runtime parameters; surface those
+        # as TRANSLATED while preserving the default feature flags.
         return replace(
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.IGNORED,
         )
 

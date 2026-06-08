@@ -67,14 +67,14 @@ def negotiate_execution_params(
 ) -> tuple[ParamDegradation, ...]:
     """Report execution parameters the runtime will not honor natively.
 
-    Only parameters that were actually *requested* (non-empty) are considered —
-    an absent parameter cannot be degraded. The result is purely informational;
-    nothing here changes what the runtime receives.
+    Only parameters that were actually *requested* are considered — an absent
+    parameter cannot be degraded. For ``tools``, an explicit empty list is a
+    requested no-tools allow-list, so ``[]`` is distinct from ``None``.
     """
     requested: list[tuple[str, ParamSupport]] = []
     if system_prompt:
         requested.append(("system_prompt", capabilities.system_prompt_support))
-    if tools:
+    if tools is not None:
         requested.append(("tools", capabilities.tool_restriction_support))
     if permission_mode:
         requested.append(("permission_mode", capabilities.permission_mode_support))

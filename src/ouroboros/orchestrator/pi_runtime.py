@@ -140,9 +140,11 @@ class PiRuntime:
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
-            # System prompt is composed into the user message, not passed as a
-            # native system directive. Pi also has no permission-mode flag.
+            # System prompt and tool guidance are composed into the user
+            # message, not passed as native runtime parameters. Pi also has no
+            # permission-mode flag.
             system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.IGNORED,
         )
 
