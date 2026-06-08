@@ -44,6 +44,14 @@ execution contract. It replaces ad-hoc prompting with a structured
 specification-first workflow: interview, crystallize, execute, evaluate,
 evolve.
 
+<p align="center">
+  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=ouroboros">
+    <img src="assets/atlas-cloud-logo.png" alt="Atlas Cloud" width="200">
+  </a>
+</p>
+
+> 🎁 **[Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=ouroboros)** is a full-modal, OpenAI-compatible AI inference platform (DeepSeek, Qwen, GLM, Kimi, MiniMax, …). Use it with Ouroboros's LiteLLM backend: set `OPENAI_API_KEY=<key>` + `OPENAI_BASE_URL=https://api.atlascloud.ai/v1`.
+
 ---
 
 ## The Ouroboros Agent OS Stack
@@ -160,7 +168,7 @@ Then run `ooo setup` inside a Claude Code session.
 ```bash
 pip install ouroboros-ai                # base
 pip install ouroboros-ai[claude]        # + Claude Code deps
-pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
+pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider (incl. Atlas Cloud via OPENAI_BASE_URL)
 pip install ouroboros-ai[mcp]           # + MCP server/client support
 pip install ouroboros-ai[tui]           # + Textual terminal UI
 pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui)
