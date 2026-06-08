@@ -123,9 +123,7 @@ class TestBeforeToolCallIntercept:
         ]
         assert decision.events == tuple(events)
 
-    def test_intercept_requested_event_carries_bounded_before_payload(
-        self, tmp_path: Path
-    ) -> None:
+    def test_intercept_requested_event_carries_bounded_before_payload(self, tmp_path: Path) -> None:
         manifest = _manifest_with_hooks(
             tmp_path, [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
         )
