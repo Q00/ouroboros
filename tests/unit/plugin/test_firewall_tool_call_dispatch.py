@@ -188,9 +188,7 @@ class TestBeforeToolCallIntercept:
                 "reason": "Optional write access not granted by the trust gate.",
             }
         )
-        payload["hooks"] = [
-            _tool_call_hook(name="before_tool_call", failure_policy="fail_closed")
-        ]
+        payload["hooks"] = [_tool_call_hook(name="before_tool_call", failure_policy="fail_closed")]
         target = tmp_path / "ouroboros.plugin.json"
         target.write_text(json.dumps(payload))
         manifest = load_manifest(target)
