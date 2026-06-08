@@ -459,11 +459,11 @@ if [ "$HAS_UV" = true ]; then
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "mcp==1.26.0"
-        --with "claude-agent-sdk==0.1.50"
+        --with "mcp==1.27.2"
+        --with "claude-agent-sdk==0.2.87"
         --with "anthropic==0.105.2"
         --with "litellm==1.86.2"
-        --with "textual==8.1.1"
+        --with "textual==8.2.7"
       )
       ;;
   esac
