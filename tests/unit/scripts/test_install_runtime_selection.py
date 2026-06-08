@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -93,6 +94,30 @@ exit 0
     )
 
 
+def _expected_pins_for_extras(*extra_names: str) -> list[str]:
+    extras = _read_pyproject_extras()
+    expected_pins: list[str] = []
+    for extra_name in extra_names:
+        for dep in extras.get(extra_name, []):
+            stripped = dep.strip()
+            if stripped:
+                expected_pins.append(stripped)
+    return expected_pins
+
+
+def _assert_calls_include_pyproject_pins(calls: str, *extra_names: str) -> None:
+    expected_pins = _expected_pins_for_extras(*extra_names)
+    assert expected_pins, "no pyproject pins discovered — parity check inert"
+
+    drifted = sorted(pin for pin in expected_pins if f"--with {pin}" not in calls)
+    assert not drifted, (
+        "install.sh uv --with list has drifted from pyproject pins.\n"
+        f"Missing or mismatched for extras {extra_names}: {drifted}\n"
+        "Update the case statement in scripts/install.sh so each "
+        "`--with <spec>` string matches pyproject [project.optional-dependencies]."
+    )
+
+
 def test_install_script_syntax_is_valid() -> None:
     result = subprocess.run(
         ["bash", "-n", str(INSTALL_SH)], text=True, capture_output=True, check=False
@@ -130,10 +155,25 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.26.0 --with claude-agent-sdk==0.1.50 --with anthropic==0.105.2"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.27.2 --with claude-agent-sdk==0.2.87 --with anthropic==0.105.2"
         in calls
     )
+    _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
     assert "ouroboros setup --runtime claude --non-interactive" in calls
+
+
+def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "hermes"},
+        fake_commands={"hermes": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "Runtime: hermes (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
+    _assert_calls_include_pyproject_pins(calls, "mcp")
+    assert "ouroboros setup --runtime hermes --non-interactive" in calls
 
 
 def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
@@ -294,8 +334,6 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
     # `all` is a single self-referential entry, e.g.
     # ``["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]``. Pull the
     # bracketed names back out so we can compare against our mapping.
-    import re
-
     declared_in_all: set[str] = set()
     for entry in extras.get("all", []):
         match = re.search(r"\[([^\]]+)\]", entry)
@@ -333,29 +371,8 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     past the existing test. Each pyproject pin string is checked verbatim
     against the captured ``--with`` arguments so any drift fails here.
     """
-    extras = _read_pyproject_extras()
-
-    # Collect every dependency string declared by an extra we install via uv
-    # --with (the ``copilot`` extra has no Python deps, so nothing to pin).
-    expected_pins: list[str] = []
-    for extra_name in _EXTRA_TO_PACKAGES:
-        for dep in extras.get(extra_name, []):
-            stripped = dep.strip()
-            if stripped:
-                expected_pins.append(stripped)
-
-    # Sanity: pyproject must declare at least one pin we expect to enforce.
-    # If this fails the parsing is broken or the extras went empty.
-    assert expected_pins, "no pyproject pins discovered — parity check inert"
-
     result = _run_installer(tmp_path, env={"OUROBOROS_INSTALL_RUNTIME": "all"})
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    drifted = sorted(pin for pin in expected_pins if f"--with {pin}" not in calls)
-    assert not drifted, (
-        "install.sh `[all]` --with list has drifted from pyproject pins.\n"
-        f"Missing or mismatched: {drifted}\n"
-        "Update the case statement in scripts/install.sh so each "
-        "`--with <spec>` string matches pyproject [project.optional-dependencies]."
-    )
+    _assert_calls_include_pyproject_pins(calls, *_EXTRA_TO_PACKAGES)

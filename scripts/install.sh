@@ -449,13 +449,13 @@ if [ "$HAS_UV" = true ]; then
   case "$EXTRAS" in
     "[mcp,claude]")
       UV_ARGS+=(
-        --with "mcp==1.26.0"
-        --with "claude-agent-sdk==0.1.50"
+        --with "mcp==1.27.2"
+        --with "claude-agent-sdk==0.2.87"
         --with "anthropic==0.105.2"
       )
       ;;
     "[mcp]")
-      UV_ARGS+=(--with "mcp==1.26.0")
+      UV_ARGS+=(--with "mcp==1.27.2")
       ;;
     "[all]")
       UV_ARGS+=(
