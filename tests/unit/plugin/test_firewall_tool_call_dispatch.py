@@ -386,6 +386,48 @@ class TestPayloadBoundary:
         assert payload["correlation_id"] == "corr-1"
         assert payload["invocation_id"] == "inv-1"
 
+    def test_args_preview_redacts_secret_shapes_before_hook_env(self, tmp_path: Path) -> None:
+        manifest = _manifest_with_hooks(
+            tmp_path,
+            [
+                _tool_call_hook(
+                    name="before_tool_call",
+                    failure_policy="fail_open",
+                    scope=HOOK_TOOL_OBSERVE_SCOPE,
+                )
+            ],
+        )
+        env_sink: list[dict] = []
+        raw_openai_key = "sk-thisIsClearlyASecretValue123456789"
+        raw_github_token = "ghp_thisIsClearlyASecretValue123456789"
+        raw_aws_key = "AKIAIOSFODNN7EXAMPLE"
+        raw_bearer = "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"
+        kw = dict(_BEFORE_KW)
+        kw["args_preview"] = json.dumps(
+            {
+                "api_key": raw_openai_key,
+                "token": raw_github_token,
+                "aws_key": raw_aws_key,
+                "authorization": raw_bearer,
+                "safe": "keep-me",
+            }
+        )
+
+        dispatch_before_tool_call(
+            manifest=manifest,
+            event_sink=_noop_sink,
+            subprocess_runner=_runner(0, env_sink=env_sink),
+            **kw,
+        )
+
+        env_payload = env_sink[0][TOOL_CALL_HOOK_PAYLOAD_ENV]
+        payload = json.loads(env_payload)
+        for raw_secret in (raw_openai_key, raw_github_token, raw_aws_key, raw_bearer):
+            assert raw_secret not in env_payload
+            assert raw_secret not in payload["args_preview"]
+        assert "[redacted]" in payload["args_preview"]
+        assert "keep-me" in payload["args_preview"]
+
 
 # ---------------------------------------------------------------------------
 # Schema-version gating — tool-call hooks are a v0.4 vocabulary addition

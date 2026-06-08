@@ -1336,6 +1336,35 @@ def _bounded_preview(text: str, limit: int = TOOL_CALL_ARGS_PREVIEW_LIMIT) -> st
     return text[: limit - 1] + "…"
 
 
+_SECRET_PREVIEW_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Bearer\s+[^\"'\s,}\]]+"),
+    re.compile(r"gh[oprsu]_[A-Za-z0-9]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+)
+_SECRET_PREVIEW_NAMED_VALUE_RE = re.compile(
+    r"(?i)([\"']?\b(?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|password|"
+    r"passwd|secret|client[_-]?secret|authorization|bearer)\b[\"']?\s*[:=]\s*[\"']?)"
+    r"([^\"'\s,}\]]+)"
+)
+_SECRET_PREVIEW_FLAG_VALUE_RE = re.compile(
+    r"(?i)(--(?:token|password|passwd|api-key|apikey|secret|auth|authorization|"
+    r"client-secret|access-token|refresh-token|bearer|credential|credentials)"
+    r"(?:=|\s+))([^\"'\s]+)"
+)
+
+
+def _redact_tool_call_args_preview(text: str) -> str:
+    """Redact secret-shaped before-tool-call previews at the hook boundary."""
+
+    redacted = _SECRET_PREVIEW_NAMED_VALUE_RE.sub(rf"\1{_REDACTED}", text)
+    redacted = _SECRET_PREVIEW_FLAG_VALUE_RE.sub(rf"\1{_REDACTED}", redacted)
+    for pattern in _SECRET_PREVIEW_VALUE_PATTERNS:
+        redacted = pattern.sub(_REDACTED, redacted)
+    return redacted
+
+
 def _matching_tool_call_hooks(
     manifest: PluginManifest, hook_kind: HookKind
 ) -> tuple[HookSpec, ...]:
@@ -1484,7 +1513,7 @@ def dispatch_before_tool_call(
     payload = {
         "tool": tool,
         "args_digest": args_digest,
-        "args_preview": _bounded_preview(args_preview),
+        "args_preview": _bounded_preview(_redact_tool_call_args_preview(args_preview)),
         "correlation_id": correlation_id,
         "invocation_id": invocation_id,
         "permissions": list(current_tool_permissions),
