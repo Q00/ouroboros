@@ -13,7 +13,7 @@ import pytest
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.hermes_runtime as hermes_runtime_module
 from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime, _parse_quiet_output
 from ouroboros.router import Resolved, ResolveRequest, SkillDispatchRouter
@@ -123,6 +123,19 @@ class TestHermesCliRuntime:
         assert runtime.runtime_backend == "hermes_cli"
         assert runtime.working_directory == _EXPECTED_CWD
         assert runtime.permission_mode == "default"
+        assert runtime.permission_mode_requested is False
+
+    def test_tracks_requested_permission_mode_and_declares_ignored_support(self) -> None:
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            cwd="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+
+        assert runtime.permission_mode == "acceptEdits"
+        assert runtime.permission_mode_requested is True
+        assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+        assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
 
     def test_constructor_accepts_llm_backend(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")

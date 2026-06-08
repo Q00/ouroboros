@@ -592,6 +592,17 @@ class TestKiroAgentAdapterParamSupport:
         # tools restriction is enforced via native trust flags → stays NATIVE.
         assert caps.tool_restriction_support is ParamSupport.NATIVE
 
+    def test_tracks_caller_requested_permission_mode(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        default_adapter = KiroAgentAdapter(cli_path="kiro-cli")
+        custom_adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="default")
+
+        assert default_adapter.permission_mode == "acceptEdits"
+        assert default_adapter.permission_mode_requested is False
+        assert custom_adapter.permission_mode == "default"
+        assert custom_adapter.permission_mode_requested is True
+
 
 class TestKiroAgentAdapterExecuteTask:
     @pytest.mark.asyncio

@@ -74,18 +74,22 @@ allow-list, and `permission_mode`. Each is one of:
 | Parameter       | Claude Code | Codex / Gemini / Goose / Copilot | OpenCode | Hermes | Pi | Kiro |
 | --------------- | :---------: | :------------------------------: | :------: | :----: | :-: | :--: |
 | `system_prompt` | native | translated | translated | translated | translated | translated |
-| `permission_mode` | native | native | native | native | native | translated |
+| `permission_mode` | native | native | ignored | ignored | ignored | translated |
 | `tools` (allow-list) | native | native | native | native | native | native |
 
 > Most CLI runtimes compose the system prompt **into the user message** (e.g.
-> `## System Instructions\n...`) rather than passing a native system directive, and Kiro
-> additionally maps `permission_mode` onto coarse `--trust-*` flags. This is honored work, but
-> not in the form supplied.
+> `## System Instructions\n...`) rather than passing a native system directive. Kiro
+> additionally maps `permission_mode` onto coarse `--trust-*` flags, which is honored work but
+> not in the form supplied. OpenCode, Hermes, and Pi keep the requested mode in runtime metadata
+> but do not pass it to their CLI commands.
 
 **Observability:** when a workflow supplies a parameter the active runtime does not honor
 natively, the orchestrator surfaces a one-time notice (console + a structured
-`orchestrator.parallel_executor.param_degraded` log) so the degradation is visible instead of
-silent. This is **informational only** — it does not change what is passed to the runtime.
+degradation log such as `coordinator.param_degraded`, `orchestrator.runner.param_degraded`,
+or `orchestrator.parallel_executor.param_degraded`) so the degradation is visible instead of
+silent. The shared announcer's fallback event is
+`orchestrator.runtime_params.param_degraded`. This is **informational only** — it does not
+change what is passed to the runtime.
 
 ### Integration Surface (UX differences)
 

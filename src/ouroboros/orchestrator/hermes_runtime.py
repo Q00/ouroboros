@@ -182,6 +182,7 @@ class HermesCliRuntime(AgentRuntime):
         stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
+        self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode or "default"
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -225,9 +226,13 @@ class HermesCliRuntime(AgentRuntime):
     @property
     def capabilities(self) -> RuntimeCapabilities:
         # Hermes composes the system prompt into the user message rather than
-        # passing a native system directive; surface that as TRANSLATED while
-        # preserving the default feature flags.
-        return replace(FULL_CAPABILITIES, system_prompt_support=ParamSupport.TRANSLATED)
+        # passing a native system directive, and hermes chat has no
+        # permission-mode flag. Surface both truthfully for degradation notices.
+        return replace(
+            FULL_CAPABILITIES,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            permission_mode_support=ParamSupport.IGNORED,
+        )
 
     @property
     def working_directory(self) -> str | None:
@@ -236,6 +241,10 @@ class HermesCliRuntime(AgentRuntime):
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def permission_mode_requested(self) -> bool:
+        return self._permission_mode_requested
 
     @property
     def llm_backend(self) -> str | None:

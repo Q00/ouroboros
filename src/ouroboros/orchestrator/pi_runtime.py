@@ -79,6 +79,7 @@ class PiRuntime:
         **_kwargs: Any,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
+        self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -130,14 +131,19 @@ class PiRuntime:
         return self._permission_mode
 
     @property
+    def permission_mode_requested(self) -> bool:
+        return self._permission_mode_requested
+
+    @property
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(
             skill_dispatch=True,
             targeted_resume=True,
             structured_output=True,
             # System prompt is composed into the user message, not passed as a
-            # native system directive.
+            # native system directive. Pi also has no permission-mode flag.
             system_prompt_support=ParamSupport.TRANSLATED,
+            permission_mode_support=ParamSupport.IGNORED,
         )
 
     # -- CLI resolution ----------------------------------------------------

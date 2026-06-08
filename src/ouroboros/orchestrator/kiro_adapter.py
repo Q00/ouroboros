@@ -152,6 +152,7 @@ class KiroAgentAdapter:
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._model = model
+        self._permission_mode_requested = permission_mode is not None
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._permission_mode = permission_mode or "acceptEdits"
         self._skill_dispatcher = skill_dispatcher
@@ -182,6 +183,10 @@ class KiroAgentAdapter:
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def permission_mode_requested(self) -> bool:
+        return self._permission_mode_requested
 
     @property
     def llm_backend(self) -> str | None:

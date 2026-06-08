@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 from ouroboros.orchestrator.pi_runtime import PiRuntime
 
 
@@ -73,6 +73,22 @@ def test_build_command_uses_documented_json_prompt_argument() -> None:
         "sess_123-OK",
         "Do the task",
     ]
+
+
+def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None:
+    default_runtime = PiRuntime(cli_path="/tmp/pi", cwd="/tmp/project")
+    requested_runtime = PiRuntime(
+        cli_path="/tmp/pi",
+        cwd="/tmp/project",
+        permission_mode="acceptEdits",
+    )
+
+    assert default_runtime.permission_mode is None
+    assert default_runtime.permission_mode_requested is False
+    assert requested_runtime.permission_mode == "acceptEdits"
+    assert requested_runtime.permission_mode_requested is True
+    assert requested_runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+    assert requested_runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
 
 
 def test_build_command_rejects_unsafe_resume_session_id() -> None:
