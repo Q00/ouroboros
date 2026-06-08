@@ -102,6 +102,9 @@ from ouroboros.orchestrator.runtime_message_projection import (
     normalized_message_type,
     project_runtime_message,
 )
+from ouroboros.orchestrator.runtime_param_negotiation import (
+    announce_execution_param_degradations,
+)
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -482,8 +485,25 @@ class OrchestratorRunner:
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
+
+    def _announce_param_degradations(
+        self,
+        *,
+        system_prompt: str | None,
+        tools: list[str] | None,
+    ) -> None:
+        """Surface requested execution params this runtime will degrade."""
+        announce_execution_param_degradations(
+            self._adapter,
+            system_prompt=system_prompt,
+            tools=tools,
+            announced=self._announced_param_degradations,
+            console=self._console,
+            log_event="orchestrator.runner.param_degraded",
+        )
 
     def _plan_parallel_workers(self) -> int:
         """Return the effective fan-out worker count for the connected backend.
@@ -2253,6 +2273,10 @@ class OrchestratorRunner:
                 nonlocal tracker
 
                 active_runtime_handle = resume_handle
+                self._announce_param_degradations(
+                    system_prompt=system_prompt,
+                    tools=merged_tools,
+                )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=prompt,
@@ -3173,6 +3197,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                 console=self._console,
                 spinner="dots",
             ) as status:
+                self._announce_param_degradations(
+                    system_prompt=system_prompt,
+                    tools=merged_tools,
+                )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=resume_prompt,

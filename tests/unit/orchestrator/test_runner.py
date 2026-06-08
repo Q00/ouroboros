@@ -23,7 +23,12 @@ from ouroboros.core.seed import (
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
 # TODO: uncomment when OpenCode runtime is shipped
@@ -314,6 +319,28 @@ class TestOrchestratorRunner:
     ) -> OrchestratorRunner:
         """Create a runner with mocked dependencies."""
         return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+    def test_param_degradation_notice_surfaces_for_serial_runner(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            system_prompt_support=ParamSupport.TRANSLATED,
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        runner._announce_param_degradations(system_prompt="be terse", tools=None)
+        runner._announce_param_degradations(system_prompt="be terse", tools=None)
+
+        assert mock_console.print.call_count == 1
+        notice = mock_console.print.call_args.args[0]
+        assert "system_prompt" in notice
+        assert "opencode" in notice
 
     @pytest.mark.asyncio
     async def test_execute_seed_success(

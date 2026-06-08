@@ -13,7 +13,7 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.opencode_runtime as opencode_runtime_module
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.router import Resolved, ResolveRequest
@@ -142,10 +142,18 @@ class TestOpenCodeRuntimeProperties:
     def test_permission_mode_default(self) -> None:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
         assert runtime.permission_mode == "bypassPermissions"
+        assert runtime.permission_mode_requested is False
 
     def test_permission_mode_custom(self) -> None:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp", permission_mode="acceptEdits")
         assert runtime.permission_mode == "acceptEdits"
+        assert runtime.permission_mode_requested is True
+
+    def test_capabilities_report_non_native_params_honestly(self) -> None:
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
+
+        assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+        assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
 
 
 class TestOpenCodeRuntimeBuildCommand:

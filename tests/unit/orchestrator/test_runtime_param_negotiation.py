@@ -8,8 +8,13 @@ native handling, or an absent parameter, yields nothing.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.runtime_param_negotiation import (
+    adapter_requested_permission_mode,
+    announce_execution_param_degradations,
     negotiate_execution_params,
 )
 
@@ -108,3 +113,65 @@ def test_multiple_non_native_params_are_all_reported() -> None:
 
     reported = {item.parameter for item in result}
     assert reported == {"system_prompt", "permission_mode"}
+
+
+def test_adapter_default_permission_mode_is_not_requested() -> None:
+    adapter = SimpleNamespace(permission_mode="bypassPermissions")
+
+    assert adapter_requested_permission_mode(adapter) is None
+
+
+def test_adapter_explicit_permission_mode_is_requested() -> None:
+    adapter = SimpleNamespace(
+        permission_mode="acceptEdits",
+        permission_mode_requested=True,
+    )
+
+    assert adapter_requested_permission_mode(adapter) == "acceptEdits"
+
+
+def test_shared_notice_suppresses_unrequested_permission_default() -> None:
+    adapter = SimpleNamespace(
+        capabilities=_caps(permission_mode_support=ParamSupport.IGNORED),
+        runtime_backend="opencode",
+        permission_mode="bypassPermissions",
+    )
+    console = MagicMock()
+
+    announce_execution_param_degradations(
+        adapter,
+        system_prompt=None,
+        tools=None,
+        console=console,
+    )
+
+    console.print.assert_not_called()
+
+
+def test_shared_notice_surfaces_requested_permission_degradation_once() -> None:
+    adapter = SimpleNamespace(
+        capabilities=_caps(permission_mode_support=ParamSupport.IGNORED),
+        runtime_backend="opencode",
+        permission_mode="acceptEdits",
+        permission_mode_requested=True,
+    )
+    console = MagicMock()
+    announced: set[tuple[str, str]] = set()
+
+    announce_execution_param_degradations(
+        adapter,
+        system_prompt=None,
+        tools=None,
+        announced=announced,
+        console=console,
+    )
+    announce_execution_param_degradations(
+        adapter,
+        system_prompt=None,
+        tools=None,
+        announced=announced,
+        console=console,
+    )
+
+    assert console.print.call_count == 1
+    assert "permission_mode" in console.print.call_args.args[0]

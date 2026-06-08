@@ -166,6 +166,7 @@ class OpenCodeRuntime:
                 MCP tool handlers.
         """
         self._cli_path = self._resolve_cli_path(cli_path)
+        self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode or "bypassPermissions"
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -199,7 +200,11 @@ class OpenCodeRuntime:
         # OpenCode composes the system prompt into the user message rather than
         # passing a native system directive; surface that as TRANSLATED while
         # preserving the default feature flags.
-        return replace(FULL_CAPABILITIES, system_prompt_support=ParamSupport.TRANSLATED)
+        return replace(
+            FULL_CAPABILITIES,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            permission_mode_support=ParamSupport.IGNORED,
+        )
 
     @property
     def llm_backend(self) -> str | None:
@@ -222,6 +227,11 @@ class OpenCodeRuntime:
             Permission mode string (e.g. ``"bypassPermissions"``).
         """
         return self._permission_mode
+
+    @property
+    def permission_mode_requested(self) -> bool:
+        """Return whether permission mode was supplied by the caller."""
+        return self._permission_mode_requested
 
     # -- CLI resolution ----------------------------------------------------
 

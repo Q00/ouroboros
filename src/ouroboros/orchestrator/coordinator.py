@@ -44,6 +44,9 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     allowed_capability_names,
 )
+from ouroboros.orchestrator.runtime_param_negotiation import (
+    announce_execution_param_degradations,
+)
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.adapter import AgentMessage, AgentRuntime
@@ -211,6 +214,7 @@ class LevelCoordinator:
         self._inherited_runtime_handle = inherited_runtime_handle
         self._task_cwd = task_cwd
         self._level_runtime_handles: dict[tuple[str, int], RuntimeHandle] = {}
+        self._announced_param_degradations: set[tuple[str, str]] = set()
 
     def _build_level_runtime_handle(
         self,
@@ -378,11 +382,19 @@ class LevelCoordinator:
         session_id: str | None = None
         final_text = ""
         messages: list[AgentMessage] = []
+        tools = derive_coordinator_tools(self._adapter.runtime_backend)
 
         try:
+            announce_execution_param_degradations(
+                self._adapter,
+                system_prompt=COORDINATOR_SYSTEM_PROMPT,
+                tools=tools,
+                announced=self._announced_param_degradations,
+                log_event="coordinator.param_degraded",
+            )
             async for message in self._adapter.execute_task(
                 prompt=prompt,
-                tools=derive_coordinator_tools(self._adapter.runtime_backend),
+                tools=tools,
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
                 resume_handle=runtime_handle,
             ):
