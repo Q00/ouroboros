@@ -202,9 +202,7 @@ class MagicKeywordDetector:
 
         for skill_name, metadata in all_metadata.items():
             localized_keywords = tuple(
-                keyword
-                for triggers in metadata.localized_triggers.values()
-                for keyword in triggers
+                keyword for triggers in metadata.localized_triggers.values() for keyword in triggers
             )
             trigger_keywords = (*metadata.trigger_keywords, *localized_keywords)
             if not trigger_keywords:

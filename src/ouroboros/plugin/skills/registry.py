@@ -725,9 +725,7 @@ class SkillRegistry:
         """
         # Index trigger keywords
         localized_keywords = tuple(
-            keyword
-            for triggers in metadata.localized_triggers.values()
-            for keyword in triggers
+            keyword for triggers in metadata.localized_triggers.values() for keyword in triggers
         )
         for keyword in (*metadata.trigger_keywords, *localized_keywords):
             if keyword not in self._trigger_index:
