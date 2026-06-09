@@ -42,7 +42,9 @@ UNSUPPORTED_BIDIRECTIONAL_FRAME_TYPES = {
     "host_uri_cancel",
 }
 
-SUPPORTED_EVENT_TYPES = AGENT_EVENT_TYPES | PASSIVE_LIFECYCLE_EVENT_TYPES | {READY_TYPE, RESPONSE_TYPE}
+SUPPORTED_EVENT_TYPES = (
+    AGENT_EVENT_TYPES | PASSIVE_LIFECYCLE_EVENT_TYPES | {READY_TYPE, RESPONSE_TYPE}
+)
 
 
 class GjcProtocolError(ProviderError):
@@ -62,7 +64,9 @@ def is_passive_lifecycle_event(event: dict[str, Any]) -> bool:
     return event.get("type") in PASSIVE_LIFECYCLE_EVENT_TYPES
 
 
-def unsupported_frame_error(event: dict[str, Any], *, provider: str = "gjc") -> UnsupportedGjcRpcFrame | None:
+def unsupported_frame_error(
+    event: dict[str, Any], *, provider: str = "gjc"
+) -> UnsupportedGjcRpcFrame | None:
     """Return a fail-closed error for unsupported bidirectional or unknown frames."""
     event_type = event.get("type")
     if event_type in SUPPORTED_EVENT_TYPES:
@@ -72,7 +76,9 @@ def unsupported_frame_error(event: dict[str, Any], *, provider: str = "gjc") -> 
     detail = f"Unsupported GJC RPC frame: type={frame_type}"
     if frame_id is not None:
         detail = f"{detail} id={frame_id}"
-    return UnsupportedGjcRpcFrame(message=detail, provider=provider, details={"frame_type": frame_type, "id": frame_id})
+    return UnsupportedGjcRpcFrame(
+        message=detail, provider=provider, details={"frame_type": frame_type, "id": frame_id}
+    )
 
 
 def validate_response_ack(

@@ -110,7 +110,9 @@ async def test_normal_completion_uses_gjc_rpc_and_closes_stdin() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Say hello")],
@@ -142,7 +144,9 @@ async def test_json_object_extraction_injects_directive() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Return JSON")],
@@ -157,8 +161,12 @@ async def test_json_object_extraction_injects_directive() -> None:
 
 @pytest.mark.asyncio
 async def test_json_schema_invalid_retries_then_success() -> None:
-    first = _FakeProcess(stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _agent_end("prompt-1", '{"approved": "yes"}')))
-    second = _FakeProcess(stdout=_gjc_jsonl(_ready(), _ack("prompt-2"), _agent_end("prompt-2", '{"approved": true}')))
+    first = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _agent_end("prompt-1", '{"approved": "yes"}'))
+    )
+    second = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-2"), _agent_end("prompt-2", '{"approved": true}'))
+    )
     factory = _ProcessFactory(first, second)
     uuids = [type("U", (), {"hex": "1"})(), type("U", (), {"hex": "2"})()]
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project", max_retries=2)
@@ -189,13 +197,17 @@ async def test_json_schema_invalid_retries_then_success() -> None:
 
 @pytest.mark.asyncio
 async def test_retry_exhaustion_returns_provider_error() -> None:
-    process = _FakeProcess(stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _agent_end("prompt-1", '{"approved": "yes"}')))
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _agent_end("prompt-1", '{"approved": "yes"}'))
+    )
     factory = _ProcessFactory(process)
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project", max_retries=1)
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Return verdict")],
@@ -242,7 +254,9 @@ async def test_assistant_error_returns_provider_error() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Hello")],
@@ -270,7 +284,9 @@ async def test_explicit_set_model_success() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Hello")],
@@ -289,13 +305,17 @@ async def test_explicit_set_model_success() -> None:
 
 @pytest.mark.asyncio
 async def test_explicit_set_model_failure_returns_provider_error() -> None:
-    process = _FakeProcess(stdout=_gjc_jsonl(_ready(), _ack("set-model-1", success=False, command="set_model")))
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("set-model-1", success=False, command="set_model"))
+    )
     factory = _ProcessFactory(process)
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Hello")],
@@ -315,7 +335,9 @@ async def test_malformed_jsonl_returns_provider_error() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
         result = await adapter.complete(
             [Message(role=MessageRole.USER, content="Hello")],
@@ -329,29 +351,49 @@ async def test_malformed_jsonl_returns_provider_error() -> None:
 
 @pytest.mark.asyncio
 async def test_prompt_ack_required_before_streaming() -> None:
-    process = _FakeProcess(stdout=_gjc_jsonl(_ready(), {"id": "prompt-1", "type": "message_update", "delta": "early"}))
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), {"id": "prompt-1", "type": "message_update", "delta": "early"})
+    )
     factory = _ProcessFactory(process)
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "GjcProtocolError"
     assert process.terminated
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("frame_type", ["workflow_gate", "host_tool_call", "host_uri_request", "extension_ui_request", "unknown_frame"])
-async def test_unsupported_first_frame_returns_provider_error_and_terminates(frame_type: str) -> None:
+@pytest.mark.parametrize(
+    "frame_type",
+    [
+        "workflow_gate",
+        "host_tool_call",
+        "host_uri_request",
+        "extension_ui_request",
+        "unknown_frame",
+    ],
+)
+async def test_unsupported_first_frame_returns_provider_error_and_terminates(
+    frame_type: str,
+) -> None:
     process = _FakeProcess(stdout=_gjc_jsonl({"id": "frame-1", "type": frame_type}))
     factory = _ProcessFactory(process)
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"
@@ -366,7 +408,9 @@ async def test_empty_stdout_missing_ready_returns_provider_error() -> None:
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.provider == "gjc"
@@ -380,7 +424,9 @@ async def test_supported_out_of_order_first_frame_is_generic_protocol_error() ->
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.provider == "gjc"
@@ -391,15 +437,21 @@ async def test_supported_out_of_order_first_frame_is_generic_protocol_error() ->
 
 @pytest.mark.asyncio
 async def test_late_same_id_success_false_after_prompt_ack_fails() -> None:
-    process = _FakeProcess(stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _ack("prompt-1", success=False)))
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _ack("prompt-1", success=False))
+    )
     factory = _ProcessFactory(process)
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "GjcCommandError"
@@ -407,17 +459,34 @@ async def test_late_same_id_success_false_after_prompt_ack_fails() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("frame_type", ["workflow_gate", "extension_ui_request", "host_tool_call", "host_tool_cancel", "host_uri_request", "host_uri_cancel", "unknown_frame"])
+@pytest.mark.parametrize(
+    "frame_type",
+    [
+        "workflow_gate",
+        "extension_ui_request",
+        "host_tool_call",
+        "host_tool_cancel",
+        "host_uri_request",
+        "host_uri_cancel",
+        "unknown_frame",
+    ],
+)
 async def test_unsupported_frames_fail_and_terminate(frame_type: str) -> None:
-    process = _FakeProcess(stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), {"id": "frame-1", "type": frame_type}))
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), {"id": "frame-1", "type": frame_type})
+    )
     factory = _ProcessFactory(process)
     adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"
@@ -433,9 +502,13 @@ async def test_wrong_command_prompt_ack_fails() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "GjcProtocolError"
@@ -449,9 +522,14 @@ async def test_unsupported_frame_during_set_model_phase_is_unsupported() -> None
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="openai/gpt-4.1", model_is_explicit=True))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")],
+            CompletionConfig(model="openai/gpt-4.1", model_is_explicit=True),
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"
@@ -465,9 +543,13 @@ async def test_unsupported_frame_during_prompt_phase_is_unsupported() -> None:
 
     with (
         patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
-        patch("ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
     ):
-        result = await adapter.complete([Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default"))
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
 
     assert result.is_err
     assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"

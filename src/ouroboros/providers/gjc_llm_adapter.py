@@ -201,7 +201,11 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
             return ""
         assistant_event = event.get("assistantMessageEvent")
         if isinstance(assistant_event, dict):
-            delta = assistant_event.get("delta") or assistant_event.get("text") or assistant_event.get("content")
+            delta = (
+                assistant_event.get("delta")
+                or assistant_event.get("text")
+                or assistant_event.get("content")
+            )
             return delta if isinstance(delta, str) else ""
         delta = event.get("delta") or event.get("text") or event.get("content")
         if isinstance(delta, str):
@@ -317,7 +321,9 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
         final_content = ""
         prompt_id = f"prompt-{uuid4().hex}"
 
-        async def fail(message: str, details: dict[str, object] | None = None) -> Result[CompletionResponse, ProviderError]:
+        async def fail(
+            message: str, details: dict[str, object] | None = None
+        ) -> Result[CompletionResponse, ProviderError]:
             await self._terminate_process(process)
             return Result.err(
                 ProviderError(message=message, provider=self._provider_name, details=details or {})
@@ -366,7 +372,12 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                     )
                     ack = await next_event()
                     self._check_unsupported_or_unknown(ack)
-                    validate_response_ack(ack, command_id=set_model_id, command="set_model", provider=self._provider_name)
+                    validate_response_ack(
+                        ack,
+                        command_id=set_model_id,
+                        command="set_model",
+                        provider=self._provider_name,
+                    )
 
                 await self._write_rpc(
                     process,
@@ -379,7 +390,12 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                     self._check_unsupported_or_unknown(event)
                     event_id = event.get("id")
                     if event.get("type") == "response" and event_id == prompt_id:
-                        validate_response_ack(event, command_id=prompt_id, command="prompt", provider=self._provider_name)
+                        validate_response_ack(
+                            event,
+                            command_id=prompt_id,
+                            command="prompt",
+                            provider=self._provider_name,
+                        )
                         prompt_acked = True
                         continue
                     if not prompt_acked:

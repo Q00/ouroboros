@@ -39,6 +39,7 @@ log = get_logger(__name__)
 
 _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024
 
+
 class MalformedGjcEvent(ProviderError):
     """Raised when GJC emits malformed JSONL."""
 
@@ -95,10 +96,19 @@ class GjcRuntime:
             skill_dispatcher=self._skill_dispatcher,
         )
         if startup_output_timeout_seconds is not None:
-            self._startup_output_timeout_seconds = None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
+            self._startup_output_timeout_seconds = (
+                None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
+            )
         if stdout_idle_timeout_seconds is not None:
-            self._stdout_idle_timeout_seconds = None if stdout_idle_timeout_seconds <= 0 else stdout_idle_timeout_seconds
-        log.info(f"{self._log_namespace}.initialized", cli_path=self._cli_path, cwd=self._cwd, model=model)
+            self._stdout_idle_timeout_seconds = (
+                None if stdout_idle_timeout_seconds <= 0 else stdout_idle_timeout_seconds
+            )
+        log.info(
+            f"{self._log_namespace}.initialized",
+            cli_path=self._cli_path,
+            cwd=self._cwd,
+            model=model,
+        )
 
     @property
     def runtime_backend(self) -> str:
@@ -118,7 +128,9 @@ class GjcRuntime:
 
     @property
     def capabilities(self) -> RuntimeCapabilities:
-        return RuntimeCapabilities(skill_dispatch=True, targeted_resume=False, structured_output=True)
+        return RuntimeCapabilities(
+            skill_dispatch=True, targeted_resume=False, structured_output=True
+        )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         if cli_path is not None:
@@ -151,12 +163,20 @@ class GjcRuntime:
         buffer_byte_estimate = 0
         saw_chunk = False
         while True:
-            timeout_seconds = first_chunk_timeout_seconds if not saw_chunk else chunk_timeout_seconds
+            timeout_seconds = (
+                first_chunk_timeout_seconds if not saw_chunk else chunk_timeout_seconds
+            )
             try:
-                chunk = await stream.read(16384) if timeout_seconds is None else await asyncio.wait_for(stream.read(16384), timeout=timeout_seconds)
+                chunk = (
+                    await stream.read(16384)
+                    if timeout_seconds is None
+                    else await asyncio.wait_for(stream.read(16384), timeout=timeout_seconds)
+                )
             except TimeoutError as exc:
                 phase = "startup" if not saw_chunk else "idle"
-                raise TimeoutError(f"{self._display_name} produced no stdout during {phase} window ({timeout_seconds:.0f}s)") from exc
+                raise TimeoutError(
+                    f"{self._display_name} produced no stdout during {phase} window ({timeout_seconds:.0f}s)"
+                ) from exc
             if not chunk:
                 break
             saw_chunk = True
@@ -177,7 +197,9 @@ class GjcRuntime:
         if buffer:
             yield buffer.rstrip("\r")
 
-    async def _collect_stream_lines(self, stream: asyncio.StreamReader | None, *, max_lines: int | None = None) -> list[str]:
+    async def _collect_stream_lines(
+        self, stream: asyncio.StreamReader | None, *, max_lines: int | None = None
+    ) -> list[str]:
         if stream is None:
             return []
         lines: deque[str] = deque(maxlen=max_lines if max_lines and max_lines > 0 else None)
@@ -190,9 +212,13 @@ class GjcRuntime:
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise MalformedGjcEvent(message=self._malformed_event_message(line), provider=self._provider_name) from exc
+            raise MalformedGjcEvent(
+                message=self._malformed_event_message(line), provider=self._provider_name
+            ) from exc
         if not isinstance(event, dict):
-            raise MalformedGjcEvent(message=self._malformed_event_message(line), provider=self._provider_name)
+            raise MalformedGjcEvent(
+                message=self._malformed_event_message(line), provider=self._provider_name
+            )
         return event
 
     def _malformed_event_message(self, line: str) -> str:
@@ -251,12 +277,17 @@ class GjcRuntime:
 
     def _extract_error_content(self, event: dict[str, Any]) -> str | None:
         def from_message(message: Any) -> str | None:
-            if not isinstance(message, dict) or message.get("role") != "assistant" or message.get("stopReason") != "error":
+            if (
+                not isinstance(message, dict)
+                or message.get("role") != "assistant"
+                or message.get("stopReason") != "error"
+            ):
                 return None
             error = message.get("errorMessage") or message.get("error")
             if isinstance(error, str) and error.strip():
                 return error.strip()
             return self._extract_text_from_message(message)
+
         if event.get("type") in {"message_start", "message_end", "turn_end"}:
             return from_message(event.get("message"))
         if event.get("type") == "agent_end":
@@ -274,7 +305,11 @@ class GjcRuntime:
     def _check_unsupported_or_unknown(self, event: dict[str, Any]) -> None:
         error = unsupported_frame_error(event, provider=self._provider_name)
         if error is not None:
-            log.warning(f"{self._log_namespace}.unsupported_frame", frame_type=error.details.get("frame_type"), id=error.details.get("id"))
+            log.warning(
+                f"{self._log_namespace}.unsupported_frame",
+                frame_type=error.details.get("frame_type"),
+                id=error.details.get("id"),
+            )
             raise error
 
     def _model_override(self) -> tuple[str, str] | None:
@@ -290,7 +325,9 @@ class GjcRuntime:
     async def _send_command(self, process: Any, payload: dict[str, Any]) -> None:
         stdin = getattr(process, "stdin", None)
         if stdin is None:
-            raise GjcProtocolError(message="GJC stdin pipe is unavailable", provider=self._provider_name)
+            raise GjcProtocolError(
+                message="GJC stdin pipe is unavailable", provider=self._provider_name
+            )
         stdin.write((json.dumps(payload) + "\n").encode())
         drain = getattr(stdin, "drain", None)
         if callable(drain):
@@ -322,7 +359,9 @@ class GjcRuntime:
             with contextlib.suppress(ProcessLookupError, Exception):
                 kill()
             with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
-                await asyncio.wait_for(process.wait(), timeout=self._process_shutdown_timeout_seconds)
+                await asyncio.wait_for(
+                    process.wait(), timeout=self._process_shutdown_timeout_seconds
+                )
 
     def _close_stdin(self, process: Any) -> None:
         stdin = getattr(process, "stdin", None)
@@ -348,13 +387,21 @@ class GjcRuntime:
         intercepted_messages = await self._interceptor.maybe_dispatch(prompt, None)
         if intercepted_messages is not None:
             for message in intercepted_messages:
-                yield AgentMessage(type=message.type, content=message.content, data=message.data, tool_name=message.tool_name)
+                yield AgentMessage(
+                    type=message.type,
+                    content=message.content,
+                    data=message.data,
+                    tool_name=message.tool_name,
+                )
             return
         parts = []
         if system_prompt:
             parts.append(f"## System Instructions\n{system_prompt}")
         if tools:
-            parts.append("## Tooling Guidance\nPrefer these tools:\n" + "\n".join(f"- {tool}" for tool in tools))
+            parts.append(
+                "## Tooling Guidance\nPrefer these tools:\n"
+                + "\n".join(f"- {tool}" for tool in tools)
+            )
         parts.append(prompt)
         composed_prompt = "\n\n".join(part for part in parts if part.strip())
         command = self._build_command(prompt=composed_prompt)
@@ -377,27 +424,51 @@ class GjcRuntime:
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_child_env(),
             )
-            stderr_task = asyncio.create_task(self._collect_stream_lines(process.stderr, max_lines=self._max_stderr_lines))
-            line_iter = self._iter_stream_lines(process.stdout, first_chunk_timeout_seconds=self._startup_output_timeout_seconds, chunk_timeout_seconds=self._stdout_idle_timeout_seconds)
+            stderr_task = asyncio.create_task(
+                self._collect_stream_lines(process.stderr, max_lines=self._max_stderr_lines)
+            )
+            line_iter = self._iter_stream_lines(
+                process.stdout,
+                first_chunk_timeout_seconds=self._startup_output_timeout_seconds,
+                chunk_timeout_seconds=self._stdout_idle_timeout_seconds,
+            )
             try:
                 ready_event = self._parse_event(await anext(line_iter))
                 self._check_unsupported_or_unknown(ready_event)
             except StopAsyncIteration as exc:
                 raise TimeoutError("GJC produced no ready event") from exc
             if ready_event.get("type") != "ready":
-                raise GjcProtocolError(message=f"Expected GJC ready frame before any other frame, got {ready_event.get('type')!r}", provider=self._provider_name)
+                raise GjcProtocolError(
+                    message=f"Expected GJC ready frame before any other frame, got {ready_event.get('type')!r}",
+                    provider=self._provider_name,
+                )
             spawn_to_ready_ms = int((time.monotonic() - spawn_started) * 1000)
             log.info(f"{self._log_namespace}.ready_received", spawn_to_ready_ms=spawn_to_ready_ms)
             override = self._model_override()
             if override is not None:
                 model_command_id = f"set_model-{uuid4().hex}"
-                await self._send_command(process, {"id": model_command_id, "type": "set_model", "provider": override[0], "modelId": override[1]})
+                await self._send_command(
+                    process,
+                    {
+                        "id": model_command_id,
+                        "type": "set_model",
+                        "provider": override[0],
+                        "modelId": override[1],
+                    },
+                )
                 event = self._parse_event(await anext(line_iter))
                 self._check_unsupported_or_unknown(event)
-                validate_response_ack(event, command_id=model_command_id, command="set_model", provider=self._provider_name)
+                validate_response_ack(
+                    event,
+                    command_id=model_command_id,
+                    command="set_model",
+                    provider=self._provider_name,
+                )
                 log.info(f"{self._log_namespace}.model_acknowledged")
             prompt_command_id = f"prompt-{uuid4().hex}"
-            await self._send_command(process, {"id": prompt_command_id, "type": "prompt", "message": composed_prompt})
+            await self._send_command(
+                process, {"id": prompt_command_id, "type": "prompt", "message": composed_prompt}
+            )
             acked = False
             async for line in line_iter:
                 if not line:
@@ -406,16 +477,29 @@ class GjcRuntime:
                 event_type = event.get("type")
                 self._check_unsupported_or_unknown(event)
                 if event_type == "response" and event.get("id") == prompt_command_id:
-                    validate_response_ack(event, command_id=prompt_command_id, command="prompt", provider=self._provider_name)
+                    validate_response_ack(
+                        event,
+                        command_id=prompt_command_id,
+                        command="prompt",
+                        provider=self._provider_name,
+                    )
                     if not acked:
                         acked = True
                         prompt_ack_ms = int((time.monotonic() - task_started) * 1000)
-                        log.info(f"{self._log_namespace}.prompt_acknowledged", prompt_ack_ms=prompt_ack_ms)
+                        log.info(
+                            f"{self._log_namespace}.prompt_acknowledged",
+                            prompt_ack_ms=prompt_ack_ms,
+                        )
                     continue
                 if not acked:
-                    raise GjcProtocolError(message=f"Expected GJC prompt response before streaming, got {event_type!r}", provider=self._provider_name)
+                    raise GjcProtocolError(
+                        message=f"Expected GJC prompt response before streaming, got {event_type!r}",
+                        provider=self._provider_name,
+                    )
                 if is_passive_lifecycle_event(event):
-                    log.debug(f"{self._log_namespace}.passive_lifecycle_event", event_type=event_type)
+                    log.debug(
+                        f"{self._log_namespace}.passive_lifecycle_event", event_type=event_type
+                    )
                     continue
                 error_content = self._extract_error_content(event)
                 if error_content:
@@ -423,7 +507,9 @@ class GjcRuntime:
                 delta = self._extract_content_delta(event)
                 if delta:
                     last_content += delta
-                    yield AgentMessage(type="assistant", content=delta, data={"event_type": "message_update"})
+                    yield AgentMessage(
+                        type="assistant", content=delta, data={"event_type": "message_update"}
+                    )
                     continue
                 final_content = self._extract_final_content(event)
                 if final_content:
@@ -431,42 +517,97 @@ class GjcRuntime:
                 if event_type == "agent_end":
                     break
             else:
-                raise GjcProtocolError(message="GJC stream ended before agent_end", provider=self._provider_name)
+                raise GjcProtocolError(
+                    message="GJC stream ended before agent_end", provider=self._provider_name
+                )
             self._close_stdin(process)
             returncode = await process.wait()
             process_finished = True
             stderr_lines = await stderr_task if stderr_task else []
             task_wall_ms = int((time.monotonic() - task_started) * 1000)
             if returncode != 0:
-                raise GjcExitError(message="\n".join(stderr_lines).strip() or f"GJC exited with code {returncode}.", provider=self._provider_name, details={"returncode": returncode})
+                raise GjcExitError(
+                    message="\n".join(stderr_lines).strip()
+                    or f"GJC exited with code {returncode}.",
+                    provider=self._provider_name,
+                    details={"returncode": returncode},
+                )
             if pending_error_content:
                 raise ProviderError(message=pending_error_content, provider=self._provider_name)
             final_message = pending_final_content or last_content or "GJC task completed."
-            log.info(f"{self._log_namespace}.task_completed", task_wall_ms=task_wall_ms, returncode=returncode)
-            yield AgentMessage(type="result", content=final_message, data={"subtype": "success", "returncode": returncode})
-        except (TimeoutError, MalformedGjcEvent, GjcProtocolError, GjcCommandError, UnsupportedGjcRpcFrame, GjcExitError, ProviderError) as exc:
+            log.info(
+                f"{self._log_namespace}.task_completed",
+                task_wall_ms=task_wall_ms,
+                returncode=returncode,
+            )
+            yield AgentMessage(
+                type="result",
+                content=final_message,
+                data={"subtype": "success", "returncode": returncode},
+            )
+        except (
+            TimeoutError,
+            MalformedGjcEvent,
+            GjcProtocolError,
+            GjcCommandError,
+            UnsupportedGjcRpcFrame,
+            GjcExitError,
+            ProviderError,
+        ) as exc:
             if process is not None and not isinstance(exc, GjcExitError):
                 await self._terminate_process(process)
                 process_terminated = True
             stderr_lines = await stderr_task if stderr_task else []
             provider_exc = self._provider_error(exc)
-            log.info(f"{self._log_namespace}.task_failed", error_type=type(exc).__name__, error=str(exc))
-            yield AgentMessage(type="result", content=(self._error_message(provider_exc, stderr_lines) if isinstance(exc, TimeoutError) else provider_exc.message), data={"subtype": "error", "error_type": type(exc).__name__, **({"returncode": provider_exc.details.get("returncode")} if isinstance(provider_exc.details, dict) and "returncode" in provider_exc.details else {})}, resume_handle=current_handle)
+            log.info(
+                f"{self._log_namespace}.task_failed", error_type=type(exc).__name__, error=str(exc)
+            )
+            yield AgentMessage(
+                type="result",
+                content=(
+                    self._error_message(provider_exc, stderr_lines)
+                    if isinstance(exc, TimeoutError)
+                    else provider_exc.message
+                ),
+                data={
+                    "subtype": "error",
+                    "error_type": type(exc).__name__,
+                    **(
+                        {"returncode": provider_exc.details.get("returncode")}
+                        if isinstance(provider_exc.details, dict)
+                        and "returncode" in provider_exc.details
+                        else {}
+                    ),
+                },
+                resume_handle=current_handle,
+            )
         except asyncio.CancelledError:
             if process is not None:
                 await self._terminate_process(process)
             raise
         except FileNotFoundError as exc:
-            yield AgentMessage(type="result", content=f"{self._display_name} not found: {exc}", data={"subtype": "error", "error_type": type(exc).__name__})
+            yield AgentMessage(
+                type="result",
+                content=f"{self._display_name} not found: {exc}",
+                data={"subtype": "error", "error_type": type(exc).__name__},
+            )
         except Exception as exc:
             if process is not None:
                 await self._terminate_process(process)
                 process_terminated = True
-            yield AgentMessage(type="result", content=f"Failed to run {self._display_name}: {exc}", data={"subtype": "error", "error_type": type(exc).__name__})
+            yield AgentMessage(
+                type="result",
+                content=f"Failed to run {self._display_name}: {exc}",
+                data={"subtype": "error", "error_type": type(exc).__name__},
+            )
         finally:
             if process is not None:
                 self._close_stdin(process)
-                if not process_finished and not process_terminated and getattr(process, "returncode", None) is None:
+                if (
+                    not process_finished
+                    and not process_terminated
+                    and getattr(process, "returncode", None) is None
+                ):
                     await self._terminate_process(process)
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
@@ -484,14 +625,34 @@ class GjcRuntime:
         messages: list[AgentMessage] = []
         final_message = ""
         success = True
-        async for message in self.execute_task(prompt=prompt, tools=tools, system_prompt=system_prompt, resume_handle=resume_handle, resume_session_id=resume_session_id):
+        async for message in self.execute_task(
+            prompt=prompt,
+            tools=tools,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
+        ):
             messages.append(message)
             if message.is_final:
                 final_message = message.content
                 success = not message.is_error
         if not success:
-            return Result.err(ProviderError(message=final_message, provider=self._provider_name, details={"messages": [message.content for message in messages]}))
-        return Result.ok(TaskResult(success=success, final_message=final_message, messages=tuple(messages), session_id=None, resume_handle=None))
+            return Result.err(
+                ProviderError(
+                    message=final_message,
+                    provider=self._provider_name,
+                    details={"messages": [message.content for message in messages]},
+                )
+            )
+        return Result.ok(
+            TaskResult(
+                success=success,
+                final_message=final_message,
+                messages=tuple(messages),
+                session_id=None,
+                resume_handle=None,
+            )
+        )
 
 
 __all__ = [

@@ -56,7 +56,6 @@ def test_copilot_installs_custom_agents_file(tmp_path: Path) -> None:
     assert "### When a skill requires `run_lateral_review`" in content
 
 
-
 def test_gjc_agent_dir_defaults_to_home_gjc_agent(tmp_path: Path) -> None:
     assert gjc_agent_dir(home=tmp_path, environ={}) == tmp_path / ".gjc" / "agent"
 
@@ -68,13 +67,16 @@ def test_gjc_agent_dir_respects_gjc_config_dir(tmp_path: Path) -> None:
 
 
 def test_gjc_agent_dir_respects_explicit_agent_dir(tmp_path: Path) -> None:
-    assert gjc_agent_dir(
-        home=tmp_path,
-        environ={
-            "GJC_CODING_AGENT_DIR": str(tmp_path / "agent-dir"),
-            "GJC_CONFIG_DIR": str(tmp_path / "ignored-root"),
-        },
-    ) == tmp_path / "agent-dir"
+    assert (
+        gjc_agent_dir(
+            home=tmp_path,
+            environ={
+                "GJC_CODING_AGENT_DIR": str(tmp_path / "agent-dir"),
+                "GJC_CONFIG_DIR": str(tmp_path / "ignored-root"),
+            },
+        )
+        == tmp_path / "agent-dir"
+    )
 
 
 def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path: Path) -> None:
@@ -87,6 +89,7 @@ def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path:
     assert first.path == second.path == gjc_instruction_path(environ=env)
     assert first.path == tmp_path / "agent" / "rules" / GUIDE_FILENAME
     assert first.path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("gjc")
+
 
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "opencode" / "AGENTS.md"

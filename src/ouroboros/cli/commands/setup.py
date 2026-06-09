@@ -242,7 +242,9 @@ def _detect_runtimes() -> dict[str, str | None]:
         gjc_path = get_gjc_cli_path()
     except Exception:
         gjc_path = None
-    runtimes["gjc"] = (gjc_path if gjc_path and shutil.which(gjc_path) else None) or shutil.which("gjc")
+    runtimes["gjc"] = (gjc_path if gjc_path and shutil.which(gjc_path) else None) or shutil.which(
+        "gjc"
+    )
 
     return runtimes
 
@@ -1822,8 +1824,6 @@ _GJC_OOO_BRIDGE_SUBDIR = "ouroboros-ooo-bridge"
 _GJC_OOO_BRIDGE_FILENAME = "index.ts"
 
 
-
-
 def _detect_pi_bridge_dispatch_entry() -> tuple[str, list[str]]:
     """Return the launcher a managed Pi bridge should use for this install."""
     if _is_source_tree_ouroboros_build():
@@ -1954,6 +1954,7 @@ def _install_pi_ooo_bridge() -> bool:
     print_info("Restart Pi or run /reload in an existing Pi session to load the bridge.")
     return True
 
+
 def _gjc_bridge_source_text() -> str | None:
     """Return the packaged managed GJC bridge extension source."""
     from importlib import resources
@@ -2040,7 +2041,6 @@ def _setup_gjc(gjc_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
     _install_runtime_instruction_artifact("gjc")
     _install_gjc_ooo_bridge()
-
 
 
 def _setup_gemini(gemini_path: str) -> None:
