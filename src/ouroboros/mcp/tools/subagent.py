@@ -153,18 +153,19 @@ def synthesize_code_investigation_when_complete(
             "errors": violations,
         }
         for item in aggregated_outputs
-        if (violations := _contract_violations_for_code_investigation_output(request, item["output"]))
+        if (
+            violations := _contract_violations_for_code_investigation_output(
+                request, item["output"]
+            )
+        )
     ]
-    contract_violation_result_ids = {
-        str(item["result_id"]) for item in contract_violations
-    }
+    contract_violation_result_ids = {str(item["result_id"]) for item in contract_violations}
     confirmation_required = []
     for item in aggregated_outputs:
         result_id = str(item["result_id"])
         output = item["output"]
-        if (
-            result_id in contract_violation_result_ids
-            or _requires_code_investigation_confirmation(output)
+        if result_id in contract_violation_result_ids or _requires_code_investigation_confirmation(
+            output
         ):
             confirmation_required.append(item)
 

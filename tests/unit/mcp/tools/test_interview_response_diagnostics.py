@@ -321,12 +321,9 @@ def test_code_investigation_synthesis_fails_closed_for_stale_from_code_output() 
     assert result["confirmation_required_result_ids"] == ["code_facts"]
     assert result["synthesis"] is None
     assert result["contract_violations"][0]["result_id"] == "code_facts"
-    assert any(
-        "True was expected" in error for error in result["contract_violations"][0]["errors"]
-    )
+    assert any("True was expected" in error for error in result["contract_violations"][0]["errors"])
     assert result["user_confirmation_prompts"] == [
-        "Confirm before forwarding this code-derived answer: "
-        "The project appears to use FastAPI."
+        "Confirm before forwarding this code-derived answer: The project appears to use FastAPI."
     ]
     assert synthesis_calls == []
 
@@ -365,9 +362,7 @@ def test_code_investigation_synthesis_requires_confirmation_for_from_code_prefix
     assert result["ready_for_forward"] is False
     assert result["requires_user_confirmation"] is True
     assert result["confirmation_required_result_ids"] == ["code_facts"]
-    assert result["user_confirmation_prompts"] == [
-        "Confirm whether this repository has no router."
-    ]
+    assert result["user_confirmation_prompts"] == ["Confirm whether this repository has no router."]
     assert result["contract_violations"] == []
     assert result["synthesis"] == {"answer": "No router was found in the inspected files."}
 
