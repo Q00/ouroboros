@@ -31,6 +31,7 @@ from ouroboros.providers.gjc_rpc_protocol import (
     is_passive_lifecycle_event,
     unsupported_frame_error,
     validate_response_ack,
+    validate_supported_event_correlation,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
@@ -45,6 +46,7 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
     _default_cli_name = "gjc"
     _log_namespace = "gjc_llm_adapter"
     _completion_profile_backend = "gjc"
+    _process_shutdown_timeout_seconds = 5.0
 
     def __init__(
         self,
@@ -280,6 +282,51 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
         if error is not None:
             raise error
 
+    async def _terminate_process(self, process: Any) -> None:
+        if getattr(process, "returncode", None) is not None:
+            return
+        terminate = getattr(process, "terminate", None)
+        kill = getattr(process, "kill", None)
+        try:
+            if callable(terminate):
+                terminate()
+            elif callable(kill):
+                kill()
+            else:
+                return
+        except ProcessLookupError:
+            return
+        except Exception:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=self._process_shutdown_timeout_seconds)
+            return
+        except (TimeoutError, ProcessLookupError):
+            pass
+        if callable(kill):
+            with contextlib.suppress(ProcessLookupError, Exception):
+                kill()
+            with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
+                await asyncio.wait_for(
+                    process.wait(), timeout=self._process_shutdown_timeout_seconds
+                )
+
+    async def _wait_for_process_exit(self, process: Any) -> int:
+        try:
+            return await asyncio.wait_for(
+                process.wait(), timeout=self._process_shutdown_timeout_seconds
+            )
+        except TimeoutError as exc:
+            await self._terminate_process(process)
+            raise ProviderError(
+                message="GJC did not exit after stdin closed.",
+                provider=self._provider_name,
+                details={
+                    "returncode": getattr(process, "returncode", None),
+                    "pid": getattr(process, "pid", None),
+                },
+            ) from exc
+
     async def _complete_once(
         self,
         messages: list[Message],
@@ -403,8 +450,9 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                             message=f"Expected GJC prompt response before streaming, got {event.get('type')!r}",
                             provider=self._provider_name,
                         )
-                    if event_id not in {None, prompt_id}:
-                        continue
+                    validate_supported_event_correlation(
+                        event, prompt_id=prompt_id, provider=self._provider_name
+                    )
                     if is_passive_lifecycle_event(event):
                         continue
                     error = self._extract_agent_error(event)
@@ -458,9 +506,23 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                 if process.stdin is not None:
                     process.stdin.close()
 
+        try:
+            returncode = await self._wait_for_process_exit(process)
+        except ProviderError as exc:
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                if stderr_task is not None:
+                    stderr_lines = await stderr_task
+            return Result.err(
+                ProviderError(
+                    message=exc.message,
+                    provider=self._provider_name,
+                    details={**exc.details, "stderr": "\n".join(stderr_lines).strip()},
+                )
+            )
         if stderr_task is not None:
             stderr_lines = await stderr_task
-        returncode = await process.wait()
         if returncode != 0:
             return Result.err(
                 ProviderError(

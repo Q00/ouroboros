@@ -1,6 +1,10 @@
 """Unit tests for the GJC LLM adapter."""
 
+import asyncio
 import json
+import os
+import signal
+import sys
 from typing import Any
 from unittest.mock import patch
 
@@ -22,6 +26,13 @@ class _FakeStream:
         chunk = self._buffer[self._cursor : next_cursor]
         self._cursor = next_cursor
         return chunk
+
+
+class _HangingStream(_FakeStream):
+    async def read(self, chunk_size: int = 16384) -> bytes:
+        if self._cursor >= len(self._buffer):
+            await asyncio.sleep(3600)
+        return await super().read(chunk_size)
 
 
 class _FakeStdin:
@@ -99,7 +110,7 @@ async def test_normal_completion_uses_gjc_rpc_and_closes_stdin() -> None:
             _ready(),
             _ack("prompt-1"),
             _ack("ignored"),
-            {"id": "unrelated", "type": "message_update", "delta": "ignore"},
+            {"id": "unrelated", "type": "tool_execution_start"},
             {"id": "prompt-1", "type": "message_update", "delta": "Hel"},
             {"id": "prompt-1", "type": "message_update", "delta": "lo"},
             _agent_end("prompt-1", "Hello"),
@@ -553,3 +564,308 @@ async def test_unsupported_frame_during_prompt_phase_is_unsupported() -> None:
 
     assert result.is_err
     assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"
+
+
+@pytest.mark.asyncio
+async def test_json_schema_invalid_output_exhausts_retries_returns_provider_error() -> None:
+    processes = [
+        _FakeProcess(
+            stdout=_gjc_jsonl(
+                _ready(), _ack(f"prompt-{idx}"), _agent_end(f"prompt-{idx}", '{"approved": "yes"}')
+            )
+        )
+        for idx in (1, 2)
+    ]
+    factory = _ProcessFactory(*processes)
+    uuids = [type("U", (), {"hex": str(idx)})() for idx in (1, 2)]
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project", max_retries=2)
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch("ouroboros.providers.gjc_llm_adapter.uuid4", side_effect=uuids),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Return verdict")],
+            CompletionConfig(
+                model="default",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {"approved": {"type": "boolean"}},
+                        "required": ["approved"],
+                    },
+                },
+            ),
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert result.error.provider == "gjc"
+    assert "non-conforming output" in result.error.message
+    assert len(factory.created) == 2
+
+
+@pytest.mark.asyncio
+async def test_json_object_extracts_embedded_valid_json_first_valid() -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            _agent_end("prompt-1", 'Prose before {"ok": true} prose after'),
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="JSON")],
+            CompletionConfig(model="default", response_format={"type": "json_object"}),
+        )
+
+    assert result.is_ok
+    assert result.value.content == '{"ok": true}'
+
+
+@pytest.mark.asyncio
+async def test_first_valid_json_wins_even_when_later_block_matches_schema() -> None:
+    content = '```json\n{"approved": "yes"}\n```\n```json\n{"approved": true}\n```'
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _agent_end("prompt-1", content))
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project", max_retries=1)
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Return verdict")],
+            CompletionConfig(
+                model="default",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {"approved": {"type": "boolean"}},
+                        "required": ["approved"],
+                    },
+                },
+            ),
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert "non-conforming output" in result.error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ['{"approved":', "not json", ""])
+async def test_json_object_bad_or_empty_output_retries_then_errors(content: str) -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(_ready(), _ack("prompt-1"), _agent_end("prompt-1", content))
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project", max_retries=1)
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="JSON")],
+            CompletionConfig(model="default", response_format={"type": "json_object"}),
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert result.error.provider == "gjc"
+
+
+@pytest.mark.asyncio
+async def test_empty_assistant_output_returns_provider_error() -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            {
+                "id": "prompt-1",
+                "type": "agent_end",
+                "messages": [{"role": "assistant", "content": ""}],
+            },
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert "Empty response" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_timeout_during_streaming_terminates_with_partial_content() -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            {"id": "prompt-1", "type": "message_update", "delta": "partial"},
+        )
+    )
+    process.stdout = _HangingStream(
+        _gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            {"id": "prompt-1", "type": "message_update", "delta": "partial"},
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project", timeout=0.01)
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert result.error.details["timed_out"] is True
+    assert result.error.details["partial_content"] == "partial"
+    assert process.terminated
+
+
+@pytest.mark.asyncio
+async def test_unrelated_id_supported_frame_fails_closed() -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(), _ack("prompt-1"), {"id": "other", "type": "message_update", "delta": "bad"}
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert result.error.details["error_type"] == "GjcProtocolError"
+    assert "unrelated id" in result.error.message
+    assert process.terminated
+
+
+@pytest.mark.asyncio
+async def test_post_close_wait_hang_is_bounded_and_child_killed(tmp_path) -> None:
+    child = tmp_path / "gjc_hangs_after_eof.py"
+    child.write_text(
+        "import json, signal, sys, time\n"
+        "print(json.dumps({'type':'ready'}), flush=True)\n"
+        "line = sys.stdin.readline()\n"
+        "prompt_id = json.loads(line)['id']\n"
+        "print(json.dumps({'id': prompt_id, 'type':'response', 'command':'prompt', 'success': True}), flush=True)\n"
+        "print(json.dumps({'id': prompt_id, 'type':'agent_end', 'messages':[{'role':'assistant','content':'done'}]}), flush=True)\n"
+        "sys.stdin.read()\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    adapter = GjcLLMAdapter(cli_path=sys.executable, cwd=str(tmp_path))
+    adapter._process_shutdown_timeout_seconds = 0.05
+
+    with patch.object(
+        adapter, "_build_child_env", return_value={**os.environ, "PYTHONUNBUFFERED": "1"}
+    ):
+        original = asyncio.create_subprocess_exec
+
+        async def create_process(*_command: str, **kwargs: Any) -> Any:
+            return await original(sys.executable, str(child), **kwargs)
+
+        with (
+            patch(
+                "ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", create_process
+            ),
+            patch(
+                "ouroboros.providers.gjc_llm_adapter.uuid4",
+                return_value=type("U", (), {"hex": "1"})(),
+            ),
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+            )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert result.error.provider == "gjc"
+    assert "did not exit" in result.error.message
+    assert result.error.details["returncode"] is not None
+    assert result.error.details["returncode"] < 0
+    with pytest.raises(ProcessLookupError):
+        os.kill(result.error.details["pid"], 0)
+
+
+@pytest.mark.asyncio
+async def test_sigkill_mid_stream_returns_provider_error_with_returncode(tmp_path) -> None:
+    child = tmp_path / "gjc_sigkill.py"
+    child.write_text(
+        "import json, os, signal, sys\n"
+        "print(json.dumps({'type':'ready'}), flush=True)\n"
+        "line = sys.stdin.readline()\n"
+        "prompt_id = json.loads(line)['id']\n"
+        "print(json.dumps({'id': prompt_id, 'type':'response', 'command':'prompt', 'success': True}), flush=True)\n"
+        "print(json.dumps({'id': prompt_id, 'type':'message_update', 'delta':'partial'}), flush=True)\n"
+        "os.kill(os.getpid(), signal.SIGKILL)\n",
+        encoding="utf-8",
+    )
+    adapter = GjcLLMAdapter(cli_path=sys.executable, cwd=str(tmp_path))
+
+    original = asyncio.create_subprocess_exec
+
+    async def create_process(*_command: str, **kwargs: Any) -> Any:
+        return await original(sys.executable, str(child), **kwargs)
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", create_process),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert result.error.provider == "gjc"
+    assert result.error.details["returncode"] == -signal.SIGKILL

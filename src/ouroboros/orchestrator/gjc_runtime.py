@@ -33,6 +33,7 @@ from ouroboros.providers.gjc_rpc_protocol import (
     is_passive_lifecycle_event,
     unsupported_frame_error,
     validate_response_ack,
+    validate_supported_event_correlation,
 )
 
 log = get_logger(__name__)
@@ -373,6 +374,41 @@ class GjcRuntime:
         stderr_text = "\n".join(stderr_lines or []).strip()
         return stderr_text or str(exc)
 
+    async def _wait_for_process_exit(self, process: Any) -> int:
+        try:
+            return await asyncio.wait_for(
+                process.wait(), timeout=self._process_shutdown_timeout_seconds
+            )
+        except TimeoutError as exc:
+            await self._terminate_process(process)
+            returncode = getattr(process, "returncode", None)
+            details = {"returncode": returncode} if returncode is not None else {}
+            raise GjcExitError(
+                message="GJC did not exit after stdin closed.",
+                provider=self._provider_name,
+                details=details,
+            ) from exc
+
+    async def _classify_premature_eof(
+        self, process: Any, stderr_task: asyncio.Task[list[str]] | None
+    ) -> None:
+        returncode = getattr(process, "returncode", None)
+        if returncode is None:
+            with contextlib.suppress(TimeoutError):
+                returncode = await asyncio.wait_for(
+                    process.wait(), timeout=self._process_shutdown_timeout_seconds
+                )
+        if returncode not in (None, 0):
+            stderr_lines = await stderr_task if stderr_task else []
+            raise GjcExitError(
+                message="\n".join(stderr_lines).strip() or f"GJC exited with code {returncode}.",
+                provider=self._provider_name,
+                details={"returncode": returncode},
+            )
+        raise GjcProtocolError(
+            message="GJC stream ended before agent_end", provider=self._provider_name
+        )
+
     async def execute_task(
         self,
         prompt: str,
@@ -496,6 +532,9 @@ class GjcRuntime:
                         message=f"Expected GJC prompt response before streaming, got {event_type!r}",
                         provider=self._provider_name,
                     )
+                validate_supported_event_correlation(
+                    event, prompt_id=prompt_command_id, provider=self._provider_name
+                )
                 if is_passive_lifecycle_event(event):
                     log.debug(
                         f"{self._log_namespace}.passive_lifecycle_event", event_type=event_type
@@ -517,11 +556,9 @@ class GjcRuntime:
                 if event_type == "agent_end":
                     break
             else:
-                raise GjcProtocolError(
-                    message="GJC stream ended before agent_end", provider=self._provider_name
-                )
+                await self._classify_premature_eof(process, stderr_task)
             self._close_stdin(process)
-            returncode = await process.wait()
+            returncode = await self._wait_for_process_exit(process)
             process_finished = True
             stderr_lines = await stderr_task if stderr_task else []
             task_wall_ms = int((time.monotonic() - task_started) * 1000)

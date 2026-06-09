@@ -81,6 +81,21 @@ def unsupported_frame_error(
     )
 
 
+def validate_supported_event_correlation(
+    event: dict[str, Any],
+    *,
+    prompt_id: str,
+    provider: str = "gjc",
+) -> None:
+    """Fail closed when a supported post-ack event carries an unrelated id."""
+    event_id = event.get("id")
+    if event.get("type") in AGENT_EVENT_TYPES and event_id is not None and event_id != prompt_id:
+        raise GjcProtocolError(
+            message=f"GJC event {event.get('type')!r} carried unrelated id {event_id!r} for active prompt {prompt_id!r}",
+            provider=provider,
+        )
+
+
 def validate_response_ack(
     event: dict[str, Any],
     *,

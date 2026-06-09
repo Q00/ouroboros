@@ -91,6 +91,30 @@ def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path:
     assert first.path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("gjc")
 
 
+def test_gjc_agent_dir_precedence(tmp_path: Path) -> None:
+    env = {
+        "GJC_CODING_AGENT_DIR": str(tmp_path / "explicit-agent"),
+        "GJC_CONFIG_DIR": str(tmp_path / "config-root"),
+    }
+    assert gjc_agent_dir(home=tmp_path, environ=env) == tmp_path / "explicit-agent"
+    assert (
+        gjc_agent_dir(home=tmp_path, environ={"GJC_CONFIG_DIR": str(tmp_path / "config-root")})
+        == tmp_path / "config-root" / "agent"
+    )
+    assert gjc_agent_dir(home=tmp_path, environ={}) == tmp_path / ".gjc" / "agent"
+
+
+def test_gjc_artifact_repairs_content_drift_and_matches_renderer(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    artifact = install_gjc_instruction_artifact(environ=env)
+    artifact.path.write_text("corrupt", encoding="utf-8")
+
+    repaired = install_gjc_instruction_artifact(environ=env)
+
+    assert repaired.path == artifact.path
+    assert repaired.path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("gjc")
+
+
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "opencode" / "AGENTS.md"
     path.parent.mkdir(parents=True)

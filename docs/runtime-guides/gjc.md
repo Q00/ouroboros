@@ -190,6 +190,33 @@ Use GJC as the runtime backend when you want GJC to execute Seed tasks; use
 `llm.backend: gjc` when the authoring/evaluation flow can accept adapter-level
 JSON extraction and validation rather than provider-native schema enforcement.
 
+## Live QA
+
+Live GJC QA is opt-in and is skipped by default. The tests require all gates:
+`OUROBOROS_LIVE_GJC=1`, a resolvable `gjc` binary via `OUROBOROS_GJC_CLI_PATH`
+or `PATH`, and a cheap `gjc --mode rpc` readiness/auth probe. Missing gates are
+reported as skips with actionable reasons; a skipped live run is not an exercised
+pass badge.
+
+Hermetic runs should continue excluding the marker:
+
+```bash
+uv run python -m pytest -m "not live_gjc" --co -q
+uv run python -m pytest -m "not live_gjc" tests/unit/orchestrator/test_gjc_runtime.py -q
+```
+
+To run the live QA when GJC is installed and authenticated:
+
+```bash
+OUROBOROS_LIVE_GJC=1 uv run python -m pytest -m live_gjc tests/live/test_gjc_agentos_live.py -vv
+OUROBOROS_LIVE_GJC=1 uv run python tools/live_gjc_agentos_qa.py
+```
+
+The wrapper prints a QA receipt with `EXERCISED` versus `SKIPPED` counts plus the
+resolved GJC binary path and version. The `ooo` bridge test is deterministic: it
+checks the installed extension source dispatches `ouroboros dispatch --runtime
+gjc`. Interactive GJC PTY round-trip confirmation remains a manual receipt step.
+
 ## Capabilities
 
 | Capability | Status |

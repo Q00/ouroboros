@@ -3160,6 +3160,38 @@ class TestGjcSetup:
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge
         assert "_OUROBOROS_GJC_BRIDGE_DEPTH" in bridge
 
+    def test_install_gjc_ooo_bridge_is_idempotent_and_repairs_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+
+        assert setup_cmd._install_gjc_ooo_bridge() is True
+        first_mtime = bridge_path.stat().st_mtime_ns
+        assert setup_cmd._install_gjc_ooo_bridge() is True
+        assert bridge_path.stat().st_mtime_ns == first_mtime
+
+        bridge_path.write_text("corrupt", encoding="utf-8")
+        assert setup_cmd._install_gjc_ooo_bridge() is True
+        repaired = bridge_path.read_text(encoding="utf-8")
+        assert repaired != "corrupt"
+        assert '"dispatch", "--runtime", "gjc"' in repaired
+
+    def test_install_gjc_ooo_bridge_atomic_failure_preserves_prior_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent_dir = tmp_path / "gjc-agent"
+        monkeypatch.setenv("GJC_CODING_AGENT_DIR", str(agent_dir))
+        bridge_path = agent_dir / "extensions" / "ouroboros-ooo-bridge" / "index.ts"
+        bridge_path.parent.mkdir(parents=True)
+        bridge_path.write_text("prior", encoding="utf-8")
+
+        with patch("ouroboros.cli.commands.setup._atomic_write_text", side_effect=OSError("boom")):
+            assert setup_cmd._install_gjc_ooo_bridge() is False
+
+        assert bridge_path.read_text(encoding="utf-8") == "prior"
+
     def test_register_kiro_mcp_server_creates_fresh_entry(self, tmp_path: Path) -> None:
         """Fresh setup writes a valid entry with the Kiro env vars baked in."""
         with (
