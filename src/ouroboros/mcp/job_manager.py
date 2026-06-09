@@ -1045,9 +1045,10 @@ class JobManager:
         Closes the zombie gap left by :meth:`_recover_linked_execution_terminal_snapshot`:
         a job stuck in ``QUEUED``/``RUNNING`` whose owner crashed (and which has
         no recoverable linked-execution evidence) would otherwise report
-        ``RUNNING`` forever. When the owner is provably dead and no live runner
-        remains in this process, materialize a terminal ``INTERRUPTED`` event so
-        readers see an authoritative final state. Idempotent via a deterministic
+        ``RUNNING`` forever. When the owner is provably dead, no live runner
+        remains in this process, and no linked session still holds a live
+        heartbeat lock, materialize a terminal ``INTERRUPTED`` event so readers
+        see an authoritative final state. Idempotent via a deterministic
         event id, and a no-op on read-only stores (projects without persisting).
         """
         if (
@@ -1058,6 +1059,14 @@ class JobManager:
         ):
             return snapshot
         if not self._job_owner_is_dead(owner_pid, owner_start_time):
+            return snapshot
+        # A linked runtime (execute/auto/evaluate) runs in its own session
+        # process with a heartbeat lock. If that holder is still alive it — not
+        # this dead MCP owner — is the progress authority and will emit the
+        # terminal event itself, so the job is not orphaned. Interrupting now
+        # would permanently terminalize still-active work and disable
+        # resume/result polling.
+        if snapshot.links.session_id is not None and is_holder_alive(snapshot.links.session_id):
             return snapshot
 
         if getattr(self._event_store, "_read_only", False):
