@@ -11,6 +11,7 @@ import structlog
 from ouroboros.backends import resolve_llm_backend_name, soft_tool_enforcement_backends
 from ouroboros.config import (
     get_codex_cli_path,
+    get_gjc_cli_path,
     get_gemini_cli_path,
     get_goose_cli_path,
     get_hermes_cli_path,
@@ -25,6 +26,7 @@ from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
+from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
 
@@ -104,6 +106,7 @@ def resolve_llm_permission_mode(
         "hermes",
         "opencode",
         "pi",
+        "gjc",
     ):
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
@@ -251,6 +254,17 @@ def create_llm_adapter(
     if resolved_backend == "pi":
         return PiLLMAdapter(
             cli_path=cli_path or get_pi_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    if resolved_backend == "gjc":
+        return GjcLLMAdapter(
+            cli_path=cli_path or get_gjc_cli_path(),
             cwd=cwd,
             permission_mode=resolved_permission_mode,
             allowed_tools=allowed_tools,

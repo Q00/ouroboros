@@ -69,12 +69,14 @@ _KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
 _COPILOT_LLM_BACKENDS = frozenset({"copilot", "copilot_cli"})
 _HERMES_LLM_BACKENDS = frozenset({"hermes", "hermes_cli"})
 _PI_LLM_BACKENDS = frozenset({"pi", "pi_cli"})
+_GJC_LLM_BACKENDS = frozenset({"gjc", "gjc_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
 _COPILOT_DEFAULT_MODEL = "default"
 _HERMES_DEFAULT_MODEL = "default"
 _PI_DEFAULT_MODEL = "default"
+_GJC_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -159,6 +161,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GOOSE_CLI_PATH",
         "OUROBOROS_GEMINI_CLI_PATH",
         "OUROBOROS_PI_CLI_PATH",
+        "OUROBOROS_GJC_CLI_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -1121,6 +1124,31 @@ def get_pi_cli_path() -> str | None:
     return None
 
 
+def get_gjc_cli_path() -> str | None:
+    """Get GJC CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_GJC_CLI_PATH environment variable
+        2. config.yaml orchestrator.gjc_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to GJC CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_GJC_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.gjc_cli_path:
+            return config.orchestrator.gjc_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
 def get_opencode_mode() -> str | None:
     """Get configured OpenCode integration mode from config file.
 
@@ -1257,6 +1285,8 @@ def _default_model_for_backend(
         return _HERMES_DEFAULT_MODEL
     if resolved in _PI_LLM_BACKENDS:
         return _PI_DEFAULT_MODEL
+    if resolved in _GJC_LLM_BACKENDS:
+        return _GJC_DEFAULT_MODEL
     return default_model
 
 
@@ -1297,6 +1327,8 @@ def _normalize_configured_model_for_backend(
         return _HERMES_DEFAULT_MODEL
     if resolved in _PI_LLM_BACKENDS and candidate == default_model:
         return _PI_DEFAULT_MODEL
+    if resolved in _GJC_LLM_BACKENDS and candidate == default_model:
+        return _GJC_DEFAULT_MODEL
 
     return candidate
 

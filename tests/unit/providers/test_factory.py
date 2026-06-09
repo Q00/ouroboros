@@ -16,6 +16,7 @@ from ouroboros.providers.factory import (
     resolve_llm_permission_mode,
 )
 from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
+from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
@@ -80,6 +81,11 @@ class TestResolveLLMBackend:
         """Pi aliases normalize to pi."""
         assert resolve_llm_backend("pi") == "pi"
         assert resolve_llm_backend("pi_cli") == "pi"
+
+    def test_resolves_gjc_aliases(self) -> None:
+        """GJC aliases normalize to gjc."""
+        assert resolve_llm_backend("gjc") == "gjc"
+        assert resolve_llm_backend("gajae-code") == "gjc"
 
 
 class TestCreateLLMAdapter:
@@ -146,6 +152,30 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="pi", cli_path="/tmp/pi")
         assert isinstance(adapter, PiLLMAdapter)
         assert adapter._cli_path == "/tmp/pi"
+
+    def test_creates_gjc_adapter(self) -> None:
+        """GJC backend returns GjcLLMAdapter."""
+        adapter = create_llm_adapter(backend="gjc", cli_path="/tmp/gjc")
+        assert isinstance(adapter, GjcLLMAdapter)
+        assert adapter._cli_path == "/tmp/gjc"
+
+    def test_creates_gjc_adapter_uses_configured_cli_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GJC factory consumes the shared CLI path helper when no explicit path is passed."""
+        monkeypatch.setattr("ouroboros.providers.factory.get_gjc_cli_path", lambda: "/tmp/gjc")
+
+        adapter = create_llm_adapter(backend="gjc", cwd="/tmp/project")
+
+        assert isinstance(adapter, GjcLLMAdapter)
+        assert adapter._cli_path == "/tmp/gjc"
+        assert adapter._cwd == "/tmp/project"
+
+    def test_gjc_interview_use_case_bypasses_permissions(self) -> None:
+        """GJC interview driver mirrors Pi's text-only bypass permission convention."""
+        assert (
+            resolve_llm_permission_mode(backend="gjc", use_case="interview") == "bypassPermissions"
+        )
 
     def test_pi_interview_use_case_bypasses_permissions(self) -> None:
         """Pi interview driver uses the text-only bypass permission convention."""

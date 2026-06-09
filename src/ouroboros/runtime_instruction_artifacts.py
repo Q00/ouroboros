@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 
@@ -75,6 +76,12 @@ def _write_managed_section(path: Path, backend: str) -> Path:
     return path
 
 
+def _write_exact_guide(path: Path, backend: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_backend_skill_capability_guide(backend), encoding="utf-8")
+    return path
+
+
 def opencode_instruction_path(config_dir: str | Path) -> Path:
     """Return OpenCode's global instruction artifact path."""
     return Path(config_dir).expanduser() / "AGENTS.md"
@@ -101,6 +108,28 @@ def copilot_instruction_dir(home: str | Path | None = None) -> Path:
 def copilot_instruction_path(home: str | Path | None = None) -> Path:
     """Return the setup-owned Copilot AGENTS.md instruction artifact path."""
     return copilot_instruction_dir(home) / COPILOT_AGENTS_FILENAME
+
+
+def gjc_agent_dir(home: str | Path | None = None, environ: dict[str, str] | None = None) -> Path:
+    """Return GJC's agent directory for rules/extensions discovery."""
+    env = os.environ if environ is None else environ
+    explicit_agent_dir = env.get("GJC_CODING_AGENT_DIR", "").strip()
+    if explicit_agent_dir:
+        return Path(explicit_agent_dir).expanduser()
+
+    config_dir = env.get("GJC_CONFIG_DIR", "").strip()
+    if config_dir:
+        return Path(config_dir).expanduser() / "agent"
+
+    root = Path(home).expanduser() if home is not None else Path.home()
+    return root / ".gjc" / "agent"
+
+
+def gjc_instruction_path(
+    home: str | Path | None = None, environ: dict[str, str] | None = None
+) -> Path:
+    """Return GJC's global rules artifact path."""
+    return gjc_agent_dir(home=home, environ=environ) / "rules" / GUIDE_FILENAME
 
 
 def install_opencode_instruction_artifact(
@@ -147,6 +176,18 @@ def install_copilot_instruction_artifact(
     )
 
 
+def install_gjc_instruction_artifact(
+    *,
+    home: str | Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> RuntimeInstructionArtifact:
+    """Install GJC's setup-owned global rules guidance file."""
+    return RuntimeInstructionArtifact(
+        backend="gjc",
+        path=_write_exact_guide(gjc_instruction_path(home=home, environ=environ), "gjc"),
+    )
+
+
 __all__ = [
     "COPILOT_AGENTS_FILENAME",
     "COPILOT_INSTRUCTIONS_DIRNAME",
@@ -155,8 +196,11 @@ __all__ = [
     "copilot_instruction_dir",
     "copilot_instruction_path",
     "gemini_instruction_path",
+    "gjc_agent_dir",
+    "gjc_instruction_path",
     "install_copilot_instruction_artifact",
     "install_gemini_instruction_artifact",
+    "install_gjc_instruction_artifact",
     "install_kiro_instruction_artifact",
     "install_opencode_instruction_artifact",
     "kiro_instruction_path",

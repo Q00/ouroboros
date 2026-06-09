@@ -85,6 +85,7 @@ exclude = [
 # reliably finds ouroboros-bridge.ts / package.json / tsconfig.json in the
 # installed wheel, independent of hatchling's implicit asset handling.
 "src/ouroboros/opencode/plugin" = "ouroboros/opencode/plugin"
+"src/ouroboros/gjc_bridge" = "ouroboros/gjc_bridge"
 # Same pattern for the vendored UserLevel plugin schemas — `_load_schema`
 # in `ouroboros.plugin.manifest` resolves them via `importlib.resources`,
 # so they must reach the installed wheel as package data, not just the

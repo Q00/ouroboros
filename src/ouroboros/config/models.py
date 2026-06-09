@@ -134,6 +134,7 @@ class LLMConfig(BaseModel, frozen=True):
         "hermes",
         "goose",
         "pi",
+        "gjc",
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
@@ -367,6 +368,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "goose_cli",
         "pi",
         "pi_cli",
+        "gjc",
+        "gjc_cli",
     }
 )
 
@@ -491,7 +494,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     """
 
     runtime_backend: Literal[
-        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot", "goose", "pi"
+        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot", "goose", "pi", "gjc"
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
@@ -520,6 +523,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     kiro_cli_path: str | None = None
     goose_cli_path: str | None = None
     pi_cli_path: str | None = None
+    gjc_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -538,6 +542,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "kiro_cli_path",
         "goose_cli_path",
         "pi_cli_path",
+        "gjc_cli_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:

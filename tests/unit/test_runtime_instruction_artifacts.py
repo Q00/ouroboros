@@ -2,14 +2,18 @@
 
 from pathlib import Path
 
+from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.runtime_instruction_artifacts import (
     COPILOT_AGENTS_FILENAME,
     COPILOT_INSTRUCTIONS_DIRNAME,
     GUIDE_FILENAME,
+    gjc_agent_dir,
+    gjc_instruction_path,
     install_copilot_instruction_artifact,
     install_gemini_instruction_artifact,
     install_kiro_instruction_artifact,
     install_opencode_instruction_artifact,
+    install_gjc_instruction_artifact,
 )
 
 
@@ -51,6 +55,38 @@ def test_copilot_installs_custom_agents_file(tmp_path: Path) -> None:
     assert "## Ouroboros Skill Capability Guide: Copilot" in content
     assert "### When a skill requires `run_lateral_review`" in content
 
+
+
+def test_gjc_agent_dir_defaults_to_home_gjc_agent(tmp_path: Path) -> None:
+    assert gjc_agent_dir(home=tmp_path, environ={}) == tmp_path / ".gjc" / "agent"
+
+
+def test_gjc_agent_dir_respects_gjc_config_dir(tmp_path: Path) -> None:
+    assert gjc_agent_dir(environ={"GJC_CONFIG_DIR": str(tmp_path / "custom-gjc")}) == (
+        tmp_path / "custom-gjc" / "agent"
+    )
+
+
+def test_gjc_agent_dir_respects_explicit_agent_dir(tmp_path: Path) -> None:
+    assert gjc_agent_dir(
+        home=tmp_path,
+        environ={
+            "GJC_CODING_AGENT_DIR": str(tmp_path / "agent-dir"),
+            "GJC_CONFIG_DIR": str(tmp_path / "ignored-root"),
+        },
+    ) == tmp_path / "agent-dir"
+
+
+def test_gjc_installs_rules_guide_exact_renderer_output_and_idempotent(tmp_path: Path) -> None:
+    env = {"GJC_CODING_AGENT_DIR": str(tmp_path / "agent")}
+
+    first = install_gjc_instruction_artifact(environ=env)
+    second = install_gjc_instruction_artifact(environ=env)
+
+    assert first.backend == "gjc"
+    assert first.path == second.path == gjc_instruction_path(environ=env)
+    assert first.path == tmp_path / "agent" / "rules" / GUIDE_FILENAME
+    assert first.path.read_text(encoding="utf-8") == render_backend_skill_capability_guide("gjc")
 
 def test_marked_section_refresh_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "opencode" / "AGENTS.md"
