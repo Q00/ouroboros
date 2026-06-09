@@ -319,6 +319,13 @@ class TestMechanicalVerifier:
             assert mech_result.passed is False
             assert "timed out" in mech_result.checks[0].message.lower()
 
+            # Timeout failures must carry the same command/cwd diagnostics as
+            # other failures so the formatter can show which check hung.
+            timeout_details = mech_result.checks[0].details
+            assert timeout_details["timed_out"] is True
+            assert timeout_details["command"] == ["echo", "test-ok"]
+            assert "working_dir" in timeout_details
+
     @pytest.mark.asyncio
     async def test_verify_skips_unconfigured_checks(self) -> None:
         """Checks with no command configured are skipped (passed with skip message)."""

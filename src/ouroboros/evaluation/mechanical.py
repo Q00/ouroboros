@@ -29,7 +29,10 @@ _COMMAND_OUTPUT_PREVIEW_CHARS = 500
 
 
 def _output_preview(text: str) -> str:
-    """Return a compact output preview preserving the diagnostically useful tail."""
+    """Return a compact preview from the leading portion of command output.
+
+    The diagnostically useful tail is captured separately by ``_output_tail``.
+    """
     if not text:
         return ""
     if len(text) <= _COMMAND_OUTPUT_PREVIEW_CHARS:
@@ -309,7 +312,13 @@ class MechanicalVerifier:
                 check_type=check_type,
                 passed=False,
                 message=f"Check {check_type.value} timed out after {self.config.timeout_seconds}s",
-                details={"timed_out": True},
+                details={
+                    "timed_out": True,
+                    "command": list(command),
+                    "working_dir": str(self.config.working_dir)
+                    if self.config.working_dir
+                    else None,
+                },
             )
 
         passed = cmd_result.return_code == 0
