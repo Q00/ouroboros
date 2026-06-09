@@ -88,12 +88,14 @@ def test_llm_choices_include_hermes_adapter() -> None:
     assert "codex" in choices
     assert "hermes" in choices
     assert "pi" in choices
+    assert "gjc" in choices
 
 
 def test_capability_specific_resolution_rejects_wrong_surface() -> None:
     with pytest.raises(ValueError):
         resolve_runtime_backend_name("litellm")
     assert resolve_llm_backend_name("hermes_cli") == "hermes"
+    assert resolve_llm_backend_name("gajae-code") == "gjc"
 
 
 def test_interview_driver_choices_follow_llm_capability() -> None:
@@ -126,7 +128,7 @@ def test_switchable_runtime_metadata_is_registry_owned() -> None:
     assert gjc_capability.cli_config_key == "gjc_cli_path"
     assert gjc_capability.switchable_runtime is False
     assert gjc_capability.supports_runtime is True
-    assert gjc_capability.supports_llm is False
+    assert gjc_capability.supports_llm is True
 
 
 def test_codex_skill_execution_guidance_is_registry_owned() -> None:
