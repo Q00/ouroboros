@@ -26,6 +26,7 @@ from ouroboros.config.loader import (
     get_dependency_analysis_model,
     get_double_diamond_model,
     get_gemini_cli_path,
+    get_gjc_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
@@ -1290,6 +1291,55 @@ class TestLLMHelperLookups:
             assert get_reflect_model(backend="pi") == "default"
             assert get_semantic_model(backend="pi") == "default"
             assert get_assertion_extraction_model(backend="pi") == "default"
+
+    def test_gjc_backend_uses_default_model_sentinel(self) -> None:
+        """Backend-aware defaults avoid cross-provider model names for GJC."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("missing config"),
+            ),
+        ):
+            assert get_clarification_model(backend="gjc") == "default"
+            assert get_wonder_model(backend="gjc") == "default"
+            assert get_reflect_model(backend="gjc") == "default"
+            assert get_semantic_model(backend="gjc") == "default"
+            assert get_assertion_extraction_model(backend="gjc") == "default"
+
+    def test_gjc_backend_normalizes_config_default_models_to_default_sentinel(self) -> None:
+        """Existing default configs should remain usable after switching to GJC."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(),
+            ),
+        ):
+            assert get_clarification_model(backend="gjc") == "default"
+            assert get_qa_model(backend="gjc") == "default"
+            assert get_wonder_model(backend="gjc") == "default"
+            assert get_reflect_model(backend="gjc") == "default"
+            assert get_semantic_model(backend="gjc") == "default"
+            assert get_assertion_extraction_model(backend="gjc") == "default"
+
+    def test_get_gjc_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for GJC CLI path."""
+        monkeypatch.setenv("OUROBOROS_GJC_CLI_PATH", "~/bin/gjc")
+        assert get_gjc_cli_path() == str(Path("~/bin/gjc").expanduser())
+
+    def test_get_gjc_cli_path_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(gjc_cli_path="/tmp/gjc")
+                ),
+            ),
+        ):
+            assert get_gjc_cli_path() == "/tmp/gjc"
 
     def test_codex_backend_preserves_explicit_non_default_models_from_config(self) -> None:
         """Explicit config overrides should survive backend normalization."""

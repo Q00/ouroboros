@@ -33,6 +33,8 @@ def test_resolves_aliases_to_canonical_names() -> None:
     assert resolve_backend_alias("codex_cli") == "codex"
     assert resolve_backend_alias("claude_code") == "claude"
     assert resolve_backend_alias("openrouter") == "litellm"
+    assert resolve_backend_alias("gajae-code") == "gjc"
+    assert resolve_backend_alias("gajae_code") == "gjc"
 
 
 def test_runtime_choices_include_runtime_only_backends() -> None:
@@ -69,6 +71,7 @@ def test_tool_envelope_support_is_registry_owned() -> None:
     assert backend_supports_tool_envelope("gemini_cli")
     assert not backend_supports_tool_envelope("hermes")
     assert not backend_supports_tool_envelope("pi")
+    assert not backend_supports_tool_envelope("gjc")
 
 
 def test_switchable_runtime_metadata_is_registry_owned() -> None:
@@ -77,6 +80,14 @@ def test_switchable_runtime_metadata_is_registry_owned() -> None:
     assert capability.name == "gemini"
     assert capability.switchable_runtime is True
     assert capability.cli_config_key == "gemini_cli_path"
+    gjc_capability = get_backend_capability("gajae-code")
+    assert gjc_capability is not None
+    assert gjc_capability.name == "gjc"
+    assert gjc_capability.cli_name == "gjc"
+    assert gjc_capability.cli_config_key == "gjc_cli_path"
+    assert gjc_capability.switchable_runtime is False
+    assert gjc_capability.supports_runtime is False
+    assert gjc_capability.supports_llm is False
 
 
 def test_codex_skill_execution_guidance_is_registry_owned() -> None:
@@ -114,7 +125,7 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
 
 
 def test_renders_generic_skill_capability_guides_for_runtime_backends() -> None:
-    for backend_name in ("hermes", "claude", "opencode", "gemini", "kiro", "copilot", "pi"):
+    for backend_name in ("hermes", "claude", "opencode", "gemini", "kiro", "copilot", "pi", "gjc"):
         guide = render_backend_skill_capability_guide(backend_name)
 
         assert guide.startswith(f"## Ouroboros Skill Capability Guide: {backend_name.title()}\n")

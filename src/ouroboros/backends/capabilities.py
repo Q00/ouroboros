@@ -272,6 +272,18 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        name="gjc",
+        aliases=("gajae-code", "gajae_code"),
+        supports_runtime=False,
+        supports_llm=False,
+        supports_interview_driver=False,
+        switchable_runtime=False,
+        cli_name="gjc",
+        cli_config_key="gjc_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         name="litellm",
         aliases=("openai", "openrouter"),
         supports_llm=True,

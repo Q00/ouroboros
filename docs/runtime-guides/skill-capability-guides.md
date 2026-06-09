@@ -39,6 +39,7 @@ its rendered guide or a documented fallback.
 | Gemini | `~/.gemini/GEMINI.md` | Installed by Gemini setup as a managed section in the global Gemini memory file. |
 | Kiro | `~/.kiro/steering/ouroboros-skill-capability-guide.md` | Installed by Kiro setup as a global steering file. |
 | Copilot | `~/.copilot/ouroboros-instructions/AGENTS.md` | Installed by Copilot setup; Ouroboros Copilot runtime also injects that directory through `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. |
+| GJC | No setup-owned capability artifact yet | Known gap: GJC is registered in the capability registry and is being wired in across a PR stack, but setup does not yet install a durable GJC-owned instruction artifact. Use `render_backend_skill_capability_guide("gjc")` when building GJC prompts until a stable artifact surface exists. |
 | Goose | No setup-owned capability artifact yet | Known gap: setup can select Goose as a runtime, but no durable Goose instruction surface or Goose-specific `SkillExecutionCapability` entries are registered yet. Keep skill requirements runtime-neutral and rely on runtime-local operator guidance until a Goose artifact installer exists. |
 | Pi | No setup-owned capability artifact yet | Known gap: Pi has generic rendered capability guidance in the registry, but setup does not yet install it into a durable Pi-owned instruction artifact. Use `render_backend_skill_capability_guide("pi")` when building Pi prompts until a stable artifact surface exists. |
 

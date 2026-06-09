@@ -226,6 +226,11 @@ class TestLLMConfig:
         config = LLMConfig(backend="pi")
         assert config.backend == "pi"
 
+    def test_llm_config_accepts_gjc_backend(self) -> None:
+        """LLMConfig accepts GJC as a local CLI backend."""
+        config = LLMConfig(backend="gjc")
+        assert config.backend == "gjc"
+
 
 class TestLLMTaskProfileConfig:
     """Test provider-neutral LLM task profile configuration."""
@@ -590,6 +595,13 @@ class TestOrchestratorConfig:
         assert config.pi_cli_path is not None
         assert "~" not in config.pi_cli_path
 
+    def test_orchestrator_config_accepts_gjc_backend(self) -> None:
+        """GJC is a valid runtime-only backend."""
+        config = OrchestratorConfig(runtime_backend="gjc", gjc_cli_path="~/bin/gjc")
+        assert config.runtime_backend == "gjc"
+        assert config.gjc_cli_path is not None
+        assert "~" not in config.gjc_cli_path
+
 
 class TestGetDefaultConfig:
     """Test get_default_config helper function."""
@@ -716,6 +728,11 @@ class TestRuntimeProfileConfig:
         profile = RuntimeProfileConfig(default="pi", stages={"execute": "pi_cli"})
         assert profile.default == "pi"
         assert profile.stages == {"execute": "pi_cli"}
+
+    def test_runtime_profile_accepts_gjc_backends(self) -> None:
+        profile = RuntimeProfileConfig(default="gjc", stages={"execute": "gjc_cli"})
+        assert profile.default == "gjc"
+        assert profile.stages == {"execute": "gjc_cli"}
 
     def test_orchestrator_runtime_profile_string_shorthand(self) -> None:
         config = OrchestratorConfig(runtime_profile="worker")
