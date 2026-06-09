@@ -257,6 +257,7 @@ def backend(
         _setup_claude,
         _setup_codex,
         _setup_gemini,
+        _setup_gjc,
         _setup_goose,
         _setup_hermes,
         _setup_pi,
@@ -283,6 +284,8 @@ def backend(
             _setup_hermes(cli_path)
         elif new_backend == "gemini":
             _setup_gemini(cli_path)
+        elif new_backend == "gjc":
+            _setup_gjc(cli_path)
         elif new_backend == "goose":
             _setup_goose(cli_path)
         elif new_backend == "pi":

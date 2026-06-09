@@ -126,7 +126,7 @@ def test_switchable_runtime_metadata_is_registry_owned() -> None:
     assert gjc_capability.name == "gjc"
     assert gjc_capability.cli_name == "gjc"
     assert gjc_capability.cli_config_key == "gjc_cli_path"
-    assert gjc_capability.switchable_runtime is False
+    assert gjc_capability.switchable_runtime is True
     assert gjc_capability.supports_runtime is True
     assert gjc_capability.supports_llm is True
 
