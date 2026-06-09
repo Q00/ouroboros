@@ -33,7 +33,7 @@ class _FakeStream:
 
 
 class _FakeStdin:
-    def __init__(self, process: "_FakeProcess") -> None:
+    def __init__(self, process: _FakeProcess) -> None:
         self._process = process
         self.writes: list[dict[str, Any]] = []
         self.closed = False

@@ -18,16 +18,20 @@ from ouroboros.config import get_gjc_cli_path
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
+from ouroboros.providers.base import (
+    CompletionConfig,
+    CompletionResponse,
+    Message,
+    MessageRole,
+    UsageInfo,
+)
+from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.gjc_rpc_protocol import (
-    GjcCommandError,
     GjcProtocolError,
-    UnsupportedGjcRpcFrame,
     is_passive_lifecycle_event,
     unsupported_frame_error,
     validate_response_ack,
 )
-from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, MessageRole, UsageInfo
-from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 _SAFE_MODEL_PART_PATTERN = re.compile(r"^[A-Za-z0-9_.:@-]+$")

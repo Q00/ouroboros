@@ -11,9 +11,9 @@ from ouroboros.runtime_instruction_artifacts import (
     gjc_instruction_path,
     install_copilot_instruction_artifact,
     install_gemini_instruction_artifact,
+    install_gjc_instruction_artifact,
     install_kiro_instruction_artifact,
     install_opencode_instruction_artifact,
-    install_gjc_instruction_artifact,
 )
 
 

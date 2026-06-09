@@ -25,6 +25,7 @@ from ouroboros.orchestrator.adapter import (
     SkillDispatchHandler,
     TaskResult,
 )
+from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.gjc_rpc_protocol import (
     GjcCommandError,
     GjcProtocolError,
@@ -33,7 +34,6 @@ from ouroboros.providers.gjc_rpc_protocol import (
     unsupported_frame_error,
     validate_response_ack,
 )
-from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 
 log = get_logger(__name__)
 

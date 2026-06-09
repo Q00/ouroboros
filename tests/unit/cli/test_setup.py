@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 import yaml
 
+from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
     _display_repos_table,
@@ -24,7 +25,6 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 from ouroboros.codex import CodexArtifactInstallResult
-from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 
 # ── Codex setup tests ────────────────────────────────────────────

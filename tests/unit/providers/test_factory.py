@@ -15,8 +15,8 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
-from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
+from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter

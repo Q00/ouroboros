@@ -245,8 +245,8 @@ def backend(
         _setup_claude,
         _setup_codex,
         _setup_gemini,
-        _setup_goose,
         _setup_gjc,
+        _setup_goose,
         _setup_hermes,
     )
 

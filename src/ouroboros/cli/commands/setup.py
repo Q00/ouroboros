@@ -1246,9 +1246,9 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     from ouroboros.runtime_instruction_artifacts import (
         install_copilot_instruction_artifact,
         install_gemini_instruction_artifact,
+        install_gjc_instruction_artifact,
         install_kiro_instruction_artifact,
         install_opencode_instruction_artifact,
-        install_gjc_instruction_artifact,
     )
 
     installers = {
