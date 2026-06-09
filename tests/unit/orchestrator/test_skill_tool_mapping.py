@@ -77,6 +77,18 @@ Arguments:
     }
 
 
+def test_extract_skill_body_tool_context_keys_reads_inline_arguments_mapping() -> None:
+    body = """
+Tool: ouroboros_brownfield
+Arguments: { "action": "scan" }
+
+Tool: ouroboros_brownfield
+Arguments: { "action": "set_defaults", "indices": "<comma-separated IDs>" }
+"""
+
+    assert extract_skill_body_tool_context_keys(body) == {"ouroboros_brownfield": ("indices",)}
+
+
 def test_extract_skill_body_tool_context_keys_ignores_frontmatter_only_usage() -> None:
     skill_md = """---
 name: run

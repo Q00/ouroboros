@@ -42,7 +42,7 @@ def _packaged_skills_dir(module_file: Path | None = None) -> Path:
 
 
 _TOOL_LINE_RE = re.compile(r"^\s*Tool:\s*`?(ouroboros_[A-Za-z0-9_]+)`?\s*$")
-_ARGUMENTS_LINE_RE = re.compile(r"^(?P<indent>\s*)Arguments:\s*(?:#.*)?$")
+_ARGUMENTS_LINE_RE = re.compile(r"^(?P<indent>\s*)Arguments:\s*(?P<inline>.*)$")
 _ARGUMENT_KEY_RE = re.compile(r"^(?P<indent>\s+)(?P<key>[A-Za-z_][A-Za-z0-9_]*):(?P<value>.*)$")
 _INLINE_TOOL_CALL_RE = re.compile(r"\b(ouroboros_[A-Za-z0-9_]+)\(([^)]*)\)")
 _INLINE_KWARG_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -149,6 +149,14 @@ def _collect_tool_block_context_keys(
     if index >= len(lines):
         return tool_name, (), index
 
+    inline_arguments = arguments_match.group("inline").strip()
+    if inline_arguments and not inline_arguments.startswith("#"):
+        return (
+            tool_name,
+            _extract_mapping_context_keys(inline_arguments),
+            index + 1,
+        )
+
     arguments_indent = len(arguments_match.group("indent"))
     key_indent: int | None = None
     context_keys: list[str] = []
@@ -182,6 +190,23 @@ def _collect_tool_block_context_keys(
         index += 1
 
     return tool_name, tuple(context_keys), index
+
+
+def _extract_mapping_context_keys(raw_mapping: str) -> tuple[str, ...]:
+    try:
+        raw = yaml.safe_load(raw_mapping)
+    except yaml.YAMLError:
+        return ()
+    if not isinstance(raw, Mapping):
+        return ()
+
+    context_keys: list[str] = []
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, str) and _looks_like_context_argument(value):
+            context_keys.append(key)
+    return tuple(context_keys)
 
 
 def _split_inline_call_arguments(raw_arguments: str) -> tuple[str, ...]:
