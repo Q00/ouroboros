@@ -37,8 +37,11 @@ def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() 
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
 
     assert (
-        "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`"
+        "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`"
         in docs
     )
-    assert "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, and Pi" in docs
-    assert "`kiro-cli`, `copilot`, and `goose` CLI binaries" in docs
+    assert (
+        "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, and GJC"
+        in docs
+    )
+    assert "`kiro-cli`, `copilot`, `goose`, `pi`, and `gjc` CLI binaries" in docs

@@ -139,6 +139,9 @@ to expand the primitive set:
   primitives or motivate the addition under a fresh canonical issue.
 - Do **not** treat `MCPBridge` as a mutable global. It must be passed
   through the context.
+- The GJC runtime consumes the existing `AgentRuntime`, `RuntimeCapabilities`,
+  and `AgentMessage` contracts. It adds no `AgentRuntimeContext` fields; GJC
+  RPC details stay inside the adapter boundary.
 
 ## 5. What this document does not promise
 

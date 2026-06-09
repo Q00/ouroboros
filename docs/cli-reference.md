@@ -67,7 +67,7 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | Option | Description |
 |--------|-------------|
 | `--resume TEXT` | Resume an existing auto session id |
-| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow — see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
+| `--runtime TEXT` | Runtime backend for the **run-handoff** phase. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`. Authoring phases (interview, seed generation, seed repair) **always run in-process** inside the Ouroboros MCP server in `ooo auto` flow — see [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
 | `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
 | `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
 | `--skip-run` | Stop after creating an A-grade Seed |
@@ -226,7 +226,7 @@ truth table describes the gate function alone, not the auto flow:
 Detect available runtime backends and configure Ouroboros for your environment.
 
 Ouroboros supports multiple runtime backends via a pluggable `AgentRuntime` protocol. The `setup` command auto-detects
-which runtimes are available in your PATH (including Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, and Pi) and
+which runtimes are available in your PATH (including Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, and GJC) and
 configures `orchestrator.runtime_backend` accordingly. Additional runtimes can be registered
 by implementing the protocol — see [Architecture](architecture.md#how-to-add-a-new-runtime-adapter).
 
@@ -238,7 +238,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, or `stdio` |
@@ -246,6 +246,11 @@ ouroboros setup [OPTIONS]
 For Pi, setup also installs `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts`.
 Restart Pi or run `/reload` and interactive Pi/roach-pi sessions can dispatch
 `ooo ...` commands into Ouroboros through the shared skill router.
+For GJC, setup installs the GJC-side `ooo` bridge extension into
+`<agent-dir>/extensions` and a renderer-generated skill capability guide into
+`<agent-dir>/rules/ouroboros-skill-capability-guide.md`. Interactive GJC
+sessions can dispatch `ooo ...` commands into Ouroboros after the extension is
+loaded.
 
 **Examples:**
 
@@ -268,7 +273,7 @@ ouroboros setup --non-interactive
 
 **What setup does:**
 
-- Scans PATH for `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro-cli`, `copilot`, and `goose` CLI binaries
+- Scans PATH for `claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro-cli`, `copilot`, `goose`, `pi`, and `gjc` CLI binaries
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
 - For Claude Code: registers the MCP server in `~/.claude/mcp.json`
@@ -284,6 +289,8 @@ ouroboros setup --non-interactive
 - For Kiro CLI: sets `orchestrator.kiro_cli_path` and `llm.backend: kiro` in `~/.ouroboros/config.yaml`, and registers the Ouroboros MCP server in `~/.kiro/settings/mcp.json` with `OUROBOROS_RUNTIME=kiro` / `OUROBOROS_LLM_BACKEND=kiro` baked into the entry's `env` so `ooo <skill>` shortcuts route to the Kiro adapter on the very next `kiro-cli chat`. The detector prefers the resolved `ouroboros` binary over `uvx` to stay within Kiro's MCP init timeout
 - For Kiro CLI: installs the runtime skill capability guide into `~/.kiro/steering/ouroboros-skill-capability-guide.md`
 - For Copilot CLI: installs the runtime skill capability guide into `~/.copilot/ouroboros-instructions/AGENTS.md` and configures Ouroboros-launched Copilot child sessions to read it via `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+- For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml`
+- For GJC: installs the `ooo` bridge extension into `<agent-dir>/extensions` and the renderer-generated skill capability guide into `<agent-dir>/rules/ouroboros-skill-capability-guide.md`
 
 > **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup on current Codex releases; profile anchors live in `~/.codex/<profile>.config.toml`. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
 
@@ -331,8 +338,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
-| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`) |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`. Custom adapters registered in `runtime_factory.py` are also accepted. |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`) |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -404,7 +411,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | Option | Description |
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
-| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`). Uses configured default if omitted |
+| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`). Uses configured default if omitted |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
@@ -933,8 +940,8 @@ ouroboros mcp serve [OPTIONS]
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
 | `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
 | `--db TEXT` | Path to the EventStore database file |
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
 
 **Examples:**
 
@@ -998,7 +1005,7 @@ If Ouroboros is installed directly (not via `uvx`), use:
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # or "codex", "opencode", "hermes", "gemini", "copilot", "goose", "kiro", or "pi"
+  runtime_backend: claude   # or "codex", "opencode", "hermes", "gemini", "copilot", "goose", "kiro", "pi", or "gjc"
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
@@ -1015,8 +1022,8 @@ ouroboros mcp info [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 
@@ -1031,7 +1038,7 @@ ouroboros mcp info [OPTIONS]
 ## Typical Workflows
 
 > For first-time setup and the complete onboarding flow, see **[Getting Started](getting-started.md)**.
-> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), and [Pi CLI](runtime-guides/pi.md) references.
+> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), [OpenCode](runtime-guides/opencode.md), [Hermes](runtime-guides/hermes.md), [Gemini](runtime-guides/gemini.md), [Kiro CLI](runtime-guides/kiro.md), [GitHub Copilot CLI](runtime-guides/copilot.md), [Pi CLI](runtime-guides/pi.md), and [GJC](runtime-guides/gjc.md) references.
 
 ### Cancelling Stuck Executions
 
@@ -1054,7 +1061,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`) |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for Claude Code / Codex runtimes (no-op for OpenCode) |
@@ -1063,6 +1070,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary |
+| `OUROBOROS_GJC_CLI_PATH` | `orchestrator.gjc_cli_path` | Explicit path to `gjc` binary when it is not on `PATH` |
 | `OUROBOROS_SESSION_WALL_CLOCK_SECONDS` | `runtime_controls.session_wall_clock_seconds` | Override the Auto session wall-clock watchdog budget; `0` disables the watchdog |
 | `OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS` | `runtime_controls.mcp_tool_timeout_seconds` | Optional adapter-level MCP timeout; `0` disables the fixed wall-clock cap |
 | `OUROBOROS_GENERATION_IDLE_TIMEOUT_SECONDS` | `runtime_controls.generation_idle_timeout_seconds` | Stop an evolve generation after no lineage/execution activity is observed |
