@@ -1949,12 +1949,25 @@ def _install_pi_ooo_bridge() -> bool:
     return True
 
 
+def _detect_gjc_bridge_dispatch_entry() -> tuple[str, list[str]]:
+    """Return the launcher a managed GJC bridge should use for this install."""
+    if _is_source_tree_ouroboros_build():
+        return sys.executable, ["-m", "ouroboros"]
+    try:
+        version = importlib_metadata.version("ouroboros-ai")
+    except importlib_metadata.PackageNotFoundError:
+        return sys.executable, ["-m", "ouroboros"]
+    if ".dev" in version:
+        return sys.executable, ["-m", "ouroboros"]
+    return shutil.which("ouroboros") or "ouroboros", []
+
+
 def _gjc_bridge_source_text() -> str | None:
     """Return the packaged managed GJC bridge extension source."""
     from importlib import resources
 
     try:
-        return (
+        source = (
             resources.files("ouroboros.gjc_bridge")
             .joinpath(_GJC_OOO_BRIDGE_FILENAME)
             .read_text(encoding="utf-8")
@@ -1962,9 +1975,19 @@ def _gjc_bridge_source_text() -> str | None:
     except (FileNotFoundError, ModuleNotFoundError, OSError):
         dev = Path(__file__).resolve().parents[2] / "gjc_bridge" / _GJC_OOO_BRIDGE_FILENAME
         try:
-            return dev.read_text(encoding="utf-8") if dev.exists() else None
+            source = dev.read_text(encoding="utf-8") if dev.exists() else None
         except OSError:
             return None
+    if source is None:
+        return None
+    command, args = _detect_gjc_bridge_dispatch_entry()
+    return source.replace(
+        'const DEFAULT_COMMAND = "ouroboros";',
+        f"const DEFAULT_COMMAND = {json.dumps(command)};",
+    ).replace(
+        "const DEFAULT_ARGS: string[] = [];",
+        f"const DEFAULT_ARGS: string[] = {json.dumps(args)};",
+    )
 
 
 def _install_gjc_ooo_bridge() -> bool:
@@ -2027,6 +2050,12 @@ def _setup_gjc(gjc_path: str) -> None:
         config_dict["orchestrator"] = orch
     orch["runtime_backend"] = "gjc"
     orch["gjc_cli_path"] = gjc_path
+
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "gjc"
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)

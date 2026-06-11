@@ -6,6 +6,8 @@ const COMMAND_RE = /^\s*ooo(?:\s+|$)/i;
 const UNSUPPORTED_DISPATCH_EXIT_CODE = 78;
 const DEPTH_ENV = "_OUROBOROS_GJC_BRIDGE_DEPTH";
 const TIMEOUT_MS = Number(process.env.OUROBOROS_GJC_BRIDGE_TIMEOUT_MS || 6 * 60 * 60 * 1000);
+const DEFAULT_COMMAND = "ouroboros";
+const DEFAULT_ARGS: string[] = [];
 
 type InputEvent = { text?: string };
 type InputContext = { cwd: string };
@@ -19,6 +21,11 @@ type ExtensionAPI = {
 
 type ExecResult = { stdout: string; stderr: string; code: number | null };
 
+function ouroborosEntry(): { command: string; args: string[] } {
+  if (process.env.OUROBOROS_CLI) return { command: process.env.OUROBOROS_CLI, args: [] };
+  return { command: DEFAULT_COMMAND, args: DEFAULT_ARGS };
+}
+
 function outputText(stdout: string, stderr: string): string {
   const out = stdout.trim();
   const err = stderr.trim();
@@ -28,9 +35,10 @@ function outputText(stdout: string, stderr: string): string {
 
 async function dispatch(text: string, cwd: string): Promise<ExecResult> {
   const env = { ...process.env, [DEPTH_ENV]: "1" };
-  const args = ["dispatch", "--runtime", "gjc", "--cwd", cwd, text];
+  const entry = ouroborosEntry();
+  const args = [...entry.args, "dispatch", "--runtime", "gjc", "--cwd", cwd, text];
   try {
-    const result = await execFileAsync("ouroboros", args, { cwd, env, timeout: TIMEOUT_MS });
+    const result = await execFileAsync(entry.command, args, { cwd, env, timeout: TIMEOUT_MS });
     return { stdout: result.stdout || "", stderr: result.stderr || "", code: 0 };
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string; code?: number | null; signal?: string };

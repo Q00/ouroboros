@@ -3143,6 +3143,7 @@ class TestGjcSetup:
         config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert config["orchestrator"]["runtime_backend"] == "gjc"
         assert config["orchestrator"]["gjc_cli_path"] == "/opt/bin/gjc"
+        assert config["llm"]["backend"] == "gjc"
 
         guide_path = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
         assert guide_path.read_text(encoding="utf-8") == render_backend_skill_capability_guide(
@@ -3156,6 +3157,9 @@ class TestGjcSetup:
         ).exists()
         assert '"dispatch", "--runtime", "gjc"' in bridge
         assert '"--cwd", cwd' in bridge
+        assert "process.env.OUROBOROS_CLI" in bridge
+        assert "DEFAULT_COMMAND" in bridge
+        assert '"-m", "ouroboros"' in bridge
         assert "{ cwd, env, timeout: TIMEOUT_MS }" in bridge
         assert "UNSUPPORTED_DISPATCH_EXIT_CODE = 78" in bridge
         assert "_OUROBOROS_GJC_BRIDGE_DEPTH" in bridge
