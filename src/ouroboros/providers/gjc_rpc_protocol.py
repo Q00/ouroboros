@@ -8,6 +8,7 @@ from ouroboros.core.errors import ProviderError
 
 RESPONSE_TYPE = "response"
 READY_TYPE = "ready"
+EVENT_ENVELOPE_TYPE = "event"
 
 AGENT_EVENT_TYPES = {
     "agent_start",
@@ -21,6 +22,7 @@ AGENT_EVENT_TYPES = {
 
 PASSIVE_LIFECYCLE_EVENT_TYPES = {
     "tool_execution_start",
+    "tool_execution_update",
     "tool_execution_end",
     "auto_compaction_start",
     "auto_compaction_end",
@@ -28,9 +30,15 @@ PASSIVE_LIFECYCLE_EVENT_TYPES = {
     "auto_retry_start",
     "auto_retry_end",
     "auto_retry_exhausted",
+    "retry_fallback_applied",
+    "retry_fallback_succeeded",
     "ttsr_triggered",
     "todo_reminder",
     "todo_auto_clear",
+    "irc_message",
+    "notice",
+    "thinking_level_changed",
+    "goal_updated",
 }
 
 UNSUPPORTED_BIDIRECTIONAL_FRAME_TYPES = {
@@ -62,6 +70,31 @@ class UnsupportedGjcRpcFrame(ProviderError):
 def is_passive_lifecycle_event(event: dict[str, Any]) -> bool:
     """Return whether an event is documented passive lifecycle/status noise."""
     return event.get("type") in PASSIVE_LIFECYCLE_EVENT_TYPES
+
+
+def unwrap_event_envelope(frame: dict[str, Any], *, provider: str = "gjc") -> dict[str, Any] | None:
+    """Return the inner agent event of a protocol-v2 agent-wire envelope, else None.
+
+    GJC >= 0.4 emits every agent session event wrapped as
+    ``{"type": "event", "protocol_version": 2, "seq": ..., "frame_id": ...,
+    "payload": {"event_type": ..., "event": {...}}}`` (gjc docs/rpc.md), while
+    command acks (``response``) and ``ready`` remain top-level frames. Returns
+    ``None`` for non-envelope frames so bare (pre-envelope) events keep working.
+
+    Raises:
+        GjcProtocolError: for an envelope frame whose payload carries no event.
+    """
+    if frame.get("type") != EVENT_ENVELOPE_TYPE:
+        return None
+    payload = frame.get("payload")
+    if isinstance(payload, dict):
+        inner = payload.get("event")
+        if isinstance(inner, dict):
+            return inner
+    raise GjcProtocolError(
+        message="Malformed GJC event envelope: payload.event missing or not an object",
+        provider=provider,
+    )
 
 
 def unsupported_frame_error(

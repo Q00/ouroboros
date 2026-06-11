@@ -553,3 +553,155 @@ async def test_unsupported_frame_during_prompt_phase_is_unsupported() -> None:
 
     assert result.is_err
     assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"
+
+
+def _envelope(event: dict[str, object], *, seq: int = 1) -> dict[str, object]:
+    return {
+        "protocol_version": 2,
+        "session_id": "session-1",
+        "seq": seq,
+        "frame_id": f"frame-{seq}",
+        "type": "event",
+        "payload": {"event_type": event.get("type"), "event": event},
+    }
+
+
+@pytest.mark.asyncio
+async def test_protocol_v2_enveloped_stream_completes() -> None:
+    streamed: list[str] = []
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            _envelope({"type": "agent_start"}, seq=1),
+            _envelope(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "thinking_delta", "delta": "let me think"},
+                },
+                seq=2,
+            ),
+            _envelope(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "Hel"},
+                },
+                seq=3,
+            ),
+            _envelope(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "lo"},
+                },
+                seq=4,
+            ),
+            _envelope(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_end", "content": "Hello"},
+                },
+                seq=5,
+            ),
+            _envelope({"type": "tool_execution_update", "toolCallId": "t1"}, seq=6),
+            _envelope({"type": "some_future_event"}, seq=7),
+            _envelope(
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "thinking", "thinking": "let me think"},
+                                {"type": "text", "text": "Hello"},
+                            ],
+                        }
+                    ],
+                },
+                seq=8,
+            ),
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(
+        cli_path="/tmp/gjc",
+        cwd="/tmp/project",
+        on_message=lambda _role, delta: streamed.append(delta),
+    )
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Say hello")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_ok
+    assert result.value.content == "Hello"
+    # Thinking deltas and text_end snapshots must not pollute streamed content.
+    assert streamed == ["Hel", "lo"]
+
+
+@pytest.mark.asyncio
+async def test_protocol_v2_malformed_envelope_is_protocol_error() -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            {"type": "event", "payload": {"event_type": "agent_start"}},
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Say hello")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert result.error.details["error_type"] == "GjcProtocolError"
+
+
+@pytest.mark.asyncio
+async def test_slash_qualified_model_id_sends_set_model() -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("set-model-1", command="set_model"),
+            _ack("prompt-1"),
+            _agent_end("prompt-1", "Done"),
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")],
+            CompletionConfig(
+                model="openrouter/google/gemini-3-flash-preview", model_is_explicit=True
+            ),
+        )
+
+    assert result.is_ok
+    assert json.loads(process.stdin.writes[0]) == {
+        "id": "set-model-1",
+        "type": "set_model",
+        "provider": "openrouter",
+        "modelId": "google/gemini-3-flash-preview",
+    }

@@ -609,3 +609,120 @@ def test_capabilities_are_non_resumable_structured_skill_dispatch() -> None:
     assert caps.skill_dispatch is True
     assert caps.targeted_resume is False
     assert caps.structured_output is True
+
+
+def _envelope(event: dict[str, object], *, seq: int = 1) -> str:
+    return _event(
+        {
+            "protocol_version": 2,
+            "session_id": "session-1",
+            "seq": seq,
+            "frame_id": f"frame-{seq}",
+            "type": "event",
+            "payload": {"event_type": event.get("type"), "event": event},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_protocol_v2_enveloped_stream_success() -> None:
+    process = _FakeProcess([_event({"type": "ready"})])
+    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
+    original_send = runtime._send_command
+
+    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
+        await original_send(proc, payload)
+        if payload["type"] == "prompt":
+            frames = [
+                _event(
+                    {
+                        "type": "response",
+                        "id": payload["id"],
+                        "command": "prompt",
+                        "success": True,
+                    }
+                ),
+                _envelope({"type": "agent_start"}, seq=1),
+                _envelope(
+                    {
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "thinking_delta", "delta": "hmm"},
+                    },
+                    seq=2,
+                ),
+                _envelope(
+                    {
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": "Hel"},
+                    },
+                    seq=3,
+                ),
+                _envelope(
+                    {
+                        "type": "message_update",
+                        "assistantMessageEvent": {"type": "text_delta", "delta": "lo"},
+                    },
+                    seq=4,
+                ),
+                _envelope({"type": "tool_execution_update", "toolCallId": "t1"}, seq=5),
+                _envelope({"type": "some_future_event"}, seq=6),
+                _envelope(
+                    {
+                        "type": "agent_end",
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "Hello"}],
+                            }
+                        ],
+                    },
+                    seq=7,
+                ),
+            ]
+            proc.stdout._buffer.extend(("\n".join(frames) + "\n").encode())
+
+    with (
+        patch.object(runtime, "_send_command", side_effect=send_and_append),
+        patch("asyncio.create_subprocess_exec", return_value=process),
+    ):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    result = messages[-1]
+    assert not result.is_error
+    assert result.content == "Hello"
+    deltas = [msg.content for msg in messages if msg.type == "assistant"]
+    assert deltas == ["Hel", "lo"]
+    assert process.stdin.closed
+
+
+@pytest.mark.asyncio
+async def test_protocol_v2_malformed_envelope_is_protocol_error() -> None:
+    process = _FakeProcess([_event({"type": "ready"})])
+    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
+    original_send = runtime._send_command
+
+    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
+        await original_send(proc, payload)
+        if payload["type"] == "prompt":
+            frames = [
+                _event(
+                    {
+                        "type": "response",
+                        "id": payload["id"],
+                        "command": "prompt",
+                        "success": True,
+                    }
+                ),
+                _event({"type": "event", "payload": {"event_type": "agent_start"}}),
+            ]
+            proc.stdout._buffer.extend(("\n".join(frames) + "\n").encode())
+
+    with (
+        patch.object(runtime, "_send_command", side_effect=send_and_append),
+        patch("asyncio.create_subprocess_exec", return_value=process),
+    ):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    assert messages[-1].is_error
+    assert messages[-1].data["error_type"] == "GjcProtocolError"
+    assert process.terminated
