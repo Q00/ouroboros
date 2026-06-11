@@ -399,6 +399,20 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                     process.wait(), timeout=self._process_shutdown_timeout_seconds
                 )
 
+    async def _observe_returncode(
+        self,
+        process: Any,
+        *,
+        timeout_seconds: float = 0.05,
+    ) -> int | None:
+        """Best-effort, bounded returncode observation after EOF/error races."""
+        returncode = getattr(process, "returncode", None)
+        if returncode is not None:
+            return returncode
+        with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
+            return await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+        return getattr(process, "returncode", None)
+
     async def _wait_for_process_exit(self, process: Any) -> int:
         try:
             return await asyncio.wait_for(
@@ -460,8 +474,11 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
             message: str, details: dict[str, object] | None = None
         ) -> Result[CompletionResponse, ProviderError]:
             await self._terminate_process(process)
+            error_details = dict(details or {})
+            if error_details.get("returncode") is None:
+                error_details["returncode"] = await self._observe_returncode(process)
             return Result.err(
-                ProviderError(message=message, provider=self._provider_name, details=details or {})
+                ProviderError(message=message, provider=self._provider_name, details=error_details)
             )
 
         try:
@@ -574,7 +591,7 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                 exc.message,
                 {
                     **exc.details,
-                    "returncode": getattr(process, "returncode", None),
+                    "returncode": exc.details.get("returncode"),
                     "stderr": "\n".join(stderr_lines).strip(),
                     "error_type": type(exc).__name__,
                 },
