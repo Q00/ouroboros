@@ -103,6 +103,8 @@ class CodexCliRuntime:
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
         runtime_profile: str | None = None,
+        startup_output_timeout_seconds: float | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = self._resolve_permission_mode(permission_mode)
@@ -118,6 +120,14 @@ class CodexCliRuntime:
             log_namespace=self._log_namespace,
         )
         self._builtin_mcp_handlers: dict[str, Any] | None = None
+        if startup_output_timeout_seconds is not None:
+            self._startup_output_timeout_seconds = (
+                None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
+            )
+        if stdout_idle_timeout_seconds is not None:
+            self._stdout_idle_timeout_seconds = (
+                None if stdout_idle_timeout_seconds <= 0 else stdout_idle_timeout_seconds
+            )
 
         log.info(
             f"{self._log_namespace}.initialized",
@@ -127,6 +137,8 @@ class CodexCliRuntime:
             cwd=self._cwd,
             runtime_profile=runtime_profile,
             codex_profile=self._codex_profile,
+            startup_output_timeout_seconds=self._startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=self._stdout_idle_timeout_seconds,
             skills_dir=(
                 str(self._skills_dir) if self._skills_dir is not None else self._skills_package_uri
             ),

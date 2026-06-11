@@ -78,6 +78,8 @@ def create_agent_runtime(
         return CodexCliRuntime(
             cli_path=cli_path or get_codex_cli_path(),
             runtime_profile=get_runtime_profile(),
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
             **runtime_kwargs,
         )
 
