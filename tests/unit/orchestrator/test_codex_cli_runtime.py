@@ -200,6 +200,32 @@ class TestCodexCliRuntime:
         )
         return skill_md
 
+    def test_default_timeouts_match_class_attributes(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+        assert (
+            runtime._startup_output_timeout_seconds
+            == CodexCliRuntime._startup_output_timeout_seconds
+        )
+        assert runtime._stdout_idle_timeout_seconds == CodexCliRuntime._stdout_idle_timeout_seconds
+
+    def test_explicit_timeout_kwargs_override_defaults(self) -> None:
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            startup_output_timeout_seconds=10.0,
+            stdout_idle_timeout_seconds=20.0,
+        )
+        assert runtime._startup_output_timeout_seconds == 10.0
+        assert runtime._stdout_idle_timeout_seconds == 20.0
+
+    def test_zero_timeout_disables_guard(self) -> None:
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            startup_output_timeout_seconds=0,
+            stdout_idle_timeout_seconds=0,
+        )
+        assert runtime._startup_output_timeout_seconds is None
+        assert runtime._stdout_idle_timeout_seconds is None
+
     def test_build_command_for_new_session(self) -> None:
         """Builds a new-session exec command (prompt fed via stdin, not args)."""
         runtime = CodexCliRuntime(
