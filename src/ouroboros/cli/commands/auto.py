@@ -99,7 +99,6 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     COPILOT = "copilot"
     KIRO = "kiro"
     PI = "pi"
-    GJC = "gjc"
 
 
 app = typer.Typer(

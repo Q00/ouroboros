@@ -41,23 +41,28 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "copilot",
         "kiro",
         "pi",
-        "gjc",
     }
 
 
-def test_cli_runtime_enums_accept_gjc_for_frontdoor_commands() -> None:
+def test_cli_runtime_enums_keep_inert_gjc_out_of_frontdoor_commands() -> None:
     from ouroboros.cli.commands import init, mcp, run
     from ouroboros.cli.commands.auto import AgentRuntimeBackend as AutoRuntimeBackend
 
-    assert AutoRuntimeBackend("gjc") is AutoRuntimeBackend.GJC
-    assert run.AgentRuntimeBackend("gjc") is run.AgentRuntimeBackend.GJC
-    assert mcp.AgentRuntimeBackend("gjc") is mcp.AgentRuntimeBackend.GJC
-    assert init.AgentRuntimeBackend("gjc") is init.AgentRuntimeBackend.GJC
-    assert mcp.LLMBackend("gjc") is mcp.LLMBackend.GJC
-    assert init.LLMBackend("gjc") is init.LLMBackend.GJC
+    with pytest.raises(ValueError):
+        AutoRuntimeBackend("gjc")
+    with pytest.raises(ValueError):
+        run.AgentRuntimeBackend("gjc")
+    with pytest.raises(ValueError):
+        mcp.AgentRuntimeBackend("gjc")
+    with pytest.raises(ValueError):
+        init.AgentRuntimeBackend("gjc")
+    with pytest.raises(ValueError):
+        mcp.LLMBackend("gjc")
+    with pytest.raises(ValueError):
+        init.LLMBackend("gjc")
 
 
-def test_cli_frontdoor_help_lists_gjc_backend_options() -> None:
+def test_cli_frontdoor_help_omits_inert_gjc_backend_options() -> None:
     runner = CliRunner()
     commands = [
         ["auto", "--help"],
@@ -70,7 +75,7 @@ def test_cli_frontdoor_help_lists_gjc_backend_options() -> None:
     for args in commands:
         result = runner.invoke(app, args)
         assert result.exit_code == 0, result.output
-        assert "gjc" in result.output
+        assert "gjc" not in result.output
 
 
 def test_interview_allowed_tools_omits_unsupported_hermes_envelope(monkeypatch) -> None:

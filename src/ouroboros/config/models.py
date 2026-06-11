@@ -134,7 +134,6 @@ class LLMConfig(BaseModel, frozen=True):
         "hermes",
         "goose",
         "pi",
-        "gjc",
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
@@ -368,8 +367,6 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "goose_cli",
         "pi",
         "pi_cli",
-        "gjc",
-        "gjc_cli",
     }
 )
 
@@ -494,7 +491,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     """
 
     runtime_backend: Literal[
-        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot", "goose", "pi", "gjc"
+        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot", "goose", "pi"
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
