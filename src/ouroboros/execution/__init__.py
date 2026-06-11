@@ -2,7 +2,6 @@
 
 This module implements Phase 2 of the Ouroboros workflow:
 - Double Diamond pattern: Discover → Define → Design → Deliver
-- Recursive AC decomposition
 - Phase transition management
 - SubAgent isolation for child AC execution (Story 3.4)
 """

@@ -192,15 +192,11 @@ class ExecutionConfig(BaseModel, frozen=True):
     Attributes:
         max_iterations_per_ac: Maximum iterations per acceptance criteria
         retrospective_interval: Iterations between retrospectives
-        atomicity_model: Default model for atomicity analysis
-        decomposition_model: Default model for AC decomposition
         double_diamond_model: Default model for Double Diamond phases
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
     retrospective_interval: int = Field(default=3, ge=1)
-    atomicity_model: str = DEFAULT_OPUS_MODEL
-    decomposition_model: str = DEFAULT_OPUS_MODEL
     double_diamond_model: str = DEFAULT_OPUS_MODEL
 
 

@@ -16,13 +16,11 @@ from ouroboros.config.loader import (
     get_agent_permission_mode,
     get_agent_runtime_backend,
     get_assertion_extraction_model,
-    get_atomicity_model,
     get_clarification_model,
     get_codex_cli_path,
     get_consensus_advocate_model,
     get_consensus_models,
     get_context_compression_model,
-    get_decomposition_model,
     get_dependency_analysis_model,
     get_double_diamond_model,
     get_gemini_cli_path,
@@ -1472,11 +1470,7 @@ class TestLLMHelperLookups:
                         ontology_analysis_model="gpt-5-ontology",
                         context_compression_model="gpt-5-mini",
                     ),
-                    execution=ExecutionConfig(
-                        atomicity_model="gpt-5-atomic",
-                        decomposition_model="gpt-5-decompose",
-                        double_diamond_model="gpt-5-diamond",
-                    ),
+                    execution=ExecutionConfig(double_diamond_model="gpt-5-diamond"),
                     resilience=ResilienceConfig(
                         wonder_model="gpt-5-wonder",
                         reflect_model="gpt-5-reflect",
@@ -1494,8 +1488,6 @@ class TestLLMHelperLookups:
         ):
             assert get_ontology_analysis_model() == "gpt-5-ontology"
             assert get_context_compression_model() == "gpt-5-mini"
-            assert get_atomicity_model() == "gpt-5-atomic"
-            assert get_decomposition_model() == "gpt-5-decompose"
             assert get_double_diamond_model() == "gpt-5-diamond"
             assert get_wonder_model() == "gpt-5-wonder"
             assert get_reflect_model() == "gpt-5-reflect"

@@ -18,8 +18,6 @@ Functions:
     get_dependency_analysis_model: Get dependency analysis model from env var or config
     get_ontology_analysis_model: Get ontology analysis model from env var or config
     get_context_compression_model: Get context compression model from env var or config
-    get_atomicity_model: Get atomicity model from env var or config
-    get_decomposition_model: Get decomposition model from env var or config
     get_double_diamond_model: Get Double Diamond model from env var or config
     get_wonder_model: Get Wonder model from env var or config
     get_reflect_model: Get Reflect model from env var or config
@@ -1419,40 +1417,6 @@ def get_context_compression_model(backend: str | None = None) -> str:
         )
     except ConfigError:
         return _default_model_for_backend("gpt-4", backend=backend)
-
-
-def get_atomicity_model(backend: str | None = None) -> str:
-    """Get atomicity analysis model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_ATOMICITY_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.execution.atomicity_model,
-            default_model=DEFAULT_OPUS_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
-
-
-def get_decomposition_model(backend: str | None = None) -> str:
-    """Get AC decomposition model from environment variable or config."""
-    env_model = os.environ.get("OUROBOROS_DECOMPOSITION_MODEL", "").strip()
-    if env_model:
-        return env_model
-
-    try:
-        config = load_config()
-        return _normalize_configured_model_for_backend(
-            config.execution.decomposition_model,
-            default_model=DEFAULT_OPUS_MODEL,
-            backend=backend,
-        )
-    except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
 
 
 def get_double_diamond_model(backend: str | None = None) -> str:

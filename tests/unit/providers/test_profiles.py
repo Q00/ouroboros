@@ -122,11 +122,11 @@ def test_resolve_completion_profile_suppresses_backend_profile_for_explicit_mode
                 "providers": {"codex": {"profile": "ouroboros-fast"}},
             },
         },
-        llm_role_profiles={"atomicity": "fast"},
+        llm_role_profiles={"qa": "fast"},
     )
     request = CompletionConfig(
         model="custom-codex-model",
-        role="atomicity",
+        role="qa",
         model_is_explicit=True,
     )
 
