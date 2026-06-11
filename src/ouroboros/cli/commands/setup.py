@@ -2034,6 +2034,12 @@ def _setup_gjc(gjc_path: str) -> None:
     orch["runtime_backend"] = "gjc"
     orch["gjc_cli_path"] = gjc_path
 
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "gjc"
+
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 

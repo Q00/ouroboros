@@ -3143,6 +3143,7 @@ class TestGjcSetup:
         config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert config["orchestrator"]["runtime_backend"] == "gjc"
         assert config["orchestrator"]["gjc_cli_path"] == "/opt/bin/gjc"
+        assert config["llm"]["backend"] == "gjc"
 
         guide_path = agent_dir / "rules" / "ouroboros-skill-capability-guide.md"
         assert guide_path.read_text(encoding="utf-8") == render_backend_skill_capability_guide(
