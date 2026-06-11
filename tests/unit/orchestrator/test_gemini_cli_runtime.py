@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.gemini_cli_runtime import (
     _MAX_OUROBOROS_DEPTH,
     GeminiCLIRuntime,
@@ -234,6 +235,8 @@ def test_runtime_capabilities_mark_targeted_resume_unsupported() -> None:
     assert runtime.capabilities.skill_dispatch is True
     assert runtime.capabilities.targeted_resume is False
     assert runtime.capabilities.structured_output is True
+    assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+    assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
 
 # ---------------------------------------------------------------------------

@@ -55,10 +55,47 @@ These capabilities depend on the runtime backend's native features and execution
 | ------------------------- | :---------------------------------: | :-------------------: | :-------------------------------------------------------: | :------------------------------------------------------------------------: | :------------------------------------------: | :--------------------------: | :-----------------------------------------------------------------------: | :-----------------------------: | ---------------------------------------------------------------- |
 | **Authentication**        |        Max Plan subscription        |    OpenAI API key     |        Provider API keys (configured in OpenCode)         |        NousResearch (or compatible provider) API key or local model        | Google auth (`gemini auth` or `GOOGLE_API_KEY`) |      Kiro AWS sign-in        | GitHub Copilot subscription via `gh auth login`                           | Pi provider auth via `/login` or provider API key | No separate Ouroboros API key is needed for Claude Code, Kiro, Copilot, or Pi CLI; Pi still needs its own provider credentials |
 | **Underlying model**      |         Claude (Anthropic)          |   GPT-5.4+ (OpenAI)   | Provider-dependent (OpenCode supports multiple providers) | Provider-dependent (Hermes supports multiple providers) or Any local model | Gemini-selected or `--model` value           | Claude (via AWS) + others    | Live-discovered (Claude, GPT-5, etc.; whatever your subscription grants)  | Pi-selected or `--model` value  | Copilot is the only runtime with a live model picker             |
-| **Tool surface**          | Read, Write, Edit, Bash, Glob, Grep | Codex-native tool set |            Read, Write, Edit, Bash, Glob, Grep            |                      Custom skills via MCP + run cmd                       | Gemini-managed tool set                      |   Kiro-native tool set       | Read, Write, Edit, Bash, Glob, Grep (via `--available-tools` allowlist)   | Pi-native tool set              | Different tool implementations; same task outcomes               |
-| **Sandbox / permissions** |    Claude Code permission system    |  Codex sandbox model  |                OpenCode permission system                 |                          Hermes permission system                          | `--approval-mode auto_edit` / `yolo`         | `--trust-tools` / `--trust-all-tools` | `--add-dir <CWD>` boundary + `--allow-tool` envelope             | Pi CLI permission model         | Each runtime manages its own safety boundaries                   |
+| **Tool surface**          | Read, Write, Edit, Bash, Glob, Grep | Codex-native tool set |            Read, Write, Edit, Bash, Glob, Grep            |                      Custom skills via MCP + run cmd                       | Gemini-managed tool set                      |   Kiro-native tool set       | Copilot-managed tool set plus Ouroboros prompt guidance                  | Pi-native tool set              | Different tool implementations; same task outcomes               |
+| **Sandbox / permissions** |    Claude Code permission system    |  Codex sandbox model  |                OpenCode permission system                 |                          Hermes permission system                          | `--approval-mode auto_edit` / `yolo`         | `--trust-tools` / `--trust-all-tools` | `--add-dir <CWD>` boundary plus Copilot permission envelope      | Pi CLI permission model         | Each runtime manages its own safety boundaries                   |
 | **Cost model**            |        Included in Max Plan         | Per-token API charges |              Depends on configured provider               |                            Depends on API/Local                            | Depends on Google account/API usage          |    Included in Kiro plan     | Included in Copilot subscription                                          | Depends on Pi account/provider  | See [OpenAI pricing](https://openai.com/pricing) for Codex costs |
 | **Declared capabilities** | skill_dispatch, targeted_resume, structured_output | all three | all three | all three | skill_dispatch and structured_output; `targeted_resume=False` (no native resume API) | skill_dispatch only; `targeted_resume=False` (headless does not surface session ids), `structured_output=False` (plain-text stdio) | skill_dispatch only; `targeted_resume=False` (no resume API); `structured_output=False` (no `--output-schema`, JSON via prompt directive) | all three | See `RuntimeCapabilities` on the adapter |
+
+### Parameter handling (negotiation)
+
+Beyond the feature flags above, `RuntimeCapabilities` declares how each runtime honors the
+execution **parameters** Ouroboros passes to `execute_task` — `system_prompt`, the `tools`
+allow-list, and `permission_mode`. Each is one of:
+
+- **`native`** — honored directly (e.g. a separate system-prompt field, a real tool allow-list).
+- **`translated`** — honored only through a lossy adaptation (the intent is partially preserved,
+  but not in the form supplied).
+- **`ignored`** — silently dropped.
+
+| Parameter       | Claude Code | Codex | Gemini | Goose | Copilot | OpenCode | Hermes | Pi | Kiro |
+| --------------- | :---------: | :---: | :-----: | :---: | :-----: | :------: | :----: | :-: | :--: |
+| `system_prompt` | native | translated | translated | translated | translated | translated | translated | translated | translated |
+| `permission_mode` | native | native | native | native | native | ignored | ignored | ignored | translated |
+| `tools` (allow-list) | native | translated | translated | translated | translated | translated | translated | translated | native |
+
+> Most CLI runtimes compose the system prompt **into the user message** (e.g.
+> `## System Instructions\n...`) rather than passing a native system directive. Codex,
+> Gemini, Goose, Copilot, OpenCode, Hermes, and Pi also render requested tool
+> allow-lists only as prompt guidance, so `tools` is translated rather than a
+> native runtime allow-list when the list is non-empty. An explicit empty
+> allow-list (`tools=[]`) cannot be translated by those prompt-only composers
+> because no tool names are rendered; the orchestrator reports that no-tools
+> restriction as `ignored` for observability. Kiro
+> additionally maps `permission_mode` onto coarse `--trust-*` flags, which is honored work but
+> not in the form supplied. OpenCode, Hermes, and Pi keep the requested mode in runtime metadata
+> but do not pass it to their CLI commands.
+
+**Observability:** when a workflow supplies a parameter the active runtime does not honor
+natively, the orchestrator surfaces a one-time notice (console + a structured
+degradation log such as `coordinator.param_degraded`, `orchestrator.runner.param_degraded`,
+or `orchestrator.parallel_executor.param_degraded`) so the degradation is visible instead of
+silent. The shared announcer's fallback event is
+`orchestrator.runtime_params.param_degraded`. This is **informational only** — it does not
+change what is passed to the runtime.
 
 ### Integration Surface (UX differences)
 

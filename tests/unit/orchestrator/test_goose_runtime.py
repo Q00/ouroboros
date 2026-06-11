@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
 
@@ -61,6 +62,13 @@ def test_goose_default_permission_mode_preserves_approval_gate() -> None:
 
     assert runtime.permission_mode == "approve"
     assert runtime._build_child_env()["GOOSE_MODE"] == "approve"
+
+
+def test_goose_capabilities_report_prompt_only_tool_restrictions_as_translated() -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project")
+
+    assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+    assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
 
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "accept_edits", "acceptedits"])

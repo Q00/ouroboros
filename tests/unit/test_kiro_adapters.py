@@ -575,6 +575,35 @@ class TestCreateAgentRuntimeKiro:
 # ===========================================================================
 
 
+class TestKiroAgentAdapterParamSupport:
+    """Kiro declares its lossy parameter handling for observability."""
+
+    def test_declares_translated_system_prompt_and_permission_mode(self) -> None:
+        from ouroboros.orchestrator.adapter import ParamSupport
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli")
+        caps = adapter.capabilities
+
+        # system_prompt is wrapped as <system>...</system>; permission_mode maps
+        # onto coarse --trust-* flags — both lossy adaptations.
+        assert caps.system_prompt_support is ParamSupport.TRANSLATED
+        assert caps.permission_mode_support is ParamSupport.TRANSLATED
+        # tools restriction is enforced via native trust flags → stays NATIVE.
+        assert caps.tool_restriction_support is ParamSupport.NATIVE
+
+    def test_tracks_caller_requested_permission_mode(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        default_adapter = KiroAgentAdapter(cli_path="kiro-cli")
+        custom_adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="default")
+
+        assert default_adapter.permission_mode == "acceptEdits"
+        assert default_adapter.permission_mode_requested is False
+        assert custom_adapter.permission_mode == "default"
+        assert custom_adapter.permission_mode_requested is True
+
+
 class TestKiroAgentAdapterExecuteTask:
     @pytest.mark.asyncio
     async def test_streams_output_lines(self) -> None:

@@ -37,7 +37,12 @@ from ouroboros.copilot_permissions import (
     build_copilot_exec_permission_args,
     resolve_copilot_permission_mode,
 )
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
@@ -45,8 +50,7 @@ from ouroboros.providers.profiles import resolve_completion_profile
 log = structlog.get_logger(__name__)
 
 # Copilot CLI accepts the same three permission mode names that Ouroboros
-# uses everywhere; the mapping to ``--allow-tool`` / ``--deny-tool`` /
-# ``--allow-all`` flags lives in ``copilot_permissions``.
+# uses everywhere; permission mode is mapped through ``copilot_permissions``.
 _COPILOT_PERMISSION_MODES = frozenset({"default", "acceptEdits", "bypassPermissions"})
 _COPILOT_DEFAULT_PERMISSION_MODE = "default"
 
@@ -61,9 +65,9 @@ class CopilotCliRuntime(CodexCliRuntime):
     Extends :class:`CodexCliRuntime` with overrides specific to the Copilot
     CLI process model:
 
-    - Permission flags translated through the Copilot envelope
-      (``--add-dir`` boundary plus ``--available-tools`` / ``--allow-tool``
-      / ``--allow-all-tools`` / ``--allow-all``).
+    - Permission flags translated through the Copilot envelope.
+    - Per-call tool allow-lists are inherited from the Codex prompt composer as
+      tooling guidance, not enforced as native Copilot CLI restrictions.
     - Prompt is passed via the ``-p <prompt>`` flag, not stdin.
     - No ``--output-last-message`` flag (Copilot reconstructs the assistant
       reply from the JSONL event stream).
@@ -86,6 +90,18 @@ class CopilotCliRuntime(CodexCliRuntime):
     _skills_package_uri = "packaged://ouroboros.copilot/skills"
     _process_shutdown_timeout_seconds = 5.0
     _max_resume_retries = 0  # Copilot CLI does not support session resumption
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        """Report Copilot CLI semantics without inheriting Codex degradations."""
+        return RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=False,
+            structured_output=False,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+            permission_mode_support=ParamSupport.NATIVE,
+        )
 
     def __init__(
         self,

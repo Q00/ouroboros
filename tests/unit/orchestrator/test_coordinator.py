@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
@@ -197,6 +202,11 @@ class _StubCoordinatorRuntime:
         self._runtime_handle_backend = "opencode"
         self._cwd = "/tmp/project"
         self._permission_mode = "acceptEdits"
+        self.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+        )
 
     @property
     def runtime_backend(self) -> str:
@@ -530,6 +540,36 @@ class TestParseReviewResponse:
 
 class TestRunReview:
     """Tests for LevelCoordinator.run_review()."""
+
+    @pytest.mark.asyncio
+    async def test_run_review_announces_param_degradation(self):
+        runtime = _StubCoordinatorRuntime(
+            (
+                AgentMessage(
+                    type="result",
+                    content='{"review_summary":"Reviewed","fixes_applied":[],"warnings_for_next_level":[],"conflicts_resolved":[]}',
+                    data={"subtype": "success"},
+                ),
+            )
+        )
+        runtime.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            system_prompt_support=ParamSupport.TRANSLATED,
+        )
+        coordinator = LevelCoordinator(runtime)
+
+        await coordinator.run_review(
+            execution_id="exec_degrade",
+            conflicts=[FileConflict(file_path="src/app.py", ac_indices=(0, 1))],
+            level_context=LevelContext(level_number=1, completed_acs=()),
+            level_number=1,
+        )
+
+        assert ("system_prompt", ParamSupport.TRANSLATED.value) in (
+            coordinator._announced_param_degradations
+        )
 
     @pytest.mark.asyncio
     async def test_run_review_uses_fresh_level_scoped_runtime_handle(self):

@@ -21,6 +21,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -693,6 +694,28 @@ class TaskResult:
     resume_handle: RuntimeHandle | None = None
 
 
+class ParamSupport(StrEnum):
+    """How a runtime honors a given execution parameter.
+
+    Used for observability only: the orchestrator surfaces non-``NATIVE``
+    handling so an operator can see when a parameter is not honored in the form
+    they supplied it. It does **not** change what is passed to the runtime.
+
+    Values:
+        NATIVE: The runtime honors the parameter directly (e.g. a separate
+            system-prompt field, a real tool allow-list, a permission flag).
+        TRANSLATED: The runtime honors it only through a lossy adaptation —
+            e.g. embedding the system prompt into the user message, or mapping
+            a permission mode onto coarser CLI flags. The intent is partially
+            preserved but the supplied form is not.
+        IGNORED: The runtime silently drops the parameter.
+    """
+
+    NATIVE = "native"
+    TRANSLATED = "translated"
+    IGNORED = "ignored"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
     """Declarative feature contract surfaced by an ``AgentRuntime``.
@@ -710,11 +733,23 @@ class RuntimeCapabilities:
         structured_output: Runtime emits structured JSONL events
             (tool calls, thread ids, per-item events). ``False`` means
             plain-text stdout lines only.
+        system_prompt_support: How the runtime honors the ``system_prompt``
+            execution parameter (see :class:`ParamSupport`).
+        tool_restriction_support: How the runtime honors the ``tools``
+            allow-list passed to ``execute_task``.
+        permission_mode_support: How the runtime honors ``permission_mode``.
+
+    The three ``*_support`` fields default to :attr:`ParamSupport.NATIVE` so
+    existing runtimes and ``FULL_CAPABILITIES`` are unchanged; a runtime opts in
+    to a non-native value only when its handling is demonstrably lossy.
     """
 
     skill_dispatch: bool
     targeted_resume: bool
     structured_output: bool
+    system_prompt_support: ParamSupport = ParamSupport.NATIVE
+    tool_restriction_support: ParamSupport = ParamSupport.NATIVE
+    permission_mode_support: ParamSupport = ParamSupport.NATIVE
 
 
 # Default capability profile for first-class backends (Claude, Codex).
@@ -1682,6 +1717,7 @@ __all__ = [
     "ClaudeCodeRuntime",
     "DEFAULT_TOOLS",
     "FULL_CAPABILITIES",
+    "ParamSupport",
     "RuntimeCapabilities",
     "RuntimeHandle",
     "SkillDispatchHandler",

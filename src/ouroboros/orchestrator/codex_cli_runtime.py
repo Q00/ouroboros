@@ -33,7 +33,10 @@ from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    FULL_CAPABILITIES,
     AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
@@ -137,6 +140,17 @@ class CodexCliRuntime:
     @property
     def runtime_backend(self) -> str:
         return self._runtime_handle_backend
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        # Codex composes the system prompt and tool guidance into the user
+        # message rather than passing native runtime parameters; surface those
+        # as TRANSLATED while preserving the default feature flags.
+        return replace(
+            FULL_CAPABILITIES,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+        )
 
     @property
     def llm_backend(self) -> str | None:

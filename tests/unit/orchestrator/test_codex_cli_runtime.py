@@ -16,7 +16,7 @@ from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.router import Resolved, ResolveRequest
@@ -24,6 +24,13 @@ from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatch
 
 _EXPECTED_CODEX_PATH = str(Path("/usr/local/bin/codex"))
 _EXPECTED_PROJECT_CWD = str(Path("/tmp/project"))
+
+
+def test_capabilities_report_prompt_only_tool_restrictions_as_translated() -> None:
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
+    assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
 
 class _FakeStream:

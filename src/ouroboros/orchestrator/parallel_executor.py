@@ -116,6 +116,9 @@ from ouroboros.orchestrator.rate_limit import (
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
+from ouroboros.orchestrator.runtime_param_negotiation import (
+    announce_execution_param_degradations,
+)
 from ouroboros.orchestrator.verifier import (
     Verifier,
     VerifierContractError,
@@ -2470,6 +2473,9 @@ class ParallelACExecutor:
         self._checkpoint_store = checkpoint_store
         self._execution_counters_lock = asyncio.Lock()
         self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
+        # Param degradations already surfaced this run, keyed by (param, support),
+        # so the operator is told once rather than on every dispatch.
+        self._announced_param_degradations: set[tuple[str, str]] = set()
 
     @staticmethod
     def _build_dispatch_rate_gate(adapter: AgentRuntime) -> RateLimitGate:
@@ -2528,6 +2534,27 @@ class ParallelACExecutor:
             )
 
         await self._dispatch_rate_gate.acquire(estimated_tokens, on_backoff=_log_backoff)
+
+    def _announce_param_degradations(
+        self,
+        *,
+        system_prompt: str | None,
+        tools: list[str] | None,
+    ) -> None:
+        """Surface (once per run) execution params the runtime won't honor natively.
+
+        Observability only — nothing here changes what is passed to the runtime.
+        It makes previously silent degradation (e.g. a CLI runtime folding the
+        system prompt into the user message) visible in logs and the console.
+        """
+        announce_execution_param_degradations(
+            self._adapter,
+            system_prompt=system_prompt,
+            tools=tools,
+            announced=self._announced_param_degradations,
+            console=self._console,
+            log_event="orchestrator.parallel_executor.param_degraded",
+        )
 
     def _flush_console(self) -> None:
         """Flush console output to ensure progress is visible immediately."""
@@ -4670,6 +4697,10 @@ Each Sub-AC should be:
 Respond with either "ATOMIC" or the JSON array only, nothing else.
 """
 
+        self._announce_param_degradations(
+            system_prompt=decomposition_system_prompt,
+            tools=[],
+        )
         # Pace this backend request within the shared budget before starting the
         # decomposition timeout, so rate-limit waiting never eats into it.
         await self._await_dispatch_rate_budget(
@@ -5439,6 +5470,7 @@ Files present:
         exec_start = time.monotonic()
 
         await self._wait_for_memory(label)
+        self._announce_param_degradations(system_prompt=system_prompt, tools=tools)
         # Pace delivery within the backend's shared rate budget (dormant unless
         # an RPM/TPM is configured for this backend) before the stall-scoped run.
         await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)

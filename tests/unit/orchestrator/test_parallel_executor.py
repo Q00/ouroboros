@@ -14,7 +14,13 @@ import pytest
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    FULL_CAPABILITIES,
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
@@ -10113,3 +10119,132 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
         "Sub-AC 2: write a focused regression test",
         "Sub-AC 3: document the result",
     ]
+
+
+@pytest.mark.asyncio
+async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatches() -> None:
+    class _CapturingRuntime:
+        runtime_backend = "codex_cli"
+        capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+        )
+
+        def __init__(self) -> None:
+            self.dispatched_tools: list[str] | None = None
+
+        async def execute_task(
+            self,
+            prompt: str,
+            tools: list[str] | None = None,
+            system_prompt: str | None = None,
+            resume_handle: RuntimeHandle | None = None,
+            resume_session_id: str | None = None,
+        ):
+            del prompt, system_prompt, resume_handle, resume_session_id
+            self.dispatched_tools = tools
+            yield AgentMessage(type="assistant", content='["Sub-AC 1: inspect", "Sub-AC 2: test"]')
+
+    runtime = _CapturingRuntime()
+    console = MagicMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=console,
+        enable_decomposition=True,
+    )
+
+    result = await executor._try_decompose_ac(
+        ac_content="Investigate and test sub-AC behavior.",
+        ac_index=0,
+        seed_goal="Verify decomposition tool handling",
+        tools=["Read"],
+        system_prompt="system",
+    )
+
+    assert result == ["Sub-AC 1: inspect", "Sub-AC 2: test"]
+    assert runtime.dispatched_tools == []
+    console.print.assert_called_once()
+    notice = console.print.call_args.args[0]
+    assert "tools" in notice
+    assert "ignored" in notice
+
+
+class _ParamCapsStubAdapter:
+    """Minimal adapter exposing the attributes the param-degradation hook reads."""
+
+    def __init__(self, capabilities: RuntimeCapabilities) -> None:
+        self.capabilities = capabilities
+        self.runtime_backend = "hermes_cli"
+        self.permission_mode = "acceptEdits"
+        self.working_directory = "/workspace"
+
+
+def _make_param_executor(capabilities: RuntimeCapabilities) -> ParallelACExecutor:
+    return ParallelACExecutor(
+        adapter=_ParamCapsStubAdapter(capabilities),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+
+class TestParamDegradationNotice:
+    """The executor surfaces non-native param handling once per run."""
+
+    def test_translated_system_prompt_surfaces_one_notice(self) -> None:
+        caps = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            system_prompt_support=ParamSupport.TRANSLATED,
+        )
+        executor = _make_param_executor(caps)
+
+        # Two dispatches with the same degraded param → surfaced once (deduped).
+        executor._announce_param_degradations(system_prompt="be terse", tools=None)
+        executor._announce_param_degradations(system_prompt="be terse", tools=None)
+
+        assert executor._console.print.call_count == 1
+        notice = executor._console.print.call_args.args[0]
+        assert "system_prompt" in notice
+        assert "hermes_cli" in notice
+
+    def test_all_native_adapter_is_silent(self) -> None:
+        executor = _make_param_executor(FULL_CAPABILITIES)
+
+        executor._announce_param_degradations(system_prompt="be terse", tools=["Read"])
+
+        executor._console.print.assert_not_called()
+
+    def test_absent_system_prompt_produces_no_notice(self) -> None:
+        caps = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            system_prompt_support=ParamSupport.TRANSLATED,
+        )
+        executor = _make_param_executor(caps)
+
+        executor._announce_param_degradations(system_prompt=None, tools=None)
+
+        executor._console.print.assert_not_called()
+
+    def test_empty_tools_allowlist_surfaces_one_notice(self) -> None:
+        caps = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+        )
+        executor = _make_param_executor(caps)
+
+        executor._announce_param_degradations(system_prompt=None, tools=[])
+        executor._announce_param_degradations(system_prompt=None, tools=[])
+
+        assert executor._console.print.call_count == 1
+        notice = executor._console.print.call_args.args[0]
+        assert "tools" in notice
+        assert "ignored" in notice

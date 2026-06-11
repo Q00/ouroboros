@@ -37,7 +37,10 @@ from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    FULL_CAPABILITIES,
     AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
@@ -163,6 +166,7 @@ class OpenCodeRuntime:
                 MCP tool handlers.
         """
         self._cli_path = self._resolve_cli_path(cli_path)
+        self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode or "bypassPermissions"
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -192,6 +196,18 @@ class OpenCodeRuntime:
         return self._runtime_handle_backend
 
     @property
+    def capabilities(self) -> RuntimeCapabilities:
+        # OpenCode composes the system prompt and tool guidance into the user
+        # message rather than passing native runtime parameters; surface those
+        # as TRANSLATED while preserving the default feature flags.
+        return replace(
+            FULL_CAPABILITIES,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+            permission_mode_support=ParamSupport.IGNORED,
+        )
+
+    @property
     def llm_backend(self) -> str | None:
         return self._llm_backend
 
@@ -212,6 +228,11 @@ class OpenCodeRuntime:
             Permission mode string (e.g. ``"bypassPermissions"``).
         """
         return self._permission_mode
+
+    @property
+    def permission_mode_requested(self) -> bool:
+        """Return whether permission mode was supplied by the caller."""
+        return self._permission_mode_requested
 
     # -- CLI resolution ----------------------------------------------------
 

@@ -24,7 +24,12 @@ from typing import Any
 import structlog
 
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeCapabilities, RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 
@@ -272,6 +277,12 @@ class GeminiCLIRuntime(CodexCliRuntime):
             skill_dispatch=True,
             targeted_resume=False,
             structured_output=True,
+            # System prompt is composed into the user message (inherited Codex
+            # prompt builder), not passed as a native system directive. The
+            # inherited builder also renders requested tool lists as prompt
+            # guidance rather than enforcing a Gemini-native allow-list.
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
         )
 
     # -- Event parsing and normalization -----------------------------------

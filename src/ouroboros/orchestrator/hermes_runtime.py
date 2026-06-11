@@ -25,8 +25,11 @@ from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
+    FULL_CAPABILITIES,
     AgentMessage,
     AgentRuntime,
+    ParamSupport,
+    RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
@@ -179,6 +182,7 @@ class HermesCliRuntime(AgentRuntime):
         stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
+        self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode or "default"
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -220,12 +224,29 @@ class HermesCliRuntime(AgentRuntime):
         return self._runtime_handle_backend
 
     @property
+    def capabilities(self) -> RuntimeCapabilities:
+        # Hermes composes the system prompt and tool guidance into the user
+        # message rather than passing native runtime parameters, and hermes chat
+        # has no permission-mode flag. Surface both truthfully for degradation
+        # notices.
+        return replace(
+            FULL_CAPABILITIES,
+            system_prompt_support=ParamSupport.TRANSLATED,
+            tool_restriction_support=ParamSupport.TRANSLATED,
+            permission_mode_support=ParamSupport.IGNORED,
+        )
+
+    @property
     def working_directory(self) -> str | None:
         return self._cwd
 
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def permission_mode_requested(self) -> bool:
+        return self._permission_mode_requested
 
     @property
     def llm_backend(self) -> str | None:

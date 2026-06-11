@@ -21,6 +21,7 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    ParamSupport,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
@@ -45,6 +46,11 @@ _KIRO_CAPABILITIES = RuntimeCapabilities(
     skill_dispatch=True,
     targeted_resume=False,
     structured_output=False,
+    # System prompt is wrapped into the prompt as <system>...</system>, and
+    # permission_mode is mapped onto coarse --trust-* flags — both lossy
+    # adaptations rather than native handling.
+    system_prompt_support=ParamSupport.TRANSLATED,
+    permission_mode_support=ParamSupport.TRANSLATED,
 )
 
 log = get_logger(__name__)
@@ -146,6 +152,7 @@ class KiroAgentAdapter:
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._model = model
+        self._permission_mode_requested = permission_mode is not None
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._permission_mode = permission_mode or "acceptEdits"
         self._skill_dispatcher = skill_dispatcher
@@ -176,6 +183,10 @@ class KiroAgentAdapter:
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def permission_mode_requested(self) -> bool:
+        return self._permission_mode_requested
 
     @property
     def llm_backend(self) -> str | None:
