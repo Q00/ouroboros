@@ -161,13 +161,14 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     )
     _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
     assert "ouroboros setup --runtime claude --non-interactive" in calls
-
     mcp_config = json.loads(
         (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
     )
     assert mcp_config["mcpServers"]["ouroboros"] == {
         "command": "uvx",
         "args": [
+            "--python",
+            ">=3.12",
             "--from",
             "ouroboros-ai[mcp,claude]",
             "ouroboros",
