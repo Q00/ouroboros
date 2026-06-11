@@ -156,7 +156,7 @@ def show(
 def backend(
     new_backend: Annotated[
         str | None,
-        typer.Argument(help="Backend to switch to (claude, codex, hermes, gemini, goose)."),
+        typer.Argument(help="Backend to switch to (claude, codex, hermes, gemini, gjc, goose)."),
     ] = None,
 ) -> None:
     """Show or switch the runtime backend.
@@ -172,6 +172,7 @@ def backend(
     [dim]    ouroboros config backend claude    # switch to Claude Code[/dim]
     [dim]    ouroboros config backend hermes    # switch to Hermes[/dim]
     [dim]    ouroboros config backend gemini    # switch to Gemini CLI[/dim]
+    [dim]    ouroboros config backend gjc       # switch to GJC[/dim]
     [dim]    ouroboros config backend goose     # switch to Goose[/dim]
     """
     data, config_path = _load_config()
@@ -184,7 +185,7 @@ def backend(
         if cli_path:
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
         console.print(
-            "\n[dim]Switch with: ouroboros config backend <claude|codex|hermes|gemini|goose>[/dim]\n"
+            "\n[dim]Switch with: ouroboros config backend <claude|codex|hermes|gemini|gjc|goose>[/dim]\n"
         )
         return
 
@@ -216,6 +217,10 @@ def backend(
         from ouroboros.config import get_goose_cli_path
 
         cli_path = get_goose_cli_path()
+    elif new_backend == "gjc":
+        from ouroboros.config import get_gjc_cli_path
+
+        cli_path = get_gjc_cli_path()
     if not cli_path:
         cli_path = shutil.which(cli_name)
     if not cli_path:
@@ -230,6 +235,12 @@ def backend(
                 "goose CLI not found.\n"
                 "Set OUROBOROS_GOOSE_CLI_PATH, configure orchestrator.goose_cli_path "
                 "in config.yaml, or install goose on PATH and retry."
+            )
+        elif new_backend == "gjc":
+            print_error(
+                "gjc CLI not found.\n"
+                "Set OUROBOROS_GJC_CLI_PATH, configure orchestrator.gjc_cli_path "
+                "in config.yaml, or install gjc on PATH and retry."
             )
         else:
             print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")

@@ -135,7 +135,7 @@ This means:
 `ouroboros setup --runtime gjc` also installs a managed GJC bridge extension:
 
 ```text
-<agent-dir>/extensions/ouroboros-ooo-bridge.ts
+<agent-dir>/extensions/ouroboros-ooo-bridge/index.ts
 ```
 
 After GJC loads that extension, interactive GJC sessions can type:
@@ -254,4 +254,4 @@ rejected by Ouroboros after extraction and validation.
 
 **`ooo ...` is sent to the model as ordinary chat inside GJC**
 Run `ouroboros setup --runtime gjc`, then restart or reload GJC. Confirm that
-`<agent-dir>/extensions/ouroboros-ooo-bridge.ts` exists.
+`<agent-dir>/extensions/ouroboros-ooo-bridge/index.ts` exists.

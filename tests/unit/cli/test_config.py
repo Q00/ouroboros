@@ -188,6 +188,19 @@ class TestConfigBackend:
         assert result.exit_code == 0
         mock_setup.assert_called_once_with("/usr/bin/gjc")
 
+    def test_switch_to_gjc_honors_configured_cli_path(self, config_dir: Path) -> None:
+        """config backend gjc should honor explicit env/config path helpers."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.get_gjc_cli_path", return_value="/opt/gjc/bin/gjc"),
+            patch("shutil.which", return_value=None),
+            patch("ouroboros.cli.commands.setup._setup_gjc") as mock_setup,
+        ):
+            result = runner.invoke(app, ["backend", "gjc"])
+
+        assert result.exit_code == 0
+        mock_setup.assert_called_once_with("/opt/gjc/bin/gjc")
+
     def test_switch_to_goose_honors_configured_cli_path(self, config_dir: Path) -> None:
         """config backend goose should honor explicit env/config path helpers."""
         with (
