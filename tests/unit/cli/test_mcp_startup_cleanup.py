@@ -91,6 +91,7 @@ class TestMCPStartupAutoCleanup:
         mock_server = MagicMock()
         mock_server.info.tools = []
         mock_server.serve = AsyncMock()
+        mock_server.shutdown = AsyncMock()
 
         return mock_event_store, mock_repo, mock_server
 
@@ -125,6 +126,39 @@ class TestMCPStartupAutoCleanup:
         mock_repo.cancel_orphaned_sessions.assert_called_once()
         mock_es.initialize.assert_awaited_once()
         mock_server.serve.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_routes_through_server_shutdown(self) -> None:
+        """Teardown must drain adapter-owned resources via ``server.shutdown()``
+        (ControlBus → stores → bridge), not close the stores directly — so
+        control-bus subscriber tasks are drained and the bridge is closed in
+        the documented order."""
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+
+        async def serve_side_effect(*args, **kwargs) -> None:
+            await asyncio.sleep(0)
+
+        mock_server.serve.side_effect = serve_side_effect
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        mock_server.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_startup_does_not_wait_for_background_cleanup(self) -> None:
@@ -321,6 +355,38 @@ class TestMCPStartupAutoCleanup:
         assert cleanup_started.is_set()
         assert cleanup_cancelled.is_set()
         mock_server.serve.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_serve_failure_propagates_after_cleanup(self) -> None:
+        """A serve-loop failure (e.g. bind/listen error) must surface to the CLI
+        instead of being swallowed as a clean shutdown, while persistent stores
+        are still released. Regression for the lifecycle wrapper that awaited the
+        serve task under ``contextlib.suppress(Exception)``."""
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+        mock_server.serve = AsyncMock(side_effect=OSError("address already in use"))
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            with pytest.raises(OSError, match="address already in use"):
+                await _run_mcp_server("localhost", 8080, "stdio")
+
+        # Cleanup still ran despite the failure: adapter shutdown owns store
+        # closure, so the WAL checkpoint path is reached even when serve fails.
+        mock_server.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_event_store_init_failure_aborts_startup(self) -> None:

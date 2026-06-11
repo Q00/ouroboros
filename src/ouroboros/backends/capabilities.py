@@ -8,7 +8,9 @@ sets.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,12 +35,40 @@ class BackendCapability:
     cli_config_key: str | None = None
     soft_tool_enforcement: bool = False
     supports_tool_envelope: bool = True
+    supports_native_parallel_subagents: bool = False
     skill_execution_capabilities: tuple[SkillExecutionCapability, ...] = ()
 
     @property
     def names(self) -> tuple[str, ...]:
         """Canonical name plus accepted aliases."""
         return (self.name, *self.aliases)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSubagentOrchestrationContract:
+    """Runtime handling contract for MCP subagent directive metadata."""
+
+    backend_name: str
+    supports_native_parallel_subagents: bool
+    dispatch_mode: str
+    mcp_directive_keys: tuple[str, ...]
+    sequential_fallback: Mapping[str, Any]
+    runtime_instruction_handling: str
+    callable_mcp_tool_capabilities: tuple[Mapping[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the contract for runtime envelopes and tests."""
+        return {
+            "backend_name": self.backend_name,
+            "supports_native_parallel_subagents": self.supports_native_parallel_subagents,
+            "dispatch_mode": self.dispatch_mode,
+            "mcp_directive_keys": list(self.mcp_directive_keys),
+            "sequential_fallback": dict(self.sequential_fallback),
+            "runtime_instruction_handling": self.runtime_instruction_handling,
+            "callable_mcp_tool_capabilities": [
+                dict(capability) for capability in self.callable_mcp_tool_capabilities
+            ],
+        }
 
 
 _CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
@@ -170,6 +200,19 @@ _GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
     ),
 )
 
+_OPENCODE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
+    *_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    SkillExecutionCapability(
+        name="orchestrate_subagents",
+        guidance=(
+            "Use OpenCode's native task/subagent primitive for parallel-capable "
+            "Ouroboros subagent fan-out, including `_subagent` and `_subagents` "
+            "MCP directive payloads. Preserve the sequential fallback described "
+            "by the MCP capability metadata when native parallel dispatch is unavailable."
+        ),
+    ),
+)
+
 _CAPABILITIES: tuple[BackendCapability, ...] = (
     BackendCapability(
         name="claude",
@@ -245,8 +288,9 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_interview_driver=True,
         cli_name="opencode",
         cli_config_key="opencode_cli_path",
-        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+        skill_execution_capabilities=_OPENCODE_SKILL_EXECUTION_CAPABILITIES,
         soft_tool_enforcement=True,
+        supports_native_parallel_subagents=True,
     ),
     BackendCapability(
         name="goose",
@@ -265,6 +309,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         supports_runtime=True,
         supports_llm=True,
         supports_interview_driver=True,
+        switchable_runtime=True,
         cli_name="pi",
         cli_config_key="pi_cli_path",
         supports_tool_envelope=False,
@@ -304,6 +349,78 @@ def render_backend_skill_capability_guide(name: str) -> str:
             )
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def build_runtime_subagent_orchestration_contract(
+    name: str,
+    *,
+    directive_metadata: Mapping[str, Any],
+    opencode_mode: str | None = None,
+    callable_mcp_tool_capabilities: Sequence[Mapping[str, Any]] = (),
+) -> RuntimeSubagentOrchestrationContract:
+    """Build runtime-specific handling metadata for MCP subagent directives.
+
+    ``directive_metadata`` is the explicit MCP-side orchestration metadata from
+    owned Ouroboros tools, such as the lateral panel contract. Runtime support
+    determines whether native parallel subagent dispatch can be used or whether
+    the declared sequential fallback must be followed.
+    """
+    capability = get_backend_capability(name)
+    if capability is None:
+        msg = f"Unsupported backend: {name.strip().lower()}"
+        raise ValueError(msg)
+
+    sequential_fallback = directive_metadata.get("sequential_fallback", {})
+    if not isinstance(sequential_fallback, Mapping):
+        sequential_fallback = {}
+
+    native_parallel_available = _supports_native_parallel_subagent_surface(
+        capability,
+        opencode_mode=opencode_mode,
+    )
+
+    if native_parallel_available:
+        dispatch_mode = "native_parallel_subagents"
+        runtime_instruction_handling = (
+            "Consume MCP `_subagent` or `_subagents` directive payloads with the "
+            "runtime's native parallel subagent primitive. For OpenCode this "
+            "requires the plugin surface (`opencode_mode=plugin`). Keep the "
+            "MCP-declared sequential fallback available for downgraded runtime "
+            "surfaces."
+        )
+    else:
+        dispatch_mode = "sequential_fallback"
+        runtime_instruction_handling = (
+            "This runtime has no native parallel subagent primitive. Follow the "
+            "MCP `sequential_fallback` contract and process each structured "
+            "subagent payload sequentially, preserving the response correlation "
+            "keys declared by the directive metadata."
+        )
+
+    return RuntimeSubagentOrchestrationContract(
+        backend_name=capability.name,
+        supports_native_parallel_subagents=native_parallel_available,
+        dispatch_mode=dispatch_mode,
+        mcp_directive_keys=("_subagent", "_subagents"),
+        sequential_fallback=dict(sequential_fallback),
+        runtime_instruction_handling=runtime_instruction_handling,
+        callable_mcp_tool_capabilities=tuple(
+            dict(capability) for capability in callable_mcp_tool_capabilities
+        ),
+    )
+
+
+def _supports_native_parallel_subagent_surface(
+    capability: BackendCapability,
+    *,
+    opencode_mode: str | None,
+) -> bool:
+    """Return whether the current backend surface has a native subagent receiver."""
+    if not capability.supports_native_parallel_subagents:
+        return False
+    if capability.name != "opencode":
+        return True
+    return (opencode_mode or "").strip().lower() == "plugin"
 
 
 def get_backend_capability(name: str) -> BackendCapability | None:
@@ -385,8 +502,10 @@ def backend_supports_tool_envelope(name: str | None) -> bool:
 
 __all__ = [
     "BackendCapability",
+    "RuntimeSubagentOrchestrationContract",
     "SkillExecutionCapability",
     "backend_supports_tool_envelope",
+    "build_runtime_subagent_orchestration_contract",
     "get_backend_capability",
     "interview_driver_backend_choices",
     "llm_backend_choices",

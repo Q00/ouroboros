@@ -6,10 +6,12 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from enum import Enum
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 from typing import Annotated
@@ -322,17 +324,124 @@ async def _run_mcp_server(
 
     _write_pid_file()
 
-    # Start serving
+    # Start serving with graceful shutdown + orphan reaping.
+    #
+    # asyncio.run() only translates SIGINT into KeyboardInterrupt; an unhandled
+    # SIGTERM would terminate the process immediately and skip the finally block
+    # below — leaking the PID file and, more importantly, skipping the
+    # EventStore.close() WAL TRUNCATE checkpoint (the -wal file then grows
+    # unbounded across many concurrent sessions). Install explicit handlers and
+    # race the serve task against a stop Event so every shutdown path is clean.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_stop(signame: str) -> None:
+        _console_out.print(f"[blue]Received {signame}, shutting down...[/blue]")
+        stop.set()
+
+    # Resolve signals by name: SIGHUP is POSIX-only, so referencing
+    # ``signal.SIGHUP`` directly would raise AttributeError while *building* the
+    # loop iterable on Windows — before the suppress() below could catch it.
+    # getattr keeps SIGHUP on POSIX and skips it where the constant is absent.
+    for _signame in ("SIGTERM", "SIGINT", "SIGHUP"):
+        _sig = getattr(signal, _signame, None)
+        if _sig is None:
+            continue
+        # add_signal_handler is unavailable on some event loops (e.g. the
+        # Windows Proactor loop); fall back silently — KeyboardInterrupt still
+        # covers SIGINT there.
+        with contextlib.suppress(NotImplementedError, ValueError, RuntimeError):
+            loop.add_signal_handler(_sig, _request_stop, _sig.name)
+
+    # Parent-death watchdog: when the MCP client that spawned us dies, this
+    # process is reparented away from its original parent so a vanished client
+    # never leaves an orphaned server pinning the SQLite database (the
+    # streamable-http case in particular has no stdin EOF to rely on). macOS
+    # lacks Linux's PR_SET_PDEATHSIG, so we poll getppid() — a POSIX best-effort
+    # backstop. We compare against the *original* ppid rather than testing
+    # ``== 1`` so detection still fires under a child-subreaper (systemd --user,
+    # tini, some container runtimes) where the orphan reparents to the subreaper
+    # rather than to pid 1. Skipped when launched already-detached on purpose
+    # (orig_ppid is already 1, e.g. a real launchd/systemd service). Not
+    # effective on Windows (no reparent-on-death model); SIGINT/stdin EOF cover
+    # the common cases there.
+    orig_ppid = os.getppid()
+
+    async def _orphan_watchdog() -> None:
+        if orig_ppid == 1:
+            return
+        while not stop.is_set():
+            if os.getppid() != orig_ppid:
+                _console_out.print("[yellow]Parent client gone — orphan exit[/yellow]")
+                stop.set()
+                return
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=5.0)
+
+    serve_task = asyncio.create_task(
+        server.serve(transport=transport, host=host, port=port),
+        name="ouroboros-mcp-serve",
+    )
+    stop_task = asyncio.create_task(stop.wait(), name="ouroboros-mcp-stop")
+    watchdog_task = asyncio.create_task(_orphan_watchdog(), name="ouroboros-mcp-watchdog")
+
+    serve_exc: BaseException | None = None
     try:
-        await server.serve(transport=transport, host=host, port=port)
+        await asyncio.wait(
+            {serve_task, stop_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # When the serve loop itself is what finished (rather than a stop
+        # signal), preserve any failure it raised. asyncio.wait() leaves the
+        # exception parked on the task, so a bind/listen/runtime error from
+        # server.serve() would otherwise be discarded by the suppressing
+        # cleanup below and reported as a clean shutdown. A normal serve return
+        # or a stop-driven shutdown leaves serve_exc None.
+        if serve_task.done() and not serve_task.cancelled():
+            serve_exc = serve_task.exception()
     finally:
+        # Runs for SIGTERM, orphan-exit and KeyboardInterrupt too, so
+        # EventStore.close() always gets to collapse the WAL. Cancel the serve
+        # loop and helpers, then release the persistent stores in reverse init
+        # order. Draining under suppress() guarantees cleanup is never skipped;
+        # the genuine serve-loop outcome is re-inspected afterwards.
+        for _task in (serve_task, watchdog_task, stop_task):
+            if not _task.done():
+                _task.cancel()
+        for _task in (serve_task, watchdog_task, stop_task):
+            with contextlib.suppress(BaseException):
+                await _task
         if cleanup_task is not None and not cleanup_task.done():
             cleanup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await cleanup_task
-            except asyncio.CancelledError:
-                pass
+        # Route teardown through the adapter so its owned resources close in the
+        # documented order: the ControlBus reactive surface is drained first
+        # (cancelling subscriber tasks), then the EventStore (whose close()
+        # collapses the WAL) and BrownfieldStore, then the MCP bridge. Closing
+        # the stores directly here would bypass that contract and leave
+        # control-bus tasks and upstream bridge connections dangling. Best
+        # effort — a drain/close failure is already logged inside shutdown();
+        # never let it escape the cleanup path.
+        with contextlib.suppress(Exception):
+            await server.shutdown()
         _cleanup_pid_file()
+        # Surface an abnormal serve-loop termination. A cancellation is the
+        # intended shutdown path (SIGTERM/orphan-exit/stdin EOF), but any other
+        # exception means the transport loop itself crashed — re-raise it after
+        # cleanup so the command exits non-zero with a trace instead of a silent
+        # exit 0 that would hide exactly the failure class this server must report.
+        if not serve_task.cancelled():
+            serve_exc = serve_task.exception()
+            if serve_exc is not None:
+                raise serve_exc
+
+    # Surface a serve-loop failure only after cleanup has collapsed the WAL and
+    # released the stores. This restores the error-propagation contract of the
+    # prior ``await server.serve(...)`` so ``ouroboros mcp serve`` exits non-zero
+    # on startup/runtime failures instead of reporting a clean stop.
+    if serve_exc is not None:
+        raise serve_exc
 
 
 @app.command()

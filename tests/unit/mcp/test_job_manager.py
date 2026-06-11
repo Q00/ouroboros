@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+import os
 from unittest.mock import AsyncMock, patch
 
 from ouroboros.core.types import Result
@@ -4319,5 +4320,224 @@ class TestJobManager:
             assert terminal_recovered.status == JobStatus.COMPLETED
         finally:
             gate.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+
+class TestZombieJobReconciliation:
+    """Reconcile non-terminal jobs whose owning process is provably gone.
+
+    Closes the R-zombie gap: a job stuck in RUNNING/QUEUED whose owner crashed
+    (with no recoverable linked-execution evidence) must not report RUNNING
+    forever. Authoritative liveness uses the recorded owner PID + start time.
+    """
+
+    async def _seed_running_job(
+        self,
+        store: EventStore,
+        job_id: str,
+        *,
+        owner_pid: int | None,
+        owner_start_time: float | None,
+        session_id: str | None = None,
+    ) -> None:
+        writer = JobManager(store)
+        data: dict = {
+            "job_type": "execute_seed",
+            "status": JobStatus.RUNNING.value,
+            "message": "Running execute_seed",
+            "links": {"session_id": session_id, "execution_id": None, "lineage_id": None},
+        }
+        if owner_pid is not None:
+            data["owner_pid"] = owner_pid
+            data["owner_start_time"] = owner_start_time
+        await writer._append_event("mcp.job.created", job_id, data)
+
+    async def test_running_job_reconciled_to_interrupted_when_owner_dead(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store, "job_zombie", owner_pid=4_242_424, owner_start_time=111.0
+            )
+            restarted = JobManager(store)
+
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+                snapshot = await restarted.get_snapshot("job_zombie")
+
+            assert snapshot.status is JobStatus.INTERRUPTED
+            assert snapshot.result_meta["interrupted_from_dead_owner"] is True
+            assert snapshot.is_terminal is True
+            events, _ = await store.get_events_after("job", "job_zombie", last_row_id=0)
+            assert [event.type for event in events] == [
+                "mcp.job.created",
+                "mcp.job.interrupted",
+            ]
+        finally:
+            await store.close()
+
+    async def test_running_job_not_reconciled_when_owner_alive(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store, "job_live", owner_pid=4_242_424, owner_start_time=111.0
+            )
+            restarted = JobManager(store)
+
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=True):
+                snapshot = await restarted.get_snapshot("job_live")
+
+            assert snapshot.status is JobStatus.RUNNING
+            events, _ = await store.get_events_after("job", "job_live", last_row_id=0)
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    async def test_running_job_not_reconciled_when_linked_session_still_alive(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store,
+                "job_linked_live",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id="orch_live",
+            )
+            restarted = JobManager(store)
+
+            # Owner MCP process is gone, but the linked session runtime still
+            # holds a live heartbeat lock — it remains the progress authority,
+            # so the job must not be terminalized.
+            with (
+                patch.object(job_manager_module, "is_process_identity_alive", return_value=False),
+                patch.object(job_manager_module, "is_holder_alive", return_value=True) as holder,
+            ):
+                snapshot = await restarted.get_snapshot("job_linked_live")
+
+            holder.assert_any_call("orch_live")
+            assert snapshot.status is JobStatus.RUNNING
+            assert snapshot.is_terminal is False
+            events, _ = await store.get_events_after("job", "job_linked_live", last_row_id=0)
+            # Nothing persisted — the live linked session must be able to finish.
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    async def test_dead_owner_with_dead_linked_session_is_reconciled(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store,
+                "job_linked_dead",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id="orch_dead",
+            )
+            restarted = JobManager(store)
+
+            # Owner gone AND no live linked holder → genuinely orphaned, so the
+            # session-liveness guard must not suppress reconciliation.
+            with (
+                patch.object(job_manager_module, "is_process_identity_alive", return_value=False),
+                patch.object(job_manager_module, "is_holder_alive", return_value=False),
+            ):
+                snapshot = await restarted.get_snapshot("job_linked_dead")
+
+            assert snapshot.status is JobStatus.INTERRUPTED
+            assert snapshot.result_meta["interrupted_from_dead_owner"] is True
+            events, _ = await store.get_events_after("job", "job_linked_dead", last_row_id=0)
+            assert [event.type for event in events] == [
+                "mcp.job.created",
+                "mcp.job.interrupted",
+            ]
+        finally:
+            await store.close()
+
+    async def test_legacy_job_without_owner_identity_is_not_reconciled(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(store, "job_legacy", owner_pid=None, owner_start_time=None)
+            restarted = JobManager(store)
+
+            with patch.object(
+                job_manager_module, "is_process_identity_alive", return_value=False
+            ) as alive:
+                snapshot = await restarted.get_snapshot("job_legacy")
+
+            # Owner identity unknown → conservative: never consult liveness, never reconcile.
+            alive.assert_not_called()
+            assert snapshot.status is JobStatus.RUNNING
+            events, _ = await store.get_events_after("job", "job_legacy", last_row_id=0)
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    async def test_reconciliation_is_idempotent(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store, "job_idem", owner_pid=4_242_424, owner_start_time=111.0
+            )
+            restarted = JobManager(store)
+
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+                first = await restarted.get_snapshot("job_idem")
+                second = await restarted.get_snapshot("job_idem")
+
+            assert first.status is JobStatus.INTERRUPTED
+            assert second.status is JobStatus.INTERRUPTED
+            events, _ = await store.get_events_after("job", "job_idem", last_row_id=0)
+            # Exactly one synthetic terminal event — no duplicates on re-read.
+            assert [event.type for event in events] == [
+                "mcp.job.created",
+                "mcp.job.interrupted",
+            ]
+        finally:
+            await store.close()
+
+    async def test_read_only_store_projects_interrupted_without_persisting(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store, "job_ro", owner_pid=4_242_424, owner_start_time=111.0
+            )
+            restarted = JobManager(store)
+            await restarted._ensure_initialized()
+            store._read_only = True
+
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+                snapshot = await restarted.get_snapshot("job_ro")
+
+            assert snapshot.status is JobStatus.INTERRUPTED
+            assert snapshot.result_meta["interrupted_from_dead_owner"] is True
+            store._read_only = False
+            events, _ = await store.get_events_after("job", "job_ro", last_row_id=0)
+            # Projection only — nothing persisted on a read-only store.
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    async def test_start_job_records_owning_process_identity(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        try:
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
+                )
+
+            started = await manager.start_job(
+                job_type="qa", initial_message="Running qa", runner=_runner()
+            )
+            await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
+
+            events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
+            created = events[0]
+            assert created.type == "mcp.job.created"
+            assert created.data["owner_pid"] == os.getpid()
+            assert "owner_start_time" in created.data
+        finally:
             await _cancel_manager_tasks(manager)
             await store.close()

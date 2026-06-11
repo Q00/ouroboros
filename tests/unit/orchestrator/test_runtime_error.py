@@ -1,9 +1,8 @@
 """Unit tests for runtime subprocess-failure classification.
 
 These cover the typed-error contract that lets the orchestrator's recoverable-
-failure classifier recognize provider usage-limit windows surfaced by CLI
-runtimes (hermes, gemini-cli, ...) as a non-zero process exit plus free-form
-text. See ``docs/rca-june-2026.md`` (P0).
+failure classifier recognize provider usage-limit windows surfaced by Hermes as
+a non-zero process exit plus free-form text.
 """
 
 from __future__ import annotations

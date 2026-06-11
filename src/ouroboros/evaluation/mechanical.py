@@ -12,6 +12,7 @@ The MechanicalVerifier is stateless and produces immutable results.
 
 import asyncio
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,29 @@ from ouroboros.events.evaluation import (
     create_stage1_completed_event,
     create_stage1_started_event,
 )
+
+_COMMAND_OUTPUT_PREVIEW_CHARS = 500
+
+
+def _output_preview(text: str) -> str:
+    """Return a compact preview from the leading portion of command output.
+
+    The diagnostically useful tail is captured separately by ``_output_tail``.
+    """
+    if not text:
+        return ""
+    if len(text) <= _COMMAND_OUTPUT_PREVIEW_CHARS:
+        return text
+    return text[:_COMMAND_OUTPUT_PREVIEW_CHARS]
+
+
+def _output_tail(text: str) -> str:
+    """Return the tail of command output where test failures usually appear."""
+    if not text:
+        return ""
+    if len(text) <= _COMMAND_OUTPUT_PREVIEW_CHARS:
+        return text
+    return text[-_COMMAND_OUTPUT_PREVIEW_CHARS:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,12 +105,18 @@ async def run_command(
     Returns:
         CommandResult with output and status
     """
+    env = os.environ.copy()
+    # The MCP server sets this sentinel to prevent recursive server spawning.
+    # Mechanical verification must test the repository as a fresh process would;
+    # leaking the sentinel makes CLI tests take the nested-server early exit.
+    env.pop("_OUROBOROS_NESTED", None)
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=working_dir,
+            env=env,
         )
 
         try:
@@ -282,14 +312,24 @@ class MechanicalVerifier:
                 check_type=check_type,
                 passed=False,
                 message=f"Check {check_type.value} timed out after {self.config.timeout_seconds}s",
-                details={"timed_out": True},
+                details={
+                    "timed_out": True,
+                    "command": list(command),
+                    "working_dir": str(self.config.working_dir)
+                    if self.config.working_dir
+                    else None,
+                },
             )
 
         passed = cmd_result.return_code == 0
         details: dict[str, Any] = {
+            "command": list(command),
+            "working_dir": str(self.config.working_dir) if self.config.working_dir else None,
             "return_code": cmd_result.return_code,
-            "stdout_preview": cmd_result.stdout[:500] if cmd_result.stdout else "",
-            "stderr_preview": cmd_result.stderr[:500] if cmd_result.stderr else "",
+            "stdout_preview": _output_preview(cmd_result.stdout),
+            "stderr_preview": _output_preview(cmd_result.stderr),
+            "stdout_tail": _output_tail(cmd_result.stdout),
+            "stderr_tail": _output_tail(cmd_result.stderr),
         }
 
         # Extract coverage if this was a coverage check

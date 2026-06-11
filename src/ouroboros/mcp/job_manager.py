@@ -15,7 +15,12 @@ from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
-from ouroboros.orchestrator.heartbeat import is_holder_alive, is_owned_by_current_process
+from ouroboros.orchestrator.heartbeat import (
+    current_process_identity,
+    is_holder_alive,
+    is_owned_by_current_process,
+    is_process_identity_alive,
+)
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -106,7 +111,26 @@ _JOB_TTL = timedelta(hours=1)
 _COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS = 5.0
 _RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 _RECOVERED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-failed-"
+_RECOVERED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-recovered-interrupted-"
 logger = logging.getLogger(__name__)
+
+
+def _read_owner_identity(created_data: dict[str, Any]) -> tuple[int | None, float | None]:
+    """Extract the recorded owning-process identity from a job-created event.
+
+    Returns ``(None, None)`` for jobs created before owner identity was
+    recorded, which the reconciler treats conservatively (never reconciled on
+    liveness grounds — we cannot prove the owner is dead).
+    """
+    pid_raw = created_data.get("owner_pid")
+    start_raw = created_data.get("owner_start_time")
+    pid = pid_raw if isinstance(pid_raw, int) and not isinstance(pid_raw, bool) else None
+    start = (
+        float(start_raw)
+        if isinstance(start_raw, (int, float)) and not isinstance(start_raw, bool)
+        else None
+    )
+    return pid, start
 
 
 def is_terminal_job_expired(
@@ -205,6 +229,25 @@ def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEven
     )
 
 
+def _orphaned_job_interrupted_event(job_id: str) -> BaseEvent:
+    """Build the synthetic job-interrupted event for a dead-owner zombie job."""
+    return BaseEvent(
+        id=f"{_RECOVERED_INTERRUPTED_EVENT_ID_PREFIX}{job_id}",
+        type="mcp.job.interrupted",
+        aggregate_type="job",
+        aggregate_id=job_id,
+        data={
+            "status": JobStatus.INTERRUPTED.value,
+            "message": "Job interrupted: owning process is no longer alive",
+            "error": "Owning process exited before the job reached a terminal state",
+            "result_text": "Owning process exited before the job reached a terminal state",
+            "result_meta": {"interrupted_from_dead_owner": True},
+            "is_error": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def _snapshot_with_terminal_event(
     snapshot: JobSnapshot,
     event: BaseEvent,
@@ -286,6 +329,7 @@ class JobManager:
         self._reserved_job_ids.discard(job_id)
         job_links = links or JobLinks()
 
+        owner_pid, owner_start_time = current_process_identity()
         await self._append_event(
             "mcp.job.created",
             job_id,
@@ -298,6 +342,11 @@ class JobManager:
                     "execution_id": job_links.execution_id,
                     "lineage_id": job_links.lineage_id,
                 },
+                # Owning-process identity for authoritative zombie reconciliation:
+                # if this process dies before writing a terminal event, a later
+                # reader can prove the job can no longer make progress.
+                "owner_pid": owner_pid,
+                "owner_start_time": owner_start_time,
             },
         )
 
@@ -881,7 +930,13 @@ class JobManager:
             result_payload=result_payload,
             error=error,
         )
-        return await self._recover_linked_execution_terminal_snapshot(snapshot)
+        owner_pid, owner_start_time = _read_owner_identity(created.data)
+        snapshot = await self._recover_linked_execution_terminal_snapshot(snapshot)
+        return await self._reconcile_orphaned_job_snapshot(
+            snapshot,
+            owner_pid=owner_pid,
+            owner_start_time=owner_start_time,
+        )
 
     async def _recover_linked_execution_terminal_snapshot(
         self, snapshot: JobSnapshot
@@ -961,6 +1016,125 @@ class JobManager:
             )
             latest = events[-1]
         return _snapshot_with_terminal_event(snapshot, latest, cursor)
+
+    def _job_owner_is_dead(
+        self,
+        owner_pid: int | None,
+        owner_start_time: float | None,
+    ) -> bool:
+        """Return True only when the recorded owning process is provably gone.
+
+        Conservative by design: a missing owner identity (legacy jobs) or a
+        still-running owner — including a different live process — returns
+        False, so a job is never reconciled away while it might still progress.
+        PID recycling is guarded by the recorded process start time.
+        """
+        if owner_pid is None:
+            return False
+        return not is_process_identity_alive(owner_pid, owner_start_time)
+
+    async def _reconcile_orphaned_job_snapshot(
+        self,
+        snapshot: JobSnapshot,
+        *,
+        owner_pid: int | None,
+        owner_start_time: float | None,
+    ) -> JobSnapshot:
+        """Reconcile a non-terminal job whose owning process is gone.
+
+        Closes the zombie gap left by :meth:`_recover_linked_execution_terminal_snapshot`:
+        a job stuck in ``QUEUED``/``RUNNING`` whose owner crashed (and which has
+        no recoverable linked-execution evidence) would otherwise report
+        ``RUNNING`` forever. When the owner is provably dead, no live runner
+        remains in this process, and no linked session still holds a live
+        heartbeat lock, materialize a terminal ``INTERRUPTED`` event so readers
+        see an authoritative final state. Idempotent via a deterministic
+        event id, and a no-op on read-only stores (projects without persisting).
+        """
+        if (
+            snapshot.is_terminal
+            or snapshot.status == JobStatus.CANCEL_REQUESTED
+            or snapshot.job_id in self._tasks
+            or snapshot.job_id in self._runner_tasks
+        ):
+            return snapshot
+        if not self._job_owner_is_dead(owner_pid, owner_start_time):
+            return snapshot
+        # A linked runtime (execute/auto/evaluate) runs in its own session
+        # process with a heartbeat lock. If that holder is still alive it — not
+        # this dead MCP owner — is the progress authority and will emit the
+        # terminal event itself, so the job is not orphaned. Interrupting now
+        # would permanently terminalize still-active work and disable
+        # resume/result polling.
+        if snapshot.links.session_id is not None and is_holder_alive(snapshot.links.session_id):
+            return snapshot
+
+        if getattr(self._event_store, "_read_only", False):
+            event = _orphaned_job_interrupted_event(snapshot.job_id)
+            return _snapshot_with_terminal_event(snapshot, event, snapshot.cursor)
+
+        lock = self._recovery_locks.setdefault(snapshot.job_id, asyncio.Lock())
+        async with lock:
+            events, cursor = await self._event_store.get_events_after(
+                "job", snapshot.job_id, last_row_id=0
+            )
+            existing_terminal = _latest_job_terminal_event(events)
+            if existing_terminal is not None:
+                return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+            latest_status_event = _latest_job_status_event(events)
+            if (
+                latest_status_event is not None
+                and latest_status_event.data.get("status") == JobStatus.CANCEL_REQUESTED.value
+            ):
+                return _snapshot_with_status_event(snapshot, latest_status_event, cursor)
+            try:
+                recovered = await self._append_orphaned_job_interrupted_event(
+                    snapshot.job_id,
+                    check_current=False,
+                    event_id=f"{_RECOVERED_INTERRUPTED_EVENT_ID_PREFIX}{snapshot.job_id}",
+                )
+            except PersistenceError:
+                events, cursor = await self._event_store.get_events_after(
+                    "job", snapshot.job_id, last_row_id=0
+                )
+                existing_terminal = _latest_job_terminal_event(events)
+                if existing_terminal is not None:
+                    return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+                raise
+            if not recovered:
+                return snapshot
+            events, cursor = await self._event_store.get_events_after(
+                "job", snapshot.job_id, last_row_id=0
+            )
+            latest = events[-1]
+        return _snapshot_with_terminal_event(snapshot, latest, cursor)
+
+    async def _append_orphaned_job_interrupted_event(
+        self,
+        job_id: str,
+        *,
+        check_current: bool = True,
+        event_id: str | None = None,
+    ) -> bool:
+        """Persist a terminal INTERRUPTED event for a dead-owner zombie job."""
+        if check_current:
+            snapshot = await self.get_snapshot(job_id)
+            if snapshot.is_terminal or snapshot.status == JobStatus.CANCEL_REQUESTED:
+                return False
+        await self._append_event(
+            "mcp.job.interrupted",
+            job_id,
+            {
+                "status": JobStatus.INTERRUPTED.value,
+                "message": "Job interrupted: owning process is no longer alive",
+                "error": "Owning process exited before the job reached a terminal state",
+                "result_text": "Owning process exited before the job reached a terminal state",
+                "result_meta": {"interrupted_from_dead_owner": True},
+                "is_error": True,
+            },
+            event_id=event_id,
+        )
+        return True
 
     async def wait_for_change(
         self,

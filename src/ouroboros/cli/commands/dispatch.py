@@ -38,6 +38,32 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _env_flag(name: str) -> bool:
+    """Return True when an environment variable carries a truthy value."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _silence_bridge_console_logs() -> None:
+    """Suppress structlog console output on the deterministic dispatch path.
+
+    External frontdoors (e.g. the Pi ``ooo`` bridge) capture this process'
+    stderr and surface it alongside the user-facing stdout result, so the
+    normal diagnostic stream (``mcp.server.tool_registered`` and friends)
+    leaks into the rendered output. Silence console logging here while
+    keeping file logging (``~/.ouroboros/logs/``) intact for debugging.
+    Genuine tracebacks still reach stderr. Opt back in with
+    ``OUROBOROS_DISPATCH_VERBOSE=1``.
+    """
+    if _env_flag("OUROBOROS_DISPATCH_VERBOSE"):
+        return
+    from ouroboros.observability.logging import set_console_logging
+
+    set_console_logging(False)
+
+
 def _print_tool_result(result: MCPToolResult) -> None:
     text = result.text_content.strip()
     if text:
@@ -204,6 +230,7 @@ def dispatch_command(
     frontdoors such as Pi extensions a deterministic bridge into the same
     shared skill router used by subprocess runtimes.
     """
+    _silence_bridge_console_logs()
     prompt = _join_prompt(prompt_parts)
     if not prompt:
         print_error("Usage: ouroboros dispatch 'ooo <command> [args...]'")

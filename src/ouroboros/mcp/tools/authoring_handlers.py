@@ -46,6 +46,7 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_subagent,
     build_subagent_result,
     emit_subagent_dispatched_event,
+    lateral_persona_panel_metadata_from_capability_definitions,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -55,6 +56,11 @@ from ouroboros.mcp.types import (
     MCPToolParameter,
     MCPToolResult,
     ToolInputType,
+)
+from ouroboros.orchestrator.capabilities import (
+    interview_code_investigation_answer_contract,
+    ouroboros_tool_capability_metadata,
+    stable_code_investigation_question_identity,
 )
 from ouroboros.orchestrator.policy import (
     PolicyContext,
@@ -197,6 +203,18 @@ _INTERVIEW_COMPLETION_NEGATIONS = (
     "do not close",
     "dont close",
     "don't close",
+)
+
+_INTERVIEW_LATERAL_REVIEW_PROSE_FALLBACK_INSTRUCTION = (
+    "Follow skills/interview/SKILL.md milestone lateral-review dispatch: "
+    "call ouroboros_lateral_think with meta.lateral_review_tool_args when "
+    "present. If only legacy advisory fields are present, call it with "
+    'personas=["researcher","contrarian","simplifier"], a problem context '
+    "containing the current interview session, milestone, and question, and a "
+    "current approach describing the next interview-routing decision. Fold only "
+    "concrete, user-safe findings into the next answer or question; if lateral "
+    "tooling is unavailable, continue the interview and say the review could "
+    "not be run."
 )
 
 
@@ -431,6 +449,74 @@ def _build_interview_lateral_review_tool_args(
     }
 
 
+def _build_interview_lateral_review_orchestration(
+    *,
+    tool_args: dict[str, Any],
+) -> dict[str, Any]:
+    """Build runtime handling metadata for interview lateral-review panels."""
+    panel = lateral_persona_panel_metadata_from_capability_definitions()
+    if not panel:
+        return {
+            "kind": "mcp_directive",
+            "directive": "run_lateral_persona_panel",
+            "mcp_tool": "ouroboros_lateral_think",
+            "tool_args": dict(tool_args),
+            "structured_lateral_panel_metadata_available": False,
+            "fallback": "skill_prose_instructions",
+            "prose_instruction_source": "skills/interview/SKILL.md",
+            "prose_instruction": _INTERVIEW_LATERAL_REVIEW_PROSE_FALLBACK_INSTRUCTION,
+            "runtime_handling": {
+                "call_mcp_tool_first": True,
+                "result_correlation_key": None,
+                "requires_prose_parsing": True,
+                "synthesize_before_interview_continuation": True,
+            },
+        }
+    requested_personas = [str(item) for item in tool_args.get("personas", [])]
+    panel_persona_by_id = {
+        str(persona.get("persona_id")): dict(persona)
+        for persona in panel.get("personas", [])
+        if isinstance(persona, dict) and persona.get("persona_id")
+    }
+    panel_personas = [
+        panel_persona_by_id[persona_id]
+        for persona_id in requested_personas
+        if persona_id in panel_persona_by_id
+    ]
+    response_refs = dict(panel.get("response_payload_refs", {}))
+    sequential_fallback = dict(panel.get("sequential_fallback", {}))
+    sequential_mode = str(sequential_fallback.get("mode") or "sequential_persona_payload_dispatch")
+    mcp_tool = str(panel.get("mcp_tool") or "ouroboros_lateral_think")
+
+    return {
+        "kind": "mcp_directive",
+        "directive": "run_lateral_persona_panel",
+        "mcp_tool": mcp_tool,
+        "tool_args": dict(tool_args),
+        "panel": {
+            "panel_id": str(panel.get("panel_id") or "lateral_persona_panel.v1"),
+            "mcp_tool": mcp_tool,
+            "dispatch_modes": list(panel.get("dispatch_modes", [])),
+            "parallel_preference": str(
+                panel.get("parallel_preference") or "parallel_when_runtime_supports_subagents"
+            ),
+            "sequential_fallback": sequential_fallback,
+            "personas": panel_personas,
+            "response_payload_refs": response_refs,
+            "runtime_instruction": str(panel.get("runtime_instruction") or ""),
+        },
+        "runtime_handling": {
+            "call_mcp_tool_first": True,
+            "parallel_capable_execution_mode": "parallel_subagent_panel",
+            "sequential_fallback_mode": sequential_mode,
+            "sequential_fallback_trigger": sequential_fallback.get("trigger"),
+            "result_correlation_key": response_refs.get("result_correlation_key"),
+            "requires_prose_parsing": bool(response_refs.get("requires_prose_parsing")),
+            "synthesize_before_interview_continuation": True,
+        },
+    }
+
+
 def _with_lateral_review_dispatch(
     state: InterviewState,
     *,
@@ -441,17 +527,23 @@ def _with_lateral_review_dispatch(
     """Attach runnable lateral-think dispatch metadata to an advisory."""
     if lateral_review_meta is None:
         return None
+    tool_args = _build_interview_lateral_review_tool_args(
+        state,
+        next_question=next_question,
+        score=score,
+        lateral_review_meta=lateral_review_meta,
+    )
     enriched = dict(lateral_review_meta)
     enriched.update(
         {
             "lateral_review_required": True,
             "lateral_review_tool": "ouroboros_lateral_think",
             "lateral_review_personas": list(_INTERVIEW_LATERAL_PERSONAS),
-            "lateral_review_tool_args": _build_interview_lateral_review_tool_args(
-                state,
-                next_question=next_question,
-                score=score,
-                lateral_review_meta=lateral_review_meta,
+            "lateral_review_tool_args": tool_args,
+            "lateral_review_orchestration": (
+                _build_interview_lateral_review_orchestration(
+                    tool_args=tool_args,
+                )
             ),
         }
     )
@@ -498,6 +590,60 @@ def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None)
     if score is None:
         return question
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
+
+
+def _build_code_investigation_request(
+    *,
+    session_id: str,
+    question: str,
+    last_question: str | None = None,
+) -> dict[str, Any]:
+    """Build stable metadata for caller-side code-fact investigation.
+
+    The interview MCP tool is only the question generator; repo inspection runs
+    in the parent runtime. This metadata gives that runtime a concrete request
+    envelope keyed to the exact question text, so investigation results can be
+    correlated even when the user-facing display has an ambiguity prefix.
+    """
+    mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
+    code_investigation = mcp_tool_capability["orchestration"]["code_investigation"]
+    request: dict[str, Any] = {
+        "session_id": session_id,
+        "question_identity": stable_code_investigation_question_identity(question),
+        "question": question,
+        "investigation_goal": "describe_current_state_from_code",
+        "investigation_targets": [{"target_type": "workspace", "scope": "active"}],
+        "fact_categories": [
+            "tech_stack",
+            "frameworks",
+            "dependencies",
+            "current_patterns",
+            "architecture",
+            "file_structure",
+            "configuration",
+        ],
+        "allowed_capabilities": ["inspect_code"],
+        "repo_inspection_tool_capabilities": list(
+            code_investigation["repo_inspection_tool_capabilities"]
+        ),
+        "confidence_policy": {
+            "auto_confirm_when": ["exact manifest or config match with a single clear answer"],
+            "confirmation_required_when": [
+                "multiple code paths or configuration sources disagree",
+                "the answer implies a product or architecture decision",
+            ],
+            "human_judgment_when": [
+                "desired future behavior",
+                "priority, scope, ownership, rollout, or acceptance criteria",
+            ],
+        },
+        "answer_prefixes": ["[from-code]", "[from-code][auto-confirmed]"],
+        "answer_contract": interview_code_investigation_answer_contract(),
+        "mcp_tool_capability": mcp_tool_capability,
+    }
+    if last_question:
+        request["last_question"] = last_question
+    return request
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -2198,6 +2344,11 @@ class InterviewHandler:
                     # axis must not flip or ``HandlerInterviewBackend.start``
                     # would raise on every oversized ``initial_context``.
                     start_meta.update(_length_guard_meta_fields())
+                else:
+                    start_meta["code_investigation_request"] = _build_code_investigation_request(
+                        session_id=state.interview_id,
+                        question=question,
+                    )
 
                 start_response_text = (
                     f"Interview started. Session ID: {state.interview_id}\n\n{display_question}"
@@ -2282,6 +2433,13 @@ class InterviewHandler:
                         # ``False`` so the auto driver does not treat the
                         # summarize prompt as a hard failure.
                         resume_meta.update(_length_guard_meta_fields())
+                    else:
+                        resume_meta["code_investigation_request"] = (
+                            _build_code_investigation_request(
+                                session_id=session_id,
+                                question=pending_question,
+                            )
+                        )
 
                     resume_response_text = f"Session {session_id}\n\n{display_question}"
                     # Q00/ouroboros#831 (diagnostics): response-shape event for
@@ -2806,6 +2964,11 @@ class InterviewHandler:
                     # guard meta-directive.  ``is_error`` stays ``False`` so
                     # the auto driver's ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
+                else:
+                    answer_meta["code_investigation_request"] = _build_code_investigation_request(
+                        session_id=session_id,
+                        question=question,
+                    )
 
                 if lateral_review_dispatch_meta is not None:
                     answer_meta.update(lateral_review_dispatch_meta)

@@ -2251,10 +2251,21 @@ class TestEvaluateHandlerCodeChanges:
     def _make_stage1(self, *, passed: bool):
         from ouroboros.evaluation.models import CheckResult, CheckType, MechanicalResult
 
+        details = (
+            {
+                "command": ["uv", "run", "pytest", "tests/", "-x", "-q"],
+                "working_dir": "/tmp/project",
+                "stdout_tail": "FAILED tests/test_example.py::test_case",
+                "stderr_tail": "AssertionError: boom",
+            }
+            if not passed
+            else {}
+        )
         check = CheckResult(
             check_type=CheckType.TEST,
             passed=passed,
             message="tests passed" if passed else "tests failed",
+            details=details,
         )
         return MechanicalResult(passed=passed, checks=(check,), coverage_score=None)
 
@@ -2276,6 +2287,10 @@ class TestEvaluateHandlerCodeChanges:
         text = handler._format_evaluation_result(result, code_changes=True)
 
         assert "real build/test failures" in text
+        assert "command: uv run pytest tests/ -x -q" in text
+        assert "cwd: /tmp/project" in text
+        assert "FAILED tests/test_example.py::test_case" in text
+        assert "AssertionError: boom" in text
         assert "No code changes detected" not in text
 
     def test_format_result_stage1_fail_no_code_changes(self) -> None:

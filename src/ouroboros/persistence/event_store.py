@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import contextlib
 from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, event, func, or_, select, text
+from sqlalchemy.exc import OperationalError
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
@@ -627,17 +629,45 @@ class EventStore:
                 operation="get_all_sessions",
             )
 
+        # Pin the selective ix_events_event_type index. SQLite's planner
+        # otherwise satisfies ORDER BY timestamp by scanning *every* event row
+        # via ix_events_timestamp and filtering inline — a 30s+ query on large
+        # stores, even though session events are a tiny subset. SQLAlchemy/SQLite
+        # ignores with_hint(), so the hint is pinned via raw SQL.
+        # ``.columns(*events_table.c)`` re-attaches the ORM column types so the
+        # raw result gets the same processing as ``select(events_table)`` (notably
+        # JSON payload deserialization); without it from_db_row rejects the
+        # payload string.
+        indexed_query = (
+            text(
+                "SELECT * FROM events INDEXED BY ix_events_event_type "
+                "WHERE event_type LIKE :pattern "
+                "ORDER BY timestamp ASC"
+            )
+            .bindparams(pattern="orchestrator.session.%")
+            .columns(*events_table.c)
+        )
+        fallback_query = (
+            select(events_table)
+            .where(events_table.c.event_type.like("orchestrator.session.%"))
+            .order_by(events_table.c.timestamp.asc())
+        )
         try:
-            async with self._engine.begin() as conn:
-                query = (
-                    select(events_table)
-                    .where(events_table.c.event_type.like("orchestrator.session.%"))
-                    .order_by(events_table.c.timestamp.asc())
-                )
-
-                result = await conn.execute(query)
-                rows = result.mappings().all()
-                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+            try:
+                async with self._engine.begin() as conn:
+                    result = await conn.execute(indexed_query)
+                    rows = result.mappings().all()
+                    return [BaseEvent.from_db_row(dict(row)) for row in rows]
+            except OperationalError:
+                # ``INDEXED BY`` makes ix_events_event_type mandatory; SQLite
+                # errors if it is absent (e.g. a store created outside the
+                # bundled schema/migrations). Fall back to the planner's choice
+                # on a fresh transaction so correctness never depends on a
+                # specific index name.
+                async with self._engine.begin() as conn:
+                    result = await conn.execute(fallback_query)
+                    rows = result.mappings().all()
+                    return [BaseEvent.from_db_row(dict(row)) for row in rows]
         except Exception as e:
             raise PersistenceError(
                 f"Failed to get all sessions: {e}",
@@ -1278,6 +1308,25 @@ class EventStore:
     async def close(self) -> None:
         """Close the database connection."""
         if self._engine is not None:
+            # Collapse the WAL back into the main DB before disposing. Without
+            # an explicit TRUNCATE checkpoint, long-lived multi-connection
+            # setups (many concurrent MCP/TUI sessions) let the -wal file grow
+            # unbounded: passive autocheckpoints cannot truncate while any
+            # other reader is active, so the file only ever appends. Best
+            # effort — ignore failures (read-only stores, lock contention).
+            #
+            # Use a short per-connection busy_timeout instead of the 30s default
+            # (set in initialize()): the checkpoint needs the write lock, and a
+            # peer process mid-write could otherwise stall this shutdown path for
+            # up to 30s. A missed checkpoint is harmless — the next clean close
+            # retries — so we cap the wait at ~2s. ``connect()`` (not ``begin()``)
+            # avoids an upfront BEGIN IMMEDIATE; the checkpoint acquires its own
+            # lock under the bounded timeout.
+            if not self._read_only:
+                with contextlib.suppress(Exception):
+                    async with self._engine.connect() as conn:
+                        await conn.exec_driver_sql("PRAGMA busy_timeout=2000")
+                        await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
             await self._engine.dispose()
             self._engine = None
 

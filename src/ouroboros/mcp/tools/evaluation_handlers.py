@@ -909,6 +909,22 @@ class EvaluateHandler:
             for check in s1.checks:
                 status = "PASS" if check.passed else "FAIL"
                 lines.append(f"  [{status}] {check.check_type}: {check.message}")
+                if not check.passed:
+                    details = check.details
+                    command = details.get("command")
+                    if isinstance(command, list) and command:
+                        lines.append(f"    command: {' '.join(str(part) for part in command)}")
+                    working_dir = details.get("working_dir")
+                    if working_dir:
+                        lines.append(f"    cwd: {working_dir}")
+                    stdout_tail = str(details.get("stdout_tail") or "").strip()
+                    stderr_tail = str(details.get("stderr_tail") or "").strip()
+                    if stdout_tail:
+                        lines.append("    stdout tail:")
+                        lines.extend(f"      {line}" for line in stdout_tail.splitlines())
+                    if stderr_tail:
+                        lines.append("    stderr tail:")
+                        lines.extend(f"      {line}" for line in stderr_tail.splitlines())
             lines.append("")
 
         # Stage 2 results

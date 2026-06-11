@@ -409,6 +409,15 @@ _USAGE_LIMIT_TEXT_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_USAGE_LIMIT_WINDOW_CONTEXT_PATTERN = re.compile(
+    r"\b(?:usage|quota|allowance|rate|request)\s+"
+    r"(?:limit|quota|cap|window|allowance)\b.{0,120}"
+    r"\b(?:reached|exceeded|exhausted|depleted|hit|reset|resets|available|renews)\b"
+    r"|\b(?:reached|exceeded|exhausted|depleted|hit|reset|resets|available|renews)\b"
+    r".{0,120}\b(?:usage|quota|allowance|rate|request)\s+"
+    r"(?:limit|quota|cap|window|allowance)\b",
+    re.IGNORECASE,
+)
 
 
 class OrchestratorRunner:
@@ -1179,14 +1188,7 @@ class OrchestratorRunner:
             )
             is not None
         )
-        mentions_limit_window = (
-            re.search(
-                r"\b(?:usage|quota|allowance|rate|request)\s+"
-                r"(?:limit|quota|cap|window|allowance)\b",
-                normalized,
-            )
-            is not None
-        )
+        mentions_limit_window = _USAGE_LIMIT_WINDOW_CONTEXT_PATTERN.search(normalized) is not None
 
         if has_quota_phrase and (has_runtime_error_shape or duration_seconds is not None):
             return True

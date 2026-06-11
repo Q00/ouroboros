@@ -11,6 +11,8 @@ jobs:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -40,11 +42,40 @@ jobs:
         run: |
           uv run pytest tests/ --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        if: always()
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          file: ./coverage.xml
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: error
+          retention-days: 1
+
+  coverage:
+    name: Upload coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: test
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v6.0.1
+        with:
+          files: ./coverage/coverage-3.12/coverage.xml,./coverage/coverage-3.13/coverage.xml,./coverage/coverage-3.14/coverage.xml
+          use_oidc: true
           fail_ci_if_error: false
           flags: unittests
-          name: codecov-${{ matrix.python-version }}
+          name: codecov
