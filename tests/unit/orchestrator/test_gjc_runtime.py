@@ -239,7 +239,7 @@ async def test_ack_message_update_agent_end_success_and_stdin_pipe_closed() -> N
     ):
         messages = [msg async for msg in runtime.execute_task("Do it")]
 
-    assert mock_exec.call_args.args == ("/tmp/gjc", "--mode", "rpc")
+    assert mock_exec.call_args.args == ("/tmp/gjc", "--mode", "rpc", "--no-session")
     assert mock_exec.call_args.kwargs["stdin"] == asyncio.subprocess.PIPE
     assert mock_exec.call_args.kwargs["stdin"] != asyncio.subprocess.DEVNULL
     assert [m.content for m in messages if m.type == "assistant"] == ["Hel"]

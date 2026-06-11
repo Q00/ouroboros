@@ -121,7 +121,7 @@ async def test_normal_completion_uses_gjc_rpc_and_closes_stdin() -> None:
 
     assert result.is_ok
     assert result.value.content == "Hello"
-    assert factory.commands == [("/tmp/gjc", "--mode", "rpc")]
+    assert factory.commands == [("/tmp/gjc", "--mode", "rpc", "--no-session")]
     assert json.loads(process.stdin.writes[0]) == {
         "id": "prompt-1",
         "type": "prompt",

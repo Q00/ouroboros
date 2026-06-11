@@ -181,6 +181,8 @@ class TestConfigBackend:
         """config backend gjc should delegate to _setup_gjc for install side effects."""
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            # Isolate from the developer's real ~/.ouroboros config, which may
+            # carry orchestrator.gjc_cli_path and shadow the shutil.which stub.
             patch("ouroboros.config.get_gjc_cli_path", return_value=None),
             patch("shutil.which", return_value="/usr/bin/gjc"),
             patch("ouroboros.cli.commands.setup._setup_gjc") as mock_setup,

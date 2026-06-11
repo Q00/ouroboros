@@ -259,6 +259,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "goose_cli": "goose",
     "pi": "pi",
     "pi_cli": "pi",
+    "gjc": "gjc",
+    "gjc_cli": "gjc",
 }
 
 

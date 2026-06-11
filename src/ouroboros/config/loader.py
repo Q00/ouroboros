@@ -164,6 +164,13 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # `opencode_config._configured_opencode_cli_path` reads
         # OPENCODE_CLI_PATH and runs it via subprocess.run.
         "OPENCODE_CLI_PATH",
+        # Spawned-CLI discovery roots. The gjc CLI resolves its agent dir
+        # (rules/skills/extensions it loads into every session) from these
+        # vars; an untrusted repo .env must not be able to point a spawned
+        # gjc at attacker-controlled instruction/extension directories.
+        "GJC_CODING_AGENT_DIR",
+        "GJC_CONFIG_DIR",
+        "PI_CONFIG_DIR",
         # Runtime/backend selectors — choose which adapter is spawned.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_RUNTIME",

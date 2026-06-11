@@ -295,11 +295,12 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
     ) -> Result[CompletionResponse, ProviderError]:
         process: Any | None = None
         stderr_task: asyncio.Task[list[str]] | None = None
+        command = [self._cli_path, "--mode", "rpc"]
+        if self._ephemeral:
+            command.append("--no-session")
         try:
             process = await asyncio.create_subprocess_exec(
-                self._cli_path,
-                "--mode",
-                "rpc",
+                *command,
                 cwd=self._cwd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,

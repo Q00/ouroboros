@@ -111,18 +111,23 @@ def copilot_instruction_path(home: str | Path | None = None) -> Path:
 
 
 def gjc_agent_dir(home: str | Path | None = None, environ: dict[str, str] | None = None) -> Path:
-    """Return GJC's agent directory for rules/extensions discovery."""
+    """Return GJC's agent directory for rules/extensions discovery.
+
+    Mirrors gjc's own resolution (``@gajae-code/utils`` ``dirs.ts``):
+    ``GJC_CODING_AGENT_DIR`` overrides the agent directory as a path, while
+    ``GJC_CONFIG_DIR`` (with ``PI_CONFIG_DIR`` as fallback) is a directory
+    *name* joined under the home directory — not an absolute path.
+    """
     env = os.environ if environ is None else environ
     explicit_agent_dir = env.get("GJC_CODING_AGENT_DIR", "").strip()
     if explicit_agent_dir:
         return Path(explicit_agent_dir).expanduser()
 
-    config_dir = env.get("GJC_CONFIG_DIR", "").strip()
-    if config_dir:
-        return Path(config_dir).expanduser() / "agent"
-
     root = Path(home).expanduser() if home is not None else Path.home()
-    return root / ".gjc" / "agent"
+    config_dir_name = (
+        env.get("GJC_CONFIG_DIR", "").strip() or env.get("PI_CONFIG_DIR", "").strip() or ".gjc"
+    )
+    return root / config_dir_name.lstrip("/") / "agent"
 
 
 def gjc_instruction_path(

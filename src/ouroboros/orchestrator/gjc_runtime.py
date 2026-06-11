@@ -143,7 +143,9 @@ class GjcRuntime:
         return str(path) if path.exists() else candidate
 
     def _build_command(self, *, prompt: str) -> list[str]:
-        return [self._cli_path, "--mode", "rpc"]
+        # --no-session: one task per process, never resumed (targeted_resume is
+        # False), so persisting gjc session files would only accumulate noise.
+        return [self._cli_path, "--mode", "rpc", "--no-session"]
 
     def _build_child_env(self) -> dict[str, str]:
         env = os.environ.copy()

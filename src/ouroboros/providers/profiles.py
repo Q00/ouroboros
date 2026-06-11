@@ -29,6 +29,8 @@ _BACKEND_ALIASES = {
     "opencode_cli": "opencode",
     "pi": "pi",
     "pi_cli": "pi",
+    "gjc": "gjc",
+    "gjc_cli": "gjc",
     "litellm": "litellm",
     "openai": "litellm",
     "openrouter": "litellm",

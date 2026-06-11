@@ -60,9 +60,16 @@ def test_gjc_agent_dir_defaults_to_home_gjc_agent(tmp_path: Path) -> None:
     assert gjc_agent_dir(home=tmp_path, environ={}) == tmp_path / ".gjc" / "agent"
 
 
-def test_gjc_agent_dir_respects_gjc_config_dir(tmp_path: Path) -> None:
-    assert gjc_agent_dir(environ={"GJC_CONFIG_DIR": str(tmp_path / "custom-gjc")}) == (
+def test_gjc_agent_dir_resolves_config_dir_name_under_home(tmp_path: Path) -> None:
+    # gjc treats GJC_CONFIG_DIR as a directory *name* under home, not a path.
+    assert gjc_agent_dir(home=tmp_path, environ={"GJC_CONFIG_DIR": "custom-gjc"}) == (
         tmp_path / "custom-gjc" / "agent"
+    )
+
+
+def test_gjc_agent_dir_falls_back_to_pi_config_dir_name(tmp_path: Path) -> None:
+    assert gjc_agent_dir(home=tmp_path, environ={"PI_CONFIG_DIR": "custom-pi"}) == (
+        tmp_path / "custom-pi" / "agent"
     )
 
 
