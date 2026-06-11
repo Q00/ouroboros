@@ -761,6 +761,41 @@ async def test_timeout_during_streaming_terminates_with_partial_content() -> Non
 
 
 @pytest.mark.asyncio
+async def test_default_idle_timeout_bounds_stalled_stream_without_explicit_timeout() -> None:
+    process = _FakeProcess()
+    process.stdout = _HangingStream(
+        _gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            {"id": "prompt-1", "type": "message_update", "delta": "partial"},
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(
+        cli_path="/tmp/gjc",
+        cwd="/tmp/project",
+        stdout_idle_timeout_seconds=0.01,
+    )
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Hello")], CompletionConfig(model="default")
+        )
+
+    assert result.is_err
+    assert not result.is_ok
+    assert "produced no stdout during idle window" in result.error.message
+    assert result.error.details["phase"] == "idle"
+    assert result.error.details["error_type"] == "ProviderError"
+    assert process.terminated
+
+
+@pytest.mark.asyncio
 async def test_unrelated_id_supported_frame_fails_closed() -> None:
     process = _FakeProcess(
         stdout=_gjc_jsonl(

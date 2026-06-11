@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
+from collections.abc import AsyncIterator
 import contextlib
 from dataclasses import replace
 import json
@@ -47,6 +49,9 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
     _log_namespace = "gjc_llm_adapter"
     _completion_profile_backend = "gjc"
     _process_shutdown_timeout_seconds = 5.0
+    _startup_output_timeout_seconds = 120.0
+    _stdout_idle_timeout_seconds = 600.0
+    _max_line_buffer_bytes = 50 * 1024 * 1024
 
     def __init__(
         self,
@@ -61,6 +66,8 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
         ephemeral: bool = True,
         timeout: float | None = None,
         runtime_profile: str | None = None,
+        startup_output_timeout_seconds: float | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         del runtime_profile
         super().__init__(
@@ -75,6 +82,14 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
             timeout=timeout,
             runtime_profile=None,
         )
+        if startup_output_timeout_seconds is not None:
+            self._startup_output_timeout_seconds = (
+                None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
+            )
+        if stdout_idle_timeout_seconds is not None:
+            self._stdout_idle_timeout_seconds = (
+                None if stdout_idle_timeout_seconds <= 0 else stdout_idle_timeout_seconds
+            )
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve GJC CLI path from config helpers."""
@@ -282,6 +297,75 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
         if error is not None:
             raise error
 
+    async def _iter_gjc_stream_lines(
+        self,
+        stream: asyncio.StreamReader | None,
+    ) -> AsyncIterator[str]:
+        """Yield GJC JSONL stream lines with default startup/idle bounds.
+
+        The generic Codex adapter only applies a whole-request timeout when
+        callers supply one. GJC is a long-lived RPC subprocess, so its LLM path
+        needs the same fail-closed stdout windows as ``GjcRuntime`` even when
+        constructed through production factory paths that pass ``timeout=None``.
+        """
+        if stream is None:
+            return
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffer = ""
+        buffer_byte_estimate = 0
+        saw_chunk = False
+        while True:
+            timeout_seconds = (
+                self._startup_output_timeout_seconds
+                if not saw_chunk
+                else self._stdout_idle_timeout_seconds
+            )
+            try:
+                chunk = (
+                    await stream.read(16384)
+                    if timeout_seconds is None
+                    else await asyncio.wait_for(stream.read(16384), timeout=timeout_seconds)
+                )
+            except TimeoutError as exc:
+                phase = "startup" if not saw_chunk else "idle"
+                raise ProviderError(
+                    message=(
+                        f"{self._display_name} produced no stdout during {phase} "
+                        f"window ({timeout_seconds:.0f}s)"
+                    ),
+                    provider=self._provider_name,
+                    details={
+                        "phase": phase,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                ) from exc
+            if not chunk:
+                break
+            saw_chunk = True
+            decoded = decoder.decode(chunk)
+            buffer += decoded
+            buffer_byte_estimate += len(decoded) * 4
+            if buffer_byte_estimate > self._max_line_buffer_bytes:
+                raise ProviderError(
+                    message=f"GJC RPC line buffer exceeded {self._max_line_buffer_bytes} bytes",
+                    provider=self._provider_name,
+                    details={
+                        "buffer_limit_bytes": self._max_line_buffer_bytes,
+                        "overflow_stage": "line_buffer",
+                    },
+                )
+            while True:
+                newline_index = buffer.find("\n")
+                if newline_index < 0:
+                    break
+                line = buffer[:newline_index]
+                buffer = buffer[newline_index + 1 :]
+                buffer_byte_estimate = len(buffer) * 4
+                yield line.rstrip("\r")
+        buffer += decoder.decode(b"", final=True)
+        if buffer:
+            yield buffer.rstrip("\r")
+
     async def _terminate_process(self, process: Any) -> None:
         if getattr(process, "returncode", None) is not None:
             return
@@ -295,6 +379,10 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
             else:
                 return
         except ProcessLookupError:
+            with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
+                await asyncio.wait_for(
+                    process.wait(), timeout=self._process_shutdown_timeout_seconds
+                )
             return
         except Exception:
             return
@@ -378,7 +466,7 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
 
         try:
             stderr_task = asyncio.create_task(self._collect_stream_lines(process.stderr))
-            stdout_iter = self._iter_stream_lines(process.stdout)
+            stdout_iter = self._iter_gjc_stream_lines(process.stdout)
 
             async def next_event() -> dict[str, Any]:
                 async for raw_line in stdout_iter:
