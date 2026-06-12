@@ -19,7 +19,7 @@ from ouroboros.backends import (
 )
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
-from ouroboros.cli.formatters.tables import create_key_value_table, print_table
+from ouroboros.cli.formatters.tables import create_key_value_table, create_table, print_table
 
 app = typer.Typer(
     name="config",
@@ -160,6 +160,104 @@ def _resolve_db_path(data: dict, config_path: Path) -> str:
     return f"ouroboros.db ({resolved})"
 
 
+def _effective_value(
+    env_vars: tuple[str, ...],
+    raw_value: object,
+    default: object,
+) -> tuple[str, str]:
+    """Resolve the effective value and its source (env > config > default)."""
+    import os
+
+    for name in env_vars:
+        env_value = os.environ.get(name, "").strip()
+        if env_value:
+            return env_value, f"env {name} ⚠"
+    if raw_value is not None:
+        return str(raw_value), "config"
+    return str(default), "default"
+
+
+def _agent_cell(backend: str, installed: dict[str, str | None]) -> str:
+    """Render an agent name with an install marker."""
+    return backend if installed.get(backend) else f"{backend} ⚠ not installed"
+
+
+def _render_effective_view(data: dict, config_path: Path) -> None:
+    """GUI-equivalent effective view: defaults, per-stage agents/models, sources.
+
+    This is the text surface chat-gateway agents (e.g. hermes via Discord)
+    relay when no browser or TUI can reach the user, so it must carry the
+    same information the settings GUI shows: resolved inheritance, env
+    overrides, and install status (#1395's effective-view concern).
+    """
+    from ouroboros.backends.model_catalog import installed_backends
+    from ouroboros.config_tui.fields import (
+        GLOBAL_LLM_BACKEND_FIELD,
+        GLOBAL_RUNTIME_FIELD,
+        STAGE_MODEL_FIELDS,
+        get_value,
+    )
+    from ouroboros.orchestrator_stage import Stage
+
+    installed = installed_backends()
+
+    defaults_table = create_table("Defaults", show_lines=False)
+    defaults_table.add_column("Setting", style="cyan")
+    defaults_table.add_column("Value")
+    defaults_table.add_column("Source", style="dim")
+    agent_value, agent_source = _effective_value(
+        GLOBAL_RUNTIME_FIELD.env_vars,
+        get_value(data, GLOBAL_RUNTIME_FIELD.key),
+        "claude",
+    )
+    defaults_table.add_row("Default agent", _agent_cell(agent_value, installed), agent_source)
+    llm_value, llm_source = _effective_value(
+        GLOBAL_LLM_BACKEND_FIELD.env_vars,
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
+        "claude_code",
+    )
+    defaults_table.add_row("LLM backend (internal calls)", llm_value, llm_source)
+    print_table(defaults_table)
+
+    stages_table = create_table("Per-stage overrides", show_lines=False)
+    stages_table.add_column("Stage", style="cyan")
+    stages_table.add_column("Agent")
+    stages_table.add_column("Model")
+    stages_table.add_column("Model source", style="dim")
+    profile_default = get_value(data, "orchestrator.runtime_profile.default")
+    for stage in Stage:
+        stage_agent = get_value(data, f"orchestrator.runtime_profile.stages.{stage.value}")
+        if stage_agent:
+            agent_cell = _agent_cell(str(stage_agent), installed)
+        else:
+            resolved = str(profile_default or agent_value)
+            agent_cell = f"(inherit) → {_agent_cell(resolved, installed)}"
+        model_field = STAGE_MODEL_FIELDS[stage]
+        model_value, model_source = _effective_value(
+            model_field.env_vars,
+            get_value(data, model_field.key),
+            "backend default",
+        )
+        stages_table.add_row(stage.value, agent_cell, model_value, model_source)
+    print_table(stages_table)
+
+    env_table = create_key_value_table(
+        {
+            "config_path": str(config_path),
+            "cli_path": _resolve_cli_path(data) or "?",
+            "database": _resolve_db_path(data, config_path),
+            "log_level": str(data.get("logging", {}).get("level", "info")),
+        },
+        "Environment",
+    )
+    print_table(env_table)
+    console.print(
+        "[dim]Change values: settings GUI (`ouroboros config`) or "
+        "`ouroboros config set <key> <value>`. "
+        "⚠ env sources override saved config until unset.[/dim]"
+    )
+
+
 @app.command()
 def show(
     section: Annotated[
@@ -167,9 +265,12 @@ def show(
         typer.Argument(help="Configuration section to display (e.g., 'orchestrator')."),
     ] = None,
 ) -> None:
-    """Display current configuration.
+    """Display the effective configuration.
 
-    Shows all configuration if no section specified.
+    Without arguments, renders the GUI-equivalent effective view: defaults,
+    per-stage agents and models with resolved inheritance, value sources
+    (env override / config / default), and CLI install status. Pass a
+    section name for the raw section contents.
     """
     data, config_path = _load_config()
 
@@ -187,16 +288,7 @@ def show(
         else:
             console.print(f"[cyan]{section}[/] = {section_data}")
     else:
-        config_summary = {
-            "config_path": str(config_path),
-            "runtime_backend": data.get("orchestrator", {}).get("runtime_backend", "?"),
-            "llm_backend": data.get("llm", {}).get("backend", "?"),
-            "cli_path": _resolve_cli_path(data) or "?",
-            "database": _resolve_db_path(data, config_path),
-            "log_level": data.get("logging", {}).get("level", "info"),
-        }
-        table = create_key_value_table(config_summary, "Current Configuration")
-        print_table(table)
+        _render_effective_view(data, config_path)
 
 
 @app.command()

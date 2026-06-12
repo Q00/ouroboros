@@ -75,3 +75,72 @@ def test_bare_invocation_forwards_web_flags(monkeypatch) -> None:
         "port": 8765,
         "open_browser": False,
     }
+
+
+def _show_env(monkeypatch, tmp_path, config: dict) -> None:
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+    for name in (
+        "OUROBOROS_AGENT_RUNTIME",
+        "OUROBOROS_RUNTIME",
+        "OUROBOROS_LLM_BACKEND",
+        "OUROBOROS_CLARIFICATION_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_show_effective_view_renders_stages_and_inheritance(monkeypatch, tmp_path) -> None:
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {
+                "runtime_backend": "opencode",
+                "runtime_profile": {"stages": {"execute": "codex"}},
+            },
+            "clarification": {"default_model": "my-model"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"opencode": "/bin/opencode", "codex": "/bin/codex"},
+    )
+    result = runner.invoke(app, ["show"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "Per-stage overrides" in out
+    assert "(inherit)" in out and "opencode" in out  # inheriting stages resolved
+    assert "codex" in out  # explicit execute override
+    assert "my-model" in out  # configured stage model
+    assert "interview" in out and "reflect" in out
+
+
+def test_show_effective_view_marks_env_override(monkeypatch, tmp_path) -> None:
+    _show_env(monkeypatch, tmp_path, {"orchestrator": {"runtime_backend": "opencode"}})
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"hermes": "/bin/hermes", "opencode": "/bin/opencode"},
+    )
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "hermes")
+    result = runner.invoke(app, ["show"])
+    assert result.exit_code == 0
+    assert "hermes" in result.output  # env wins over config
+    assert "OUROBOROS_AGENT_RUNTIME" in result.output  # and the source says so
+
+
+def test_show_effective_view_marks_uninstalled_agent(monkeypatch, tmp_path) -> None:
+    _show_env(monkeypatch, tmp_path, {"orchestrator": {"runtime_backend": "kiro"}})
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"kiro": None},
+    )
+    result = runner.invoke(app, ["show"])
+    assert result.exit_code == 0
+    assert "not installed" in result.output
+
+
+def test_show_section_still_returns_raw_contents(monkeypatch, tmp_path) -> None:
+    _show_env(monkeypatch, tmp_path, {"logging": {"level": "debug"}})
+    result = runner.invoke(app, ["show", "logging"])
+    assert result.exit_code == 0
+    assert "debug" in result.output
