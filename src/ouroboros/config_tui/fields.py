@@ -41,13 +41,13 @@ class SettingField:
 
 GLOBAL_RUNTIME_FIELD = SettingField(
     key="orchestrator.runtime_backend",
-    label="Default runtime",
+    label="Default agent (runtime)",
     env_vars=_RUNTIME_ENV_VARS,
 )
 
 GLOBAL_LLM_BACKEND_FIELD = SettingField(
     key="llm.backend",
-    label="LLM backend",
+    label="LLM backend (internal calls)",
     env_vars=("OUROBOROS_LLM_BACKEND",),
 )
 
@@ -56,7 +56,7 @@ def stage_runtime_field(stage: Stage) -> SettingField:
     """Per-stage runtime select (writes ``orchestrator.runtime_profile.stages.<stage>``)."""
     return SettingField(
         key=f"orchestrator.runtime_profile.stages.{stage.value}",
-        label=f"{stage.value.title()} runtime",
+        label="Agent",
         stage=stage.value,
     )
 

@@ -169,3 +169,20 @@ def test_settings_app_imports_without_monitor_tui() -> None:
         "assert 'ouroboros.tui' not in sys.modules, 'monitor TUI package leaked'"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.asyncio
+async def test_inherit_label_tracks_global_default(app_env) -> None:
+    """The stage inherit option shows the resolved default agent (UX: #1411)."""
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        runtime_select = pilot.app.query_one(f"#stage-runtime-{Stage.INTERVIEW.value}", Select)
+        labels = {str(label) for label, value in runtime_select._options if value}
+        assert any("(inherit — claude)" in label for label in labels)
+
+        pilot.app.query_one("#global-runtime", Select).value = "codex"
+        await pilot.pause()
+        labels = {str(label) for label, value in runtime_select._options if value}
+        assert any("(inherit — codex)" in label for label in labels)
+        # Rebuilding options must not lose the user's selection.
+        assert runtime_select.value == INHERIT_SENTINEL

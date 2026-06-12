@@ -98,15 +98,16 @@ class SettingsApp(App[None]):
     .stage-title { text-style: bold; color: $accent; }
     .field-label { color: $text-muted; margin: 1 0 0 0; }
 
-    /* Global selects share one horizontal band under the stage row. */
+    /* Defaults band above the stage row. */
     #global-row {
         layout: grid;
-        grid-size: 2;
+        grid-size: 1;
         grid-gutter: 0 1;
         height: auto;
         margin: 1 0 0 0;
     }
     .global-cell { border: round $secondary; padding: 0 1; height: auto; }
+    .field-help { color: $text-muted; text-style: italic; margin: 0 0 1 0; }
 
     #action-bar { layout: horizontal; height: auto; margin: 1 0 0 0; }
     #status-bar { width: 1fr; margin: 0 0 0 2; content-align: left middle; }
@@ -143,10 +144,21 @@ class SettingsApp(App[None]):
             value = get_value(self._defaults, key)
         return value
 
+    def _global_runtime_value(self) -> str:
+        """The default agent as currently selected (falling back to config)."""
+        try:
+            global_value = self.query_one("#global-runtime", Select).value
+        except NoMatches:
+            global_value = Select.NULL
+        if _is_blank(global_value):
+            return _canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key))
+        return str(global_value)
+
     def _runtime_options(self, *, include_inherit: bool) -> list[tuple[str, str]]:
         options: list[tuple[str, str]] = []
         if include_inherit:
-            options.append(("(inherit default)", INHERIT_SENTINEL))
+            # Show the resolved default inline so "(inherit)" is concrete.
+            options.append((f"(inherit — {self._global_runtime_value()})", INHERIT_SENTINEL))
         for name in runtime_backend_choices():
             if self._installed.get(name):
                 options.append((name, name))
@@ -181,14 +193,7 @@ class SettingsApp(App[None]):
                 id="config-path",
             )
 
-            yield Static(
-                "Stages — interview → execute → evaluate → reflect", classes="section-title"
-            )
-            with Container(id="stage-row"):
-                for stage in Stage:
-                    yield from self._compose_stage_card(stage)
-
-            yield Static("Global", classes="section-title")
+            yield Static("Defaults", classes="section-title")
             with Container(id="global-row"):
                 with Container(classes="global-cell"):
                     yield from self._compose_select_field(
@@ -197,15 +202,32 @@ class SettingsApp(App[None]):
                         value=_canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key)),
                         select_id="global-runtime",
                     )
-                with Container(classes="global-cell"):
-                    yield from self._compose_select_field(
-                        GLOBAL_LLM_BACKEND_FIELD,
-                        options=[(name, name) for name in llm_backend_choices()],
-                        value=_canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key)),
-                        select_id="global-llm-backend",
+                    yield Static(
+                        "The coding agent that runs your work. Every stage below "
+                        "inherits this unless you override it.",
+                        classes="field-help",
                     )
 
-            with Collapsible(title="Advanced models", collapsed=True):
+            yield Static(
+                "Per-stage overrides — interview → execute → evaluate → reflect",
+                classes="section-title",
+            )
+            with Container(id="stage-row"):
+                for stage in Stage:
+                    yield from self._compose_stage_card(stage)
+
+            with Collapsible(title="Advanced", collapsed=True):
+                yield from self._compose_select_field(
+                    GLOBAL_LLM_BACKEND_FIELD,
+                    options=[(name, name) for name in llm_backend_choices()],
+                    value=_canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key)),
+                    select_id="global-llm-backend",
+                )
+                yield Static(
+                    "Engine for Ouroboros' own internal LLM calls (QA verdicts, "
+                    "semantic evaluation) — usually the same as the default agent.",
+                    classes="field-help",
+                )
                 for field in ADVANCED_MODEL_FIELDS:
                     yield Static(field.label, classes="field-label")
                     warning = _env_warning_text(field)
@@ -301,6 +323,11 @@ class SettingsApp(App[None]):
         elif select_id == "global-runtime":
             for stage in Stage:
                 runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
+                current = runtime_select.value
+                # Rebuild so the "(inherit — <agent>)" label tracks the new default.
+                runtime_select.set_options(self._runtime_options(include_inherit=True))
+                if not _is_blank(current):
+                    runtime_select.value = current
                 if runtime_select.value == INHERIT_SENTINEL:
                     self._refresh_stage_model_options(stage)
         elif select_id.startswith("stage-model-"):
