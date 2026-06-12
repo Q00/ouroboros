@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import inspect
 import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -112,6 +113,22 @@ _COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS = 5.0
 _RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 _RECOVERED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-failed-"
 _RECOVERED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-recovered-interrupted-"
+_DRAIN_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-drain-interrupted-"
+_DRAIN_GRACE_SECONDS = 5.0
+
+
+def _drain_interrupted_data() -> dict[str, Any]:
+    """Terminal payload for jobs interrupted by server shutdown (drain)."""
+    return {
+        "status": JobStatus.INTERRUPTED.value,
+        "message": "Job interrupted: MCP server shut down before the job finished",
+        "error": "MCP server shut down before the job reached a terminal state",
+        "result_text": "MCP server shut down before the job reached a terminal state",
+        "result_meta": {"interrupted_from_shutdown": True},
+        "is_error": True,
+    }
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,7 +159,7 @@ def is_terminal_job_expired(
     """Return true when a terminal job handle is past the retrieval TTL."""
     if not snapshot.is_terminal:
         return False
-    ttl = ttl or _JOB_TTL
+    ttl = ttl if ttl is not None else _JOB_TTL
     current = now or datetime.now(UTC)
     updated = snapshot.updated_at
     if updated.tzinfo is None:
@@ -289,6 +306,9 @@ class JobManager:
         self._initialized = False
         self._known_job_ids: set[str] = set()
         self._reserved_job_ids: set[str] = set()
+        self._draining = False
+        self._cleanup_running = False
+        self._last_cleanup_monotonic = time.monotonic()
 
     async def _ensure_initialized(self) -> None:
         if not self._initialized:
@@ -406,6 +426,18 @@ class JobManager:
                     await runner
                 except asyncio.CancelledError:
                     pass
+            if self._draining:
+                # Server shutdown, not a user cancel: persist INTERRUPTED
+                # (matching the dead-owner reconciliation semantics) — unless a
+                # live external holder owns the terminal state for this job.
+                if self._drain_should_terminalize(snapshot):
+                    await self._append_event(
+                        "mcp.job.interrupted",
+                        job_id,
+                        _drain_interrupted_data(),
+                        event_id=f"{_DRAIN_INTERRUPTED_EVENT_ID_PREFIX}{job_id}",
+                    )
+                raise
             await self._append_event(
                 "mcp.job.cancelled",
                 job_id,
@@ -876,6 +908,7 @@ class JobManager:
     async def get_snapshot(self, job_id: str) -> JobSnapshot:
         """Reconstruct the latest state of a job from persisted events."""
         await self._ensure_initialized()
+        await self._maybe_cleanup_expired()
         events, cursor = await self._event_store.get_events_after("job", job_id, last_row_id=0)
         if not events:
             raise ValueError(f"Job not found: {job_id}")
@@ -1415,12 +1448,122 @@ class JobManager:
             source_process_id=job_id,
         )
 
+    def _drain_should_terminalize(self, snapshot: JobSnapshot) -> bool:
+        """During drain, terminalize only when no live external holder owns the job.
+
+        A linked runtime running in *another* live process (heartbeat holder)
+        is the progress authority and will emit the terminal event itself —
+        interrupting its job here would permanently terminalize still-active
+        work. A holder owned by *this* (exiting) process is about to die with
+        us, so its job must be terminalized now while the store is still open.
+        """
+        session_id = snapshot.links.session_id
+        if session_id is None:
+            return True
+        if not is_holder_alive(session_id):
+            return True
+        return is_owned_by_current_process(session_id)
+
+    async def drain(self, grace_seconds: float = _DRAIN_GRACE_SECONDS) -> int:
+        """Terminalize in-process background jobs before the shared EventStore closes.
+
+        Called by the serve shutdown path *before* ``server.shutdown()``.
+        Without an explicit drain, job tasks are killed by ``asyncio.run``
+        teardown after ``EventStore.close()``, so their terminal appends fail
+        with ``PersistenceError`` and the rows stay RUNNING forever —
+        manufacturing exactly the dead-owner zombies that
+        :meth:`_reconcile_orphaned_job_snapshot` exists to clean up.
+
+        Returns the number of jobs whose tasks finished within the grace.
+        """
+        self._draining = True
+        live_job_ids = [job_id for job_id, task in self._tasks.items() if not task.done()]
+        # Monitors are progress mirrors with no terminal authority — stop them
+        # first so they cannot race the terminal events written below.
+        for job_id, monitor in list(self._monitors.items()):
+            if not monitor.done():
+                monitor.cancel()
+                monitor.add_done_callback(_consume_task_result)
+            self._monitors.pop(job_id, None)
+        if not live_job_ids:
+            return 0
+        # Cancel runners (not the _run_job wrappers): the CancelledError path
+        # in _run_job persists the terminal event — INTERRUPTED while draining.
+        for job_id in live_job_ids:
+            runner = self._runner_tasks.get(job_id)
+            if runner is not None and not runner.done():
+                runner.cancel()
+            else:
+                task = self._tasks.get(job_id)
+                if task is not None and not task.done():
+                    task.cancel()
+        job_tasks = {
+            self._tasks[job_id]
+            for job_id in live_job_ids
+            if job_id in self._tasks and not self._tasks[job_id].done()
+        }
+        drained = 0
+        if job_tasks:
+            done, pending = await asyncio.wait(job_tasks, timeout=grace_seconds)
+            drained = len(done)
+            for task in done:
+                _consume_task_result(task)
+            for task in pending:
+                task.cancel()
+                task.add_done_callback(_consume_task_result)
+        # Jobs whose tasks did not unwind within the grace still get an
+        # authoritative terminal row (idempotent event id) while the store is
+        # open; the wedged task itself dies with the event loop.
+        for job_id in live_job_ids:
+            task = self._tasks.get(job_id)
+            if task is None or task.done():
+                continue
+            try:
+                snapshot = await self.get_snapshot(job_id)
+                if snapshot.is_terminal or not self._drain_should_terminalize(snapshot):
+                    continue
+                await self._append_event(
+                    "mcp.job.interrupted",
+                    job_id,
+                    _drain_interrupted_data(),
+                    event_id=f"{_DRAIN_INTERRUPTED_EVENT_ID_PREFIX}{job_id}",
+                )
+            except (PersistenceError, ValueError):
+                logger.warning(
+                    "mcp.job.drain_terminalize_failed",
+                    extra={"job_id": job_id},
+                    exc_info=True,
+                )
+        return drained
+
+    async def _maybe_cleanup_expired(self) -> None:
+        """Throttled TTL sweep of the in-memory job registries.
+
+        Piggybacks on the read path (``get_snapshot``) so the idle case costs
+        two comparisons; the sweep itself replays every known job id, so it
+        runs at most once per TTL window. Reentrancy-guarded because the
+        sweep's own snapshot reads come back through ``get_snapshot``.
+        """
+        if self._draining or self._cleanup_running:
+            return
+        now = time.monotonic()
+        if now - self._last_cleanup_monotonic < _JOB_TTL.total_seconds():
+            return
+        self._last_cleanup_monotonic = now
+        self._cleanup_running = True
+        try:
+            await self.cleanup_expired_jobs()
+        except Exception:
+            logger.warning("mcp.job.ttl_cleanup_failed", exc_info=True)
+        finally:
+            self._cleanup_running = False
+
     async def cleanup_expired_jobs(self, ttl: timedelta | None = None) -> int:
         """Remove terminal jobs older than *ttl* from the in-memory registry.
 
         Returns the number of cleaned-up job IDs.
         """
-        ttl = ttl or _JOB_TTL
+        ttl = ttl if ttl is not None else _JOB_TTL
         now = datetime.now(UTC)
         expired: list[str] = []
         for job_id in list(self._known_job_ids):
@@ -1439,6 +1582,8 @@ class JobManager:
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
             self._monitors.pop(job_id, None)
+            self._recovery_locks.pop(job_id, None)
+            self._monitor_terminalized_jobs.discard(job_id)
         return len(expired)
 
     async def _append_event(

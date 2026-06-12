@@ -398,18 +398,29 @@ class TestCheckEventStore:
 
 
 class TestCheckPidFile:
+    def _patch_paths(self, tmp_path):
+        """Isolate both the legacy PID file and the per-instance registry."""
+        return (
+            patch("ouroboros.cli.commands.mcp_doctor._PID_FILE", tmp_path / "mcp-server.pid"),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._PID_REGISTRY_DIR",
+                tmp_path / "mcp-servers",
+            ),
+        )
+
     def test_passes_when_no_pid_file(self, tmp_path):
-        fake_pid = tmp_path / "mcp-server.pid"
-        with patch("ouroboros.cli.commands.mcp_doctor._PID_FILE", fake_pid):
+        pid_patch, registry_patch = self._patch_paths(tmp_path)
+        with pid_patch, registry_patch:
             result = check_pid_file()
         assert result.status == "pass"
         assert "not running" in result.message.lower() or "no pid" in result.message.lower()
 
     def test_passes_when_pid_alive(self, tmp_path):
-        fake_pid = tmp_path / "mcp-server.pid"
-        fake_pid.write_text("12345", encoding="utf-8")
+        (tmp_path / "mcp-server.pid").write_text("12345", encoding="utf-8")
+        pid_patch, registry_patch = self._patch_paths(tmp_path)
         with (
-            patch("ouroboros.cli.commands.mcp_doctor._PID_FILE", fake_pid),
+            pid_patch,
+            registry_patch,
             patch("ouroboros.cli.commands.mcp_doctor._pid_is_alive", return_value=True),
         ):
             result = check_pid_file()
@@ -417,10 +428,11 @@ class TestCheckPidFile:
         assert "12345" in result.message
 
     def test_warns_when_pid_stale(self, tmp_path):
-        fake_pid = tmp_path / "mcp-server.pid"
-        fake_pid.write_text("99999", encoding="utf-8")
+        (tmp_path / "mcp-server.pid").write_text("99999", encoding="utf-8")
+        pid_patch, registry_patch = self._patch_paths(tmp_path)
         with (
-            patch("ouroboros.cli.commands.mcp_doctor._PID_FILE", fake_pid),
+            pid_patch,
+            registry_patch,
             patch("ouroboros.cli.commands.mcp_doctor._pid_is_alive", return_value=False),
         ):
             result = check_pid_file()
@@ -428,12 +440,44 @@ class TestCheckPidFile:
         assert result.remediation != ""
 
     def test_warns_when_pid_file_unreadable(self, tmp_path):
-        fake_pid = tmp_path / "mcp-server.pid"
-        fake_pid.write_text("not_a_number", encoding="utf-8")
-        with patch("ouroboros.cli.commands.mcp_doctor._PID_FILE", fake_pid):
+        (tmp_path / "mcp-server.pid").write_text("not_a_number", encoding="utf-8")
+        pid_patch, registry_patch = self._patch_paths(tmp_path)
+        with pid_patch, registry_patch:
             result = check_pid_file()
         assert result.status == "warn"
         assert result.remediation != ""
+
+    def test_registry_live_instances_pass(self, tmp_path):
+        registry = tmp_path / "mcp-servers"
+        registry.mkdir()
+        (registry / "111.pid").write_text("111 1700000000.0", encoding="utf-8")
+        (registry / "222.pid").write_text("222 None", encoding="utf-8")
+        pid_patch, registry_patch = self._patch_paths(tmp_path)
+        with (
+            pid_patch,
+            registry_patch,
+            patch("ouroboros.cli.commands.mcp_doctor._pid_is_alive", return_value=True),
+        ):
+            result = check_pid_file()
+        assert result.status == "pass"
+        assert "2 MCP server instance(s)" in result.message
+        assert "111" in result.message
+        assert "222" in result.message
+
+    def test_registry_stale_records_warn_without_kill_advice(self, tmp_path):
+        registry = tmp_path / "mcp-servers"
+        registry.mkdir()
+        (registry / "333.pid").write_text("333 1700000000.0", encoding="utf-8")
+        pid_patch, registry_patch = self._patch_paths(tmp_path)
+        with (
+            pid_patch,
+            registry_patch,
+            patch("ouroboros.cli.commands.mcp_doctor._pid_is_alive", return_value=False),
+        ):
+            result = check_pid_file()
+        assert result.status == "warn"
+        assert "stale instance record" in result.message
+        assert "kill" not in result.remediation.lower() or "do not kill" in result.remediation
 
 
 # ---------------------------------------------------------------------------

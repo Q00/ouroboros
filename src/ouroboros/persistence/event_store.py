@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-import contextlib
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -1305,28 +1304,44 @@ class EventStore:
         """
         return await self.replay("lineage", lineage_id)
 
+    async def checkpoint_wal(self) -> bool:
+        """Best-effort WAL TRUNCATE checkpoint without closing the store.
+
+        Collapses the WAL back into the main DB. Without an explicit TRUNCATE
+        checkpoint, long-lived multi-connection setups (many concurrent
+        MCP/TUI sessions) let the -wal file grow unbounded: passive
+        autocheckpoints cannot truncate while any other reader is active, so
+        the file only ever appends. Long-lived *idle* servers can call this
+        periodically so they stop pinning a growing WAL between requests.
+
+        Uses a short per-connection busy_timeout instead of the 30s default
+        (set in initialize()): the checkpoint needs the write lock, and a
+        peer process mid-write could otherwise stall the caller for up to
+        30s. A missed checkpoint is harmless — a later attempt retries — so
+        the wait is capped at ~2s. ``connect()`` (not ``begin()``) avoids an
+        upfront BEGIN IMMEDIATE; the checkpoint acquires its own lock under
+        the bounded timeout.
+
+        Returns:
+            True when the checkpoint ran, False when skipped or it failed
+            (read-only store, no engine, lock contention).
+        """
+        if self._engine is None or self._read_only:
+            return False
+        try:
+            async with self._engine.connect() as conn:
+                await conn.exec_driver_sql("PRAGMA busy_timeout=2000")
+                await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            return False
+        return True
+
     async def close(self) -> None:
         """Close the database connection."""
         if self._engine is not None:
-            # Collapse the WAL back into the main DB before disposing. Without
-            # an explicit TRUNCATE checkpoint, long-lived multi-connection
-            # setups (many concurrent MCP/TUI sessions) let the -wal file grow
-            # unbounded: passive autocheckpoints cannot truncate while any
-            # other reader is active, so the file only ever appends. Best
-            # effort — ignore failures (read-only stores, lock contention).
-            #
-            # Use a short per-connection busy_timeout instead of the 30s default
-            # (set in initialize()): the checkpoint needs the write lock, and a
-            # peer process mid-write could otherwise stall this shutdown path for
-            # up to 30s. A missed checkpoint is harmless — the next clean close
-            # retries — so we cap the wait at ~2s. ``connect()`` (not ``begin()``)
-            # avoids an upfront BEGIN IMMEDIATE; the checkpoint acquires its own
-            # lock under the bounded timeout.
-            if not self._read_only:
-                with contextlib.suppress(Exception):
-                    async with self._engine.connect() as conn:
-                        await conn.exec_driver_sql("PRAGMA busy_timeout=2000")
-                        await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+            # Collapse the WAL before disposing so the -wal file does not
+            # survive shutdown. Best effort — see checkpoint_wal().
+            await self.checkpoint_wal()
             await self._engine.dispose()
             self._engine = None
 

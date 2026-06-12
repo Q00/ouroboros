@@ -12,7 +12,8 @@ import keyword
 import os
 from pathlib import Path
 import re
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -39,6 +40,9 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
+
+if TYPE_CHECKING:
+    from ouroboros.mcp.job_manager import JobManager
 
 log = structlog.get_logger(__name__)
 
@@ -597,6 +601,8 @@ class MCPServerAdapter:
         self._mcp_server: Any = None
         self._owned_resources: list[Any] = []  # objects with async close()
         self._runtime_context: AgentRuntimeContext | None = None
+        self._job_manager: JobManager | None = None
+        self._last_tool_activity = time.monotonic()
 
         # Initialize security layer
         self._security = SecurityLayer(
@@ -722,6 +728,7 @@ class MCPServerAdapter:
         Returns:
             Result containing the tool result or an error.
         """
+        self._last_tool_activity = time.monotonic()
         handler = self._tool_handlers.get(name)
         if not handler:
             return Result.err(
@@ -1029,6 +1036,26 @@ class MCPServerAdapter:
     def register_owned_resource(self, resource: Any) -> None:
         """Register a resource whose ``close()`` will be called on shutdown."""
         self._owned_resources.append(resource)
+
+    @property
+    def job_manager(self) -> JobManager | None:
+        """Return the background-job manager owned by this server, if any.
+
+        Exposed so the serve shutdown path can drain live jobs *before* the
+        EventStore closes; job tasks killed by ``asyncio.run`` teardown after
+        the store is gone fail their terminal appends and leave RUNNING
+        zombie rows in the DB.
+        """
+        return self._job_manager
+
+    def set_job_manager(self, job_manager: JobManager) -> None:
+        """Attach the background-job manager to the server object graph."""
+        self._job_manager = job_manager
+
+    @property
+    def seconds_since_last_tool_call(self) -> float:
+        """Seconds since the last tool call (or server creation) — idle gauge."""
+        return time.monotonic() - self._last_tool_activity
 
     def _io_recorder_for_tool_call(
         self,
@@ -1878,6 +1905,7 @@ def create_ouroboros_server(
         control=control_bus,
     )
     server.set_runtime_context(agent_runtime_context)
+    server.set_job_manager(job_manager)
 
     # Close the reactive control surface before stores/bridges it may
     # reference from subscriber tasks.

@@ -51,6 +51,7 @@ class CheckResult:
 # ---------------------------------------------------------------------------
 
 _PID_FILE = Path.home() / ".ouroboros" / "mcp-server.pid"
+_PID_REGISTRY_DIR = Path.home() / ".ouroboros" / "mcp-servers"
 _EVENT_STORE_PATH = Path.home() / ".ouroboros" / "ouroboros.db"
 _EVENT_STORE_WARN_BYTES = 500 * 1024 * 1024  # 500 MB
 
@@ -358,8 +359,34 @@ def _pid_is_alive(pid: int) -> bool:
         return False
 
 
-def check_pid_file() -> CheckResult:
-    """Check the MCP server PID file for liveness."""
+def _scan_instance_registry() -> tuple[list[int], list[Path]]:
+    """Split per-instance registry records into live PIDs and stale files.
+
+    Records live at ``~/.ouroboros/mcp-servers/<pid>.pid`` containing
+    ``"<pid> <start_time|None>"`` — one per concurrently running server
+    (one server per connected MCP client is the normal steady state).
+    """
+    live: list[int] = []
+    stale: list[Path] = []
+    try:
+        entries = sorted(_PID_REGISTRY_DIR.iterdir())
+    except OSError:
+        return live, stale
+    for entry in entries:
+        try:
+            pid = int(entry.read_text(encoding="utf-8").strip().split()[0])
+        except (ValueError, IndexError, OSError):
+            stale.append(entry)
+            continue
+        if _pid_is_alive(pid):
+            live.append(pid)
+        else:
+            stale.append(entry)
+    return live, stale
+
+
+def _check_legacy_pid_file() -> CheckResult:
+    """Check the legacy single-slot PID file (pre-registry server versions)."""
     if not _PID_FILE.exists():
         return CheckResult(
             name="pid_file",
@@ -391,6 +418,37 @@ def check_pid_file() -> CheckResult:
         status="warn",
         message=f"Stale PID file: process {pid} is not running",
         remediation=f"Remove the stale file: {_rm_cmd} {_PID_FILE}",
+    )
+
+
+def check_pid_file() -> CheckResult:
+    """Check MCP server instance liveness (per-instance registry + legacy file)."""
+    live, stale = _scan_instance_registry()
+    if not live and not stale:
+        return _check_legacy_pid_file()
+
+    parts: list[str] = []
+    if live:
+        parts.append(
+            f"{len(live)} MCP server instance(s) running "
+            f"(PIDs {', '.join(str(pid) for pid in live)})"
+        )
+    if stale:
+        parts.append(f"{len(stale)} stale instance record(s)")
+        return CheckResult(
+            name="pid_file",
+            status="warn",
+            message="; ".join(parts),
+            remediation=(
+                "Stale records are swept automatically by the next "
+                "`ouroboros mcp serve`; live instances are owned by running "
+                "agent sessions — do not kill them blindly."
+            ),
+        )
+    return CheckResult(
+        name="pid_file",
+        status="pass",
+        message=parts[0],
     )
 
 
