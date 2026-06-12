@@ -149,6 +149,46 @@ def start_execute_seed_handler(
     )
 
 
+def session_status_handler() -> SessionStatusHandler:
+    """Create a SessionStatusHandler instance."""
+    return SessionStatusHandler()
+
+
+def job_status_handler() -> JobStatusHandler:
+    """Create a JobStatusHandler instance."""
+    return JobStatusHandler()
+
+
+def job_wait_handler() -> JobWaitHandler:
+    """Create a JobWaitHandler instance."""
+    return JobWaitHandler()
+
+
+def job_result_handler() -> JobResultHandler:
+    """Create a JobResultHandler instance."""
+    return JobResultHandler()
+
+
+def ac_tree_hud_handler() -> ACTreeHUDHandler:
+    """Create an ACTreeHUDHandler instance."""
+    return ACTreeHUDHandler()
+
+
+def cancel_job_handler() -> CancelJobHandler:
+    """Create a CancelJobHandler instance."""
+    return CancelJobHandler()
+
+
+def query_events_handler() -> QueryEventsHandler:
+    """Create a QueryEventsHandler instance."""
+    return QueryEventsHandler()
+
+
+def projection_query_handler() -> ProjectionQueryHandler:
+    """Create a ProjectionQueryHandler instance."""
+    return ProjectionQueryHandler()
+
+
 def generate_seed_handler(
     *,
     llm_backend: str | None = None,
@@ -161,6 +201,11 @@ def generate_seed_handler(
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
     )
+
+
+def measure_drift_handler() -> MeasureDriftHandler:
+    """Create a MeasureDriftHandler instance."""
+    return MeasureDriftHandler()
 
 
 def interview_handler(
@@ -322,6 +367,32 @@ def ralph_handler(
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
     )
+
+
+def start_ralph_handler(
+    *,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> StartRalphHandler:
+    """Create a fire-and-forget Ralph start handler alias."""
+    return StartRalphHandler(
+        evolve_handler=EvolveStepHandler(
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
+def lineage_status_handler() -> LineageStatusHandler:
+    """Create a LineageStatusHandler instance."""
+    return LineageStatusHandler()
+
+
+def evolve_rewind_handler() -> EvolveRewindHandler:
+    """Create an EvolveRewindHandler instance."""
+    return EvolveRewindHandler()
 
 
 # ---------------------------------------------------------------------------
