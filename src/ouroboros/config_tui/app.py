@@ -35,6 +35,7 @@ from ouroboros.backends.model_catalog import (
     installed_backends,
     model_choices,
     refresh_models,
+    uses_default_model_sentinel,
 )
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
 from ouroboros.config.models import OuroborosConfig, get_config_dir
@@ -563,6 +564,13 @@ class SettingsApp(App[None]):
             return str(global_value)
         return str(value)
 
+    def _selected_llm_backend(self) -> str:
+        llm_select = self.query_one("#global-llm-backend", Select)
+        value = llm_select.value
+        if _is_blank(value):
+            return _canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key))
+        return _canonical_backend(value)
+
     def _refresh_stage_model_options(self, stage: Stage) -> None:
         """Repopulate the model select with the effective backend's catalog.
 
@@ -659,7 +667,14 @@ class SettingsApp(App[None]):
                 if custom:
                     record(model_field.key, custom)
             elif not _is_blank(model_value):
-                record(model_field.key, str(model_value))
+                model_text = str(model_value)
+                if model_text == DEFAULT_MODEL_SENTINEL and not uses_default_model_sentinel(
+                    self._selected_llm_backend()
+                ):
+                    if get_value(self._raw, model_field.key) == DEFAULT_MODEL_SENTINEL:
+                        changes[model_field.key] = None
+                    continue
+                record(model_field.key, model_text)
 
         for field in ADVANCED_MODEL_FIELDS:
             raw_value = self.query_one(f"#adv-{_slug(field.key)}", Input).value.strip()

@@ -127,6 +127,12 @@ def model_choices(backend: str) -> tuple[str, ...]:
     return get_model_catalog(backend).models
 
 
+def uses_default_model_sentinel(backend: str) -> bool:
+    """Whether ``"default"`` is a safe persisted model value for this backend."""
+    capability = get_backend_capability(backend)
+    return capability is not None and capability.name in _SENTINEL_MODEL_BACKENDS
+
+
 def refresh_models(
     backend: str,
     *,
@@ -254,4 +260,5 @@ __all__ = [
     "installed_backends",
     "model_choices",
     "refresh_models",
+    "uses_default_model_sentinel",
 ]

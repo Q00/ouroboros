@@ -379,6 +379,58 @@ async def test_save_summary_shows_diff_and_reconnect_hint(app_env, monkeypatch) 
         assert "reconnect" in status  # backend change needs MCP reconnect
 
 
+@pytest.mark.asyncio
+async def test_save_skips_default_sentinel_when_llm_backend_is_claude(monkeypatch) -> None:
+    raw = {
+        "orchestrator": {"runtime_backend": "claude"},
+        "llm": {"backend": "claude_code"},
+    }
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "load_raw_config", lambda: dict(raw))
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.installed_backends",
+        lambda: {"claude": "/bin/claude", "codex": "/bin/codex"},
+    )
+    monkeypatch.setattr("ouroboros.config_tui.app.refresh_models", lambda _backend: None)
+    monkeypatch.setattr("ouroboros.config_tui.app.configured_default_model", lambda _backend: None)
+
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.EXECUTE.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+        assert pilot.app.query_one(f"#stage-model-{stage}", Select).value == "default"
+
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert captured["orchestrator.runtime_profile.stages.execute"] == "codex"
+    assert "execution.double_diamond_model" not in captured
+
+
+@pytest.mark.asyncio
+async def test_save_keeps_default_sentinel_when_llm_backend_supports_it(
+    app_env, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#global-llm-backend", Select).value = "codex"
+        await pilot.pause()
+        stage = Stage.EXECUTE.value
+        pilot.app.query_one(f"#stage-model-{stage}", Select).value = "default"
+        await pilot.pause()
+
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert captured["llm.backend"] == "codex"
+    assert captured["execution.double_diamond_model"] == "default"
+
+
 def test_save_summary_without_backend_change_has_no_reconnect_hint() -> None:
     summary = SettingsApp._save_summary(
         {"clarification.default_model": "m2"}, {"clarification.default_model": "m1"}

@@ -177,6 +177,26 @@ def _effective_value(
     return str(default), "default"
 
 
+def _effective_llm_backend_value(raw_value: object) -> tuple[str, str]:
+    """Resolve the effective LLM backend using the loader's env fallback order."""
+    import os
+
+    env_backend = os.environ.get("OUROBOROS_LLM_BACKEND", "").strip()
+    if env_backend:
+        return env_backend, "env OUROBOROS_LLM_BACKEND ⚠"
+
+    env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip()
+    capability = get_backend_capability(env_runtime)
+    if capability is not None and capability.supports_llm:
+        if env_runtime.strip().lower() == "claude_code":
+            return "claude_code", "env OUROBOROS_RUNTIME ⚠"
+        return capability.name, "env OUROBOROS_RUNTIME ⚠"
+
+    if raw_value is not None:
+        return str(raw_value), "config"
+    return "claude_code", "default"
+
+
 def _agent_cell(backend: str, installed: dict[str, str | None]) -> str:
     """Render an agent name with an install marker."""
     return backend if installed.get(backend) else f"{backend} ⚠ not installed"
@@ -199,10 +219,8 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
         get_value(data, GLOBAL_RUNTIME_FIELD.key),
         "claude",
     )
-    llm_value, llm_source = _effective_value(
-        GLOBAL_LLM_BACKEND_FIELD.env_vars,
-        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
-        "claude_code",
+    llm_value, llm_source = _effective_llm_backend_value(
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key)
     )
     profile_default = get_value(data, "orchestrator.runtime_profile.default")
     stages: dict[str, dict] = {}

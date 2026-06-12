@@ -179,6 +179,33 @@ def test_show_json_emits_machine_readable_effective_view(monkeypatch, tmp_path) 
     assert payload["stages"]["interview"]["agent"] == "opencode"
 
 
+def test_show_json_uses_runtime_env_as_llm_backend_fallback(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "claude"},
+            "llm": {"backend": "claude_code"},
+        },
+    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "codex")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex"},
+    )
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["defaults"]["llm_backend"] == {
+        "value": "codex",
+        "source": "env OUROBOROS_RUNTIME ⚠",
+    }
+
+
 def test_undo_swaps_in_backup_and_supports_redo(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
     from ouroboros.config import loader as config_loader

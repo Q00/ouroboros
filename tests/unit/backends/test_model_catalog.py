@@ -39,6 +39,13 @@ def test_codex_catalog_offers_known_models_after_sentinel() -> None:
     assert "gpt-5-codex" in choices
 
 
+def test_default_model_sentinel_support_follows_backend_contract() -> None:
+    assert mc.uses_default_model_sentinel("codex") is True
+    assert mc.uses_default_model_sentinel("codex_cli") is True
+    assert mc.uses_default_model_sentinel("claude") is False
+    assert mc.uses_default_model_sentinel("claude_code") is False
+
+
 def test_alias_resolves_to_canonical_catalog() -> None:
     assert mc.get_model_catalog("claude_code") is mc.get_model_catalog("claude")
     assert mc.get_model_catalog("codex_cli") is mc.get_model_catalog("codex")
