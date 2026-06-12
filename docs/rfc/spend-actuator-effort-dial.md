@@ -4,14 +4,14 @@
 > Relates to [discussion #1384](https://github.com/Q00/ouroboros/discussions/1384)
 > (complexity→investment mechanism). This is the **actuator / wiring half** of the
 > split the owner requested; the **estimator half** is
-> [spend estimator](./spend-estimator.md). Frugality stance:
+> [spend estimator](https://github.com/Q00/ouroboros/pull/1404). Frugality stance:
 > [#1377](https://github.com/Q00/ouroboros/discussions/1377) /
-> [frugality control loop](./frugality-control-loop.md).
+> [frugality control loop](https://github.com/Q00/ouroboros/pull/1403).
 
 ## Summary
 
 Given the per-unit difficulty + stakes estimate from the
-[estimator RFC](./spend-estimator.md), *something* must act on it during execution.
+[estimator RFC](https://github.com/Q00/ouroboros/pull/1404), *something* must act on it during execution.
 Today nothing does — and the machinery that was meant to (`PALRouter` /
 `ModelRouter` and a 1×/10×/30× tier-cost table) has **no live call site**. The
 owner reshaped the actuator decisively: **the lever is reasoning effort, not model
@@ -45,7 +45,7 @@ thinking toggle is nearly binary, for instance).
 
 The live executor is `orchestrator/parallel_executor.py` (the
 `execution/double_diamond.py` path is off the live path — see the
-[decomposition reliability RFC](./decomposition-reliability.md)). The unwired
+[decomposition reliability RFC](https://github.com/Q00/ouroboros/pull/1406)). The unwired
 `routing/router.py`, `routing/tiers.py`, and `plugin/orchestration/router.py` encode
 the **wrong actuator** and are removed, not wired — fixing a router nothing calls
 would be motion, not progress.
@@ -89,12 +89,12 @@ asserting no non-test importer remains before removal.
 
 ## Out of scope (deliberately)
 
-- **How the estimate is produced** — the [estimator RFC](./spend-estimator.md).
+- **How the estimate is produced** — the [estimator RFC](https://github.com/Q00/ouroboros/pull/1404).
 - **Cross-run calibration of the ladder boundaries** — v2.
 - **A current, cross-provider cost model** — the actuator needs only *relative*
   ordering (more difficult/stakes → more effort); billing-accurate costing is
   separate. The user-held assurance dial that bounds economize-vs-assure lives in
-  the [frugality control loop RFC](./frugality-control-loop.md).
+  the [frugality control loop RFC](https://github.com/Q00/ouroboros/pull/1403).
 
 ## Acceptance criteria
 
