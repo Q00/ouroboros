@@ -297,6 +297,10 @@ _runtime_to_extras() {
 # Preserves user choice across upgrades unless --reconfigure / --runtime is set.
 EXISTING_RUNTIME=""
 EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
+# Fresh install (no config yet) → the post-install settings-GUI offer
+# defaults to yes; upgrades default to no.
+FRESH_CONFIG=true
+[ -f "$EXISTING_CONFIG" ] && FRESH_CONFIG=false
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
@@ -629,3 +633,44 @@ if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
 _info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
+_info "Tune per-stage agents & models anytime: ouroboros config (settings GUI)"
+
+# 6. Optional first-run settings GUI (interactive installs only).
+# install.sh always runs in a real terminal when interactive, so the
+# full-screen Textual settings app can open right here. curl|bash pipe
+# installs skip this automatically ([ -t 0 ] is false).
+if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
+  if [ "$FRESH_CONFIG" = true ]; then
+    GUI_DEFAULT="y"
+    GUI_HINT="[Y/n]"
+  else
+    GUI_DEFAULT="n"
+    GUI_HINT="[y/N]"
+  fi
+  _blank
+  _say "${BOLD}First-time setup: pick per-stage agents & models in the settings GUI?${RESET}"
+  _prompt "Open settings GUI now $GUI_HINT: "
+  read -r gui_choice
+  case "${gui_choice:-$GUI_DEFAULT}" in
+    y | Y | yes | YES)
+      GUI_OK=false
+      if [ -n "${OUROBOROS_SETUP_CMD:-}" ] && "$OUROBOROS_SETUP_CMD" config; then
+        GUI_OK=true
+      elif command -v uvx &>/dev/null; then
+        # The selected extras may not include [tui]; run the GUI from an
+        # ephemeral env with the tui extra instead of fattening the install.
+        _info "Settings GUI needs the tui extra; running it via uvx..."
+        if uvx --from "${PACKAGE_NAME}[tui]" ouroboros config; then
+          GUI_OK=true
+        fi
+      fi
+      if [ "$GUI_OK" = false ]; then
+        _warn "Could not open the settings GUI."
+        _info "Run it later with: uvx --from '${PACKAGE_NAME}[tui]' ouroboros config"
+      fi
+      ;;
+    *)
+      _info "Skipped. Run it anytime: ouroboros config"
+      ;;
+  esac
+fi
