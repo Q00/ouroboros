@@ -557,7 +557,7 @@ if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" =
   # MCP command matches the installer that actually ran in step 3
   if [ "$INSTALL_METHOD" = "uv" ]; then
     case "$EXTRAS" in
-      "[mcp,claude]")
+      "[mcp,claude]" | "[mcp,claude,tui]")
         OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
         ;;
       "[all]")
