@@ -4,11 +4,9 @@ This package provides:
 - Agent Registry: Dynamic agent discovery and registration
 - Agent Pool: Reusable agent pool with load balancing
 - Skills Registry: Hot-reloading skill discovery
-- Orchestration: Task scheduling and model routing
 
 Architecture:
 - Extends the orchestrator AgentRuntime abstraction
-- Integrates with routing.complexity for PAL routing
 - Uses events.base for state tracking
 
 Usage:
@@ -38,14 +36,6 @@ from ouroboros.plugin.agents import (
     AgentState,
     TaskRequest,
 )
-from ouroboros.plugin.orchestration import (
-    ModelRouter,
-    RoutingContext,
-    ScheduledTask,
-    Scheduler,
-    SchedulerConfig,
-    TaskGraph,
-)
 from ouroboros.plugin.skills import (
     SkillInstance,
     SkillMetadata,
@@ -62,13 +52,6 @@ __all__ = [
     "AgentSpec",
     "AgentState",
     "TaskRequest",
-    # Orchestration
-    "ModelRouter",
-    "RoutingContext",
-    "Scheduler",
-    "SchedulerConfig",
-    "ScheduledTask",
-    "TaskGraph",
     # Skills
     "SkillInstance",
     "SkillMetadata",

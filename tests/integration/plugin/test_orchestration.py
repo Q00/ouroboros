@@ -3,8 +3,6 @@
 Tests cover:
 - Agent orchestration with pool
 - Skill execution flow
-- Router integration with complexity estimation
-- End-to-end workflows
 """
 
 import asyncio
@@ -23,11 +21,9 @@ from ouroboros.plugin.agents.registry import (
     AgentRegistry,
     AgentRole,
 )
-from ouroboros.plugin.orchestration.router import ModelRouter, RoutingContext
 from ouroboros.plugin.skills.registry import (
     SkillRegistry,
 )
-from ouroboros.routing.tiers import Tier
 
 
 class TestAgentPoolIntegration:
@@ -320,114 +316,3 @@ A testing skill.
             reloaded_skill = registry.get_skill("reload_test")
             assert reloaded_skill is not None
             assert "Updated Content" in reloaded_skill.spec["raw"]
-
-
-class TestModelRouterIntegration:
-    """Integration tests for ModelRouter."""
-
-    @pytest.mark.asyncio
-    async def test_router_with_learning(self) -> None:
-        """Test router learns from routing history."""
-        router = ModelRouter()
-
-        # Route a simple task
-        context = RoutingContext(
-            task_type="simple",
-            token_estimate=100,
-            tool_count=1,
-            ac_depth=1,
-        )
-
-        # First route - should use complexity estimation
-        tier1 = await router.route(context)
-        assert tier1 == Tier.FRUGAL
-
-        # Record successful result
-        await router.record_result(context, tier1, success=True)
-
-        # Route again - should use history
-        tier2 = await router.route(context)
-        assert tier2 == Tier.FRUGAL
-
-        # Verify history
-        stats = router.get_statistics()
-        assert stats["total_routes"] == 2
-        assert stats["total_records"] == 1
-
-    @pytest.mark.asyncio
-    async def test_router_escalation_workflow(self) -> None:
-        """Test router escalation after failures."""
-        router = ModelRouter()
-
-        context = RoutingContext(
-            task_type="failing",
-            token_estimate=100,
-            tool_count=1,
-            ac_depth=1,
-        )
-
-        # Initial route
-        tier1 = await router.route(context)
-
-        # Record failures
-        for _ in range(router.ESCALATION_AFTER_FAILURES):
-            await router.record_result(context, tier1, success=False)
-
-        # Next route should escalate
-        tier2 = await router.route(context)
-
-        # Should be higher tier
-        if tier1 == Tier.FRUGAL:
-            assert tier2 == Tier.STANDARD
-        elif tier1 == Tier.STANDARD:
-            assert tier2 == Tier.FRONTIER
-
-    @pytest.mark.asyncio
-    async def test_router_cost_optimization(self) -> None:
-        """Test cost optimization affects routing."""
-        router = ModelRouter()
-        router.set_cost_optimization(enabled=True)
-
-        # Medium complexity task
-        context = RoutingContext(
-            task_type="medium",
-            token_estimate=2000,
-            tool_count=3,
-            ac_depth=2,
-        )
-
-        tier = await router.route(context)
-
-        # With cost optimization, might downgrade
-        # The important thing is it makes a decision
-        assert tier in [Tier.FRUGAL, Tier.STANDARD, Tier.FRONTIER]
-
-
-class TestEndToEndWorkflow:
-    """End-to-end workflow tests."""
-
-    @pytest.mark.asyncio
-    async def test_full_plugin_workflow(self) -> None:
-        """Test complete plugin workflow end-to-end."""
-        # 1. Initialize components
-        AgentRegistry()
-        router = ModelRouter()
-
-        # 2. Route a task
-        context = RoutingContext(
-            task_type="code",
-            token_estimate=1500,
-            tool_count=2,
-            ac_depth=2,
-        )
-
-        tier = await router.route(context)
-        assert tier in [Tier.FRUGAL, Tier.STANDARD, Tier.FRONTIER]
-
-        # 3. Record routing result
-        await router.record_result(context, tier, success=True)
-
-        # 4. Verify state
-        stats = router.get_statistics()
-        assert stats["total_routes"] == 1
-        assert stats["total_records"] == 1
