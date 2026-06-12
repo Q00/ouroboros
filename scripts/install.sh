@@ -464,6 +464,7 @@ if [ "$HAS_UV" = true ]; then
         --with "anthropic==0.105.2"
         --with "litellm==1.86.2"
         --with "textual==8.2.7"
+        --with "textual-serve==1.1.3"
       )
       ;;
   esac
