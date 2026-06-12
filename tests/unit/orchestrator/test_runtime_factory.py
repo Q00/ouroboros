@@ -9,6 +9,7 @@ import pytest
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.gjc_runtime import GjcRuntime
 from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.runtime_factory import (
@@ -36,6 +37,12 @@ class TestResolveAgentRuntimeBackend:
         """OpenCode aliases normalize to opencode."""
         assert resolve_agent_runtime_backend("opencode") == "opencode"
         assert resolve_agent_runtime_backend("opencode_cli") == "opencode"
+
+    def test_resolve_gjc_aliases(self) -> None:
+        """GJC aliases normalize to gjc."""
+        assert resolve_agent_runtime_backend("gjc") == "gjc"
+        assert resolve_agent_runtime_backend("gajae-code") == "gjc"
+        assert resolve_agent_runtime_backend("gajae_code") == "gjc"
 
     def test_resolve_hermes_aliases(self) -> None:
         """Hermes aliases normalize to hermes."""
@@ -371,3 +378,51 @@ def test_create_goose_runtime_uses_configured_cli_path() -> None:
     assert runtime._cwd == "/tmp/project"
     assert runtime._skill_dispatcher is mock_dispatcher
     assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "goose"
+
+
+def test_create_gjc_runtime_uses_configured_cli_path() -> None:
+    """Creates GJC runtime with the configured CLI path and dispatcher context."""
+    mock_dispatcher = object()
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runtime_factory.get_gjc_cli_path",
+            return_value="/tmp/gjc",
+        ),
+        patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=mock_dispatcher,
+        ) as mock_create_dispatcher,
+    ):
+        runtime = create_agent_runtime(
+            backend="gjc",
+            permission_mode="acceptEdits",
+            cwd="/tmp/project",
+            llm_backend="gjc",
+        )
+
+    assert isinstance(runtime, GjcRuntime)
+    assert runtime._cli_path == "/tmp/gjc"
+    assert runtime._cwd == "/tmp/project"
+    assert runtime._skill_dispatcher is mock_dispatcher
+    assert runtime._llm_backend == "gjc"
+    assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "gjc"
+
+
+def test_create_gjc_runtime_accepts_stream_timeout_overrides() -> None:
+    """GJC RPC runtime can disable quiet-stream guards explicitly."""
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+        return_value=object(),
+    ):
+        runtime = create_agent_runtime(
+            backend="gjc",
+            cli_path="/tmp/gjc",
+            cwd="/tmp/project",
+            startup_output_timeout_seconds=0,
+            stdout_idle_timeout_seconds=0,
+        )
+
+    assert isinstance(runtime, GjcRuntime)
+    assert runtime._startup_output_timeout_seconds is None
+    assert runtime._stdout_idle_timeout_seconds is None

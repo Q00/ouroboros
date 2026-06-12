@@ -11,6 +11,7 @@ from ouroboros.config import (
     get_cli_path,
     get_codex_cli_path,
     get_copilot_cli_path,
+    get_gjc_cli_path,
     get_goose_cli_path,
     get_hermes_cli_path,
     get_kiro_cli_path,
@@ -150,6 +151,16 @@ def create_agent_runtime(
 
         return PiRuntime(
             cli_path=cli_path or get_pi_cli_path(),
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "gjc":
+        from ouroboros.orchestrator.gjc_runtime import GjcRuntime
+
+        return GjcRuntime(
+            cli_path=cli_path or get_gjc_cli_path(),
             startup_output_timeout_seconds=startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
             **runtime_kwargs,

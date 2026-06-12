@@ -308,6 +308,23 @@ def test_health_honors_agent_runtime_and_cli_path_environment_overrides(
     assert "codex OAuth file present" in result.output
 
 
+def test_health_honors_gjc_cli_path_environment_override(monkeypatch, tmp_path: Path) -> None:
+    _clear_auth_env(monkeypatch)
+    config_dir = tmp_path / "config"
+    (config_dir / "data").mkdir(parents=True)
+    gjc_cli = _make_cli(tmp_path / "custom-bin" / "gjc")
+    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_config(config_dir, backend="gjc", extra_orchestrator={"gjc_cli_path": None})
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+    monkeypatch.setenv("OUROBOROS_GJC_CLI_PATH", str(gjc_cli))
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 0
+    assert f"gjc: {gjc_cli}" in result.output
+
+
 def test_health_honors_effective_backend_configured_cli_when_runtime_env_overrides(
     monkeypatch, tmp_path: Path
 ) -> None:

@@ -318,7 +318,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
     BackendCapability(
         name="gjc",
         aliases=("gajae-code", "gajae_code"),
-        supports_runtime=False,
+        supports_runtime=True,
         supports_llm=False,
         supports_interview_driver=False,
         switchable_runtime=False,

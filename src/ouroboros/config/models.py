@@ -361,6 +361,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "goose_cli",
         "pi",
         "pi_cli",
+        "gjc",
+        "gjc_cli",
     }
 )
 
@@ -485,7 +487,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     """
 
     runtime_backend: Literal[
-        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot", "goose", "pi"
+        "claude", "codex", "opencode", "hermes", "gemini", "kiro", "copilot", "goose", "pi", "gjc"
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 

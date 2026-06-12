@@ -78,6 +78,8 @@ def test_runtime_choices_include_runtime_only_backends() -> None:
     choices = runtime_backend_choices()
     assert "hermes" in choices
     assert "pi" in choices
+    assert "gjc" in choices
+    assert resolve_runtime_backend_name("gajae_code") == "gjc"
     assert "litellm" not in choices
 
 
@@ -123,7 +125,7 @@ def test_switchable_runtime_metadata_is_registry_owned() -> None:
     assert gjc_capability.cli_name == "gjc"
     assert gjc_capability.cli_config_key == "gjc_cli_path"
     assert gjc_capability.switchable_runtime is False
-    assert gjc_capability.supports_runtime is False
+    assert gjc_capability.supports_runtime is True
     assert gjc_capability.supports_llm is False
 
 
