@@ -17,9 +17,9 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
     build_ralph_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -435,18 +435,14 @@ class RalphHandler:
                 checkpoint_commits=config.checkpoint_commits,
                 checkpoint_attempted_ac_ids=config.checkpoint_attempted_ac_ids,
             )
-            await self._event_store.initialize()
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self._event_store,
                 session_id=config.lineage_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "job_id": None,
                     "lineage_id": config.lineage_id,
-                    "status": "delegated_to_plugin",
+                    "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
                     "max_generations": config.max_generations,
                 },

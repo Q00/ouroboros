@@ -37,9 +37,11 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
+    DELEGATED_TO_SUBAGENT,
     build_execute_subagent,
     build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -463,18 +465,15 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 model_tier=model_tier,
                 max_parallel_workers=max_parallel_workers,
             )
-            await emit_subagent_dispatched_event(
+            # Preserve public response shape (#442): consumers expect
+            # session_id / status keys even in plugin-dispatch mode.
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=session_id,
                 payload=payload,
-            )
-            # Preserve public response shape (#442): consumers expect
-            # session_id / status keys even in plugin-dispatch mode.
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "session_id": session_id,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
                     "model_tier": model_tier,
@@ -1260,9 +1259,6 @@ class StartExecuteSeedHandler:
             if plugin_mode_result.is_err:
                 return plugin_mode_result
 
-            # Initialize event store first so the audit event persists.
-            await self._event_store.initialize()
-
             # Generate session_id for fresh runs BEFORE building the payload
             # so the child prompt, context, audit event, and response all
             # share the same identity.  Without this the prompt says "new"
@@ -1282,12 +1278,6 @@ class StartExecuteSeedHandler:
                 max_parallel_workers=max_parallel_workers,
             )
 
-            await emit_subagent_dispatched_event(
-                self._event_store,
-                session_id=plugin_session_id,
-                payload=payload,
-            )
-
             # Plugin mode: work runs in the OpenCode child session (Task
             # pane), NOT in a JobManager background job.  Returning a fake
             # instantly-completing job_id would break the polling contract —
@@ -1298,7 +1288,7 @@ class StartExecuteSeedHandler:
                 "job_id": None,
                 "session_id": plugin_session_id,
                 "execution_id": None,
-                "status": "delegated_to_plugin",
+                "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
             }
@@ -1311,7 +1301,14 @@ class StartExecuteSeedHandler:
                     "payload": payload,
                     "response_shape": dict(response_shape),
                 }
-            return build_subagent_result(payload, response_shape=response_shape)
+            # The shared helper initializes the store first so the audit
+            # event persists, then emits and builds the envelope.
+            return await dispatch_plugin_terminal(
+                self._event_store,
+                session_id=plugin_session_id,
+                payload=payload,
+                response_shape=response_shape,
+            )
 
         # Fall-through: real background job path (subprocess / non-opencode
         # runtimes).  No subagent payload is built here — the background job

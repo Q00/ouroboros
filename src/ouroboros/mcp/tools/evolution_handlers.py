@@ -35,9 +35,10 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
+    DELEGATED_TO_SUBAGENT,
     build_evolve_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -298,16 +299,13 @@ class EvolveStepHandler(BridgeAwareMixin):
             project_dir=arguments.get("project_dir"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=lineage_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "lineage_id": lineage_id,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                 },
             )
@@ -978,23 +976,19 @@ class StartEvolveStepHandler:
             project_dir=arguments.get("project_dir"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            # Initialize event store first so the audit event persists.
-            await self._event_store.initialize()
-            await emit_subagent_dispatched_event(
+            # Plugin mode: work runs in the OpenCode child session (Task
+            # pane), NOT in a JobManager background job.  See
+            # StartExecuteSeedHandler for rationale — no fake job_id. The
+            # shared helper initializes the store first so the audit event
+            # persists.
+            return await dispatch_plugin_terminal(
                 self._event_store,
                 session_id=lineage_id,
                 payload=payload,
-            )
-
-            # Plugin mode: work runs in the OpenCode child session (Task
-            # pane), NOT in a JobManager background job.  See
-            # StartExecuteSeedHandler for rationale — no fake job_id.
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "job_id": None,
                     "lineage_id": lineage_id,
-                    "status": "delegated_to_plugin",
+                    "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
                 },
             )

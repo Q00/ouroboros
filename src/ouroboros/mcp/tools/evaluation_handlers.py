@@ -25,9 +25,10 @@ from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
+    DELEGATED_TO_SUBAGENT,
     build_evaluate_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -434,18 +435,15 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            await emit_subagent_dispatched_event(
+            # Preserve public response shape (#442): session_id + status are
+            # part of the documented contract for ouroboros_evaluate.
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=session_id,
                 payload=payload,
-            )
-            # Preserve public response shape (#442): session_id + status are
-            # part of the documented contract for ouroboros_evaluate.
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "session_id": session_id,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "artifact_type": artifact_type,
                     "trigger_consensus": trigger_consensus,
@@ -1582,7 +1580,14 @@ class LateralThinkHandler(BridgeAwareMixin):
         # Plugin mode: dispatch even a single persona as a subagent so the
         # LLM in the child Task pane does the actual thinking — the parent
         # session stays responsive and gets the result asynchronously.
-        from ouroboros.mcp.tools.subagent import (
+        #
+        # ``should_dispatch_via_plugin`` is also imported locally in the
+        # multi-persona branch above, which makes Python treat it as a
+        # function-local name throughout this method — so it must be
+        # (re-)imported on this branch too before use, even though it is
+        # available at module scope. ``build_subagent_result`` is module
+        # scope; importing it here as well keeps the original binding intact.
+        from ouroboros.mcp.tools.subagent import (  # noqa: F811
             build_subagent_result,
             should_dispatch_via_plugin,
         )
@@ -1784,18 +1789,14 @@ class StartEvaluateHandler:
                 working_dir=arguments.get("working_dir"),
                 trigger_consensus=arguments.get("trigger_consensus", False),
             )
-            await self._event_store.initialize()
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self._event_store,
                 session_id=session_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "job_id": None,
                     "session_id": session_id,
-                    "status": "delegated_to_plugin",
+                    "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
                     "artifact_type": arguments.get("artifact_type", "code"),
                     "trigger_consensus": arguments.get("trigger_consensus", False),

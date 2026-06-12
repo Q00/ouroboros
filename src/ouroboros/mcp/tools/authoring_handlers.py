@@ -42,10 +42,10 @@ from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_SUBAGENT,
     build_generate_seed_subagent,
     build_interview_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
     should_dispatch_via_plugin,
 )
@@ -1261,16 +1261,13 @@ class GenerateSeedHandler:
                 client_gates=client_gate_status["accepted_client_gates"],
                 force=force,
             )
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=session_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "session_id": session_id,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "force": force,
                     **client_gate_status,
@@ -2014,17 +2011,14 @@ class InterviewHandler:
                 cwd=arguments.get("cwd"),
                 transcript=transcript,
             )
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=real_session_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "session_id": real_session_id,
                     "action": action,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     **_interview_reasoning_meta(
                         state=plugin_state,

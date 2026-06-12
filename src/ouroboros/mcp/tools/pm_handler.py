@@ -42,9 +42,9 @@ from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_SUBAGENT,
     build_pm_interview_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -625,17 +625,14 @@ class PMInterviewHandler:
                 selected_repos=selected_repos,
                 transcript=transcript,
             )
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=real_session_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "session_id": real_session_id,
                     "action": action,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "next_turn_hint": (
                         "When the user answers, pass the child session's "

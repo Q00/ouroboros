@@ -65,6 +65,25 @@ _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
 _LATERAL_PANEL_FALLBACK_PARALLEL_MODE = "parallel_subagent_panel"
 
+# Plugin-dispatch terminal status strings.
+#
+# These two values are INTENTIONALLY DISTINCT and must NOT be unified — they
+# are a public-contract distinction, not an accident:
+#
+# * ``DELEGATED_TO_SUBAGENT`` is returned by the *synchronous* tools
+#   (ouroboros_evolve_step, ouroboros_evaluate, ouroboros_qa, ...). It
+#   preserves the #442 response-shape contract for callers that read the
+#   sync tool's natural response fields.
+# * ``DELEGATED_TO_PLUGIN`` is returned by the fire-and-forget *Start* tools
+#   (ouroboros_start_*). It pairs with the ``job_id=None`` contract those
+#   tools document (e.g. ralph_handlers' definition) so clients know no
+#   pollable job exists.
+#
+# Defining them once removes the inline string literals copied at ~11 sites
+# while keeping the two distinct public values exactly as they were.
+DELEGATED_TO_SUBAGENT = "delegated_to_subagent"
+DELEGATED_TO_PLUGIN = "delegated_to_plugin"
+
 
 def _canonical_response_json(body: dict[str, Any]) -> str:
     """Render structured MCP dispatch content with deterministic key order."""
@@ -928,6 +947,69 @@ async def emit_subagent_dispatched_event(
             session_id=session_id,
             error=str(exc),
         )
+
+
+async def dispatch_plugin_terminal(
+    event_store: Any | None,
+    *,
+    session_id: str | None,
+    payload: SubagentPayload,
+    response_shape: dict[str, Any] | None = None,
+) -> Result:
+    """Run the standard plugin-dispatch terminal sequence and return the result.
+
+    Plugin-mode tool handlers all end the same way: persist the
+    ``subagent.dispatched`` audit event, then return the ``_subagent``
+    envelope via :func:`build_subagent_result`. This helper consolidates that
+    sequence (copy-pasted at ~11 sites) AND fixes a real inconsistency among
+    the copies.
+
+    The audit event can only persist on an *initialized* event store
+    (``EventStore.append`` raises ``PersistenceError`` when the engine is
+    None). The fire-and-forget ``Start*`` handlers called
+    ``await event_store.initialize()`` before emitting, but the synchronous
+    handlers (evolve_step, evaluate, qa, generate_seed, interview, pm) emitted
+    on a possibly-uninitialized store — and because
+    :func:`emit_subagent_dispatched_event` swallows append failures, those
+    sites silently lost the ``subagent.dispatched`` audit row. This helper
+    initializes the store uniformly before emitting.
+
+    Initialization is **try/except-guarded** to preserve the contract
+    documented on :func:`emit_subagent_dispatched_event`: losing the audit
+    row must never fail the dispatch. The dispatch envelope is the
+    user-visible result, so an ``initialize()`` failure (e.g. a transient DB
+    error) is logged and ignored rather than turning the previously-working
+    sync sites into a new hard-failure mode.
+
+    Args:
+        event_store: Optional EventStore. ``None`` (or a store whose
+            ``initialize`` raises) simply skips the audit emission; the
+            dispatch envelope is still returned.
+        session_id: Session the dispatch is scoped to (may be None).
+        payload: The dispatch payload to emit and return.
+        response_shape: Public-contract fields to merge into the response
+            (typically ``{"status": DELEGATED_TO_*, "dispatch_mode": "plugin",
+            ...}``). Forwarded verbatim to :func:`build_subagent_result`.
+
+    Returns:
+        ``Result.ok(MCPToolResult)`` with the ``_subagent`` envelope.
+    """
+    if event_store is not None:
+        try:
+            await event_store.initialize()
+        except Exception as exc:  # noqa: BLE001 — audit miss must not break dispatch
+            log.warning(
+                "subagent.dispatched.initialize_failed",
+                tool_name=payload.tool_name,
+                session_id=session_id,
+                error=str(exc),
+            )
+    await emit_subagent_dispatched_event(
+        event_store,
+        session_id=session_id,
+        payload=payload,
+    )
+    return build_subagent_result(payload, response_shape=response_shape)
 
 
 # ---------------------------------------------------------------------------

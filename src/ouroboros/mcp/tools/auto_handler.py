@@ -77,6 +77,7 @@ from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExec
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
     build_subagent_payload,
     build_subagent_result,
     emit_subagent_dispatched_event,
@@ -772,13 +773,20 @@ class StartAutoHandler:
                         details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
                     )
                 )
+            # NOTE: this site deliberately does NOT use
+            # ``dispatch_plugin_terminal``.  Auto's lease lifecycle requires
+            # the initialize/emit failure to be *observable* (release the
+            # lease + return a retriable error above), whereas the shared
+            # helper swallows initialize failures by contract.  Routing
+            # through the helper would both double-emit and hide the failure
+            # auto needs.  We share only the status constant for consistency.
             return build_subagent_result(
                 payload,
                 response_shape={
                     "job_id": None,
                     "auto_session_id": auto_session_id,
                     "session_id": auto_session_id,
-                    "status": "delegated_to_plugin",
+                    "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
                 },
             )
