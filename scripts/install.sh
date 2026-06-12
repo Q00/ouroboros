@@ -548,13 +548,13 @@ if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" =
   if [ "$INSTALL_METHOD" = "uv" ]; then
     case "$EXTRAS" in
       "[mcp,claude]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--python",">=3.12","--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
         ;;
       "[all]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--python",">=3.12","--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
         ;;
       *)
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--python",">=3.12","--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
         ;;
     esac
   elif [ "$INSTALL_METHOD" = "pipx" ]; then
