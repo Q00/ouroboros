@@ -47,6 +47,7 @@ from ouroboros.plugin.hooks import (
     HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
     HOOK_TOOL_INTERCEPT_SCOPE,
     HOOK_TOOL_OBSERVE_RECORDED_EVENT,
+    HOOK_TOOL_OBSERVE_SCOPE,
     TERMINAL_OBSERVABILITY_HOOK_NAMES,
     HookFailurePolicy,
     HookKind,
@@ -810,6 +811,23 @@ def _validate_tool_call_hook_permission(
             ),
             got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
         )
+    if raw["name"] == HookKind.AFTER_TOOL_CALL.value:
+        if HOOK_TOOL_OBSERVE_SCOPE not in permissions:
+            raise PluginManifestError(
+                "v0.4 after_tool_call hook must declare plugin:tool:observe",
+                path=str(manifest_path),
+                json_pointer=f"/hooks/{hook_index}/permissions",
+                expected=f"{HOOK_TOOL_OBSERVE_SCOPE!r} in hooks[].permissions",
+                got=permissions,
+            )
+        if HOOK_TOOL_OBSERVE_SCOPE not in declared_required_permission_scopes:
+            raise PluginManifestError(
+                "v0.4 after_tool_call hook observe permission must be required",
+                path=str(manifest_path),
+                json_pointer="/permissions",
+                expected=f"top-level {HOOK_TOOL_OBSERVE_SCOPE!r} permission with required=true",
+                got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+            )
     if raw["failure_policy"] != HookFailurePolicy.FAIL_CLOSED.value:
         return
     # fail_closed tool-call hooks must specifically hold

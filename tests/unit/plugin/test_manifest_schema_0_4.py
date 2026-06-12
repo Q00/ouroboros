@@ -248,6 +248,23 @@ class TestV04ToolCallHookEnum:
         manifest = load_manifest(_write(tmp_path, payload))
         assert manifest.hooks[0].name == HookKind.AFTER_TOOL_CALL.value
 
+    def test_after_tool_call_intercept_only_rejected(self, tmp_path: Path) -> None:
+        # after_tool_call receives observation payloads only, so the manifest
+        # must request the observe scope explicitly. Intercept authority does
+        # not implicitly grant post-call observation authority.
+        payload = _v04_manifest()
+        payload["hooks"] = [
+            _tool_call_hook(
+                name="after_tool_call",
+                failure_policy="fail_open",
+                scope=HOOK_TOOL_INTERCEPT_SCOPE,
+            )
+        ]
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+        assert exc_info.value.json_pointer == "/hooks/0/permissions"
+        assert "plugin:tool:observe" in exc_info.value.expected
+
 
 class TestV04ToolCallSchemaRules:
     """v0.4 schema constraints on failure_policy and permissions."""
