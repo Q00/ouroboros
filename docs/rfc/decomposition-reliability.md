@@ -3,10 +3,10 @@
 > Status: **Draft**
 > Relates to [discussion #1385](https://github.com/Q00/ouroboros/discussions/1385)
 > (atomicity & AC-decomposition reliability). Sibling mechanism:
-> [spend estimator](./spend-estimator.md) (#1384) — both pre-execution judgments,
+> [spend estimator](https://github.com/Q00/ouroboros/pull/1404) (#1384) — both pre-execution judgments,
 > both shared the fabricated-output failure pattern. Frugality stance:
 > [#1377](https://github.com/Q00/ouroboros/discussions/1377) /
-> [frugality control loop](./frugality-control-loop.md).
+> [frugality control loop](https://github.com/Q00/ouroboros/pull/1403).
 
 ## Summary
 
@@ -17,7 +17,8 @@ recursively. The owner's verification of #1385 produced a finding that
 **re-grounds the entire effort**:
 
 > The module the original analysis dissected — `execution/atomicity.py` +
-> `execution/decomposition.py`, via `DoubleDiamondExecutor` — has **no non-test
+> `execution/decomposition.py`, reachable only via the `DoubleDiamond` executor's
+> `run_cycle_with_decomposition` (`execution/double_diamond.py`) — has **no non-test
 > caller in `src/`**. Across recent runs: 115 `execution.ac.completed` events,
 > **zero** atomicity-check events. **The live executor is
 > `orchestrator/parallel_executor.py`.**
@@ -75,10 +76,13 @@ transplanting it onto the executor that actually runs.
 
 ### 1. Delete the off-path modules
 
-Remove `execution/atomicity.py` + `execution/decomposition.py` (and the dead
-`DoubleDiamondExecutor` atomicity/decomposition wiring and their always-Opus
-defaults), with a test asserting they have no non-test importer before removal. The
-off-path `ac_atomicity_checked` event goes with them — it is removed, not fixed.
+First remove the dead `DoubleDiamond.run_cycle_with_decomposition` wiring in
+`execution/double_diamond.py` (the only non-test importer of these modules — it
+imports `atomicity`/`decomposition` internally), then remove
+`execution/atomicity.py` + `execution/decomposition.py` themselves and their
+always-Opus defaults. A test then asserts no non-test importer of the two modules
+remains. The off-path `ac_atomicity_checked` event goes with them — removed, not
+fixed.
 
 ### 2. A verified decomposition step in `parallel_executor.py`
 
@@ -100,7 +104,7 @@ a known-non-atomic unit to run as atomic must **record that compromise** as an e
 ### The acceptance properties (restructured per owner)
 
 **v1 invariants:** executor-relative judgment (relative to the effort/tools/context
-that will run it, per the [actuator RFC](./spend-actuator-effort-dial.md)); graded
+that will run it, per the [actuator RFC](https://github.com/Q00/ouroboros/pull/1405)); graded
 confidence, not a bare boolean; outputs that are **real measurements**; a *reasoned*
 asymmetric error bias (attempt-then-bounce, argued); decomposition **verified**, not
 asserted; guaranteed termination with **recorded compromises**; **safe degradation**
@@ -120,16 +124,18 @@ re-grounding is that lesson applied.
 
 ## Out of scope (deliberately)
 
-- **The how-much-to-invest decision** — the [estimator](./spend-estimator.md) /
-  [actuator](./spend-actuator-effort-dial.md) RFCs.
+- **The how-much-to-invest decision** — the [estimator](https://github.com/Q00/ouroboros/pull/1404) /
+  [actuator](https://github.com/Q00/ouroboros/pull/1405) RFCs.
 - **A formal convergence proof** — satisfied by consistent caps + recorded
   compromises + a monotone-progress check, not a theorem.
 - **Cross-run recalibration** — v2.
 
 ## Acceptance criteria
 
-1. `execution/atomicity.py` + `execution/decomposition.py` are removed with **no
-   `src/` regression** (a test asserts no non-test importer before removal).
+1. The `DoubleDiamond.run_cycle_with_decomposition` wiring is removed first, then
+   `execution/atomicity.py` + `execution/decomposition.py` are removed with **no
+   `src/` regression** — a test asserts no non-test importer of the two modules
+   remains *after* the wiring is gone.
 2. An overlapping or scope-dropping split **in `parallel_executor.py`** is caught and
    repaired (one retry), or escalated — never silently accepted.
 3. Every forced-atomic compromise appears in the event stream; the live executor's
