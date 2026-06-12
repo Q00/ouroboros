@@ -1313,19 +1313,13 @@ class StartExecuteSeedHandler:
                 }
             return build_subagent_result(payload, response_shape=response_shape)
 
-        # Fall-through: real background job path — build payload here where
-        # session_id may still be None (background path generates its own).
-        payload = build_execute_subagent(
-            seed_content=seed_content,
-            session_id=arguments.get("session_id"),
-            seed_path=arguments.get("seed_path"),
-            cwd=arguments.get("cwd"),
-            max_iterations=arguments.get("max_iterations", 10),
-            skip_qa=arguments.get("skip_qa", False),
-            model_tier=arguments.get("model_tier", "medium"),
-            max_parallel_workers=max_parallel_workers,
-        )
-
+        # Fall-through: real background job path (subprocess / non-opencode
+        # runtimes).  No subagent payload is built here — the background job
+        # re-invokes ExecuteSeedHandler.handle() via ``_runner`` below, which
+        # constructs and consumes its own payload internally.  The only payload
+        # consumer in this handler is the plugin branch above; an earlier
+        # background-path ``build_execute_subagent`` here was orphaned by commit
+        # 3c393c98 (its result was never referenced) and has been removed.
         await self._event_store.initialize()
 
         session_id = arguments.get("session_id")
