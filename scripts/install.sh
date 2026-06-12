@@ -274,17 +274,19 @@ RUNTIME_COUNT=0
 # able to see why Claude/Hermes pull MCP dependencies while file-based runtimes
 # only need the base CLI.
 _runtime_to_extras() {
+  # `tui` ships with every selection so the settings GUI
+  # (`ouroboros config`) works out of the box (#1414).
   case "$1" in
-    claude)  EXTRAS="[mcp,claude]"; RUNTIME="claude" ;;
-    codex)   EXTRAS=""; RUNTIME="codex" ;;
-    opencode) EXTRAS=""; RUNTIME="opencode" ;;
-    hermes)  EXTRAS="[mcp]"; RUNTIME="hermes" ;;
-    gemini)  EXTRAS=""; RUNTIME="gemini" ;;
-    kiro)    EXTRAS=""; RUNTIME="kiro" ;;
-    copilot) EXTRAS=""; RUNTIME="copilot" ;;
-    pi)      EXTRAS=""; RUNTIME="pi" ;;
+    claude)  EXTRAS="[mcp,claude,tui]"; RUNTIME="claude" ;;
+    codex)   EXTRAS="[tui]"; RUNTIME="codex" ;;
+    opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
+    hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
+    gemini)  EXTRAS="[tui]"; RUNTIME="gemini" ;;
+    kiro)    EXTRAS="[tui]"; RUNTIME="kiro" ;;
+    copilot) EXTRAS="[tui]"; RUNTIME="copilot" ;;
+    pi)      EXTRAS="[tui]"; RUNTIME="pi" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
-    "")      EXTRAS=""; RUNTIME="" ;;
+    "")      EXTRAS="[tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
       _info "Expected one of: claude, codex, opencode, hermes, gemini, kiro, copilot, pi, all"
@@ -337,14 +339,14 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
-    _choice 1 "Claude" "Claude Code plugin + MCP server (${PACKAGE_NAME}[mcp,claude])"
-    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME})"
-    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp])"
-    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME})"
-    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME})"
-    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME})"
-    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME})"
-    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME})"
+    _choice 1 "Claude" "Claude Code plugin + MCP server (${PACKAGE_NAME}[mcp,claude,tui])"
+    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
+    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
+    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
+    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
+    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
     _choice 9 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _prompt "Select [1]: "
     read -r choice
@@ -386,14 +388,14 @@ else
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
-    _choice 1 "Claude" "Recommended: plugin + MCP server (${PACKAGE_NAME}[mcp,claude])"
-    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME})"
-    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp])"
-    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME})"
-    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME})"
-    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME})"
-    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME})"
-    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME})"
+    _choice 1 "Claude" "Recommended: plugin + MCP server (${PACKAGE_NAME}[mcp,claude,tui])"
+    _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
+    _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
+    _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
+    _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
+    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
     _choice 9 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _choice 0 "None" "Base CLI only; choose a backend later"
     _prompt "Select [1]: "
@@ -451,14 +453,14 @@ if [ "$HAS_UV" = true ]; then
   # (e.g. forgetting `tui`) is caught in CI rather than discovered by a
   # user with a half-installed `[all]` tree.
   case "$EXTRAS" in
-    "[mcp,claude]")
+    "[mcp,claude,tui]")
       UV_ARGS+=(
         --with "mcp==1.27.2"
         --with "claude-agent-sdk==0.2.87"
         --with "anthropic==0.105.2"
       )
       ;;
-    "[mcp]")
+    "[mcp,tui]")
       UV_ARGS+=(--with "mcp==1.27.2")
       ;;
     "[all]")
@@ -467,11 +469,14 @@ if [ "$HAS_UV" = true ]; then
         --with "claude-agent-sdk==0.2.87"
         --with "anthropic==0.105.2"
         --with "litellm==1.86.2"
-        --with "textual==8.2.7"
-        --with "textual-serve==1.1.3"
       )
       ;;
   esac
+  # Every install ships the settings GUI (`ouroboros config`).
+  UV_ARGS+=(
+    --with "textual==8.2.7"
+    --with "textual-serve==1.1.3"
+  )
   uv "${UV_ARGS[@]}"
 elif [ "$HAS_PIPX" = true ]; then
   INSTALL_METHOD="pipx"

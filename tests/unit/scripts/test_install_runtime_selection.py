@@ -137,9 +137,9 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert "Runtime: opencode (preserved from" in result.stdout
-    assert "Installing . ..." in result.stdout
+    assert "Installing .[tui] ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
         "ouroboros setup --runtime opencode --non-interactive",
     ]
 
@@ -155,7 +155,7 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.27.2 --with claude-agent-sdk==0.2.87 --with anthropic==0.105.2"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.27.2 --with claude-agent-sdk==0.2.87 --with anthropic==0.105.2 --with textual==8.2.7 --with textual-serve==1.1.3"
         in calls
     )
     _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
@@ -187,7 +187,7 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
     ]
 
@@ -270,7 +270,7 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Pi:" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
     ]
 
@@ -286,7 +286,8 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0" in calls
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3"
+        in calls
     )
     assert "--prerelease=allow" not in calls
 
