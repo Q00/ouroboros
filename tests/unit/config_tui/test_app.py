@@ -136,6 +136,21 @@ async def test_env_override_badge_absent_when_unset(app_env, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_runtime_env_override_drives_inherited_stage_cards(app_env, monkeypatch) -> None:
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "codex")
+
+    app = SettingsApp()
+    assert app._effective_stage_backend(Stage.INTERVIEW) == "codex"
+    async with app.run_test() as pilot:
+        caption = pilot.app.query_one(f"#stage-resolved-{Stage.INTERVIEW.value}", Static)
+        assert "codex" in str(caption.render())
+
+        model_select = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
+        values = {value for _, value in model_select._options}
+        assert "default" in values
+
+
+@pytest.mark.asyncio
 async def test_save_routes_changes_through_validated_persistence(app_env, monkeypatch) -> None:
     applied: dict[str, object] = {}
     monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))

@@ -7,6 +7,7 @@ that lets ourocode embed the settings screen without the monitor TUI.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from textual import work
@@ -50,7 +51,7 @@ from ouroboros.config_tui.fields import (
     get_value,
     stage_runtime_field,
 )
-from ouroboros.orchestrator_stage import Stage
+from ouroboros.orchestrator_stage import Stage, resolve_runtime_for_stage
 
 INHERIT_SENTINEL = "__inherit__"
 CUSTOM_SENTINEL = "__custom__"
@@ -311,6 +312,28 @@ class SettingsApp(App[None]):
         hint = self._default_hints[backend]
         return f"default — currently {hint}" if hint else model
 
+    def _runtime_env_override(self) -> str | None:
+        for name in GLOBAL_RUNTIME_FIELD.env_vars:
+            value = os.environ.get(name, "").strip()
+            if value:
+                return _canonical_backend(value)
+        return None
+
+    def _effective_default_runtime(self) -> str:
+        return self._runtime_env_override() or _canonical_backend(
+            self._current(GLOBAL_RUNTIME_FIELD.key)
+        )
+
+    def _selected_default_runtime(self) -> str:
+        override = self._runtime_env_override()
+        if override:
+            return override
+        global_select = self.query_one("#global-runtime", Select)
+        global_value = global_select.value
+        if _is_blank(global_value):
+            return self._effective_default_runtime()
+        return _canonical_backend(global_value)
+
     # ── dynamic model listings ───────────────────────────────────────
 
     def _request_model_listing(self, backend: str) -> None:
@@ -348,8 +371,14 @@ class SettingsApp(App[None]):
     def _effective_stage_backend(self, stage: Stage) -> str:
         stage_value = get_value(self._raw, f"orchestrator.runtime_profile.stages.{stage.value}")
         profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
-        fallback = self._current("orchestrator.runtime_backend")
-        return str(stage_value or profile_default or fallback)
+        stages = {stage: _canonical_backend(stage_value)} if stage_value else None
+        default = _canonical_backend(profile_default) if profile_default else None
+        return resolve_runtime_for_stage(
+            stage,
+            stages=stages,
+            default=default,
+            fallback=self._effective_default_runtime(),
+        )
 
     # ── compose ──────────────────────────────────────────────────────
 
@@ -557,12 +586,15 @@ class SettingsApp(App[None]):
         runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
         value = runtime_select.value
         if value == INHERIT_SENTINEL or _is_blank(value):
-            global_select = self.query_one("#global-runtime", Select)
-            global_value = global_select.value
-            if _is_blank(global_value):
-                return str(self._current("orchestrator.runtime_backend"))
-            return str(global_value)
-        return str(value)
+            profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
+            default = _canonical_backend(profile_default) if profile_default else None
+            return resolve_runtime_for_stage(
+                stage,
+                stages=None,
+                default=default,
+                fallback=self._selected_default_runtime(),
+            )
+        return _canonical_backend(value)
 
     def _selected_llm_backend(self) -> str:
         llm_select = self.query_one("#global-llm-backend", Select)

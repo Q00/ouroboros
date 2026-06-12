@@ -289,10 +289,8 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
         "claude",
     )
     defaults_table.add_row("Default agent", _agent_cell(agent_value, installed), agent_source)
-    llm_value, llm_source = _effective_value(
-        GLOBAL_LLM_BACKEND_FIELD.env_vars,
-        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
-        "claude_code",
+    llm_value, llm_source = _effective_llm_backend_value(
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key)
     )
     defaults_table.add_row("LLM backend (internal calls)", llm_value, llm_source)
     print_table(defaults_table)

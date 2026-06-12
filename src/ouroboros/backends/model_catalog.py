@@ -14,10 +14,9 @@ is duplicated here instead of imported because ``config.loader`` imports
 circular.
 
 Dynamic refresh is an explicit opt-in hook: a backend may declare a
-``list_command`` argv that prints one model id per line. No backend ships
-one yet — per-CLI support must be verified individually before wiring it —
-so ``refresh_models`` currently degrades to ``None`` (use the static
-catalog) for every backend.
+``list_command`` argv that prints one model id per line. OpenCode is wired
+because ``opencode models`` has been verified; other backends degrade to
+``None`` (use the static catalog) until their CLI support is verified.
 """
 
 from __future__ import annotations
@@ -36,9 +35,7 @@ from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_
 # Backends whose runnable model is the CLI's own configured default rather
 # than a Claude model id. Mirrors the loader's sentinel frozensets
 # (_CODEX_LLM_BACKENDS et al.); the mirror is locked by a unit test.
-_SENTINEL_MODEL_BACKENDS = frozenset(
-    {"codex", "opencode", "kiro", "copilot", "hermes", "pi", "gjc"}
-)
+_SENTINEL_MODEL_BACKENDS = frozenset({"codex", "opencode", "kiro", "copilot", "hermes", "pi"})
 
 # The sentinel the loader maps Claude-incapable backends to.
 DEFAULT_MODEL_SENTINEL = "default"
@@ -177,7 +174,6 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     "opencode": "get_opencode_cli_path",
     "goose": "get_goose_cli_path",
     "pi": "get_pi_cli_path",
-    "gjc": "get_gjc_cli_path",
 }
 
 

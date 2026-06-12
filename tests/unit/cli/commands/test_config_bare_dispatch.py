@@ -206,6 +206,29 @@ def test_show_json_uses_runtime_env_as_llm_backend_fallback(monkeypatch, tmp_pat
     }
 
 
+def test_show_text_uses_runtime_env_as_llm_backend_fallback(monkeypatch, tmp_path) -> None:
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "claude"},
+            "llm": {"backend": "claude_code"},
+        },
+    )
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "codex")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex"},
+    )
+
+    result = runner.invoke(app, ["show"])
+
+    assert result.exit_code == 0
+    assert "LLM backend" in result.output
+    assert "codex" in result.output
+    assert "OUROBOROS_RUNTIME" in result.output
+
+
 def test_undo_swaps_in_backup_and_supports_redo(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
     from ouroboros.config import loader as config_loader
