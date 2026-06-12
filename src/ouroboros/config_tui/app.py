@@ -687,9 +687,7 @@ class SettingsApp(App[None]):
     def _save_summary(changes: dict[str, Any], old_values: dict[str, Any]) -> str:
         """Render what changed (old → new) and flag keys needing an MCP reconnect."""
         diffs = []
-        ordered = sorted(
-            changes, key=lambda k: (not k.startswith(_RECONNECT_KEY_PREFIXES), k)
-        )
+        ordered = sorted(changes, key=lambda k: (not k.startswith(_RECONNECT_KEY_PREFIXES), k))
         for key in ordered:
             old = old_values.get(key)
             old_text = "unset" if old is None else str(old)
