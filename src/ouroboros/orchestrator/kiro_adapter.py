@@ -14,10 +14,17 @@ import contextlib
 import os
 from pathlib import Path
 import re
-import shutil
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.kiro.cli_policy import (
+    _RETRYABLE_EXIT_CODES,
+    build_kiro_child_env,
+    kiro_native_trust_category,
+    map_kiro_model_name,
+    resolve_kiro_cli_path,
+    strip_ansi,
+)
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -29,7 +36,6 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
-from ouroboros.runtime.child_env import build_child_env
 
 # Kiro CLI headless mode (https://kiro.dev/docs/cli/headless/) supports skill
 # dispatch (via our interceptor). It does **not** surface a session id on
@@ -57,56 +63,10 @@ _KIRO_CAPABILITIES = RuntimeCapabilities(
 
 log = get_logger(__name__)
 
-# Kiro CLI in ``--no-interactive`` mode emits terminal prompt markers and
-# color escapes on stdout (e.g. ``\x1b[38;5;141m> \x1b[0m`` before the
-# actual content). Downstream message consumers and log collectors want
-# clean text, so we strip SGR/CSI escapes from every stdout line.
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-def _strip_ansi(text: str) -> str:
-    return _ANSI_ESCAPE_RE.sub("", text)
-
-
-def _mark_kiro_subagent(env: dict[str, str]) -> None:
-    """Tag the child env as an Ouroboros sub-agent (kiro-specific marker)."""
-    env["OUROBOROS_SUBAGENT"] = "1"
-
-
 _DEFAULT_TIMEOUT = 600.0
 _DEFAULT_MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 2
-_RETRYABLE_EXIT_CODES = (1, 137)
 _PROCESS_SHUTDOWN_TIMEOUT = 5.0
-
-_MODEL_NAME_MAP: dict[str, str] = {
-    "claude-sonnet-4-6": "claude-sonnet-4.6",
-    "claude-opus-4-6": "claude-opus-4.6",
-    "claude-sonnet-4-5": "claude-sonnet-4.5",
-    "claude-opus-4-5": "claude-opus-4.5",
-    "claude-haiku-4-5": "claude-haiku-4.5",
-}
-_KIRO_TOOL_NAME_MAP: dict[str, str] = {
-    "bash": "shell",
-    "edit": "write",
-    "glob": "read",
-    "grep": "grep",
-    "ls": "read",
-    "multiedit": "write",
-    "read": "read",
-    "shell": "shell",
-    "write": "write",
-}
-_KIRO_TRUST_CATEGORIES = frozenset(_KIRO_TOOL_NAME_MAP.values())
-
-# Environment keys stripped from child processes to prevent recursive MCP
-# startup and nested session detection conflicts.
-_STRIPPED_ENV_KEYS = (
-    "OUROBOROS_AGENT_RUNTIME",
-    "OUROBOROS_LLM_BACKEND",
-    "OUROBOROS_RUNTIME",
-    "CLAUDECODE",
-)
 
 # Session ids flow from subprocess output into argv on the next resume turn;
 # validating keeps shell metacharacters and path traversal out of the command
@@ -203,14 +163,7 @@ class KiroAgentAdapter:
     # -- Internal helpers --
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
-        if cli_path:
-            return str(cli_path)
-        from ouroboros.config import get_kiro_cli_path
-
-        configured = get_kiro_cli_path()
-        if configured:
-            return configured
-        return shutil.which("kiro-cli") or "kiro-cli"
+        return resolve_kiro_cli_path(cli_path)
 
     def _build_child_env(self) -> dict[str, str]:
         """Build an isolated environment for the child kiro-cli process.
@@ -218,14 +171,11 @@ class KiroAgentAdapter:
         Strips keys that would cause recursive MCP startup or nested session
         conflicts, and enforces a recursion depth ceiling.
         """
-        return build_child_env(
-            # _STRIPPED_ENV_KEYS strips CLAUDECODE (like codex/copilot) — keep it.
-            strip_keys=_STRIPPED_ENV_KEYS,
+        return build_kiro_child_env(
             max_depth=self._max_ouroboros_depth,
             depth_error_factory=lambda _depth, max_depth: RuntimeError(
                 f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
             ),
-            post_build=_mark_kiro_subagent,
         )
 
     def _build_permission_args(self, tools: list[str] | None = None) -> list[str]:
@@ -246,7 +196,7 @@ class KiroAgentAdapter:
         mapped_tools: list[str] = []
         seen: set[str] = set()
         for tool in tools:
-            mapped = _kiro_native_trust_category(tool)
+            mapped = kiro_native_trust_category(tool)
             if mapped is not None and mapped not in seen:
                 mapped_tools.append(mapped)
                 seen.add(mapped)
@@ -262,7 +212,7 @@ class KiroAgentAdapter:
         cmd = [self._cli_path, "chat", "--no-interactive"]
         cmd.extend(self._build_permission_args(tools))
         if self._model:
-            mapped = _MODEL_NAME_MAP.get(self._model, self._model)
+            mapped = map_kiro_model_name(self._model)
             cmd.extend(["--model", mapped])
         if resume_session_id:
             # Kiro CLI 2.2+ exposes three resume flags (see
@@ -424,7 +374,7 @@ class KiroAgentAdapter:
                 if not raw_line:  # EOF
                     break
 
-                line = _strip_ansi(raw_line.decode(errors="replace")).rstrip()
+                line = strip_ansi(raw_line.decode(errors="replace")).rstrip()
                 # Drop Kiro's leading prompt marker if the reset escape landed
                 # after it and survived the strip.
                 if line.startswith("> "):
@@ -534,19 +484,3 @@ class KiroAgentAdapter:
 
 
 __all__ = ["KiroAgentAdapter"]
-
-
-def _kiro_native_trust_category(tool: str) -> str | None:
-    """Return a Kiro-native trust category for known local tools only.
-
-    Ouroboros policy allow-lists can include MCP tool names (for example
-    ``mcp__server__tool``). Kiro's ``--trust-tools`` flag accepts only native
-    trust categories such as ``read`` or ``shell``, so unknown/MCP names must
-    not be forwarded to the CLI flag. They remain in the prompt-level allow-list
-    but are filtered out of native trust-category argv.
-    """
-    normalized = tool.strip().lower().replace("_", "-")
-    mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
-    if mapped in _KIRO_TRUST_CATEGORIES:
-        return mapped
-    return None

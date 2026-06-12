@@ -12,13 +12,22 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 
 import structlog
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
+from ouroboros.kiro.cli_policy import (
+    _RETRYABLE_EXIT_CODES,
+    DEFAULT_MAX_OUROBOROS_DEPTH,
+    build_kiro_child_env,
+    kiro_native_trust_category,
+    map_kiro_model_name,
+    normalize_tool_name,
+    resolve_kiro_cli_path,
+    strip_ansi,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
@@ -27,68 +36,18 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
-from ouroboros.runtime.child_env import build_child_env
 
 log = structlog.get_logger(__name__)
 
-# Kiro CLI in ``--no-interactive`` mode still emits terminal prompt markers
-# and color escapes on stdout (e.g. ``\x1b[38;5;141m> \x1b[0m`` before the
-# actual content). Downstream parsers — especially Ouroboros' Seed extractor,
-# which matches on field prefixes like ``GOAL:`` — cannot see through the
-# escape sequences and silently fail. Stripping SGR/CSI escapes here keeps
-# response content clean without losing the underlying text.
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Kiro audit regexes (provider-only): used to detect tool_use markers and
+# extract tool names from raw model output for post-hoc envelope auditing.
 _TOOL_USE_MARKER_RE = re.compile(r'"type"\s*:\s*"tool_use"|tool_use')
 _TOOL_NAME_RE = re.compile(r'"(?:name|tool)"\s*:\s*"([^"]+)"')
-_STRIPPED_ENV_KEYS = (
-    "OUROBOROS_AGENT_RUNTIME",
-    "OUROBOROS_LLM_BACKEND",
-    "OUROBOROS_RUNTIME",
-    "CLAUDECODE",
-)
-_MAX_OUROBOROS_DEPTH = 5
-
-_KIRO_TOOL_NAME_MAP: dict[str, str] = {
-    "bash": "shell",
-    "edit": "write",
-    "glob": "read",
-    "grep": "grep",
-    "ls": "read",
-    "multiedit": "write",
-    "read": "read",
-    "shell": "shell",
-    "write": "write",
-}
-_KIRO_TRUST_CATEGORIES = frozenset(_KIRO_TOOL_NAME_MAP.values())
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI CSI/SGR escape sequences from a string."""
-    return _ANSI_ESCAPE_RE.sub("", text)
-
-
-def _mark_kiro_subagent(env: dict[str, str]) -> None:
-    """Tag the child env as an Ouroboros sub-agent (kiro-specific marker)."""
-    env["OUROBOROS_SUBAGENT"] = "1"
-
 
 _DEFAULT_TIMEOUT = 120.0
 _DEFAULT_MAX_RETRIES = 3
 _MAX_JSON_RETRIES = 3
-_RETRYABLE_EXIT_CODES = (1, 137)
 _PROCESS_SHUTDOWN_TIMEOUT = 5.0
-
-_MODEL_NAME_MAP: dict[str, str] = {
-    "claude-sonnet-4-6": "claude-sonnet-4.6",
-    "claude-opus-4-6": "claude-opus-4.6",
-    "claude-sonnet-4-5": "claude-sonnet-4.5",
-    "claude-opus-4-5": "claude-opus-4.5",
-    "claude-haiku-4-5": "claude-haiku-4.5",
-}
-
-
-def _map_model_name(model: str) -> str:
-    return _MODEL_NAME_MAP.get(model, model)
 
 
 async def _kill_process(proc: asyncio.subprocess.Process) -> None:
@@ -140,14 +99,7 @@ class KiroCodeAdapter:
             )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
-        if cli_path:
-            return str(cli_path)
-        from ouroboros.config import get_kiro_cli_path
-
-        configured = get_kiro_cli_path()
-        if configured:
-            return configured
-        return shutil.which("kiro-cli") or "kiro-cli"
+        return resolve_kiro_cli_path(cli_path)
 
     async def complete(
         self,
@@ -220,7 +172,7 @@ class KiroCodeAdapter:
                     )
                 )
 
-            content = _strip_ansi(stdout.decode(errors="replace")).strip()
+            content = strip_ansi(stdout.decode(errors="replace")).strip()
             # The Kiro prompt marker "> " sometimes survives the escape strip
             # when the CSI reset is placed before, not after, the marker.
             if content.startswith("> "):
@@ -259,14 +211,11 @@ class KiroCodeAdapter:
 
     def _build_child_env(self) -> dict[str, str]:
         """Build an isolated environment for child Kiro LLM processes."""
-        return build_child_env(
-            # _STRIPPED_ENV_KEYS strips CLAUDECODE (like codex/copilot) — keep it.
-            strip_keys=_STRIPPED_ENV_KEYS,
-            max_depth=_MAX_OUROBOROS_DEPTH,
+        return build_kiro_child_env(
+            max_depth=DEFAULT_MAX_OUROBOROS_DEPTH,
             depth_error_factory=lambda _depth, max_depth: RuntimeError(
                 f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
             ),
-            post_build=_mark_kiro_subagent,
         )
 
     def _build_cmd(self, prompt: str, config: CompletionConfig) -> list[str]:
@@ -282,7 +231,7 @@ class KiroCodeAdapter:
         elif self._permission_mode in {"acceptEdits", "bypassPermissions"}:
             cmd.append("--trust-all-tools")
         if config.model and config.model != "default":
-            cmd.extend(["--model", _map_model_name(config.model)])
+            cmd.extend(["--model", map_kiro_model_name(config.model)])
         cmd.append(prompt)
         return cmd
 
@@ -293,7 +242,7 @@ class KiroCodeAdapter:
         mapped_tools: list[str] = []
         seen: set[str] = set()
         for tool in self._allowed_tools:
-            mapped = _kiro_native_trust_category(tool)
+            mapped = kiro_native_trust_category(tool)
             if mapped is not None and mapped not in seen:
                 mapped_tools.append(mapped)
                 seen.add(mapped)
@@ -360,11 +309,11 @@ class KiroCodeAdapter:
         if self._allowed_tools is None or not _TOOL_USE_MARKER_RE.search(content):
             return
 
-        allowed_raw = frozenset(_normalize_tool_name(tool) for tool in self._allowed_tools)
+        allowed_raw = frozenset(normalize_tool_name(tool) for tool in self._allowed_tools)
         allowed_categories = frozenset(
             category
             for tool in self._allowed_tools
-            if (category := _kiro_native_trust_category(tool)) is not None
+            if (category := kiro_native_trust_category(tool)) is not None
         )
         tool_names = _TOOL_NAME_RE.findall(content)
         if not tool_names and not allowed_raw and not allowed_categories:
@@ -377,8 +326,8 @@ class KiroCodeAdapter:
             return
 
         for tool_name in tool_names:
-            normalized = _normalize_tool_name(tool_name)
-            category = _kiro_native_trust_category(tool_name)
+            normalized = normalize_tool_name(tool_name)
+            category = kiro_native_trust_category(tool_name)
             if normalized not in allowed_raw and category not in allowed_categories:
                 log.warning(
                     "kiro_adapter.tool_envelope_violation",
@@ -389,24 +338,6 @@ class KiroCodeAdapter:
 
 # Ensure protocol compliance
 _: type[LLMAdapter] = KiroCodeAdapter  # type: ignore[assignment]
-
-
-def _normalize_tool_name(tool: str) -> str:
-    return tool.strip().lower().replace("_", "-")
-
-
-def _kiro_native_trust_category(tool: str) -> str | None:
-    """Return a Kiro-native trust category for known local tools only.
-
-    Factory ``allowed_tools`` can include generic or MCP tool identifiers.
-    Kiro's ``--trust-tools`` accepts native categories only, so unknown/MCP
-    names are kept for prompt/audit comparison but omitted from argv.
-    """
-    normalized = _normalize_tool_name(tool)
-    mapped = _KIRO_TOOL_NAME_MAP.get(normalized.replace("-", ""), normalized)
-    if mapped in _KIRO_TRUST_CATEGORIES:
-        return mapped
-    return None
 
 
 __all__ = ["KiroCodeAdapter"]
