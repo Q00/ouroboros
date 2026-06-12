@@ -97,13 +97,12 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 - 5 optimized indexes for performance
 
 ### 5. Orchestration Layer
-**6-phase pipeline ensuring comprehensive execution**
+**5-phase pipeline ensuring comprehensive execution**
 - Phase 0: Big Bang (Interview → Seed)
 - Phase 1: PAL Router (Cost optimization)
 - Phase 2: Double Diamond (Discover → Define → Design → Deliver)
 - Phase 3: Resilience (Lateral thinking)
 - Phase 4: Evaluation (3-stage pipeline)
-- Phase 5: Secondary Loop (TODO registry)
 
 ### 6. Presentation Layer
 **Rich TUI interface with real-time visibility**
@@ -359,19 +358,6 @@ For the current evaluation flow, see [pipeline.py](../src/ouroboros/evaluation/p
 
 For failure modes, error-handling guidance, and configuration reference, see the [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md).
 
-### Phase 5: Secondary Loop
-
-Non-critical tasks are deferred to maintain focus on the primary goal.
-
-**Components:**
-- `secondary/todo_registry.py` - TODO item tracking
-- `secondary/scheduler.py` - Batch processing scheduler
-
-**Process:**
-1. During execution, non-blocking TODOs registered
-2. After primary goal completion, TODOs batch-processed
-3. Low-priority tasks executed during idle time
-
 ## Module Structure
 
 ```
@@ -386,10 +372,8 @@ src/ouroboros/
 |
 +-- bigbang/        # Phase 0: Interview and seed generation
 +-- routing/        # Phase 1: PAL router
-+-- execution/      # Phase 2: Double Diamond execution
 +-- resilience/     # Phase 3: Stagnation and lateral thinking
 +-- evaluation/     # Phase 4: Three-stage evaluation
-+-- secondary/      # Phase 5: TODO registry and scheduling
 |
 +-- orchestrator/   # Runtime abstraction and orchestration
 |   +-- adapter.py     # AgentRuntime protocol, ClaudeAgentAdapter
