@@ -3,9 +3,9 @@
 > Status: **Draft**
 > Relates to [discussion #1377](https://github.com/Q00/ouroboros/discussions/1377)
 > (token frugality). Composes with the spend-decision mechanism RFCs —
-> [spend estimator](./spend-estimator.md) and
-> [spend actuator (effort dial)](./spend-actuator-effort-dial.md) (#1384) — and the
-> [decomposition reliability](./decomposition-reliability.md) RFC (#1385). Sibling
+> [spend estimator](https://github.com/Q00/ouroboros/pull/1404) and
+> [spend actuator (effort dial)](https://github.com/Q00/ouroboros/pull/1405) (#1384) — and the
+> [decomposition reliability](https://github.com/Q00/ouroboros/pull/1406) RFC (#1385). Sibling
 > usability thread: [#1376](https://github.com/Q00/ouroboros/discussions/1376).
 
 ## Summary
@@ -23,7 +23,7 @@ it cannot observe:
 | **Learning layer** | Reflective guardrail loop (advisory v1) | **This RFC** |
 | **Policy input** | User-held assurance dial | This RFC (records the lever) |
 | **Controller's initial estimate** | Completion-feasibility pre-flight | reliability slice (concurrency-aware)¹ |
-| **Controller's decision** | How much capability per unit | [spend estimator](./spend-estimator.md) + [actuator](./spend-actuator-effort-dial.md) |
+| **Controller's decision** | How much capability per unit | [spend estimator](https://github.com/Q00/ouroboros/pull/1404) + [actuator](https://github.com/Q00/ouroboros/pull/1405) |
 
 This RFC scopes the **first slice the owner greenlit: spend attribution (the
 sensor) + the advisory guardrail loop (the learning layer)** — both low-risk, and
@@ -69,7 +69,8 @@ Cost/token signals are already event-sourced (`orchestrator/events.py`
 `estimated_cost_usd`; `orchestrator/workflow_state.py` `estimated_tokens`; persisted
 in `session.py`) — but nothing aggregates them into a *waste* view (tokens on ACs
 that later failed/were re-done, dead escalations, stagnation cycles). Cost is
-display-only in the TUI (`tui/cost_tracker.py`, `tui/token_tracker.py`).
+display-only in the TUI (`tui/widgets/cost_tracker.py`,
+`tui/components/token_tracker.py`).
 `observability/retrospective.py` already produces per-run retrospectives and
 `resilience/stagnation.py` detects wasted-motion — but nothing carries a lesson
 forward between runs.
@@ -121,7 +122,7 @@ codified guardrails may *propose* a default position but never override the user
 ## Out of scope (deliberately)
 
 - **The spend decision itself** (how much capability per unit) — that is the
-  [estimator](./spend-estimator.md) and [actuator](./spend-actuator-effort-dial.md)
+  [estimator](https://github.com/Q00/ouroboros/pull/1404) and [actuator](https://github.com/Q00/ouroboros/pull/1405)
   RFCs (#1384).
 - **Adaptive concurrency** — evolving `backend_limits` from a static cap to a
   signal-driven controller is the named **second slice** of the frugality
