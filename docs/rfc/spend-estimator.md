@@ -3,10 +3,10 @@
 > Status: **Draft**
 > Relates to [discussion #1384](https://github.com/Q00/ouroboros/discussions/1384)
 > (complexity→investment mechanism). This is the **estimator half** of the split the
-> owner requested; the **actuator half** is
-> [spend actuator (effort dial)](./spend-actuator-effort-dial.md). Frugality stance
-> both serve: [#1377](https://github.com/Q00/ouroboros/discussions/1377) /
-> [frugality control loop](./frugality-control-loop.md).
+> owner requested; the **actuator half** is the
+> [spend actuator (effort dial) RFC (#1405)](https://github.com/Q00/ouroboros/pull/1405).
+> Both serve the frugality stance: [#1377](https://github.com/Q00/ouroboros/discussions/1377) /
+> [frugality control loop (#1403)](https://github.com/Q00/ouroboros/pull/1403).
 
 ## Summary
 
@@ -16,7 +16,7 @@ reliably identifies cheap (and hard, and high-stakes) work. Today that estimate 
 live call site** at all. This RFC specifies the estimator: it produces, per unit of
 work, a **difficulty** estimate and a **stakes** estimate from **measured inputs**,
 with explicit confidence and faithful rationale. It does *not* decide what to do
-with that estimate — that is the [actuator RFC](./spend-actuator-effort-dial.md).
+with that estimate — that is the [actuator RFC](https://github.com/Q00/ouroboros/pull/1405).
 
 The owner accepted #1384's acceptance properties as the right direction with one
 restructure: the **safety properties are v1 invariants; calibration and cross-run
@@ -27,10 +27,15 @@ property — runtime-scoped applicability** — is added.
 
 The estimate is computed but its consumers are unprincipled or absent:
 
-- **No live consumer.** `estimate_complexity` → `PALRouter.route()` /
-  `ModelRouter.route()` (`routing/complexity.py`, `routing/router.py`,
-  `plugin/orchestration/router.py`) have **no non-test call site**. (The actuator
-  RFC removes that tier machinery; this RFC keeps and re-grounds the *estimate*.)
+- **No live *routing* consumer.** The tier router — `PALRouter.route()` /
+  `ModelRouter.route()` (`routing/router.py`, `plugin/orchestration/router.py`) — has
+  **no non-test call site**, so the routing lever does not exist at runtime (the
+  [actuator RFC (#1405)](https://github.com/Q00/ouroboros/pull/1405) removes that tier
+  machinery). `estimate_complexity` itself *is* called once outside tests —
+  `execution/atomicity.py:271` — but that module is off the live path and slated for
+  deletion (see the [decomposition reliability RFC (#1406)](https://github.com/Q00/ouroboros/pull/1406)),
+  so **no live-path consumer of the estimate remains**. This RFC keeps and re-grounds
+  the *estimate*; its live consumer becomes the actuator.
 - **Length treated as difficulty.** Complexity is a weighted sum of three length-ish
   scalars: tokens ×0.30 (÷4000), tools ×0.30 (÷5), depth ×0.40 (÷5). "Fix the race in
   the lock-free queue" scores ≈0 and would rate trivial — the hardest units are
@@ -89,7 +94,7 @@ the event stream becomes the data the v2 calibration loop reads.
 ## Out of scope (deliberately)
 
 - **What to do with the estimate** — model/effort selection, the escalation ladder,
-  and the capability matrix are the [actuator RFC](./spend-actuator-effort-dial.md).
+  and the capability matrix are the [actuator RFC](https://github.com/Q00/ouroboros/pull/1405).
 - **Cross-run calibration loop** — v2 (this RFC lays its event-stream groundwork).
 - **A perfect difficulty oracle** — "better than length, two-axis, and safe when
   unsure" is the v1 bar.
