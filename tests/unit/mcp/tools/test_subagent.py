@@ -1016,6 +1016,122 @@ class TestEmitSubagentDispatchedEvent:
         await emit_subagent_dispatched_event(store, session_id="s", payload=payload)
 
 
+class TestDispatchPluginTerminal:
+    """dispatch_plugin_terminal() — the shared plugin-dispatch terminal helper."""
+
+    async def test_initializes_store_before_emitting_audit_event(self) -> None:
+        """The fix: sync sites used to emit on an uninitialized store and
+
+        silently lose the audit row. The helper must call ``initialize()``
+        before ``append`` so the subagent.dispatched event actually persists.
+        """
+        from unittest.mock import AsyncMock, call
+
+        from ouroboros.mcp.tools.subagent import (
+            SubagentPayload,
+            dispatch_plugin_terminal,
+        )
+
+        store = AsyncMock()
+        manager = AsyncMock()
+        manager.attach_mock(store.initialize, "initialize")
+        manager.attach_mock(store.append, "append")
+
+        payload = SubagentPayload(
+            tool_name="ouroboros_evaluate", title="Eval", prompt="p", context={}
+        )
+
+        result = await dispatch_plugin_terminal(
+            store,
+            session_id="sess-1",
+            payload=payload,
+            response_shape={"status": "delegated_to_subagent"},
+        )
+
+        assert result.is_ok
+        store.initialize.assert_awaited_once()
+        store.append.assert_awaited_once()
+        # initialize() must happen BEFORE append() — otherwise append raises
+        # PersistenceError and the audit row is lost.
+        assert manager.mock_calls.index(call.initialize()) < manager.mock_calls.index(
+            call.append(manager.append.await_args.args[0])
+        )
+
+    async def test_initialize_failure_is_swallowed_dispatch_still_succeeds(self) -> None:
+        """Contract: losing the audit row must NEVER fail the dispatch.
+
+        A transient initialize() failure must not turn the previously-working
+        sync sites into a hard-failure mode.
+        """
+        from unittest.mock import AsyncMock
+
+        from ouroboros.mcp.tools.subagent import (
+            SubagentPayload,
+            dispatch_plugin_terminal,
+        )
+
+        store = AsyncMock()
+        store.initialize.side_effect = RuntimeError("db unavailable")
+        payload = SubagentPayload(
+            tool_name="ouroboros_evaluate", title="Eval", prompt="p", context={}
+        )
+
+        # Must not raise; the dispatch envelope is still returned.
+        result = await dispatch_plugin_terminal(
+            store,
+            session_id="sess-1",
+            payload=payload,
+            response_shape={"status": "delegated_to_subagent"},
+        )
+        assert result.is_ok
+        assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_evaluate"
+
+    async def test_none_store_skips_audit_but_returns_envelope(self) -> None:
+        from ouroboros.mcp.tools.subagent import (
+            SubagentPayload,
+            dispatch_plugin_terminal,
+        )
+
+        payload = SubagentPayload(tool_name="ouroboros_qa", title="QA", prompt="p", context={})
+        result = await dispatch_plugin_terminal(
+            None,
+            session_id=None,
+            payload=payload,
+            response_shape={"status": "delegated_to_subagent"},
+        )
+        assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_subagent"
+        assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_qa"
+
+    async def test_returns_build_subagent_result_envelope_with_response_shape(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from ouroboros.mcp.tools.subagent import (
+            SubagentPayload,
+            dispatch_plugin_terminal,
+        )
+
+        store = AsyncMock()
+        payload = SubagentPayload(
+            tool_name="ouroboros_start_evaluate", title="Eval", prompt="p", context={}
+        )
+        result = await dispatch_plugin_terminal(
+            store,
+            session_id="sess-1",
+            payload=payload,
+            response_shape={
+                "job_id": None,
+                "status": "delegated_to_plugin",
+                "dispatch_mode": "plugin",
+            },
+        )
+        assert result.is_ok
+        assert result.value.meta["job_id"] is None
+        assert result.value.meta["status"] == "delegated_to_plugin"
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert "_subagent" in result.value.meta
+
+
 # ---------------------------------------------------------------------------
 # Gate integration: subprocess mode falls through
 # ---------------------------------------------------------------------------

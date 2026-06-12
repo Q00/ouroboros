@@ -472,21 +472,10 @@ async def test_plugin_dispatch_forwards_progress_windows(
     """
     import json as _json
 
-    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
-
     handler = RalphHandler(
         evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
         agent_runtime_backend="opencode",
         opencode_mode="plugin",
-    )
-
-    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
-        return None
-
-    monkeypatch.setattr(
-        _ralph_handlers,
-        "emit_subagent_dispatched_event",
-        _noop_emit,
     )
 
     result = await handler.handle(
@@ -525,7 +514,6 @@ async def test_plugin_dispatch_uses_default_progress_windows_when_omitted(
     """
     import json as _json
 
-    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
     from ouroboros.ralph_loop import (
         DEFAULT_GRADE_REGRESSION_WINDOW,
         DEFAULT_OSCILLATION_WINDOW,
@@ -535,15 +523,6 @@ async def test_plugin_dispatch_uses_default_progress_windows_when_omitted(
         evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
         agent_runtime_backend="opencode",
         opencode_mode="plugin",
-    )
-
-    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
-        return None
-
-    monkeypatch.setattr(
-        _ralph_handlers,
-        "emit_subagent_dispatched_event",
-        _noop_emit,
     )
 
     result = await handler.handle(

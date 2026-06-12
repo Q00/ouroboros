@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import structlog
 import yaml
@@ -33,11 +32,13 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
+    DELEGATED_TO_SUBAGENT,
     build_evolve_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -48,7 +49,6 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
@@ -299,16 +299,13 @@ class EvolveStepHandler(BridgeAwareMixin):
             project_dir=arguments.get("project_dir"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self.event_store,
                 session_id=lineage_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "lineage_id": lineage_id,
-                    "status": "delegated_to_subagent",
+                    "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                 },
             )
@@ -979,61 +976,41 @@ class StartEvolveStepHandler:
             project_dir=arguments.get("project_dir"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            # Initialize event store first so the audit event persists.
-            await self._event_store.initialize()
-            await emit_subagent_dispatched_event(
+            # Plugin mode: work runs in the OpenCode child session (Task
+            # pane), NOT in a JobManager background job.  See
+            # StartExecuteSeedHandler for rationale — no fake job_id. The
+            # shared helper initializes the store first so the audit event
+            # persists.
+            return await dispatch_plugin_terminal(
                 self._event_store,
                 session_id=lineage_id,
                 payload=payload,
-            )
-
-            # Plugin mode: work runs in the OpenCode child session (Task
-            # pane), NOT in a JobManager background job.  See
-            # StartExecuteSeedHandler for rationale — no fake job_id.
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "job_id": None,
                     "lineage_id": lineage_id,
-                    "status": "delegated_to_plugin",
+                    "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
                 },
             )
 
-        # Fall-through: real background job path.
-        async def _runner(handle) -> MCPToolResult:
-            if handle.should_cancel():
-                return MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text="evolve_step cancelled before restart work began.",
-                        ),
-                    ),
-                    is_error=True,
-                    meta={"status": "cancelled"},
-                )
+        # Fall-through: real background job path. The shared pipeline owns the
+        # ``should_cancel()`` pre-work guard, so the runner only does the work.
+        async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        job_id = await self._job_manager.allocate_job_id()
-        agent_process_id = f"evolve_step:{lineage_id}:{uuid4().hex[:12]}"
-        agent_cancel_key = f"mcp_job:{job_id}"
-
-        snapshot = await self._job_manager.start_job(
+        snapshot = await start_background_tool_job(
+            job_manager=self._job_manager,
+            event_store=self._event_store,
             job_type="evolve_step",
+            intent="evolve_step",
+            process_scope=f"evolve_step:{lineage_id}",
             initial_message=f"Queued evolve_step for {lineage_id}",
-            runner=run_with_agent_process(
-                event_store=self._event_store,
-                intent="evolve_step",
-                work_fn=_runner,
-                process_id=agent_process_id,
-                cancel_key=agent_cancel_key,
-            ),
             links=JobLinks(lineage_id=lineage_id),
-            job_id=job_id,
+            work_fn=_runner,
+            cancelled_text="evolve_step cancelled before restart work began.",
         )
 
         text = (

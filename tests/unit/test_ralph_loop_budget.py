@@ -360,21 +360,10 @@ async def test_plugin_dispatch_forwards_max_total_seconds(
     """
     import json as _json
 
-    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
-
     handler = RalphHandler(
         evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
         agent_runtime_backend="opencode",
         opencode_mode="plugin",
-    )
-
-    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
-        return None
-
-    monkeypatch.setattr(
-        _ralph_handlers,
-        "emit_subagent_dispatched_event",
-        _noop_emit,
     )
 
     result = await handler.handle(
@@ -410,21 +399,10 @@ async def test_plugin_dispatch_forwards_derived_max_total_seconds(
     """
     import json as _json
 
-    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
-
     handler = RalphHandler(
         evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
         agent_runtime_backend="opencode",
         opencode_mode="plugin",
-    )
-
-    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
-        return None
-
-    monkeypatch.setattr(
-        _ralph_handlers,
-        "emit_subagent_dispatched_event",
-        _noop_emit,
     )
 
     result = await handler.handle(

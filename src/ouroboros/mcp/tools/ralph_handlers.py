@@ -10,16 +10,16 @@ from dataclasses import dataclass, field
 import logging
 import math
 from typing import Any
-from uuid import uuid4
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
 from ouroboros.mcp.tools.subagent import (
+    DELEGATED_TO_PLUGIN,
     build_ralph_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
+    dispatch_plugin_terminal,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -30,7 +30,6 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.ralph_loop import (
     DEFAULT_GRADE_REGRESSION_WINDOW,
@@ -436,18 +435,14 @@ class RalphHandler:
                 checkpoint_commits=config.checkpoint_commits,
                 checkpoint_attempted_ac_ids=config.checkpoint_attempted_ac_ids,
             )
-            await self._event_store.initialize()
-            await emit_subagent_dispatched_event(
+            return await dispatch_plugin_terminal(
                 self._event_store,
                 session_id=config.lineage_id,
                 payload=payload,
-            )
-            return build_subagent_result(
-                payload,
                 response_shape={
                     "job_id": None,
                     "lineage_id": config.lineage_id,
-                    "status": "delegated_to_plugin",
+                    "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
                     "max_generations": config.max_generations,
                 },
@@ -455,37 +450,21 @@ class RalphHandler:
 
         runner = RalphLoopRunner(self._evolve_handler)
 
-        async def _run_loop(handle) -> MCPToolResult:
-            if handle.should_cancel():
-                return MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text="Ralph loop cancelled before restart work began.",
-                        ),
-                    ),
-                    is_error=True,
-                    meta={"status": "cancelled"},
-                )
+        # The shared pipeline owns the ``should_cancel()`` pre-work guard.
+        async def _run_loop(_handle) -> MCPToolResult:
             result = await runner.run(config)
             return result.to_tool_result()
 
-        job_id = await self._job_manager.allocate_job_id()
-        agent_process_id = f"ralph:{config.lineage_id}:{uuid4().hex[:12]}"
-        agent_cancel_key = f"mcp_job:{job_id}"
-
-        snapshot = await self._job_manager.start_job(
+        snapshot = await start_background_tool_job(
+            job_manager=self._job_manager,
+            event_store=self._event_store,
             job_type="ralph",
+            intent="ralph",
+            process_scope=f"ralph:{config.lineage_id}",
             initial_message=f"Queued Ralph loop for {config.lineage_id}",
-            runner=run_with_agent_process(
-                event_store=self._event_store,
-                intent="ralph",
-                work_fn=_run_loop,
-                process_id=agent_process_id,
-                cancel_key=agent_cancel_key,
-            ),
             links=JobLinks(lineage_id=config.lineage_id),
-            job_id=job_id,
+            work_fn=_run_loop,
+            cancelled_text="Ralph loop cancelled before restart work began.",
         )
 
         text = (
