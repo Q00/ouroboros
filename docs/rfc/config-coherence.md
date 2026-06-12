@@ -28,55 +28,75 @@ ships first. Full live-reload is more invasive and is deferred.
 
 ## Context
 
-### Some config is read live, some is construction-bound
+### Config binds at different points, and nothing says which
 
-The inconsistency is real and unsignalled:
+The same edit can take effect immediately, on the next tool call, or only after a
+reconnect — depending on *where* the field binds. Nothing signals which:
 
-- `orchestrator/adapter.py` captures `self._permission_mode` at construction and
-  exposes it as a read-only property. **Construction-bound** — editing
-  `~/.ouroboros/config.yaml` does nothing to a live adapter until reconstruction
-  (an `/mcp` reconnect).
-- `config/loader.py` reads *other* values live from disk (e.g.
-  `get_usage_limit_pause_seconds`). **Live.**
+- **Live per read.** `config/loader.py` reads some values from disk on each access
+  (e.g. `get_usage_limit_pause_seconds`). An edit applies immediately.
+- **Re-read at tool entry.** A *fresh* runtime built during tool handling re-reads
+  config on the call — `create_agent_runtime()` resolves `permission_mode` via
+  `get_agent_permission_mode()` (`config/loader.py`), so a fresh
+  `ouroboros_execute_seed` run already picks up an edited `permission_mode` **without
+  a reconnect**.
+- **Bound to a long-lived handle.** A value captured when a durable object was
+  constructed (e.g. `orchestrator/adapter.py` capturing `self._permission_mode`) is
+  *not* re-read by that handle until it is rebuilt. An in-flight session that
+  inherited such a handle keeps the old value — this is the case that silently needs
+  an `/mcp` reconnect.
 
-So two identical-looking edits behave differently, and nothing tells the user
-which is which. `permission_mode: acceptEdits → bypassPermissions` (the fix a
-headless run needs) silently requires a reconnect; the mental model is destroyed.
+So the corrosive bug is specifically the **inherited / long-lived-handle** case:
+the *same* field can be re-read on a fresh run yet stale on an in-flight one, and
+nothing tells the user which path they are on. A coherence mechanism must therefore
+classify by the real binding point, not assume a field is globally "live" or
+"reconnect-only."
 
 ### Config is never proactively surfaced
 
-`config/models.py` + `loader.py` are the single source of truth for ~13 sections
-and ~50 env overrides (documented in `docs/config-reference.md`), but Ouroboros
-never shows a first-timer the handful of knobs that matter for their runtime, with
+`config/models.py` + `loader.py` are the single source of truth for the full config
+surface (documented in `docs/config-reference.md`), but Ouroboros never shows a
+first-timer the handful of knobs that matter for their runtime, with
 defaults and source. `ouroboros config init` generates defaults; `cli/mcp_doctor.py`
 exists for MCP diagnostics — a natural home for a coherence check. Nothing today
 compares on-disk config against the values a live adapter is actually using.
 
 ## Proposal
 
-### 1. A `reload: live | reconnect` classification per field
+### 1. A binding-point classification per field
 
-Tag each config field with a `reload` classification as metadata on the Pydantic
-models in `config/models.py` — derived from one place, so it cannot drift from real
-binding behavior. A test fails if a `reconnect`-tagged field is actually read live
-(and vice-versa).
+Tag each config field with its **binding point** as metadata on the Pydantic models
+in `config/models.py`, derived from one place so it cannot drift from real behavior:
 
-### 2. Detect-and-warn on stale structural edits
+- `live` — re-read on every access (applies immediately);
+- `tool_entry` — re-read when a fresh runtime is built per tool call (applies on the
+  next fresh run, e.g. `permission_mode`);
+- `handle_bound` — captured by a long-lived object until it is rebuilt (can go stale
+  on an in-flight session; needs a reconnect).
 
-On MCP reconnect / tool entry, diff the on-disk config against the values bound in
-the live adapter. If any `reconnect`-class field changed, return a clear, specific
-warning:
+A test fails if a field's tag disagrees with where it actually binds. Only
+`handle_bound` fields can silently go stale; `live` / `tool_entry` fields apply
+without a reconnect.
+
+### 2. Detect-and-warn on stale inherited handles
+
+On tool entry, diff the on-disk config against the values bound in any **long-lived
+handle** the session inherited. If a `handle_bound` field diverged, warn specifically:
 
 ```
-⚠ orchestrator.permission_mode changed on disk (acceptEdits → bypassPermissions)
-  but the live session still uses acceptEdits — reconnect with /mcp to apply.
+⚠ orchestrator.permission_mode on disk (acceptEdits → bypassPermissions) differs from
+  the value bound in this session's live adapter — reconnect with /mcp to apply, or
+  start a fresh run, which re-reads it at tool entry.
 ```
 
-Live-class edits produce no warning. The warning annotates by default; it blocks
-execution only when the stale field would clearly cause failure (e.g. a headless
-run still on `acceptEdits`).
+A `live` or `tool_entry` field that changed produces no warning (it already applied).
+The warning annotates by default; it blocks execution only when the stale field would
+clearly cause failure (e.g. an in-flight headless run still on `acceptEdits`).
 
 ### 3. `ooo config` — one effective-configuration view
+
+(`ooo config` is the skill/MCP shorthand surfaced in-session; the installed CLI
+surface is `ouroboros config`. Both render the same view.)
 
 A single in-session table where every key shows **active value · default · what it
 controls · source** (Ouroboros / runtime / env), unifying the Ouroboros sections,
@@ -107,11 +127,12 @@ hand-maintained second list.
 
 ## Acceptance criteria
 
-1. Editing a `reconnect`-class field (e.g. `permission_mode`) without reconnecting
-   produces a visible, specific warning the next time a tool runs; a `live`-class
-   edit produces none.
-2. The `reload` classification is derived from one source, with a test that fails
-   if a tag disagrees with real binding behavior.
+1. Editing a `handle_bound` field on an in-flight session (e.g. an inherited
+   adapter's `permission_mode`) produces a visible, specific warning on the next tool
+   call; editing a `live` / `tool_entry` field produces none (it already applied, and
+   a fresh run re-reads it).
+2. The binding-point classification is derived from one source, with a test that
+   fails if a field's tag disagrees with where it actually binds.
 3. `ooo config` answers "what is the value, where did it come from, and will my
    edit apply" in one view, including runtime-side and env-overridden keys.
 4. `ouroboros setup` never reports "complete" when the MCP + runtime/LLM chain is
