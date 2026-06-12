@@ -774,37 +774,6 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             parallel_level=data.get("parallel_level"),
         )
 
-    elif event_type == "execution.subagent.started":
-        # SubAgent started - extract parallel level if available
-        return ACUpdated(
-            execution_id=event.aggregate_id,
-            ac_id=data.get("subagent_id", ""),
-            status="executing",
-            depth=data.get("depth", 0),
-            is_atomic=False,
-            parallel_level=data.get("parallel_level"),
-        )
-
-    elif event_type == "execution.subagent.completed":
-        return ACUpdated(
-            execution_id=event.aggregate_id,
-            ac_id=data.get("subagent_id", ""),
-            status="completed",
-            depth=data.get("depth", 0),
-            is_atomic=False,
-            parallel_level=data.get("parallel_level"),
-        )
-
-    elif event_type == "execution.subagent.failed":
-        return ACUpdated(
-            execution_id=event.aggregate_id,
-            ac_id=data.get("subagent_id", ""),
-            status="failed",
-            depth=data.get("depth", 0),
-            is_atomic=False,
-            parallel_level=data.get("parallel_level"),
-        )
-
     elif event_type == "execution.decomposition.level_started":
         # Parallel batch started
         return ParallelBatchStarted(

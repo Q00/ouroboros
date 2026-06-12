@@ -275,9 +275,6 @@ class TestExecutionConfig:
         config = ExecutionConfig()
         assert config.max_iterations_per_ac == 10
         assert config.retrospective_interval == 3
-        assert config.atomicity_model == DEFAULT_OPUS_MODEL
-        assert config.decomposition_model == DEFAULT_OPUS_MODEL
-        assert config.double_diamond_model == DEFAULT_OPUS_MODEL
 
 
 class TestResilienceConfig:

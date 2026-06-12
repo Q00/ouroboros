@@ -102,17 +102,14 @@ llm_role_profiles:
   mechanical_detection: fast
   question_classification: deep
   qa: frontier
-  atomicity: standard
   brownfield_explore: frontier
   clarification: frontier
-  decomposition: standard
   dependency_analysis: standard
   pm_interview: deep
   seed_generation: deep
   consensus_advocate: deep
   consensus_perspective: deep
   consensus_vote: deep
-  double_diamond: deep
   ontology_analysis: deep
   pm_document: deep
   reflect: deep
@@ -240,7 +237,7 @@ llm:
 
 `llm_profiles` define reusable task profiles outside any single provider. `llm_role_profiles` chooses which profile a logical Ouroboros task role should use.
 
-Common role keys include `clarification`, `seed_generation`, `assertion_extraction`, `qa`, `semantic_evaluation`, `wonder`, `reflect`, `consensus_vote`, `consensus_advocate`, `consensus_judge`, `dependency_analysis`, `context_compression`, `ontology_analysis`, `atomicity`, `decomposition`, `double_diamond`, and `mechanical_detection`.
+Common role keys include `clarification`, `seed_generation`, `assertion_extraction`, `qa`, `semantic_evaluation`, `wonder`, `reflect`, `consensus_vote`, `consensus_advocate`, `consensus_judge`, `dependency_analysis`, `context_compression`, `ontology_analysis`, and `mechanical_detection`.
 
 Profile fields:
 
@@ -365,18 +362,12 @@ Controls Phase 2 — the Double Diamond execution loop.
 execution:
   max_iterations_per_ac: 10   # Maximum execution iterations per acceptance criterion
   retrospective_interval: 3   # Iterations between automatic retrospectives
-  atomicity_model: claude-opus-4-6
-  decomposition_model: claude-opus-4-6
-  double_diamond_model: claude-opus-4-6
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
-| `atomicity_model` | `string` | `"claude-opus-4-6"` | Model used for atomicity analysis (deciding whether to decompose an AC). Overridable via `OUROBOROS_ATOMICITY_MODEL`. |
-| `decomposition_model` | `string` | `"claude-opus-4-6"` | Model used for AC decomposition into child ACs. Overridable via `OUROBOROS_DECOMPOSITION_MODEL`. |
-| `double_diamond_model` | `string` | `"claude-opus-4-6"` | Default model for Double Diamond phase prompts. Overridable via `OUROBOROS_DOUBLE_DIAMOND_MODEL`. |
 
 ---
 
@@ -625,9 +616,6 @@ All environment variables have higher priority than the corresponding `config.ya
 | Variable | Overrides | Description |
 |----------|-----------|-------------|
 | `OUROBOROS_CLARIFICATION_MODEL` | `clarification.default_model` | Model for interview and seed generation. |
-| `OUROBOROS_ATOMICITY_MODEL` | `execution.atomicity_model` | Model for atomicity analysis. |
-| `OUROBOROS_DECOMPOSITION_MODEL` | `execution.decomposition_model` | Model for AC decomposition. |
-| `OUROBOROS_DOUBLE_DIAMOND_MODEL` | `execution.double_diamond_model` | Model for Double Diamond phases. |
 | `OUROBOROS_WONDER_MODEL` | `resilience.wonder_model` | Model for the Wonder phase. |
 | `OUROBOROS_REFLECT_MODEL` | `resilience.reflect_model` | Model for the Reflect phase. |
 | `OUROBOROS_SEMANTIC_MODEL` | `evaluation.semantic_model` | Model for Stage 2 semantic evaluation. |
@@ -899,9 +887,6 @@ clarification:
 execution:
   max_iterations_per_ac: 10
   retrospective_interval: 3
-  atomicity_model: claude-opus-4-6
-  decomposition_model: claude-opus-4-6
-  double_diamond_model: claude-opus-4-6
 
 resilience:
   stagnation_enabled: true
