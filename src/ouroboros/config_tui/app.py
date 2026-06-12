@@ -81,13 +81,48 @@ class SettingsApp(App[None]):
 
     CSS = """
     #settings-body { padding: 1 2; }
-    .section-title { text-style: bold; margin: 1 0 0 0; }
-    .stage-card { border: round $primary; padding: 0 1; margin: 1 0 0 0; }
+    #config-path { color: $text-muted; text-style: italic; margin: 0 0 1 0; }
+
+    .section-title { text-style: bold; color: $accent; margin: 1 0 0 0; }
+
+    /* Left-to-right stage row: one card per pipeline stage (#1411 mockup). */
+    #stage-row {
+        layout: grid;
+        grid-size: 4;
+        grid-gutter: 0 1;
+        height: auto;
+        margin: 1 0 0 0;
+    }
+    .stage-card { border: round $primary; padding: 0 1; height: auto; }
+    .stage-card:focus-within { border: round $accent; }
+    .stage-title { text-style: bold; color: $accent; }
+    .field-label { color: $text-muted; margin: 1 0 0 0; }
+
+    /* Global selects share one horizontal band under the stage row. */
+    #global-row {
+        layout: grid;
+        grid-size: 2;
+        grid-gutter: 0 1;
+        height: auto;
+        margin: 1 0 0 0;
+    }
+    .global-cell { border: round $secondary; padding: 0 1; height: auto; }
+
+    #action-bar { layout: horizontal; height: auto; margin: 1 0 0 0; }
+    #status-bar { width: 1fr; margin: 0 0 0 2; content-align: left middle; }
+
     .env-warning { color: $warning; }
     .install-warning { color: $error; }
     .hidden { display: none; }
-    #status-bar { margin: 1 0 0 0; }
     """
+
+    # Terminal-safe stage glyphs for the card headers.
+    _STAGE_GLYPHS = {
+        Stage.INTERVIEW: "✎",
+        Stage.EXECUTE: "⚙",
+        Stage.EVALUATE: "✓",
+        Stage.REFLECT: "↻",
+    }
 
     BINDINGS = [
         ("ctrl+s", "save", "Save"),
@@ -142,31 +177,37 @@ class SettingsApp(App[None]):
         yield Header()
         with VerticalScroll(id="settings-body"):
             yield Static(
-                f"Editing {get_config_dir() / 'config.yaml'} — Ctrl+S to save",
+                f"∞  {get_config_dir() / 'config.yaml'} — Ctrl+S to save",
                 id="config-path",
             )
 
-            yield Static("Global", classes="section-title")
-            yield from self._compose_select_field(
-                GLOBAL_RUNTIME_FIELD,
-                options=self._runtime_options(include_inherit=False),
-                value=_canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key)),
-                select_id="global-runtime",
+            yield Static(
+                "Stages — interview → execute → evaluate → reflect", classes="section-title"
             )
-            yield from self._compose_select_field(
-                GLOBAL_LLM_BACKEND_FIELD,
-                options=[(name, name) for name in llm_backend_choices()],
-                value=_canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key)),
-                select_id="global-llm-backend",
-            )
+            with Container(id="stage-row"):
+                for stage in Stage:
+                    yield from self._compose_stage_card(stage)
 
-            yield Static("Stages", classes="section-title")
-            for stage in Stage:
-                yield from self._compose_stage_card(stage)
+            yield Static("Global", classes="section-title")
+            with Container(id="global-row"):
+                with Container(classes="global-cell"):
+                    yield from self._compose_select_field(
+                        GLOBAL_RUNTIME_FIELD,
+                        options=self._runtime_options(include_inherit=False),
+                        value=_canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key)),
+                        select_id="global-runtime",
+                    )
+                with Container(classes="global-cell"):
+                    yield from self._compose_select_field(
+                        GLOBAL_LLM_BACKEND_FIELD,
+                        options=[(name, name) for name in llm_backend_choices()],
+                        value=_canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key)),
+                        select_id="global-llm-backend",
+                    )
 
             with Collapsible(title="Advanced models", collapsed=True):
                 for field in ADVANCED_MODEL_FIELDS:
-                    yield Static(field.label)
+                    yield Static(field.label, classes="field-label")
                     warning = _env_warning_text(field)
                     if warning:
                         yield Static(warning, classes="env-warning")
@@ -175,8 +216,9 @@ class SettingsApp(App[None]):
                         id=f"adv-{_slug(field.key)}",
                     )
 
-            yield Button("Save", variant="primary", id="save-button")
-            yield Static("", id="status-bar")
+            with Container(id="action-bar"):
+                yield Button("Save", variant="primary", id="save-button")
+                yield Static("", id="status-bar")
         yield Footer()
 
     def _compose_select_field(
@@ -187,7 +229,7 @@ class SettingsApp(App[None]):
         value: str,
         select_id: str,
     ) -> ComposeResult:
-        yield Static(field.label)
+        yield Static(field.label, classes="field-label")
         warning = _env_warning_text(field)
         if warning:
             yield Static(warning, classes="env-warning")
@@ -207,8 +249,11 @@ class SettingsApp(App[None]):
         current_model = str(self._current(model_field.key) or "")
 
         with Container(classes="stage-card", id=f"stage-card-{stage.value}"):
-            yield Static(stage.value.title(), classes="section-title")
-            yield Static(runtime_field.label)
+            yield Static(
+                f"{self._STAGE_GLYPHS.get(stage, '·')} {stage.value.title()}",
+                classes="stage-title",
+            )
+            yield Static(runtime_field.label, classes="field-label")
             yield Select(
                 self._runtime_options(include_inherit=True),
                 value=str(stage_value) if stage_value else INHERIT_SENTINEL,
@@ -220,7 +265,7 @@ class SettingsApp(App[None]):
                 classes="install-warning hidden",
                 id=f"stage-install-warning-{stage.value}",
             )
-            yield Static(model_field.label)
+            yield Static(model_field.label, classes="field-label")
             warning = _env_warning_text(model_field)
             if warning:
                 yield Static(warning, classes="env-warning")
