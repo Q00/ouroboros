@@ -259,3 +259,69 @@ class TestPartialSeedFromEvidence:
         # legacy normalization shared with ``synthesize_seed_from_ledger`` —
         # match that contract instead of the raw entry value.
         assert "Must run offline" in seed.constraints
+
+
+def _complete_ledger_with_acceptance(value: str) -> SeedDraftLedger:
+    """Complete ledger whose acceptance_criteria entry carries ``value`` verbatim."""
+    ledger = _populate_complete_ledger()
+    # Deactivate the default acceptance entry (WEAK is an inactive status) so
+    # only ``value`` contributes to the synthesized acceptance_criteria.
+    section = ledger.sections.get("acceptance_criteria")
+    if section is not None:
+        for entry in section.entries:
+            entry.status = LedgerStatus.WEAK
+    ledger.add_entry(
+        "acceptance_criteria",
+        LedgerEntry(
+            key="acceptance_criteria.custom",
+            value=value,
+            source=LedgerSource.USER_GOAL,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+    return ledger
+
+
+class TestAcceptanceCriteriaNotExplodedOnSemicolons:
+    """Over-atomization guard: a semicolon-rich AC value must stay one criterion.
+
+    Each acceptance criterion becomes a full agent session at execution time, so
+    mechanically splitting one outcome on every ``;`` multiplies token cost with
+    no benefit. Bullet/newline markers remain a legitimate split signal.
+    """
+
+    def test_semicolon_joined_acceptance_stays_single_criterion(self) -> None:
+        ledger = _complete_ledger_with_acceptance(
+            "Tasks persist to a file; the data survives a process restart"
+        )
+        seed = synthesize_seed_from_ledger(ledger, interview_id="iv-semicolon")
+        assert seed.acceptance_criteria == (
+            "Tasks persist to a file; the data survives a process restart",
+        )
+
+    def test_bullet_joined_acceptance_still_splits(self) -> None:
+        ledger = _complete_ledger_with_acceptance(
+            "- Tasks can be created\n- Tasks can be listed\n- Tasks persist"
+        )
+        seed = synthesize_seed_from_ledger(ledger, interview_id="iv-bullets")
+        assert seed.acceptance_criteria == (
+            "Tasks can be created",
+            "Tasks can be listed",
+            "Tasks persist",
+        )
+
+    def test_partial_path_also_preserves_semicolon_clauses(self) -> None:
+        ledger = SeedDraftLedger.from_goal("Goal with a clause-rich AC.")
+        ledger.add_entry(
+            "acceptance_criteria",
+            LedgerEntry(
+                key="acceptance_criteria.partial",
+                value="API returns 200; payload is valid JSON",
+                source=LedgerSource.USER_GOAL,
+                confidence=0.9,
+                status=LedgerStatus.CONFIRMED,
+            ),
+        )
+        seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
+        assert "API returns 200; payload is valid JSON" in seed.acceptance_criteria

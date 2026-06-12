@@ -111,7 +111,7 @@ The seed sits inside the **Define** diamond of Double Diamond — where expansio
    Tool: ouroboros_qa
    Arguments:
      artifact: <the seed YAML>
-     quality_bar: "Seed must be internally consistent, acceptance_criteria must be measurable and testable, constraints must be concrete (no vague terms), ontology_schema must cover all entities referenced in goal/criteria, and there must be no contradictions between fields."
+     quality_bar: "Seed must be internally consistent, acceptance_criteria must be measurable and testable, constraints must be concrete (no vague terms), ontology_schema must cover all entities referenced in goal/criteria, and there must be no contradictions between fields. acceptance_criteria must also be parsimonious: 3-7 outcome-level items, each one independently valuable user-visible outcome, NOT an implementation step. Flag over-fragmentation (more than 7 criteria, or any criterion that is a sub-step of a sibling) as a difference with the same severity as a missing piece — merging redundant criteria is as important as adding missing ones."
      artifact_type: "document"
      pass_threshold: 0.90
      seed_content: <the seed YAML>
