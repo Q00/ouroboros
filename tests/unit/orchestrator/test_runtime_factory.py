@@ -285,8 +285,8 @@ class TestCreateAgentRuntime:
         assert runtime._startup_output_timeout_seconds is None
         assert runtime._stdout_idle_timeout_seconds is None
 
-    def test_create_non_hermes_runtime_ignores_stream_timeout_overrides(self) -> None:
-        """The Hermes-specific override API must not affect other runtimes."""
+    def test_create_codex_runtime_accepts_stream_timeout_overrides(self) -> None:
+        """MCP seed execution can disable Codex quiet-stream guards explicitly."""
         with patch(
             "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
             return_value=object(),
@@ -298,6 +298,8 @@ class TestCreateAgentRuntime:
             )
 
         assert isinstance(runtime, CodexCliRuntime)
+        assert runtime._startup_output_timeout_seconds is None
+        assert runtime._stdout_idle_timeout_seconds is None
 
     def test_opencode_runtime_always_uses_subprocess_mode(self) -> None:
         """OpenCodeRuntime always gets opencode_mode='subprocess' regardless of config.
