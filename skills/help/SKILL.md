@@ -39,6 +39,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo status` | Session status + drift check | MCP |
 | `ooo resume-session` | List in-flight sessions and re-attach commands | CLI |
 | `ooo setup` | Installation wizard | Plugin |
+| `ooo config` | Settings GUI — per-stage agents & models (browser here, TUI in a terminal) | CLI |
 | `ooo welcome` | First-touch welcome guide | Plugin |
 | `ooo tutorial` | Interactive hands-on learning | Plugin |
 | `ooo help` | This reference guide | Plugin |
@@ -79,6 +80,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
 | "in-flight sessions", "mcp disconnected", "lost Ouroboros execution" | `ooo resume-session` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
+| "open settings", "change model", "change agent", "configure backend" | `ooo config` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
 | "publish to github", "create issues from seed", "seed to issues" | `ooo publish` |
 

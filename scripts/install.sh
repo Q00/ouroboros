@@ -633,7 +633,9 @@ if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
 _info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
-_info "Tune per-stage agents & models anytime: ouroboros config (settings GUI)"
+_say "${BOLD}Settings GUI — pick per-stage agents & models${RESET}"
+_info 'Inside your AI agent: > ooo config   (opens in your browser)'
+_info 'From this terminal:  ouroboros config   (full-screen TUI)'
 
 # 6. Optional first-run settings GUI (interactive installs only).
 # install.sh always runs in a real terminal when interactive, so the
@@ -670,7 +672,9 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       fi
       ;;
     *)
-      _info "Skipped. Run it anytime: ouroboros config"
+      _info "Skipped. Open it anytime:"
+      _info '  in your AI agent: > ooo config'
+      _info '  in a terminal:    ouroboros config'
       ;;
   esac
 fi

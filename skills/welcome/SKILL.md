@@ -202,6 +202,7 @@ Available Commands:
 | ooo run         | Execute with visual TUI          |
 | ooo evaluate    | 3-stage verification             |
 | ooo unstuck     | Lateral thinking when stuck      |
+| ooo config      | Settings GUI: agents & models    |
 | ooo help        | Full command reference           |
 +---------------------------------------------------+
 ```
