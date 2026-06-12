@@ -24,8 +24,23 @@ from ouroboros.cli.formatters.tables import create_key_value_table, print_table
 app = typer.Typer(
     name="config",
     help="Manage Ouroboros configuration.",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Manage Ouroboros configuration.
+
+    Without a subcommand, opens the interactive settings GUI: a full-screen
+    TUI in a regular terminal, or a browser-served session inside an AI
+    harness (#1414). Subcommands keep the scriptable surface unchanged.
+    """
+    if ctx.invoked_subcommand is None:
+        from ouroboros.config_tui.launcher import launch_settings
+
+        launch_settings()
+
 
 _VALID_BACKENDS = runtime_backend_choices()
 _SWITCHABLE_BACKENDS = tuple(
