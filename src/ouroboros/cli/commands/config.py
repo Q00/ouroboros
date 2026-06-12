@@ -29,17 +29,49 @@ app = typer.Typer(
 
 
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context) -> None:
+def main(
+    ctx: typer.Context,
+    web: Annotated[
+        bool,
+        typer.Option("--web", help="Force web mode even in an interactive terminal."),
+    ] = False,
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            help="Web-mode bind address. Use 0.0.0.0 to reach the GUI from another "
+            "machine when this host runs a remote agent (e.g. hermes).",
+        ),
+    ] = "localhost",
+    port: Annotated[
+        int | None,
+        typer.Option("--port", help="Web-mode port (default: a free port)."),
+    ] = None,
+    no_browser: Annotated[
+        bool,
+        typer.Option(
+            "--no-browser",
+            help="Never auto-open a browser; just print the URL (remote/SSH hosts).",
+        ),
+    ] = False,
+) -> None:
     """Manage Ouroboros configuration.
 
     Without a subcommand, opens the interactive settings GUI: a full-screen
     TUI in a regular terminal, or a browser-served session inside an AI
-    harness (#1414). Subcommands keep the scriptable surface unchanged.
+    harness (#1414). On remote/agent hosts (SSH, chat gateways) web mode
+    prints a reachable URL instead of opening a browser there. Subcommands
+    keep the scriptable surface unchanged.
     """
     if ctx.invoked_subcommand is None:
         from ouroboros.config_tui.launcher import launch_settings
 
-        launch_settings()
+        launch_settings(
+            force_web=web,
+            host=host,
+            port=port,
+            open_browser=False if no_browser else None,
+        )
 
 
 _VALID_BACKENDS = runtime_backend_choices()

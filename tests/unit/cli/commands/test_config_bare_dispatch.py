@@ -17,7 +17,7 @@ runner = CliRunner()
 def test_bare_invocation_launches_settings_gui(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
-        "ouroboros.config_tui.launcher.launch_settings", lambda: calls.append("launched")
+        "ouroboros.config_tui.launcher.launch_settings", lambda **_kwargs: calls.append("launched")
     )
     result = runner.invoke(app, [])
     assert result.exit_code == 0
@@ -27,7 +27,7 @@ def test_bare_invocation_launches_settings_gui(monkeypatch) -> None:
 def test_subcommand_does_not_launch_settings_gui(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
     monkeypatch.setattr(
-        "ouroboros.config_tui.launcher.launch_settings", lambda: calls.append("launched")
+        "ouroboros.config_tui.launcher.launch_settings", lambda **_kwargs: calls.append("launched")
     )
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
     (tmp_path / "config.yaml").write_text(
@@ -58,3 +58,20 @@ def test_config_help_lists_subcommands() -> None:
     assert result.exit_code == 0
     for subcommand in ("show", "set", "backend", "init", "validate"):
         assert subcommand in result.output
+
+
+def test_bare_invocation_forwards_web_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_launch(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("ouroboros.config_tui.launcher.launch_settings", _fake_launch)
+    result = runner.invoke(app, ["--web", "--host", "0.0.0.0", "--port", "8765", "--no-browser"])
+    assert result.exit_code == 0
+    assert captured == {
+        "force_web": True,
+        "host": "0.0.0.0",
+        "port": 8765,
+        "open_browser": False,
+    }
