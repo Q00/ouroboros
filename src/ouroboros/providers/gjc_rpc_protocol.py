@@ -114,6 +114,20 @@ def unsupported_frame_error(
     )
 
 
+def unsupported_enveloped_frame_error(
+    event: dict[str, Any], *, provider: str = "gjc"
+) -> UnsupportedGjcRpcFrame | None:
+    """Return a fail-closed error for unsupported host interactions inside envelopes.
+
+    Protocol-v2 envelopes may carry forward-compatible passive event types that
+    Ouroboros can ignore, but host-interaction frames require capabilities this
+    adapter does not implement and must fail closed even when enveloped.
+    """
+    if event.get("type") in UNSUPPORTED_BIDIRECTIONAL_FRAME_TYPES:
+        return unsupported_frame_error(event, provider=provider)
+    return None
+
+
 def validate_response_ack(
     event: dict[str, Any],
     *,

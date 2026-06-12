@@ -646,6 +646,46 @@ async def test_protocol_v2_enveloped_stream_completes() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_type",
+    [
+        "workflow_gate",
+        "extension_ui_request",
+        "host_tool_call",
+        "host_tool_cancel",
+        "host_uri_request",
+        "host_uri_cancel",
+    ],
+)
+async def test_protocol_v2_enveloped_host_interaction_fails_closed(frame_type: str) -> None:
+    process = _FakeProcess(
+        stdout=_gjc_jsonl(
+            _ready(),
+            _ack("prompt-1"),
+            _envelope({"type": frame_type, "id": "frame-1", "gate_id": "gate-1"}),
+        )
+    )
+    factory = _ProcessFactory(process)
+    adapter = GjcLLMAdapter(cli_path="/tmp/gjc", cwd="/tmp/project")
+
+    with (
+        patch("ouroboros.providers.gjc_llm_adapter.asyncio.create_subprocess_exec", factory),
+        patch(
+            "ouroboros.providers.gjc_llm_adapter.uuid4", return_value=type("U", (), {"hex": "1"})()
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Say hello")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert result.error.details["error_type"] == "UnsupportedGjcRpcFrame"
+    assert frame_type in result.error.message
+    assert process.terminated
+
+
+@pytest.mark.asyncio
 async def test_protocol_v2_malformed_envelope_is_protocol_error() -> None:
     process = _FakeProcess(
         stdout=_gjc_jsonl(

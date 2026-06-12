@@ -30,6 +30,7 @@ from ouroboros.providers.gjc_rpc_protocol import (
     SUPPORTED_EVENT_TYPES,
     GjcProtocolError,
     is_passive_lifecycle_event,
+    unsupported_enveloped_frame_error,
     unsupported_frame_error,
     unwrap_event_envelope,
     validate_response_ack,
@@ -405,6 +406,11 @@ class GjcLLMAdapter(CodexCliLLMAdapter):
                         event = frame
                         self._check_unsupported_or_unknown(event)
                     elif event.get("type") not in SUPPORTED_EVENT_TYPES:
+                        error = unsupported_enveloped_frame_error(
+                            event, provider=self._provider_name
+                        )
+                        if error is not None:
+                            raise error
                         continue
                     event_id = event.get("id")
                     if event.get("type") == "response" and event_id == prompt_id:

@@ -696,6 +696,53 @@ async def test_protocol_v2_enveloped_stream_success() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_type",
+    [
+        "workflow_gate",
+        "extension_ui_request",
+        "host_tool_call",
+        "host_tool_cancel",
+        "host_uri_request",
+        "host_uri_cancel",
+    ],
+)
+async def test_protocol_v2_enveloped_host_interaction_fails_closed(
+    frame_type: str,
+) -> None:
+    process = _FakeProcess([_event({"type": "ready"})])
+    runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")
+    original_send = runtime._send_command
+
+    async def send_and_append(proc: Any, payload: dict[str, Any]) -> None:
+        await original_send(proc, payload)
+        if payload["type"] == "prompt":
+            frames = [
+                _event(
+                    {
+                        "type": "response",
+                        "id": payload["id"],
+                        "command": "prompt",
+                        "success": True,
+                    }
+                ),
+                _envelope({"type": frame_type, "id": "frame-1", "gate_id": "gate-1"}),
+            ]
+            proc.stdout._buffer.extend(("\n".join(frames) + "\n").encode())
+
+    with (
+        patch.object(runtime, "_send_command", side_effect=send_and_append),
+        patch("asyncio.create_subprocess_exec", return_value=process),
+    ):
+        messages = [msg async for msg in runtime.execute_task("Do it")]
+
+    assert messages[-1].is_error
+    assert messages[-1].data["error_type"] == "UnsupportedGjcRpcFrame"
+    assert frame_type in messages[-1].content
+    assert process.terminated
+
+
+@pytest.mark.asyncio
 async def test_protocol_v2_malformed_envelope_is_protocol_error() -> None:
     process = _FakeProcess([_event({"type": "ready"})])
     runtime = GjcRuntime(cli_path="/tmp/gjc", cwd="/tmp/project")

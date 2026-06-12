@@ -32,6 +32,7 @@ from ouroboros.providers.gjc_rpc_protocol import (
     GjcProtocolError,
     UnsupportedGjcRpcFrame,
     is_passive_lifecycle_event,
+    unsupported_enveloped_frame_error,
     unsupported_frame_error,
     unwrap_event_envelope,
     validate_response_ack,
@@ -486,6 +487,11 @@ class GjcRuntime:
                 if inner is not None:
                     event = inner
                     if event.get("type") not in SUPPORTED_EVENT_TYPES:
+                        error = unsupported_enveloped_frame_error(
+                            event, provider=self._provider_name
+                        )
+                        if error is not None:
+                            raise error
                         log.debug(
                             f"{self._log_namespace}.unknown_enveloped_event",
                             event_type=event.get("type"),
