@@ -144,21 +144,14 @@ class SettingsApp(App[None]):
             value = get_value(self._defaults, key)
         return value
 
-    def _global_runtime_value(self) -> str:
-        """The default agent as currently selected (falling back to config)."""
-        try:
-            global_value = self.query_one("#global-runtime", Select).value
-        except NoMatches:
-            global_value = Select.NULL
-        if _is_blank(global_value):
-            return _canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key))
-        return str(global_value)
-
     def _runtime_options(self, *, include_inherit: bool) -> list[tuple[str, str]]:
+        # Option labels must stay static: Textual's Select does not re-render
+        # the selected label after set_options when the value is unchanged, so
+        # dynamic text (the resolved default) lives in the per-card caption
+        # (#stage-resolved-*) instead.
         options: list[tuple[str, str]] = []
         if include_inherit:
-            # Show the resolved default inline so "(inherit)" is concrete.
-            options.append((f"(inherit — {self._global_runtime_value()})", INHERIT_SENTINEL))
+            options.append(("(inherit default)", INHERIT_SENTINEL))
         for name in runtime_backend_choices():
             if self._installed.get(name):
                 options.append((name, name))
@@ -283,6 +276,11 @@ class SettingsApp(App[None]):
                 id=f"stage-runtime-{stage.value}",
             )
             yield Static(
+                f"→ runs on {effective_backend}",
+                classes="field-help",
+                id=f"stage-resolved-{stage.value}",
+            )
+            yield Static(
                 "",
                 classes="install-warning hidden",
                 id=f"stage-install-warning-{stage.value}",
@@ -318,22 +316,32 @@ class SettingsApp(App[None]):
         select_id = event.select.id or ""
         if select_id.startswith("stage-runtime-"):
             stage = Stage(select_id.removeprefix("stage-runtime-"))
+            self._update_resolved_caption(stage)
             self._refresh_stage_model_options(stage)
             self._refresh_install_warning(stage, event.value)
         elif select_id == "global-runtime":
+            # Cascade: every inheriting card re-resolves its agent and pulls
+            # the matching model catalog. Guard per card so one failure
+            # cannot skip the rest.
             for stage in Stage:
-                runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
-                current = runtime_select.value
-                # Rebuild so the "(inherit — <agent>)" label tracks the new default.
-                runtime_select.set_options(self._runtime_options(include_inherit=True))
-                if not _is_blank(current):
-                    runtime_select.value = current
-                if runtime_select.value == INHERIT_SENTINEL:
-                    self._refresh_stage_model_options(stage)
+                try:
+                    self._sync_stage_card(stage)
+                except NoMatches:
+                    continue
         elif select_id.startswith("stage-model-"):
             stage_name = select_id.removeprefix("stage-model-")
             custom_input = self.query_one(f"#stage-model-custom-{stage_name}", Input)
             custom_input.set_class(event.value != CUSTOM_SENTINEL, "hidden")
+
+    def _sync_stage_card(self, stage: Stage) -> None:
+        runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
+        self._update_resolved_caption(stage)
+        if runtime_select.value == INHERIT_SENTINEL:
+            self._refresh_stage_model_options(stage)
+
+    def _update_resolved_caption(self, stage: Stage) -> None:
+        caption = self.query_one(f"#stage-resolved-{stage.value}", Static)
+        caption.update(f"→ runs on {self._selected_runtime(stage)}")
 
     def _selected_runtime(self, stage: Stage) -> str:
         runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
@@ -347,14 +355,28 @@ class SettingsApp(App[None]):
         return str(value)
 
     def _refresh_stage_model_options(self, stage: Stage) -> None:
+        """Repopulate the model select with the effective backend's catalog.
+
+        The value *follows* the backend: a model the new backend cannot run
+        is replaced by that backend's catalog default rather than carried
+        over (the user changed the agent; the old model id is stale).
+        """
         backend = self._selected_runtime(stage)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
         current = model_select.value
         current_str = None if _is_blank(current) else str(current)
-        options = self._model_options(backend, current_str)
+        try:
+            known = list(model_choices(backend))
+        except ValueError:
+            known = []
+        options = [(model, model) for model in known]
+        options.append(("Custom…", CUSTOM_SENTINEL))
         model_select.set_options(options)
-        if current_str and any(value == current_str for _, value in options):
+        if current_str and current_str in known:
             model_select.value = current_str
+        elif known:
+            model_select.value = known[0]
+        # Custom-only backends (no known models) stay blank for free text.
 
     def _refresh_install_warning(self, stage: Stage, value: Any) -> None:
         warning = self.query_one(f"#stage-install-warning-{stage.value}", Static)

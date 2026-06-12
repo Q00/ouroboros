@@ -172,17 +172,43 @@ def test_settings_app_imports_without_monitor_tui() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inherit_label_tracks_global_default(app_env) -> None:
-    """The stage inherit option shows the resolved default agent (UX: #1411)."""
+async def test_global_change_cascades_to_inheriting_cards(app_env) -> None:
+    """Changing the default agent re-resolves inheriting cards: the
+    '→ runs on <agent>' caption updates and the model select repopulates to
+    the new backend's catalog with its default selected (UX: #1411)."""
     app = SettingsApp()
     async with app.run_test() as pilot:
-        runtime_select = pilot.app.query_one(f"#stage-runtime-{Stage.INTERVIEW.value}", Select)
-        labels = {str(label) for label, value in runtime_select._options if value}
-        assert any("(inherit — claude)" in label for label in labels)
+        stage = Stage.INTERVIEW.value
+        caption = pilot.app.query_one(f"#stage-resolved-{stage}", Static)
+        assert "claude" in str(caption.render())
 
         pilot.app.query_one("#global-runtime", Select).value = "codex"
         await pilot.pause()
-        labels = {str(label) for label, value in runtime_select._options if value}
-        assert any("(inherit — codex)" in label for label in labels)
-        # Rebuilding options must not lose the user's selection.
-        assert runtime_select.value == INHERIT_SENTINEL
+
+        assert "codex" in str(caption.render())
+        runtime_select = pilot.app.query_one(f"#stage-runtime-{stage}", Select)
+        assert runtime_select.value == INHERIT_SENTINEL  # selection preserved
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        assert model_select.value == "default"  # codex catalog default
+        values = {value for _, value in model_select._options}
+        assert "claude-opus-4-8" not in values  # stale claude id dropped
+
+
+@pytest.mark.asyncio
+async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> None:
+    """A card with an explicit agent keeps its model catalog when the
+    default changes — only inheriting cards cascade."""
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.EXECUTE.value  # fixture pins execute to codex
+        caption = pilot.app.query_one(f"#stage-resolved-{stage}", Static)
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        runtime_select = pilot.app.query_one(f"#stage-runtime-{stage}", Select)
+        assert runtime_select.value == "codex"
+        before_value = model_select.value
+
+        pilot.app.query_one("#global-runtime", Select).value = "hermes"
+        await pilot.pause()
+
+        assert "codex" in str(caption.render())
+        assert model_select.value == before_value
