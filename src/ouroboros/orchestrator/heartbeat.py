@@ -149,6 +149,11 @@ def current_process_identity() -> tuple[int, float | None]:
     return pid, _get_process_start_time(pid)
 
 
+def process_start_time(pid: int) -> float | None:
+    """Return the start time of ``pid`` (epoch seconds) when the platform exposes it."""
+    return _get_process_start_time(pid)
+
+
 def is_process_identity_alive(pid: int, start_time: float | None = None) -> bool:
     """Return True when ``pid`` is alive and still has ``start_time``.
 

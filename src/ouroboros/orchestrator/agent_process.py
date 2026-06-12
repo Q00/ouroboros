@@ -66,6 +66,7 @@ _DIRECTIVE_EMIT_TIMEOUT_SECONDS: Final[float] = 1.0
 _CANCELLED_PHASE: Final[str] = "agent_process_cancelled"
 _CANCEL_CONSUMED_PHASE: Final[str] = "agent_process_cancel_consumed"
 _CANCEL_CONTROL_SEED_PREFIX: Final[str] = "__ouroboros_agent_process_cancel__:"
+_CANCELLED_WORK_DRAIN_GRACE_SECONDS: Final[float] = 10.0
 
 
 class AgentProcessStatus(StrEnum):
@@ -1126,9 +1127,25 @@ async def run_with_agent_process[T](
     except asyncio.CancelledError:
         work_task = await _request_work_cancellation()
         if work_task is not None:
+            deadline = asyncio.get_running_loop().time() + _CANCELLED_WORK_DRAIN_GRACE_SECONDS
             while not work_task.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    # A work task that ignores cancellation must not pin the
+                    # event loop (or asyncio.run teardown) forever. Re-raise
+                    # while it is still pending WITHOUT asserting a terminal
+                    # state — mirroring the pending TimeoutError branch below —
+                    # so live work is never falsely terminalized (#880) and the
+                    # INTERRUPTED reconciliation owns the final state instead.
+                    raise
                 try:
-                    await asyncio.shield(work_task)
+                    # asyncio.wait neither cancels work_task on our re-cancel
+                    # nor swallows its result; it just bounds the drain.
+                    await asyncio.wait({work_task}, timeout=remaining)
+                    if work_task.done():
+                        # Preserve the pre-bound contract: a non-cancel failure
+                        # raised by the work task propagates to the caller.
+                        await asyncio.shield(work_task)
                 except asyncio.CancelledError:
                     # The JobManager may cancel this wrapper more than once.
                     # Do not re-cancel the work task while it is already

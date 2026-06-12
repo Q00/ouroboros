@@ -2155,3 +2155,49 @@ async def test_run_with_agent_process_separates_lifecycle_id_from_cancel_key(tmp
 
     assert fresh_result == "fresh"
     assert fresh_called is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_drain_grace_bounds_uncooperative_work(monkeypatch) -> None:
+    """A work task that swallows cancellation must not pin the wrapper forever.
+
+    The unbounded shield loop (#880) protected live work from false terminal
+    cancellation, but it also let a wedged work task pin asyncio.run teardown
+    indefinitely — keeping the MCP server process alive after the serve loop
+    ended. The bounded drain re-raises while the task is still pending WITHOUT
+    asserting a terminal state, deferring to INTERRUPTED reconciliation.
+    """
+    from ouroboros.orchestrator import agent_process as agent_process_module
+
+    monkeypatch.setattr(agent_process_module, "_CANCELLED_WORK_DRAIN_GRACE_SECONDS", 0.2)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stubborn_work(handle):
+        entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass  # swallow the runner's cancel...
+        await release.wait()  # ...and keep running past the grace
+        return "late"
+
+    wrapper = asyncio.create_task(
+        run_with_agent_process(
+            event_store=_FakeEventStore(),
+            intent="helper",
+            work_fn=stubborn_work,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    wrapper.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        # Far below 3600s: the grace (0.2s) bounds the drain.
+        await asyncio.wait_for(wrapper, timeout=2.0)
+
+    # Let the leftover work task finish so the loop closes cleanly.
+    release.set()
+    leftovers = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*leftovers, return_exceptions=True)
