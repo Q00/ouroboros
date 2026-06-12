@@ -1,9 +1,12 @@
-"""Stream and subprocess management helpers for the Codex CLI adapter.
+"""Stream and subprocess management helpers for CLI provider adapters.
 
 This module provides low-level async utilities for reading subprocess
 output streams and performing graceful process termination.  They are
 extracted from :mod:`ouroboros.providers.codex_cli_adapter` to keep
-that module focused on the LLM adapter logic.
+that module focused on the LLM adapter logic, and are backend-neutral:
+each caller threads its own ``provider`` tag so the emitted
+:class:`~ouroboros.core.errors.ProviderError` instances carry the
+correct backend label (codex, copilot, opencode, gemini, ...).
 """
 
 from __future__ import annotations
@@ -25,12 +28,16 @@ async def iter_stream_lines(
     *,
     chunk_size: int = 16384,
     max_buffer_bytes: int = _MAX_STREAM_LINE_BUFFER_BYTES,
+    provider: str = "codex_cli",
 ) -> AsyncIterator[str]:
     """Yield decoded lines from an asyncio stream without readline().
 
     The function reads raw bytes in *chunk_size* chunks, feeds them
     through an incremental UTF-8 decoder, and splits on newline
     boundaries.  Trailing ``\\r`` characters are stripped.
+
+    *provider* tags any :class:`ProviderError` raised on buffer overflow
+    with the calling backend so the error is attributable.
     """
     if stream is None:
         return
@@ -49,8 +56,8 @@ async def iter_stream_lines(
         buffer_byte_estimate += len(decoded) * 4
         if buffer_byte_estimate > max_buffer_bytes:
             raise ProviderError(
-                message=(f"Codex CLI stream line buffer exceeded {max_buffer_bytes} bytes"),
-                provider="codex_cli",
+                message=(f"CLI stream line buffer exceeded {max_buffer_bytes} bytes"),
+                provider=provider,
                 details={
                     "buffer_limit_bytes": max_buffer_bytes,
                     "overflow_stage": "line_buffer",
@@ -76,26 +83,28 @@ async def collect_stream_lines(
     stream: asyncio.StreamReader | None,
     *,
     max_total_bytes: int = _MAX_STREAM_CAPTURE_BYTES,
+    provider: str = "codex_cli",
 ) -> list[str]:
     """Drain a subprocess stream into a list of non-empty lines.
 
     The collector enforces a cumulative byte cap so stderr/stdout capture cannot
-    grow without bound under noisy or malicious subprocess output.
+    grow without bound under noisy or malicious subprocess output.  *provider*
+    tags any :class:`ProviderError` raised on overflow with the calling backend.
     """
     if stream is None:
         return []
 
     lines: list[str] = []
     total_bytes = 0
-    async for line in iter_stream_lines(stream):
+    async for line in iter_stream_lines(stream, provider=provider):
         if not line:
             continue
 
         total_bytes += len(line.encode("utf-8", errors="replace")) + 1
         if total_bytes > max_total_bytes:
             raise ProviderError(
-                message=(f"Codex CLI stream capture exceeded {max_total_bytes} bytes"),
-                provider="codex_cli",
+                message=(f"CLI stream capture exceeded {max_total_bytes} bytes"),
+                provider=provider,
                 details={
                     "capture_limit_bytes": max_total_bytes,
                     "overflow_stage": "stream_capture",

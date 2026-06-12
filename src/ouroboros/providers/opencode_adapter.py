@@ -598,7 +598,7 @@ class OpenCodeLLMAdapter:
             """Collect events, wait for exit, read stderr."""
             evts: list[dict[str, Any]] = []
             if process.stdout is not None:
-                async for line in iter_stream_lines(process.stdout):
+                async for line in iter_stream_lines(process.stdout, provider=self._provider_name):
                     if not line:
                         continue
                     try:
@@ -611,7 +611,9 @@ class OpenCodeLLMAdapter:
             rc = await process.wait()
             stderr = ""
             if process.stderr is not None:
-                stderr_lines = await collect_stream_lines(process.stderr)
+                stderr_lines = await collect_stream_lines(
+                    process.stderr, provider=self._provider_name
+                )
                 stderr = "\n".join(stderr_lines)
             return evts, rc, stderr
 

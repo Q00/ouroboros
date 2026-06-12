@@ -54,7 +54,7 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
-from ouroboros.providers.copilot_cli_stream import (
+from ouroboros.providers.codex_cli_stream import (
     collect_stream_lines,
     iter_stream_lines,
     terminate_process,
@@ -576,14 +576,14 @@ class CopilotCliLLMAdapter:
         *,
         chunk_size: int = 16384,
     ) -> AsyncIterator[str]:
-        async for line in iter_stream_lines(stream, chunk_size=chunk_size):
+        async for line in iter_stream_lines(stream, chunk_size=chunk_size, provider="copilot_cli"):
             yield line
 
     async def _collect_stream_lines(
         self,
         stream: asyncio.StreamReader | None,
     ) -> list[str]:
-        return await collect_stream_lines(stream)
+        return await collect_stream_lines(stream, provider="copilot_cli")
 
     async def _terminate_process(self, process: Any) -> None:
         await terminate_process(

@@ -326,7 +326,7 @@ class GeminiCLIAdapter:
         error_seen: str | None = None
         total_bytes = 0
 
-        async for line in iter_stream_lines(process.stdout):
+        async for line in iter_stream_lines(process.stdout, provider=self._provider_name):
             line = line.strip()
             if not line:
                 continue
@@ -421,7 +421,7 @@ class GeminiCLIAdapter:
         # A non-zero exit code always means failure.
         if returncode != 0:
             stderr_lines: list[str] = []
-            async for line in iter_stream_lines(process.stderr):
+            async for line in iter_stream_lines(process.stderr, provider=self._provider_name):
                 if line.strip():
                     stderr_lines.append(line.strip())
             stderr_text = "\n".join(stderr_lines[:10])
