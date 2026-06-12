@@ -9,22 +9,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Container, VerticalScroll
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Collapsible,
     Footer,
     Header,
     Input,
+    OptionList,
     Select,
     Static,
 )
+from textual.widgets.option_list import Option
 
 from ouroboros.backends import resolve_backend_alias, runtime_backend_choices
 from ouroboros.backends.capabilities import llm_backend_choices
-from ouroboros.backends.model_catalog import installed_backends, model_choices
+from ouroboros.backends.model_catalog import installed_backends, model_choices, refresh_models
 from ouroboros.config.models import OuroborosConfig, get_config_dir
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.fields import (
@@ -41,8 +45,16 @@ from ouroboros.orchestrator_stage import Stage
 
 INHERIT_SENTINEL = "__inherit__"
 CUSTOM_SENTINEL = "__custom__"
+SEARCH_SENTINEL = "__search__"
 
 INSTALL_REQUIRED_SUFFIX = "install required"
+
+# Above this many fetched models, the select offers a search modal instead
+# of inlining the whole listing (opencode reports ~400 ids).
+SEARCH_THRESHOLD = 20
+
+# Cap the rows rendered in the search modal while filtering.
+_SEARCH_MAX_ROWS = 200
 
 # Textual's no-selection sentinel compares by identity only; isinstance is
 # the robust blank check across widget interactions.
@@ -72,6 +84,64 @@ def _env_warning_text(field: SettingField) -> str | None:
         return None
     names = ", ".join(overrides)
     return f"⚠ overridden by {names} — saved value takes effect only after unsetting it"
+
+
+class ModelSearchScreen(ModalScreen[str | None]):
+    """Type-to-filter picker for large model listings."""
+
+    BINDINGS = [("escape", "cancel", "Close")]
+
+    CSS = """
+    ModelSearchScreen { align: center middle; }
+    #search-dialog {
+        width: 70%;
+        max-width: 90;
+        height: 70%;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #search-title { text-style: bold; color: $accent; }
+    #search-input { margin: 1 0; }
+    #search-results { height: 1fr; }
+    """
+
+    def __init__(self, models: tuple[str, ...], *, title: str) -> None:
+        super().__init__()
+        self._models = models
+        self._title = title
+
+    def compose(self) -> ComposeResult:
+        with Container(id="search-dialog"):
+            yield Static(self._title, id="search-title")
+            yield Input(placeholder="Type to filter…", id="search-input")
+            yield OptionList(id="search-results")
+
+    def on_mount(self) -> None:
+        self._apply_filter("")
+        self.query_one("#search-input", Input).focus()
+
+    def _apply_filter(self, needle: str) -> None:
+        needle = needle.strip().lower()
+        matches = [model for model in self._models if needle in model.lower()]
+        results = self.query_one("#search-results", OptionList)
+        results.clear_options()
+        results.add_options(Option(model, id=None) for model in matches[:_SEARCH_MAX_ROWS])
+        overflow = len(matches) - _SEARCH_MAX_ROWS
+        if overflow > 0:
+            results.add_options(
+                [Option(f"… {overflow} more — keep typing to narrow down", disabled=True)]
+            )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if (event.input.id or "") == "search-input":
+            self._apply_filter(event.value)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(str(event.option.prompt))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class SettingsApp(App[None]):
@@ -135,6 +205,18 @@ class SettingsApp(App[None]):
         self._raw = persistence.load_raw_config()
         self._defaults: dict[str, Any] = OuroborosConfig().model_dump(mode="json")
         self._installed: dict[str, str | None] = installed_backends()
+        # Dynamic model listings fetched from backend CLIs (None = attempted,
+        # nothing usable). Fetches run in background threads so the UI never
+        # blocks on a slow CLI.
+        self._fetched_models: dict[str, tuple[str, ...] | None] = {}
+        self._fetch_pending: set[str] = set()
+        # Last concrete model per stage, restored when a search is cancelled.
+        self._last_model_value: dict[str, str | None] = {}
+
+    def on_mount(self) -> None:
+        # Config-derived (not widget-derived): widgets may still be mounting.
+        for backend in {self._effective_stage_backend(stage) for stage in Stage}:
+            self._request_model_listing(backend)
 
     # ── value helpers ────────────────────────────────────────────────
 
@@ -159,16 +241,72 @@ class SettingsApp(App[None]):
                 options.append((f"{name} — ⚠ {INSTALL_REQUIRED_SUFFIX}", name))
         return options
 
-    def _model_options(self, backend: str, current: str | None) -> list[tuple[str, str]]:
+    def _static_models(self, backend: str) -> list[str]:
         try:
-            known = list(model_choices(backend))
+            return list(model_choices(backend))
         except ValueError:
-            known = []
+            return []
+
+    def _all_models(self, backend: str) -> list[str]:
+        """Static catalog merged with the full CLI-fetched listing."""
+        known = self._static_models(backend)
+        fetched = self._fetched_models.get(backend) or ()
+        known.extend(model for model in fetched if model not in known)
+        return known
+
+    def _model_options(self, backend: str, current: str | None) -> list[tuple[str, str]]:
+        """Select options for a backend.
+
+        Small fetched listings merge inline; large ones (e.g. opencode's
+        ~400 ids) stay behind a "Search…" entry that opens a filter modal,
+        keeping the dropdown scannable.
+        """
+        fetched = self._fetched_models.get(backend) or ()
+        if len(fetched) <= SEARCH_THRESHOLD:
+            known = self._all_models(backend)
+        else:
+            known = self._static_models(backend)
         if current and current not in known:
             known.insert(0, current)
         options = [(model, model) for model in known]
+        if len(fetched) > SEARCH_THRESHOLD:
+            options.append((f"Search {len(fetched)} models…", SEARCH_SENTINEL))
         options.append(("Custom…", CUSTOM_SENTINEL))
         return options
+
+    # ── dynamic model listings ───────────────────────────────────────
+
+    def _request_model_listing(self, backend: str) -> None:
+        """Fetch the backend CLI's model listing once, in the background."""
+        if backend in self._fetched_models or backend in self._fetch_pending:
+            return
+        self._fetch_pending.add(backend)
+        self._fetch_models_worker(backend)
+
+    @work(thread=True, exclusive=False)
+    def _fetch_models_worker(self, backend: str) -> None:
+        models = refresh_models(backend)
+        self.call_from_thread(self._on_models_fetched, backend, models)
+
+    def _on_models_fetched(self, backend: str, models: tuple[str, ...] | None) -> None:
+        self._fetch_pending.discard(backend)
+        self._fetched_models[backend] = models
+        if not models:
+            return
+        for stage in Stage:
+            try:
+                if self._selected_runtime(stage) == backend:
+                    self._merge_fetched_into_stage(stage, backend)
+            except NoMatches:
+                continue
+
+    def _merge_fetched_into_stage(self, stage: Stage, backend: str) -> None:
+        model_select = self.query_one(f"#stage-model-{stage.value}", Select)
+        current = model_select.value
+        current_str = None if _is_blank(current) else str(current)
+        model_select.set_options(self._model_options(backend, current_str))
+        if current_str:
+            model_select.value = current_str
 
     def _effective_stage_backend(self, stage: Stage) -> str:
         stage_value = get_value(self._raw, f"orchestrator.runtime_profile.stages.{stage.value}")
@@ -328,10 +466,36 @@ class SettingsApp(App[None]):
                     self._sync_stage_card(stage)
                 except NoMatches:
                     continue
-        elif select_id.startswith("stage-model-"):
-            stage_name = select_id.removeprefix("stage-model-")
-            custom_input = self.query_one(f"#stage-model-custom-{stage_name}", Input)
+        elif select_id.startswith("stage-model-") and not select_id.startswith(
+            "stage-model-custom-"
+        ):
+            stage = Stage(select_id.removeprefix("stage-model-"))
+            custom_input = self.query_one(f"#stage-model-custom-{stage.value}", Input)
             custom_input.set_class(event.value != CUSTOM_SENTINEL, "hidden")
+            if event.value == SEARCH_SENTINEL:
+                self._open_model_search(stage)
+            elif not _is_blank(event.value) and event.value != CUSTOM_SENTINEL:
+                self._last_model_value[stage.value] = str(event.value)
+
+    def _open_model_search(self, stage: Stage) -> None:
+        backend = self._selected_runtime(stage)
+        models = tuple(self._all_models(backend))
+
+        def _picked(model: str | None) -> None:
+            previous = self._last_model_value.get(stage.value)
+            self._set_stage_model(stage, model or previous)
+
+        self.push_screen(
+            ModelSearchScreen(models, title=f"{stage.value.title()} model — {backend}"),
+            _picked,
+        )
+
+    def _set_stage_model(self, stage: Stage, model: str | None) -> None:
+        backend = self._selected_runtime(stage)
+        model_select = self.query_one(f"#stage-model-{stage.value}", Select)
+        model_select.set_options(self._model_options(backend, model))
+        if model:
+            model_select.value = model
 
     def _sync_stage_card(self, stage: Stage) -> None:
         runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
@@ -362,20 +526,18 @@ class SettingsApp(App[None]):
         over (the user changed the agent; the old model id is stale).
         """
         backend = self._selected_runtime(stage)
+        self._request_model_listing(backend)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
         current = model_select.value
         current_str = None if _is_blank(current) else str(current)
-        try:
-            known = list(model_choices(backend))
-        except ValueError:
-            known = []
-        options = [(model, model) for model in known]
-        options.append(("Custom…", CUSTOM_SENTINEL))
+        keep = current_str if current_str and current_str in self._all_models(backend) else None
+        options = self._model_options(backend, keep)
         model_select.set_options(options)
-        if current_str and current_str in known:
-            model_select.value = current_str
-        elif known:
-            model_select.value = known[0]
+        concrete = [v for _, v in options if v not in (SEARCH_SENTINEL, CUSTOM_SENTINEL)]
+        if keep:
+            model_select.value = keep
+        elif concrete:
+            model_select.value = concrete[0]
         # Custom-only backends (no known models) stay blank for free text.
 
     def _refresh_install_warning(self, stage: Stage, value: Any) -> None:

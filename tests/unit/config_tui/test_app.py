@@ -12,13 +12,15 @@ import subprocess
 import sys
 
 import pytest
-from textual.widgets import Input, Select, Static
+from textual.widgets import Input, OptionList, Select, Static
 
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
     INHERIT_SENTINEL,
     INSTALL_REQUIRED_SUFFIX,
+    SEARCH_SENTINEL,
+    ModelSearchScreen,
     SettingsApp,
 )
 from ouroboros.orchestrator_stage import Stage
@@ -40,6 +42,8 @@ def app_env(monkeypatch):
         "ouroboros.config_tui.app.installed_backends",
         lambda: dict(installed),
     )
+    # Never let unit tests shell out to real backend CLIs.
+    monkeypatch.setattr("ouroboros.config_tui.app.refresh_models", lambda _backend: None)
     return raw
 
 
@@ -212,3 +216,110 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
 
         assert "codex" in str(caption.render())
         assert model_select.value == before_value
+
+
+@pytest.mark.asyncio
+async def test_dynamic_model_listing_merges_into_select(app_env, monkeypatch) -> None:
+    """A verified CLI listing expands the model choices in the background,
+    without displacing the static default or the current selection."""
+
+    def _fake_listing(backend):
+        if backend == "codex":
+            return ("openai/gpt-5.2-codex", "openai/o5-mini")
+        return None
+
+    monkeypatch.setattr("ouroboros.config_tui.app.refresh_models", _fake_listing)
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        values = {value for _, value in model_select._options}
+        assert "openai/gpt-5.2-codex" in values  # fetched entries merged
+        assert "default" in values  # static catalog kept first
+        assert model_select.value == "default"  # selection not displaced
+
+
+@pytest.mark.asyncio
+async def test_large_listing_collapses_into_search_option(app_env, monkeypatch) -> None:
+    """Hundreds of fetched models stay behind a 'Search N models…' entry
+    instead of flooding the dropdown."""
+    big = tuple(f"provider/model-{i}" for i in range(300))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.refresh_models",
+        lambda backend: big if backend == "codex" else None,
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        values = [value for _, value in model_select._options]
+        assert SEARCH_SENTINEL in values
+        assert len(values) < 30  # static catalog + sentinels only, not 300 rows
+        labels = {str(label) for label, _ in model_select._options}
+        assert any("Search 300 models" in label for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_search_modal_filters_and_applies_choice(app_env, monkeypatch) -> None:
+    big = tuple(f"provider/model-{i}" for i in range(300)) + ("anthropic/claude-opus-4-8",)
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.refresh_models",
+        lambda backend: big if backend == "codex" else None,
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        model_select.value = SEARCH_SENTINEL
+        await pilot.pause()
+        assert isinstance(pilot.app.screen, ModelSearchScreen)
+
+        search_input = pilot.app.screen.query_one("#search-input", Input)
+        search_input.value = "anthropic"
+        await pilot.pause()
+        results = pilot.app.screen.query_one("#search-results", OptionList)
+        assert results.option_count == 1
+
+        results.highlighted = 0
+        results.action_select()
+        await pilot.pause()
+        assert model_select.value == "anthropic/claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+async def test_search_modal_cancel_restores_previous_value(app_env, monkeypatch) -> None:
+    big = tuple(f"provider/model-{i}" for i in range(300))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.refresh_models",
+        lambda backend: big if backend == "codex" else None,
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        assert model_select.value == "default"
+        model_select.value = SEARCH_SENTINEL
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert model_select.value == "default"

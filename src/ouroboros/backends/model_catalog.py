@@ -53,19 +53,35 @@ class BackendModelCatalog:
             backends whose model space is free-form (e.g. litellm provider
             routes) — UIs must always offer a free-text custom entry on top
             of this tuple regardless of its length.
-        list_command: Optional argv that prints one available model id per
-            line. ``None`` means dynamic listing is not verified for this
-            backend and callers must use the static ``models``.
+        list_args: Optional CLI subcommand argv (appended to the resolved
+            backend binary) that prints one available model id per line.
+            Wired only where verified by hand — e.g. ``opencode models``.
+            ``None`` means dynamic listing is unsupported and callers must
+            use the static ``models``.
     """
 
     backend: str
     models: tuple[str, ...]
-    list_command: tuple[str, ...] | None = None
+    list_args: tuple[str, ...] | None = None
 
     @property
     def default_model(self) -> str:
         """Best default model id, matching the loader's backend mapping."""
         return self.models[0] if self.models else DEFAULT_MODEL_SENTINEL
+
+
+# Hand-curated additions per backend, appended after the loader-mirroring
+# default entry. Keep entries verifiable: the codex ids below were confirmed
+# against a live `opencode models` listing of the OpenAI catalog.
+_EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
+    "claude": ("claude-haiku-4-5-20251001",),
+    "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+}
+
+# Verified model-listing subcommands (one model id per line on stdout).
+_LIST_ARGS: dict[str, tuple[str, ...]] = {
+    "opencode": ("models",),
+}
 
 
 def _build_catalogs() -> dict[str, BackendModelCatalog]:
@@ -75,7 +91,12 @@ def _build_catalogs() -> dict[str, BackendModelCatalog]:
             models: tuple[str, ...] = (DEFAULT_MODEL_SENTINEL,)
         else:
             models = (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
-        catalogs[name] = BackendModelCatalog(backend=name, models=models)
+        models = models + _EXTRA_KNOWN_MODELS.get(name, ())
+        catalogs[name] = BackendModelCatalog(
+            backend=name,
+            models=models,
+            list_args=_LIST_ARGS.get(name),
+        )
     # LLM-only backend: model ids are provider-prefixed free-form strings,
     # so the catalog is custom-entry-only.
     catalogs["litellm"] = BackendModelCatalog(backend="litellm", models=())
@@ -110,16 +131,20 @@ def refresh_models(
 ) -> tuple[str, ...] | None:
     """Dynamically list models for a backend, or ``None`` to use the static catalog.
 
-    Degrades to ``None`` (never raises) when the backend declares no
-    verified ``list_command``, the command fails, times out, or produces
-    no parseable output.
+    Runs the backend's verified listing subcommand against its resolved CLI
+    binary (configured path first, then PATH). Degrades to ``None`` (never
+    raises) when the backend declares no listing subcommand, the CLI is not
+    installed, the command fails or times out, or output is unparseable.
     """
     catalog = get_model_catalog(backend)
-    if catalog.list_command is None:
+    if catalog.list_args is None:
+        return None
+    cli_path = detect_backend_cli(backend)
+    if cli_path is None:
         return None
     try:
-        result = subprocess.run(  # noqa: S603 - argv is a code-owned constant
-            catalog.list_command,
+        result = subprocess.run(  # noqa: S603 - resolved binary + code-owned args
+            (cli_path, *catalog.list_args),
             capture_output=True,
             text=True,
             timeout=timeout_seconds,

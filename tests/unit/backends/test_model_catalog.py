@@ -27,8 +27,16 @@ def test_catalog_default_mirrors_loader_backend_mapping(backend: str) -> None:
     assert mc.get_model_catalog(backend).default_model == loader_default
 
 
-def test_claude_catalog_lists_shipped_defaults() -> None:
-    assert mc.model_choices("claude") == (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
+def test_claude_catalog_lists_shipped_defaults_first() -> None:
+    choices = mc.model_choices("claude")
+    assert choices[:2] == (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
+    assert "claude-haiku-4-5-20251001" in choices
+
+
+def test_codex_catalog_offers_known_models_after_sentinel() -> None:
+    choices = mc.model_choices("codex")
+    assert choices[0] == mc.DEFAULT_MODEL_SENTINEL
+    assert "gpt-5-codex" in choices
 
 
 def test_alias_resolves_to_canonical_catalog() -> None:
@@ -47,32 +55,45 @@ def test_unknown_backend_raises() -> None:
         mc.get_model_catalog("not-a-backend")
 
 
-def test_refresh_models_without_list_command_degrades_to_none() -> None:
-    # No backend ships a verified list_command yet (see module docstring).
+def test_refresh_models_without_list_args_degrades_to_none() -> None:
     for backend in runtime_backend_choices():
-        assert mc.refresh_models(backend) is None
+        if mc.get_model_catalog(backend).list_args is None:
+            assert mc.refresh_models(backend) is None
+
+
+def test_opencode_ships_verified_list_args() -> None:
+    assert mc.get_model_catalog("opencode").list_args == ("models",)
+
+
+def test_refresh_models_uninstalled_cli_degrades_to_none(monkeypatch) -> None:
+    monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: None)
+    assert mc.refresh_models("opencode") is None
 
 
 def test_refresh_models_failing_command_degrades_to_none(monkeypatch) -> None:
-    catalog = mc.BackendModelCatalog(backend="claude", models=("m",), list_command=("x",))
-    monkeypatch.setitem(mc._CATALOGS, "claude", catalog)
+    monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: "/bin/opencode")
 
     def _boom(*args, **kwargs):
         raise subprocess.SubprocessError("listing failed")
 
     monkeypatch.setattr(mc.subprocess, "run", _boom)
-    assert mc.refresh_models("claude") is None
+    assert mc.refresh_models("opencode") is None
 
 
 def test_refresh_models_parses_one_model_per_line(monkeypatch) -> None:
-    catalog = mc.BackendModelCatalog(backend="claude", models=("m",), list_command=("x",))
-    monkeypatch.setitem(mc._CATALOGS, "claude", catalog)
+    monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: "/bin/opencode")
+    captured: dict[str, object] = {}
 
     class _Result:
         stdout = "model-a\n  model-b  \n\n"
 
-    monkeypatch.setattr(mc.subprocess, "run", lambda *_args, **_kwargs: _Result())
-    assert mc.refresh_models("claude") == ("model-a", "model-b")
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return _Result()
+
+    monkeypatch.setattr(mc.subprocess, "run", _fake_run)
+    assert mc.refresh_models("opencode") == ("model-a", "model-b")
+    assert captured["argv"] == ("/bin/opencode", "models")
 
 
 def test_detect_backend_cli_prefers_configured_path(monkeypatch) -> None:
