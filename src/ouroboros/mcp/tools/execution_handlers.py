@@ -34,6 +34,7 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
     build_execute_subagent,
@@ -58,7 +59,6 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     RuntimeHandle,
 )
-from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -1355,18 +1355,8 @@ class StartExecuteSeedHandler:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
 
-        async def _runner(handle) -> MCPToolResult:
-            if handle.should_cancel():
-                return MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text="Seed execution cancelled before restart work began.",
-                        ),
-                    ),
-                    is_error=True,
-                    meta={"status": "cancelled"},
-                )
+        # The shared pipeline owns the ``should_cancel()`` pre-work guard.
+        async def _runner(_handle) -> MCPToolResult:
             result = await self._execute_handler.handle(
                 arguments,
                 execution_id=execution_id,
@@ -1377,23 +1367,19 @@ class StartExecuteSeedHandler:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        job_id = await self._job_manager.allocate_job_id()
-
-        snapshot = await self._job_manager.start_job(
+        snapshot = await start_background_tool_job(
+            job_manager=self._job_manager,
+            event_store=self._event_store,
             job_type="execute_seed",
+            intent="execute_seed",
+            process_scope=f"execute_seed:{execution_id}",
             initial_message="Queued seed execution",
-            runner=run_with_agent_process(
-                event_store=self._event_store,
-                intent="execute_seed",
-                work_fn=_runner,
-                process_id=f"execute_seed:{execution_id}:{job_id}",
-                cancel_key=f"mcp_job:{job_id}",
-            ),
             links=JobLinks(
                 session_id=session_id or new_session_id,
                 execution_id=execution_id,
             ),
-            job_id=job_id,
+            work_fn=_runner,
+            cancelled_text="Seed execution cancelled before restart work began.",
         )
 
         from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend

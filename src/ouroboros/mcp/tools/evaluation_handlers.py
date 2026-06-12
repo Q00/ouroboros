@@ -22,6 +22,7 @@ from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
@@ -41,7 +42,6 @@ from ouroboros.observability.drift import (
     DRIFT_THRESHOLD,
     DriftMeasurement,
 )
-from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyExecutionPhase,
@@ -1803,21 +1803,30 @@ class StartEvaluateHandler:
             )
 
         # Fall-through: real background job path.
-        async def _runner() -> MCPToolResult:
+        #
+        # NOTE: this path now routes through ``start_background_tool_job``,
+        # which gives StartEvaluate the same job-scoped ``cancel_key`` and
+        # AgentProcess ``process_id`` as evolve/execute/ralph.  Before this
+        # extraction StartEvaluate passed neither, so the durable
+        # ``mcp_job:{job_id}`` cancel marker written by
+        # ``JobManager.cancel_job`` was never observable by the evaluate
+        # agent process — a restart-visible cancel was silently dropped.
+        async def _runner(_handle) -> MCPToolResult:
             result = await self._evaluate_handler.handle(arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        snapshot = await self._job_manager.start_job(
+        snapshot = await start_background_tool_job(
+            job_manager=self._job_manager,
+            event_store=self._event_store,
             job_type="evaluate",
+            intent="evaluate",
+            process_scope=f"evaluate:{session_id}",
             initial_message=f"Queued evaluation for {session_id}",
-            runner=run_with_agent_process(
-                event_store=self._event_store,
-                intent="evaluate",
-                work_fn=lambda _handle: _runner(),
-            ),
             links=JobLinks(session_id=session_id),
+            work_fn=_runner,
+            cancelled_text="Evaluation cancelled before work began.",
         )
 
         text = (

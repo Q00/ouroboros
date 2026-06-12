@@ -87,6 +87,7 @@ class TestBackgroundJobPath:
     @pytest.mark.asyncio
     async def test_returns_job_id_immediately(self, event_store, fake_inner_handler) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_abc123"
         snapshot.status.value = "queued"
@@ -118,6 +119,7 @@ class TestBackgroundJobPath:
     @pytest.mark.asyncio
     async def test_job_type_and_links(self, event_store, fake_inner_handler) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock(job_id="job_x", cursor=0)
         snapshot.status.value = "queued"
 

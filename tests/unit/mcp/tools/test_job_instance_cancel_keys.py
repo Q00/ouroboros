@@ -5,7 +5,8 @@ from typing import Any
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
-from ouroboros.mcp.tools import evolution_handlers, execution_handlers, ralph_handlers
+from ouroboros.mcp.tools import background
+from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
 from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
@@ -66,7 +67,19 @@ class _ExecuteHandler:
         return Result.ok(MCPToolResult())
 
 
-def _capture_run_with_agent_process(monkeypatch, module) -> list[dict[str, Any]]:
+class _EvaluateHandler:
+    async def handle(self, *args: Any, **kwargs: Any) -> Result[MCPToolResult, Any]:
+        return Result.ok(MCPToolResult())
+
+
+def _capture_run_with_agent_process(monkeypatch) -> list[dict[str, Any]]:
+    """Capture the ``run_with_agent_process`` calls the shared background helper makes.
+
+    Since the ``Start*`` handlers were consolidated onto
+    ``mcp.tools.background.start_background_tool_job``, the
+    ``run_with_agent_process`` call site lives in the ``background`` module,
+    so that is the patch target for every handler under test.
+    """
     calls: list[dict[str, Any]] = []
 
     def _fake_run_with_agent_process(**kwargs: Any):
@@ -77,12 +90,12 @@ def _capture_run_with_agent_process(monkeypatch, module) -> list[dict[str, Any]]
 
         return _runner()
 
-    monkeypatch.setattr(module, "run_with_agent_process", _fake_run_with_agent_process)
+    monkeypatch.setattr(background, "run_with_agent_process", _fake_run_with_agent_process)
     return calls
 
 
 async def test_ralph_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(monkeypatch) -> None:
-    calls = _capture_run_with_agent_process(monkeypatch, ralph_handlers)
+    calls = _capture_run_with_agent_process(monkeypatch)
     job_manager = _JobManager()
     handler = RalphHandler(
         evolve_handler=_EvolveHandler(),
@@ -103,7 +116,7 @@ async def test_ralph_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(mo
 
 
 async def test_evolve_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(monkeypatch) -> None:
-    calls = _capture_run_with_agent_process(monkeypatch, evolution_handlers)
+    calls = _capture_run_with_agent_process(monkeypatch)
     job_manager = _JobManager()
     handler = StartEvolveStepHandler(
         evolve_handler=_EvolveHandler(),  # type: ignore[arg-type]
@@ -124,7 +137,7 @@ async def test_evolve_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(m
 
 
 async def test_execute_seed_uses_job_scoped_cancel_key(monkeypatch, tmp_path) -> None:
-    calls = _capture_run_with_agent_process(monkeypatch, execution_handlers)
+    calls = _capture_run_with_agent_process(monkeypatch)
     job_manager = _JobManager()
     handler = StartExecuteSeedHandler(
         execute_handler=_ExecuteHandler(),  # type: ignore[arg-type]
@@ -137,4 +150,36 @@ async def test_execute_seed_uses_job_scoped_cancel_key(monkeypatch, tmp_path) ->
     assert result.is_ok
     assert calls[0]["cancel_key"] == "mcp_job:job_000000000001"
     assert calls[0]["process_id"].startswith("execute_seed:exec_")
+    assert calls[0]["cancel_key"] != calls[0]["process_id"]
+
+
+async def test_start_evaluate_now_passes_durable_job_scoped_cancel_key(monkeypatch) -> None:
+    """Behaviour fix: StartEvaluate must bind the durable ``mcp_job:{job_id}`` cancel key.
+
+    Before the background-pipeline consolidation StartEvaluate wrapped its
+    runner with ``lambda _handle: _runner()`` and passed neither ``process_id``
+    nor ``cancel_key``.  ``run_with_agent_process`` only builds the
+    :class:`CheckpointStore` that loads a persisted cancel marker when
+    ``cancel_key or process_id`` is set, so the durable ``mcp_job:{job_id}``
+    marker written by ``JobManager.cancel_job`` was never observable for
+    evaluate jobs — a restart-visible cancel was silently dropped.  Routing
+    through ``start_background_tool_job`` now binds it, so cancelling an
+    evaluate job is durably honoured across a restart, matching evolve/
+    execute/ralph.
+    """
+    calls = _capture_run_with_agent_process(monkeypatch)
+    job_manager = _JobManager()
+    handler = StartEvaluateHandler(
+        evaluate_handler=_EvaluateHandler(),  # type: ignore[arg-type]
+        event_store=_EventStore(),  # type: ignore[arg-type]
+        job_manager=job_manager,  # type: ignore[arg-type]
+    )
+
+    result = await handler.handle({"session_id": "orch_eval", "artifact": "code"})
+
+    assert result.is_ok
+    # The durable cancel key is now bound (previously absent), so the
+    # AgentProcess will load the persisted mcp_job:{job_id} marker on spawn.
+    assert calls[0]["cancel_key"] == "mcp_job:job_000000000001"
+    assert calls[0]["process_id"] == "evaluate:orch_eval:job_000000000001"
     assert calls[0]["cancel_key"] != calls[0]["process_id"]

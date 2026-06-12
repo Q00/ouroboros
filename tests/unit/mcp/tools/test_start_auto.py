@@ -238,6 +238,7 @@ class TestRequiredArguments:
         self, event_store, tmp_path
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.start_job = AsyncMock()
         h = StartAutoHandler(
             event_store=event_store,
@@ -259,6 +260,7 @@ class TestRequiredArguments:
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
         store.save(state)
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_resume"
         captured: dict[str, object] = {}
@@ -295,6 +297,7 @@ class TestBackgroundJobPath:
         self, event_store, fake_inner_auto, tmp_path
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_001"
         captured: dict[str, object] = {}
@@ -335,11 +338,68 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_now_binds_durable_job_scoped_cancel_key(
+        self, event_store, fake_inner_auto, tmp_path, monkeypatch
+    ) -> None:
+        """Behaviour fix: StartAuto must bind the durable ``mcp_job:{job_id}`` cancel key.
+
+        Before the background-pipeline consolidation StartAuto wrapped its
+        runner with ``lambda _handle: _runner()`` and passed neither
+        ``process_id`` nor ``cancel_key``.  ``run_with_agent_process`` only
+        builds the :class:`CheckpointStore` that loads a persisted cancel
+        marker when ``cancel_key or process_id`` is set, so the durable
+        ``mcp_job:{job_id}`` marker written by ``JobManager.cancel_job`` was
+        never observable for auto jobs — a restart-visible cancel was silently
+        dropped.  Routing through ``start_background_tool_job`` now binds it.
+        """
+        from ouroboros.mcp.tools import background
+
+        captured_run: list[dict] = []
+
+        def _fake_run_with_agent_process(**kwargs):
+            captured_run.append(kwargs)
+
+            async def _runner():
+                return MCPToolResult()
+
+            return _runner()
+
+        monkeypatch.setattr(background, "run_with_agent_process", _fake_run_with_agent_process)
+
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_auto_cancel")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_cancel"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+        assert result.is_ok
+        auto_session_id = result.value.meta["auto_session_id"]
+
+        assert len(captured_run) == 1
+        # The durable cancel key is now bound (previously absent), so the auto
+        # agent process loads the persisted mcp_job:{job_id} marker on spawn.
+        assert captured_run[0]["cancel_key"] == "mcp_job:job_auto_cancel"
+        assert captured_run[0]["process_id"] == f"auto:{auto_session_id}:job_auto_cancel"
+        assert captured_run[0]["cancel_key"] != captured_run[0]["process_id"]
+
+    @pytest.mark.asyncio
     async def test_mcp_start_auto_detached_response_text_is_deterministic_for_identical_input(
         self, event_store, fake_inner_auto, tmp_path
     ) -> None:
         async def _invoke(store_path, job_id: str) -> MCPToolResult:
             job_manager = MagicMock()
+            job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
             snapshot = MagicMock()
             snapshot.job_id = job_id
 
@@ -1005,6 +1065,7 @@ class TestBackgroundJobPath:
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_structured"
 
@@ -1034,6 +1095,7 @@ class TestBackgroundJobPath:
     ) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_coding_defaults"
 
@@ -1061,6 +1123,7 @@ class TestBackgroundJobPath:
     ) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_policy_override"
 
@@ -1094,6 +1157,7 @@ class TestBackgroundJobPath:
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_policy_alias"
 
@@ -1124,6 +1188,7 @@ class TestBackgroundJobPath:
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         store = AutoStore(tmp_path / "store")
         h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
         h._inner_auto = fake_inner_auto
@@ -1150,6 +1215,7 @@ class TestBackgroundJobPath:
     ) -> None:
         store = AutoStore(tmp_path)
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_structured_runner"
         captured: dict[str, object] = {}
@@ -1243,6 +1309,7 @@ class TestBackgroundJobPath:
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.start_job = AsyncMock()
         store = AutoStore(tmp_path)
         h = StartAutoHandler(
@@ -1277,6 +1344,7 @@ class TestBackgroundJobPath:
     ) -> None:
         async def _invoke(store_path):
             job_manager = MagicMock()
+            job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
             job_manager.start_job = AsyncMock()
             handler = StartAutoHandler(
                 event_store=event_store,
@@ -1324,6 +1392,7 @@ class TestBackgroundJobPath:
         state.opencode_mode = "plugin"
         store.save(state)
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.start_job = AsyncMock()
         h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
         h._inner_auto = fake_inner_auto
@@ -1354,6 +1423,7 @@ class TestBackgroundJobPath:
             return snapshot
 
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.start_job = AsyncMock(side_effect=_start_job)
         h = StartAutoHandler(
             event_store=event_store,
@@ -1377,6 +1447,7 @@ class TestBackgroundJobPath:
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.start_job = AsyncMock(side_effect=RuntimeError("queue unavailable"))
         store = AutoStore(tmp_path)
         h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
@@ -1400,6 +1471,7 @@ class TestBackgroundJobPath:
         event_store = MagicMock()
         event_store.initialize = AsyncMock(side_effect=RuntimeError("event store down"))
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.start_job = AsyncMock()
         store = AutoStore(tmp_path)
         h = StartAutoHandler(
@@ -1435,6 +1507,7 @@ class TestBackgroundJobPath:
         active_snapshot.job_id = "job_auto_active"
         active_snapshot.status.value = "running"
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.find_active_job_by_session = AsyncMock(return_value=active_snapshot)
         job_manager.start_job = AsyncMock()
         h = StartAutoHandler(event_store=event_store, job_manager=job_manager, store=store)
@@ -1481,6 +1554,9 @@ class TestBackgroundJobPath:
         class RestartedJobManager:
             def __init__(self) -> None:
                 self.start_job = AsyncMock(side_effect=self._start_job)
+
+            async def allocate_job_id(self) -> str:
+                return "job_alloc"
 
             async def get_snapshot(self, job_id):
                 assert job_id == "job_stale"
@@ -1583,6 +1659,7 @@ class TestBackgroundJobPath:
         started = asyncio.Event()
         release = asyncio.Event()
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.find_active_job_by_session = AsyncMock(return_value=None)
         snapshot = MagicMock()
         snapshot.job_id = "job_auto_lease"
@@ -1630,6 +1707,7 @@ class TestBackgroundJobPath:
             encoding="utf-8",
         )
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.find_active_job_by_session = AsyncMock(return_value=None)
         job_manager.start_job = AsyncMock()
         h = StartAutoHandler(
@@ -1668,6 +1746,7 @@ class TestBackgroundJobPath:
             encoding="utf-8",
         )
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.find_active_job_by_session = AsyncMock(return_value=None)
         job_manager.start_job = AsyncMock()
         h = StartAutoHandler(
@@ -1707,6 +1786,7 @@ class TestBackgroundJobPath:
             encoding="utf-8",
         )
         job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
         job_manager.find_active_job_by_session = AsyncMock(return_value=None)
         job_manager.start_job = AsyncMock()
         h = StartAutoHandler(

@@ -69,8 +69,9 @@ from ouroboros.config import get_opencode_mode
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
-from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
+from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
@@ -90,7 +91,6 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
-from ouroboros.orchestrator.agent_process import run_with_agent_process
 from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.runtime.controls import load_runtime_controls
@@ -783,25 +783,24 @@ class StartAutoHandler:
                 },
             )
 
-        async def _runner() -> MCPToolResult:
+        # The shared pipeline owns the ``should_cancel()`` pre-work guard.
+        async def _runner(_handle) -> MCPToolResult:
             result = await self._inner_auto.handle(runner_arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
 
         initial_label = auto_session_id if has_resume else goal.strip()[:80]  # type: ignore[union-attr]
-        runner = run_with_agent_process(
-            event_store=self._event_store,
-            intent="auto",
-            work_fn=lambda _handle: _runner(),
-        )
-        try:
-            snapshot = await self._job_manager.start_job(
-                job_type="auto",
-                initial_message=f"Queued ooo auto for {initial_label}",
-                runner=runner,
-                links=JobLinks(session_id=auto_session_id),
-            )
+
+        # The start lease is updated/released *around* the shared pipeline:
+        # ``on_started`` promotes the lease to "job" mode once enqueue
+        # succeeds, and ``on_enqueue_failure`` releases it (the shared helper
+        # already closes the un-started runner coroutine before this hook
+        # runs).  Routing through ``start_background_tool_job`` also gives
+        # StartAuto the job-scoped ``cancel_key`` / AgentProcess
+        # ``process_id`` it previously lacked, so the durable
+        # ``mcp_job:{job_id}`` cancel marker is now honoured for auto jobs.
+        async def _on_started(snapshot: JobSnapshot) -> None:
             _update_start_lease(
                 self._store,
                 auto_session_id,
@@ -810,10 +809,25 @@ class StartAutoHandler:
                 job_id=snapshot.job_id,
                 ttl_seconds=None,
             )
-        except Exception as exc:
-            if inspect.iscoroutine(runner):
-                runner.close()
+
+        async def _on_enqueue_failure(_exc: BaseException) -> None:
             _release_start_lease(self._store, auto_session_id, token=lease_token)
+
+        try:
+            snapshot = await start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="auto",
+                intent="auto",
+                process_scope=f"auto:{auto_session_id}",
+                initial_message=f"Queued ooo auto for {initial_label}",
+                links=JobLinks(session_id=auto_session_id),
+                work_fn=_runner,
+                cancelled_text="Auto session cancelled before work began.",
+                on_started=_on_started,
+                on_enqueue_failure=_on_enqueue_failure,
+            )
+        except Exception as exc:
             return Result.err(
                 MCPToolError(
                     "Failed to enqueue background auto session "
