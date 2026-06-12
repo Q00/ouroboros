@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-import contextlib
 from dataclasses import dataclass
 import logging
 from pathlib import Path

@@ -393,9 +393,7 @@ def _client_is_alive(pid: int, start_time: float | None) -> bool:
     except OSError:
         return False
     stat = _ps_value(pid, "stat")
-    if stat is not None and stat.startswith("Z"):
-        return False
-    return True
+    return stat is None or not stat.startswith("Z")
 
 
 def _resolve_client_identity(orig_ppid: int) -> tuple[int, float | None] | None:
