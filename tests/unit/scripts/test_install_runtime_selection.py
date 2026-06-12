@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -160,6 +161,20 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     )
     _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
     assert "ouroboros setup --runtime claude --non-interactive" in calls
+
+    mcp_config = json.loads(
+        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
+    )
+    assert mcp_config["mcpServers"]["ouroboros"] == {
+        "command": "uvx",
+        "args": [
+            "--from",
+            "ouroboros-ai[mcp,claude]",
+            "ouroboros",
+            "mcp",
+            "serve",
+        ],
+    }
 
 
 def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> None:
