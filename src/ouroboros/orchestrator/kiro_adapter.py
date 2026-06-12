@@ -29,6 +29,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
+from ouroboros.runtime.child_env import build_child_env
 
 # Kiro CLI headless mode (https://kiro.dev/docs/cli/headless/) supports skill
 # dispatch (via our interceptor). It does **not** surface a session id on
@@ -65,6 +66,11 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _mark_kiro_subagent(env: dict[str, str]) -> None:
+    """Tag the child env as an Ouroboros sub-agent (kiro-specific marker)."""
+    env["OUROBOROS_SUBAGENT"] = "1"
 
 
 _DEFAULT_TIMEOUT = 600.0
@@ -212,19 +218,15 @@ class KiroAgentAdapter:
         Strips keys that would cause recursive MCP startup or nested session
         conflicts, and enforces a recursion depth ceiling.
         """
-        env = os.environ.copy()
-        for key in _STRIPPED_ENV_KEYS:
-            env.pop(key, None)
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > self._max_ouroboros_depth:
-            msg = f"Maximum Ouroboros nesting depth ({self._max_ouroboros_depth}) exceeded"
-            raise RuntimeError(msg)
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        env["OUROBOROS_SUBAGENT"] = "1"
-        return env
+        return build_child_env(
+            # _STRIPPED_ENV_KEYS strips CLAUDECODE (like codex/copilot) — keep it.
+            strip_keys=_STRIPPED_ENV_KEYS,
+            max_depth=self._max_ouroboros_depth,
+            depth_error_factory=lambda _depth, max_depth: RuntimeError(
+                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
+            ),
+            post_build=_mark_kiro_subagent,
+        )
 
     def _build_permission_args(self, tools: list[str] | None = None) -> list[str]:
         """Map per-call tools and permission_mode onto kiro-cli trust flags.

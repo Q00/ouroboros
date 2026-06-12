@@ -46,6 +46,7 @@ from ouroboros.router import (
     ResolveRequest,
     resolve_skill_dispatch,
 )
+from ouroboros.runtime.child_env import build_child_env
 
 log = get_logger(__name__)
 
@@ -53,6 +54,11 @@ _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 _STARTUP_TIMEOUT_ENV = "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS"
 _IDLE_TIMEOUT_ENV = "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS"
+
+# Child-env strip set for Hermes.  Hermes does NOT strip CLAUDECODE (unlike
+# codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
+# are removed.
+_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
 
 
 def _resolve_timeout_override(
@@ -268,21 +274,13 @@ class HermesCliRuntime(AgentRuntime):
 
     def _build_child_env(self) -> dict[str, str]:
         """Build an isolated environment for child runtime processes."""
-        env = os.environ.copy()
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-
-        if depth > self._max_ouroboros_depth:
-            msg = f"Maximum Ouroboros nesting depth ({self._max_ouroboros_depth}) exceeded"
-            raise RuntimeError(msg)
-
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        return env
+        return build_child_env(
+            strip_keys=_CHILD_ENV_STRIP_KEYS,
+            max_depth=self._max_ouroboros_depth,
+            depth_error_factory=lambda _depth, max_depth: RuntimeError(
+                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
+            ),
+        )
 
     def _build_runtime_handle(
         self,

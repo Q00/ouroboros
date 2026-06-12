@@ -7,9 +7,14 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from ouroboros.runtime.child_env import (
+    DEFAULT_MAX_OUROBOROS_DEPTH,
+    DEFAULT_OUROBOROS_STRIP_KEYS,
+    build_child_env,
+)
+
 DEFAULT_CODEX_CLI_NAME = "codex"
-DEFAULT_MAX_OUROBOROS_DEPTH = 5
-DEFAULT_CODEX_CHILD_ENV_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+DEFAULT_CODEX_CHILD_ENV_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS = ("CODEX_THREAD_ID",)
 _COMPILED_BINARY_MAGIC_HEADERS = (
     b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit
@@ -134,25 +139,15 @@ def build_codex_child_env(
     depth_error_factory: Callable[[int, int], Exception],
 ) -> dict[str, str]:
     """Build an isolated environment for nested Codex subprocesses."""
-    env = dict(os.environ if base_env is None else base_env)
-    for key in DEFAULT_CODEX_CHILD_ENV_KEYS:
-        env.pop(key, None)
-    for key in child_session_env_keys:
-        env.pop(key, None)
-    # Strip CLAUDECODE so child codex does not detect the parent Codex/Claude
-    # session and hang or refuse to start.
-    env.pop("CLAUDECODE", None)
-
-    try:
-        depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-    except (ValueError, TypeError):
-        depth = 1
-
-    if depth > max_depth:
-        raise depth_error_factory(depth, max_depth)
-
-    env["_OUROBOROS_DEPTH"] = str(depth)
-    return env
+    return build_child_env(
+        base_env=base_env,
+        # Order preserved: Ouroboros markers, then Codex session keys, then
+        # CLAUDECODE (so child codex does not detect the parent Codex/Claude
+        # session and hang or refuse to start).
+        strip_keys=(*DEFAULT_CODEX_CHILD_ENV_KEYS, *child_session_env_keys, "CLAUDECODE"),
+        max_depth=max_depth,
+        depth_error_factory=depth_error_factory,
+    )
 
 
 def _which(name: str) -> str | None:

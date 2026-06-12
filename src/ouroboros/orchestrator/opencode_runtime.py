@@ -60,11 +60,16 @@ from ouroboros.router import (
     ResolveRequest,
     resolve_skill_dispatch,
 )
+from ouroboros.runtime.child_env import build_child_env
 
 log = get_logger(__name__)
 
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
+# Child-env strip set for OpenCode.  OpenCode does NOT strip CLAUDECODE (unlike
+# codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
+# are removed.
+_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
@@ -454,19 +459,13 @@ class OpenCodeRuntime:
             RuntimeError: If the nesting depth exceeds
                 ``_max_ouroboros_depth``.
         """
-        env = os.environ.copy()
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-        # Track and enforce recursion depth
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > self._max_ouroboros_depth:
-            msg = f"Maximum Ouroboros nesting depth ({self._max_ouroboros_depth}) exceeded"
-            raise RuntimeError(msg)
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        return env
+        return build_child_env(
+            strip_keys=_CHILD_ENV_STRIP_KEYS,
+            max_depth=self._max_ouroboros_depth,
+            depth_error_factory=lambda _depth, max_depth: RuntimeError(
+                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
+            ),
+        )
 
     # -- Stream parsing ----------------------------------------------------
 

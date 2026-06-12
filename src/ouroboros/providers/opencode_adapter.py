@@ -60,11 +60,16 @@ from ouroboros.providers.codex_cli_stream import (
     terminate_process,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.runtime.child_env import build_child_env
 
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 _MAX_OUROBOROS_DEPTH = 5
+# Child-env strip set for OpenCode.  OpenCode does NOT strip CLAUDECODE (unlike
+# codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
+# are removed.
+_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
 
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
@@ -330,20 +335,13 @@ class OpenCodeLLMAdapter:
             RuntimeError: If the nesting depth exceeds
                 ``_MAX_OUROBOROS_DEPTH``.
         """
-        env = os.environ.copy()
-        # Prevent child from re-entering Ouroboros MCP
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-        # Track and enforce recursion depth
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > _MAX_OUROBOROS_DEPTH:
-            msg = f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded"
-            raise RuntimeError(msg)
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        return env
+        return build_child_env(
+            strip_keys=_CHILD_ENV_STRIP_KEYS,
+            max_depth=_MAX_OUROBOROS_DEPTH,
+            depth_error_factory=lambda _depth, max_depth: RuntimeError(
+                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
+            ),
+        )
 
     def _is_retryable(self, error_message: str) -> bool:
         """Check if an error message suggests a retryable failure.

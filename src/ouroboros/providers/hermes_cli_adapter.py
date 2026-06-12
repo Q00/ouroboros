@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-import os
 from pathlib import Path
 import re
 import shutil
@@ -25,12 +24,17 @@ from ouroboros.providers.base import (
 )
 from ouroboros.providers.codex_cli_stream import terminate_process
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.runtime.child_env import build_child_env
 
 log = structlog.get_logger()
 
 _DEFAULT_MODEL = "default"
 _MAX_OUROBOROS_DEPTH = 5
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
+# Child-env strip set for Hermes.  Hermes does NOT strip CLAUDECODE (unlike
+# codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
+# are removed.
+_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
 
 
 class HermesCliLLMAdapter:
@@ -268,21 +272,15 @@ class HermesCliLLMAdapter:
         )
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > _MAX_OUROBOROS_DEPTH:
-            raise ProviderError(
-                message=f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded",
+        return build_child_env(
+            strip_keys=_CHILD_ENV_STRIP_KEYS,
+            max_depth=_MAX_OUROBOROS_DEPTH,
+            depth_error_factory=lambda depth, max_depth: ProviderError(
+                message=f"Maximum Ouroboros nesting depth ({max_depth}) exceeded",
                 provider=self._provider_name,
                 details={"depth": depth},
-            )
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        return env
+            ),
+        )
 
     def _resolve_model(self, config_model: str) -> str:
         if not config_model or config_model == "default":

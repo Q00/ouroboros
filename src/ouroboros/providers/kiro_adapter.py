@@ -27,6 +27,7 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+from ouroboros.runtime.child_env import build_child_env
 
 log = structlog.get_logger(__name__)
 
@@ -64,6 +65,11 @@ _KIRO_TRUST_CATEGORIES = frozenset(_KIRO_TOOL_NAME_MAP.values())
 def _strip_ansi(text: str) -> str:
     """Remove ANSI CSI/SGR escape sequences from a string."""
     return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _mark_kiro_subagent(env: dict[str, str]) -> None:
+    """Tag the child env as an Ouroboros sub-agent (kiro-specific marker)."""
+    env["OUROBOROS_SUBAGENT"] = "1"
 
 
 _DEFAULT_TIMEOUT = 120.0
@@ -253,19 +259,15 @@ class KiroCodeAdapter:
 
     def _build_child_env(self) -> dict[str, str]:
         """Build an isolated environment for child Kiro LLM processes."""
-        env = os.environ.copy()
-        for key in _STRIPPED_ENV_KEYS:
-            env.pop(key, None)
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > _MAX_OUROBOROS_DEPTH:
-            msg = f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded"
-            raise RuntimeError(msg)
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        env["OUROBOROS_SUBAGENT"] = "1"
-        return env
+        return build_child_env(
+            # _STRIPPED_ENV_KEYS strips CLAUDECODE (like codex/copilot) — keep it.
+            strip_keys=_STRIPPED_ENV_KEYS,
+            max_depth=_MAX_OUROBOROS_DEPTH,
+            depth_error_factory=lambda _depth, max_depth: RuntimeError(
+                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
+            ),
+            post_build=_mark_kiro_subagent,
+        )
 
     def _build_cmd(self, prompt: str, config: CompletionConfig) -> list[str]:
         cmd = [self._cli_path, "chat", "--no-interactive"]

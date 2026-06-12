@@ -13,12 +13,17 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from ouroboros.runtime.child_env import (
+    DEFAULT_MAX_OUROBOROS_DEPTH,
+    DEFAULT_OUROBOROS_STRIP_KEYS,
+    build_child_env,
+)
+
 DEFAULT_COPILOT_CLI_NAME = "copilot"
-DEFAULT_MAX_OUROBOROS_DEPTH = 5
 
 # Env keys whose presence would cause the child Copilot CLI to discover the
 # parent Ouroboros MCP and re-enter the orchestrator. Stripped on every spawn.
-DEFAULT_COPILOT_CHILD_ENV_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+DEFAULT_COPILOT_CHILD_ENV_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 # Copilot-specific session env keys that must not leak into a child process.
 # COPILOT_SESSION_ID and COPILOT_RESUME would cause the child to attach to the
@@ -144,27 +149,21 @@ def build_copilot_child_env(
     starts as a clean one-shot process. Preserves ``GH_TOKEN`` /
     ``GITHUB_TOKEN`` because the child needs them to authenticate.
     """
-    env = dict(os.environ if base_env is None else base_env)
-    for key in DEFAULT_COPILOT_CHILD_ENV_KEYS:
-        env.pop(key, None)
-    for key in child_session_env_keys:
-        env.pop(key, None)
-    # Strip parent-runtime markers so child Copilot does not detect another
-    # agent runtime and refuse to start or hang.
-    env.pop("CLAUDECODE", None)
-    env.pop("CODEX_THREAD_ID", None)
-    _add_ouroboros_copilot_instruction_dir(env)
-
-    try:
-        depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-    except (ValueError, TypeError):
-        depth = 1
-
-    if depth > max_depth:
-        raise depth_error_factory(depth, max_depth)
-
-    env["_OUROBOROS_DEPTH"] = str(depth)
-    return env
+    return build_child_env(
+        base_env=base_env,
+        # Order preserved: Ouroboros markers, Copilot session keys, then the
+        # parent-runtime markers (CLAUDECODE/CODEX_THREAD_ID) so child Copilot
+        # does not detect another agent runtime and refuse to start or hang.
+        strip_keys=(
+            *DEFAULT_COPILOT_CHILD_ENV_KEYS,
+            *child_session_env_keys,
+            "CLAUDECODE",
+            "CODEX_THREAD_ID",
+        ),
+        max_depth=max_depth,
+        depth_error_factory=depth_error_factory,
+        post_build=_add_ouroboros_copilot_instruction_dir,
+    )
 
 
 def _add_ouroboros_copilot_instruction_dir(env: dict[str, str]) -> None:
