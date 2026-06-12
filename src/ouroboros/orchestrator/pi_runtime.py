@@ -9,7 +9,6 @@ Pi JSON mode reference: https://pi.dev/docs/latest/json
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections import deque
 from collections.abc import AsyncIterator
 import contextlib
@@ -32,6 +31,10 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
+from ouroboros.providers.codex_cli_stream import (
+    iter_runtime_stream_lines,
+    terminate_runtime_process,
+)
 
 log = get_logger(__name__)
 
@@ -200,53 +203,14 @@ class PiRuntime:
         first_chunk_timeout_seconds: float | None = None,
         chunk_timeout_seconds: float | None = None,
     ) -> AsyncIterator[str]:
-        if stream is None:
-            return
-
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        buffer = ""
-        buffer_byte_estimate = 0
-        saw_chunk = False
-
-        while True:
-            timeout_seconds: float | None = None
-            if not saw_chunk:
-                timeout_seconds = first_chunk_timeout_seconds
-            elif chunk_timeout_seconds is not None:
-                timeout_seconds = chunk_timeout_seconds
-
-            try:
-                if timeout_seconds is None:
-                    chunk = await stream.read(16384)
-                else:
-                    chunk = await asyncio.wait_for(stream.read(16384), timeout=timeout_seconds)
-            except TimeoutError as exc:
-                phase = "startup" if not saw_chunk else "idle"
-                raise TimeoutError(
-                    f"{self._display_name} produced no stdout during {phase} "
-                    f"window ({timeout_seconds:.0f}s)"
-                ) from exc
-            if not chunk:
-                break
-
-            saw_chunk = True
-            decoded = decoder.decode(chunk)
-            buffer += decoded
-            buffer_byte_estimate += len(decoded) * 4
-            if buffer_byte_estimate > _MAX_LINE_BUFFER_BYTES:
-                raise ProviderError(f"JSONL line buffer exceeded {_MAX_LINE_BUFFER_BYTES} bytes")
-            while True:
-                newline_index = buffer.find("\n")
-                if newline_index < 0:
-                    break
-                line = buffer[:newline_index]
-                buffer = buffer[newline_index + 1 :]
-                buffer_byte_estimate = len(buffer) * 4
-                yield line.rstrip("\r")
-
-        buffer += decoder.decode(b"", final=True)
-        if buffer:
-            yield buffer.rstrip("\r")
+        async for line in iter_runtime_stream_lines(
+            stream,
+            display_name=self._display_name,
+            first_chunk_timeout_seconds=first_chunk_timeout_seconds,
+            chunk_timeout_seconds=chunk_timeout_seconds,
+            max_buffer_bytes=_MAX_LINE_BUFFER_BYTES,
+        ):
+            yield line
 
     async def _collect_stream_lines(
         self,
@@ -388,36 +352,12 @@ class PiRuntime:
     # -- Process management ------------------------------------------------
 
     async def _terminate_process(self, process: Any) -> None:
-        if getattr(process, "returncode", None) is not None:
-            return
-        terminate = getattr(process, "terminate", None)
-        kill = getattr(process, "kill", None)
-        try:
-            if callable(terminate):
-                terminate()
-            elif callable(kill):
-                kill()
-            else:
-                return
-        except ProcessLookupError:
-            return
-        except Exception as exc:
-            log.warning(f"{self._log_namespace}.process_terminate_failed", error=str(exc))
-            return
-
-        try:
-            await asyncio.wait_for(process.wait(), timeout=self._process_shutdown_timeout_seconds)
-            return
-        except (TimeoutError, ProcessLookupError):
-            pass
-
-        if callable(kill):
-            with contextlib.suppress(ProcessLookupError, Exception):
-                kill()
-            with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
-                await asyncio.wait_for(
-                    process.wait(), timeout=self._process_shutdown_timeout_seconds
-                )
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=self._process_shutdown_timeout_seconds,
+            logger=log,
+            log_namespace=self._log_namespace,
+        )
 
     # -- RuntimeHandle management ------------------------------------------
 

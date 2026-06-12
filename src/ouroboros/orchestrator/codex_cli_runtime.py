@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections import deque
 from collections.abc import AsyncIterator, Mapping
 import contextlib
@@ -42,6 +41,10 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
 )
 from ouroboros.providers.base import CompletionConfig
+from ouroboros.providers.codex_cli_stream import (
+    iter_runtime_stream_lines,
+    terminate_runtime_process,
+)
 from ouroboros.providers.profiles import resolve_completion_profile
 from ouroboros.router import (
     InvalidInputReason,
@@ -938,128 +941,27 @@ class CodexCliRuntime:
         Codex can emit JSONL events larger than the default asyncio stream limit.
         Reading fixed-size chunks avoids ``LimitOverrunError`` on oversized lines.
         """
-        if stream is None:
-            return
-
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        buffer = ""
-        buffer_byte_estimate = 0
-        saw_chunk = False
-
-        while True:
-            timeout_seconds: float | None = None
-            if not saw_chunk:
-                timeout_seconds = first_chunk_timeout_seconds
-            elif chunk_timeout_seconds is not None:
-                timeout_seconds = chunk_timeout_seconds
-
-            try:
-                if timeout_seconds is None:
-                    chunk = await stream.read(chunk_size)
-                else:
-                    chunk = await asyncio.wait_for(
-                        stream.read(chunk_size),
-                        timeout=timeout_seconds,
-                    )
-            except TimeoutError as exc:
-                phase = "startup" if not saw_chunk else "idle"
-                raise TimeoutError(
-                    f"{self._display_name} produced no stdout during {phase} "
-                    f"window ({timeout_seconds:.0f}s)"
-                ) from exc
-            if not chunk:
-                break
-
-            saw_chunk = True
-            decoded = decoder.decode(chunk)
-            buffer += decoded
-            # Track byte size incrementally: worst-case 4 bytes per char (UTF-8).
-            buffer_byte_estimate += len(decoded) * 4
-            if buffer_byte_estimate > _MAX_LINE_BUFFER_BYTES:
-                log.error(
-                    f"{self._log_namespace}.line_buffer_overflow",
-                    buffer_size=len(buffer),
-                    limit=_MAX_LINE_BUFFER_BYTES,
-                )
-                raise ProviderError(f"JSONL line buffer exceeded {_MAX_LINE_BUFFER_BYTES} bytes")
-            while True:
-                newline_index = buffer.find("\n")
-                if newline_index < 0:
-                    break
-
-                line = buffer[:newline_index]
-                buffer = buffer[newline_index + 1 :]
-                # Recalculate estimate after draining consumed lines.
-                buffer_byte_estimate = len(buffer) * 4
-                yield line.rstrip("\r")
-
-        buffer += decoder.decode(b"", final=True)
-        if buffer:
-            yield buffer.rstrip("\r")
+        async for line in iter_runtime_stream_lines(
+            stream,
+            display_name=self._display_name,
+            chunk_size=chunk_size,
+            first_chunk_timeout_seconds=first_chunk_timeout_seconds,
+            chunk_timeout_seconds=chunk_timeout_seconds,
+            max_buffer_bytes=_MAX_LINE_BUFFER_BYTES,
+            logger=log,
+            log_namespace=self._log_namespace,
+        ):
+            yield line
 
     async def _terminate_process(self, process: Any) -> None:
         """Best-effort subprocess shutdown used when task consumption is cancelled."""
-        if getattr(process, "returncode", None) is not None:
-            return
-
-        await self._close_process_stdin(process)
-
-        terminate = getattr(process, "terminate", None)
-        kill = getattr(process, "kill", None)
-
-        try:
-            if callable(terminate):
-                terminate()
-            elif callable(kill):
-                kill()
-            else:
-                return
-        except ProcessLookupError:
-            return
-        except Exception as exc:
-            log.warning(
-                f"{self._log_namespace}.process_terminate_failed",
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            return
-
-        try:
-            await asyncio.wait_for(
-                process.wait(),
-                timeout=self._process_shutdown_timeout_seconds,
-            )
-            return
-        except (TimeoutError, ProcessLookupError):
-            pass
-        except Exception as exc:
-            log.warning(
-                f"{self._log_namespace}.process_wait_failed",
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            return
-
-        if not callable(kill):
-            return
-
-        try:
-            kill()
-        except ProcessLookupError:
-            return
-        except Exception as exc:
-            log.warning(
-                f"{self._log_namespace}.process_kill_failed",
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            return
-
-        with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
-            await asyncio.wait_for(
-                process.wait(),
-                timeout=self._process_shutdown_timeout_seconds,
-            )
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=self._process_shutdown_timeout_seconds,
+            logger=log,
+            log_namespace=self._log_namespace,
+            close_stdin=self._close_process_stdin,
+        )
 
     async def _close_process_stdin(self, process: Any) -> None:
         """Best-effort stdin shutdown for runtimes that keep a writable pipe open."""

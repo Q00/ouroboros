@@ -28,6 +28,7 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
+from ouroboros.providers.codex_cli_stream import terminate_runtime_process
 
 # Kiro CLI headless mode (https://kiro.dev/docs/cli/headless/) supports skill
 # dispatch (via our interceptor). It does **not** surface a session id on
@@ -109,19 +110,12 @@ _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
     """Gracefully terminate, then force-kill a subprocess."""
-    if proc.returncode is not None:
-        return
-    try:
-        proc.terminate()
-        await asyncio.wait_for(proc.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
-    except (TimeoutError, ProcessLookupError):
-        pass
-    if proc.returncode is None:
-        try:
-            proc.kill()
-            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
-        except (TimeoutError, ProcessLookupError):
-            pass
+    await terminate_runtime_process(
+        proc,
+        shutdown_timeout=_PROCESS_SHUTDOWN_TIMEOUT,
+        logger=log,
+        log_namespace="kiro_agent",
+    )
 
 
 class KiroAgentAdapter:

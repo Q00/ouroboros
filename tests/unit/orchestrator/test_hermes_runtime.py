@@ -125,6 +125,28 @@ class TestHermesCliRuntime:
         assert runtime.permission_mode == "default"
         assert runtime.permission_mode_requested is False
 
+    @pytest.mark.asyncio
+    async def test_iter_stream_lines_enforces_line_buffer_cap(self) -> None:
+        """Regression (DUP-3): the Hermes stream reader must cap its line buffer.
+
+        The standalone Hermes copy of ``_iter_stream_lines`` shipped without a
+        buffer cap, so newline-free stdout grew memory without bound.  After
+        consolidating onto the shared runtime reader, newline-free output that
+        exceeds the cap must raise ``ProviderError`` instead of accumulating.
+        """
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.providers.codex_cli_stream import _MAX_RUNTIME_LINE_BUFFER_BYTES
+
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+
+        # The estimate counts 4 bytes per decoded char; size just past the cap.
+        oversized_chars = (_MAX_RUNTIME_LINE_BUFFER_BYTES // 4) + 1
+        newline_free = _FakeStream("a" * oversized_chars)
+
+        with pytest.raises(ProviderError, match="JSONL line buffer exceeded"):
+            async for _ in runtime._iter_stream_lines(newline_free):
+                pass
+
     def test_tracks_requested_permission_mode_and_declares_ignored_support(self) -> None:
         runtime = HermesCliRuntime(
             cli_path="hermes",

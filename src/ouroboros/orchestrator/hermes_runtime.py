@@ -7,7 +7,6 @@ by shelling out to the Hermes CLI.
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections import deque
 from collections.abc import AsyncIterator, Mapping
 import contextlib
@@ -35,6 +34,10 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
+from ouroboros.providers.codex_cli_stream import (
+    iter_runtime_stream_lines,
+    terminate_runtime_process,
+)
 from ouroboros.router import (
     InvalidInputReason,
     InvalidSkill,
@@ -335,49 +338,21 @@ class HermesCliRuntime(AgentRuntime):
         first_chunk_timeout_seconds: float | None = None,
         chunk_timeout_seconds: float | None = None,
     ) -> AsyncIterator[str]:
-        """Yield decoded lines from a subprocess stream with timeout guards."""
-        if stream is None:
-            return
+        """Yield decoded lines from a subprocess stream with timeout guards.
 
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        buffer = ""
-        saw_chunk = False
-
-        while True:
-            timeout_seconds: float | None = None
-            if not saw_chunk:
-                timeout_seconds = first_chunk_timeout_seconds
-            elif chunk_timeout_seconds is not None:
-                timeout_seconds = chunk_timeout_seconds
-
-            try:
-                if timeout_seconds is None:
-                    chunk = await stream.read(chunk_size)
-                else:
-                    chunk = await asyncio.wait_for(stream.read(chunk_size), timeout=timeout_seconds)
-            except TimeoutError as exc:
-                phase = "startup" if not saw_chunk else "idle"
-                raise TimeoutError(
-                    f"{self._display_name} produced no stdout during {phase} "
-                    f"window ({timeout_seconds:.0f}s)"
-                ) from exc
-
-            if not chunk:
-                break
-
-            saw_chunk = True
-            buffer += decoder.decode(chunk)
-            while True:
-                newline_index = buffer.find("\n")
-                if newline_index < 0:
-                    break
-                line = buffer[:newline_index]
-                buffer = buffer[newline_index + 1 :]
-                yield line.rstrip("\r")
-
-        buffer += decoder.decode(b"", final=True)
-        if buffer:
-            yield buffer.rstrip("\r")
+        Delegates to the shared runtime reader, which enforces a line-buffer
+        cap so newline-free Hermes stdout cannot grow memory without bound.
+        """
+        async for line in iter_runtime_stream_lines(
+            stream,
+            display_name=self._display_name,
+            chunk_size=chunk_size,
+            first_chunk_timeout_seconds=first_chunk_timeout_seconds,
+            chunk_timeout_seconds=chunk_timeout_seconds,
+            logger=log,
+            log_namespace=self._log_namespace,
+        ):
+            yield line
 
     async def _collect_stream_lines(
         self,
@@ -403,37 +378,12 @@ class HermesCliRuntime(AgentRuntime):
 
     async def _terminate_process(self, process: Any) -> None:
         """Best-effort subprocess shutdown used for cancellations and timeouts."""
-        if getattr(process, "returncode", None) is not None:
-            return
-
-        terminate = getattr(process, "terminate", None)
-        kill = getattr(process, "kill", None)
-        wait = getattr(process, "wait", None)
-
-        try:
-            if callable(terminate):
-                terminate()
-            elif callable(kill):
-                kill()
-            else:
-                return
-        except ProcessLookupError:
-            return
-
-        if not callable(wait):
-            return
-
-        try:
-            await asyncio.wait_for(wait(), timeout=self._process_shutdown_timeout_seconds)
-            return
-        except (ProcessLookupError, TimeoutError):
-            pass
-
-        if callable(kill):
-            with contextlib.suppress(ProcessLookupError):
-                kill()
-            with contextlib.suppress(ProcessLookupError, TimeoutError):
-                await asyncio.wait_for(wait(), timeout=self._process_shutdown_timeout_seconds)
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=self._process_shutdown_timeout_seconds,
+            logger=log,
+            log_namespace=self._log_namespace,
+        )
 
     async def execute_task(
         self,
