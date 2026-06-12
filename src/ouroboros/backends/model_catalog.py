@@ -35,7 +35,9 @@ from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_
 # Backends whose runnable model is the CLI's own configured default rather
 # than a Claude model id. Mirrors the loader's sentinel frozensets
 # (_CODEX_LLM_BACKENDS et al.); the mirror is locked by a unit test.
-_SENTINEL_MODEL_BACKENDS = frozenset({"codex", "opencode", "kiro", "copilot", "hermes", "pi"})
+_SENTINEL_MODEL_BACKENDS = frozenset(
+    {"codex", "opencode", "kiro", "copilot", "hermes", "pi", "gjc"}
+)
 
 # The sentinel the loader maps Claude-incapable backends to.
 DEFAULT_MODEL_SENTINEL = "default"
@@ -174,6 +176,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     "opencode": "get_opencode_cli_path",
     "goose": "get_goose_cli_path",
     "pi": "get_pi_cli_path",
+    "gjc": "get_gjc_cli_path",
 }
 
 
