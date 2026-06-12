@@ -36,10 +36,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 import inspect
+import logging
 from typing import TYPE_CHECKING
 
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot
@@ -145,7 +148,16 @@ async def start_background_tool_job(
         if inspect.iscoroutine(runner):
             runner.close()
         if on_enqueue_failure is not None:
-            await on_enqueue_failure(exc)
+            try:
+                await on_enqueue_failure(exc)
+            except Exception:
+                # Cleanup is best-effort: a failing hook must never mask the
+                # original enqueue exception being re-raised below.
+                logger.warning(
+                    "mcp.background_job.enqueue_failure_hook_failed",
+                    extra={"job_type": job_type},
+                    exc_info=True,
+                )
         raise
 
     if on_started is not None:
