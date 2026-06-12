@@ -23,6 +23,7 @@ catalog) for every backend.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import shutil
 import subprocess
 
@@ -202,9 +203,49 @@ def installed_backends() -> dict[str, str | None]:
     return {name: detect_backend_cli(name) for name in runtime_backend_choices()}
 
 
+def configured_default_model(backend: str) -> str | None:
+    """Resolve what the ``"default"`` sentinel currently means for a backend.
+
+    Sentinel backends defer model choice to the CLI's own user config; this
+    reads only the model field from that file so settings UIs can render
+    "default — currently <model>" instead of an opaque sentinel. Returns
+    ``None`` when the backend keeps no such file, the file is missing, or
+    parsing fails — never raises.
+    """
+    capability = get_backend_capability(backend)
+    if capability is None:
+        return None
+    try:
+        if capability.name == "hermes":
+            import yaml
+
+            config_path = Path.home() / ".hermes" / "config.yaml"
+            if not config_path.exists():
+                return None
+            data = yaml.safe_load(config_path.read_text()) or {}
+            model = data.get("model")
+            if isinstance(model, dict):
+                value = model.get("default")
+                return str(value) if value else None
+            return None
+        if capability.name == "codex":
+            import tomllib
+
+            config_path = Path.home() / ".codex" / "config.toml"
+            if not config_path.exists():
+                return None
+            data = tomllib.loads(config_path.read_text())
+            value = data.get("model")
+            return str(value) if value else None
+    except Exception:  # noqa: BLE001 - a hint must never break the caller
+        return None
+    return None
+
+
 __all__ = [
     "DEFAULT_MODEL_SENTINEL",
     "BackendModelCatalog",
+    "configured_default_model",
     "detect_backend_cli",
     "get_model_catalog",
     "installed_backends",

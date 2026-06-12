@@ -28,7 +28,13 @@ from textual.widgets.option_list import Option
 
 from ouroboros.backends import resolve_backend_alias, runtime_backend_choices
 from ouroboros.backends.capabilities import llm_backend_choices
-from ouroboros.backends.model_catalog import installed_backends, model_choices, refresh_models
+from ouroboros.backends.model_catalog import (
+    DEFAULT_MODEL_SENTINEL,
+    configured_default_model,
+    installed_backends,
+    model_choices,
+    refresh_models,
+)
 from ouroboros.config.models import OuroborosConfig, get_config_dir
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.fields import (
@@ -212,6 +218,9 @@ class SettingsApp(App[None]):
         self._fetch_pending: set[str] = set()
         # Last concrete model per stage, restored when a search is cancelled.
         self._last_model_value: dict[str, str | None] = {}
+        # What the "default" sentinel resolves to per backend (config-file
+        # hint, e.g. hermes → gpt-5.5). Cached: file reads once per backend.
+        self._default_hints: dict[str, str | None] = {}
 
     def on_mount(self) -> None:
         # Config-derived (not widget-derived): widgets may still be mounting.
@@ -268,11 +277,20 @@ class SettingsApp(App[None]):
             known = self._static_models(backend)
         if current and current not in known:
             known.insert(0, current)
-        options = [(model, model) for model in known]
+        options = [(self._model_label(backend, model), model) for model in known]
         if len(fetched) > SEARCH_THRESHOLD:
             options.append((f"Search {len(fetched)} models…", SEARCH_SENTINEL))
         options.append(("Custom…", CUSTOM_SENTINEL))
         return options
+
+    def _model_label(self, backend: str, model: str) -> str:
+        """Make the 'default' sentinel concrete: 'default — currently <model>'."""
+        if model != DEFAULT_MODEL_SENTINEL:
+            return model
+        if backend not in self._default_hints:
+            self._default_hints[backend] = configured_default_model(backend)
+        hint = self._default_hints[backend]
+        return f"default — currently {hint}" if hint else model
 
     # ── dynamic model listings ───────────────────────────────────────
 

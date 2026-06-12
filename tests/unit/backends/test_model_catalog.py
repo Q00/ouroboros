@@ -128,3 +128,36 @@ def test_installed_backends_covers_all_runtime_backends(monkeypatch) -> None:
     monkeypatch.setattr(mc, "detect_backend_cli", lambda name: f"/bin/{name}")
     result = mc.installed_backends()
     assert set(result) == set(runtime_backend_choices())
+
+
+def test_configured_default_model_hermes(monkeypatch, tmp_path) -> None:
+    (tmp_path / ".hermes").mkdir()
+    (tmp_path / ".hermes" / "config.yaml").write_text(
+        "model:\n  default: gpt-9-hermes\n  provider: openai-codex\n"
+    )
+    monkeypatch.setattr(mc.Path, "home", classmethod(lambda _cls: tmp_path))
+    assert mc.configured_default_model("hermes") == "gpt-9-hermes"
+
+
+def test_configured_default_model_codex(monkeypatch, tmp_path) -> None:
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('model = "gpt-9-codex"\n')
+    monkeypatch.setattr(mc.Path, "home", classmethod(lambda _cls: tmp_path))
+    assert mc.configured_default_model("codex") == "gpt-9-codex"
+
+
+def test_configured_default_model_missing_file(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mc.Path, "home", classmethod(lambda _cls: tmp_path))
+    assert mc.configured_default_model("hermes") is None
+    assert mc.configured_default_model("codex") is None
+
+
+def test_configured_default_model_malformed_never_raises(monkeypatch, tmp_path) -> None:
+    (tmp_path / ".hermes").mkdir()
+    (tmp_path / ".hermes" / "config.yaml").write_text("model: [broken\n")
+    monkeypatch.setattr(mc.Path, "home", classmethod(lambda _cls: tmp_path))
+    assert mc.configured_default_model("hermes") is None
+
+
+def test_configured_default_model_non_sentinel_backend() -> None:
+    assert mc.configured_default_model("claude") is None

@@ -44,6 +44,11 @@ def app_env(monkeypatch):
     )
     # Never let unit tests shell out to real backend CLIs.
     monkeypatch.setattr("ouroboros.config_tui.app.refresh_models", lambda _backend: None)
+    # ...or read the real ~/.hermes / ~/.codex configs.
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.configured_default_model",
+        lambda backend: "gpt-9-test" if backend == "codex" else None,
+    )
     return raw
 
 
@@ -157,6 +162,7 @@ async def test_save_failure_is_surfaced_inline(app_env, monkeypatch) -> None:
     app = SettingsApp()
     async with app.run_test() as pilot:
         pilot.app.query_one("#global-runtime", Select).value = "codex"
+        await pilot.pause()  # let the cascade settle before measuring layout
         pilot.app.query_one("#save-button").scroll_visible(animate=False)
         await pilot.pause()
         await pilot.click("#save-button")
@@ -323,3 +329,18 @@ async def test_search_modal_cancel_restores_previous_value(app_env, monkeypatch)
         await pilot.press("escape")
         await pilot.pause()
         assert model_select.value == "default"
+
+
+@pytest.mark.asyncio
+async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
+    """For sentinel backends the 'default' entry names the model it resolves
+    to (read from the CLI's own config), e.g. 'default — currently gpt-9-test'."""
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        labels = {str(label) for label, _ in model_select._options}
+        assert any("default — currently gpt-9-test" in label for label in labels)
+        assert model_select.value == "default"  # value stays the sentinel
