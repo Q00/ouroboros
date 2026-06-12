@@ -144,3 +144,86 @@ def test_show_section_still_returns_raw_contents(monkeypatch, tmp_path) -> None:
     result = runner.invoke(app, ["show", "logging"])
     assert result.exit_code == 0
     assert "debug" in result.output
+
+
+def test_show_json_emits_machine_readable_effective_view(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {
+                "runtime_backend": "opencode",
+                "runtime_profile": {"stages": {"execute": "codex"}},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"opencode": "/bin/opencode", "codex": "/bin/codex"},
+    )
+    result = runner.invoke(app, ["show", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["defaults"]["default_agent"]["value"] == "opencode"
+    assert payload["stages"]["execute"] == {
+        "agent": "codex",
+        "inherited": False,
+        "agent_installed": True,
+        "model": payload["stages"]["execute"]["model"],
+        "model_source": payload["stages"]["execute"]["model_source"],
+        "model_key": "execution.double_diamond_model",
+    }
+    assert payload["stages"]["interview"]["inherited"] is True
+    assert payload["stages"]["interview"]["agent"] == "opencode"
+
+
+def test_undo_swaps_in_backup_and_supports_redo(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
+    from ouroboros.config import loader as config_loader
+
+    monkeypatch.setattr(config_loader, "get_config_dir", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"orchestrator": {"runtime_backend": "hermes"}})
+    )
+    (tmp_path / "config.yaml.bak").write_text(
+        yaml.dump({"orchestrator": {"runtime_backend": "codex"}})
+    )
+
+    result = runner.invoke(app, ["undo"])
+    assert result.exit_code == 0
+    assert (
+        yaml.safe_load((tmp_path / "config.yaml").read_text())["orchestrator"]["runtime_backend"]
+        == "codex"
+    )
+
+    # undo again = redo
+    result = runner.invoke(app, ["undo"])
+    assert result.exit_code == 0
+    assert (
+        yaml.safe_load((tmp_path / "config.yaml").read_text())["orchestrator"]["runtime_backend"]
+        == "hermes"
+    )
+
+
+def test_undo_without_backup_errors(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text(yaml.dump({}))
+    result = runner.invoke(app, ["undo"])
+    assert result.exit_code == 1
+
+
+def test_undo_invalid_backup_aborts_safely(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
+    from ouroboros.config import loader as config_loader
+
+    monkeypatch.setattr(config_loader, "get_config_dir", lambda: tmp_path)
+    good = yaml.dump({"orchestrator": {"runtime_backend": "hermes"}})
+    (tmp_path / "config.yaml").write_text(good)
+    (tmp_path / "config.yaml.bak").write_text(
+        yaml.dump({"orchestrator": {"runtime_backend": "not-a-backend"}})
+    )
+    result = runner.invoke(app, ["undo"])
+    assert result.exit_code == 1
+    assert (tmp_path / "config.yaml").read_text() == good  # untouched

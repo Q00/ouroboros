@@ -344,3 +344,44 @@ async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
         labels = {str(label) for label, _ in model_select._options}
         assert any("default — currently gpt-9-test" in label for label in labels)
         assert model_select.value == "default"  # value stays the sentinel
+
+
+@pytest.mark.asyncio
+async def test_preset_button_stages_models_for_every_card(app_env) -> None:
+    """One click sets a coherent model tier across all stages, respecting
+    each card's effective backend (claude inherit vs explicit codex)."""
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        await pilot.click("#preset-frugal")
+        await pilot.pause()
+        interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
+        assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
+        execute_model = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert execute_model.value == "gpt-5-mini"  # codex frugal
+        status = pilot.app.query_one("#status-bar", Static)
+        assert "frugal" in str(status.render())
+        assert "Save" in str(status.render())  # staged, not saved
+
+
+@pytest.mark.asyncio
+async def test_save_summary_shows_diff_and_reconnect_hint(app_env, monkeypatch) -> None:
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: None)
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#global-runtime", Select).value = "codex"
+        await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+        status = str(pilot.app.query_one("#status-bar", Static).render())
+        assert "claude → codex" in status  # old → new diff
+        assert "reconnect" in status  # backend change needs MCP reconnect
+
+
+def test_save_summary_without_backend_change_has_no_reconnect_hint() -> None:
+    summary = SettingsApp._save_summary(
+        {"clarification.default_model": "m2"}, {"clarification.default_model": "m1"}
+    )
+    assert "m1 → m2" in summary
+    assert "reconnect" not in summary

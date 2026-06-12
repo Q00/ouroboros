@@ -70,6 +70,9 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
             target[keys[-1]] = value
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    if original_text is not None:
+        # One-step undo support: `ouroboros config undo` swaps this back in.
+        (config_path.parent / "config.yaml.bak").write_text(original_text)
     config_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     try:

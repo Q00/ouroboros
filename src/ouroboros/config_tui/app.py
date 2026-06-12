@@ -31,10 +31,12 @@ from ouroboros.backends.capabilities import llm_backend_choices
 from ouroboros.backends.model_catalog import (
     DEFAULT_MODEL_SENTINEL,
     configured_default_model,
+    get_model_catalog,
     installed_backends,
     model_choices,
     refresh_models,
 )
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
 from ouroboros.config.models import OuroborosConfig, get_config_dir
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.fields import (
@@ -58,6 +60,18 @@ INSTALL_REQUIRED_SUFFIX = "install required"
 # Above this many fetched models, the select offers a search modal instead
 # of inlining the whole listing (opencode reports ~400 ids).
 SEARCH_THRESHOLD = 20
+
+# One-click model presets: per-backend picks, falling back to the backend's
+# catalog default where no differentiated tier exists (sentinel backends).
+PRESET_MODELS: dict[str, dict[str, str]] = {
+    "frugal": {"claude": "claude-haiku-4-5-20251001", "codex": "gpt-5-mini"},
+    "balanced": {"claude": DEFAULT_SONNET_MODEL, "codex": "gpt-5"},
+    "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": "gpt-5-codex"},
+}
+
+# Saving these keys only takes effect for a running MCP server after a
+# reconnect (#1376 friction log) — surface that instead of failing silently.
+_RECONNECT_KEY_PREFIXES = ("orchestrator.runtime", "llm.backend")
 
 # Cap the rows rendered in the search modal while filtering.
 _SEARCH_MAX_ROWS = 200
@@ -184,6 +198,10 @@ class SettingsApp(App[None]):
     }
     .global-cell { border: round $secondary; padding: 0 1; height: auto; }
     .field-help { color: $text-muted; text-style: italic; margin: 0 0 1 0; }
+
+    #preset-row { layout: horizontal; height: auto; margin: 1 0 0 0; }
+    #preset-row Button { margin: 0 1 0 0; min-width: 14; }
+    #preset-help { margin: 1 0 0 1; width: 1fr; }
 
     #action-bar { layout: horizontal; height: auto; margin: 1 0 0 0; }
     #status-bar { width: 1fr; margin: 0 0 0 2; content-align: left middle; }
@@ -361,6 +379,15 @@ class SettingsApp(App[None]):
                 "Per-stage overrides — interview → execute → evaluate → reflect",
                 classes="section-title",
             )
+            with Container(id="preset-row"):
+                yield Button("⚡ Frugal", id="preset-frugal")
+                yield Button("⚖ Balanced", id="preset-balanced")
+                yield Button("🚀 Frontier", id="preset-frontier")
+                yield Static(
+                    "one-click models for every stage — review, then Save",
+                    classes="field-help",
+                    id="preset-help",
+                )
             with Container(id="stage-row"):
                 for stage in Stage:
                     yield from self._compose_stage_card(stage)
@@ -568,8 +595,28 @@ class SettingsApp(App[None]):
             warning.set_class(True, "hidden")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save-button":
+        button_id = event.button.id or ""
+        if button_id == "save-button":
             self.action_save()
+        elif button_id.startswith("preset-"):
+            self._apply_preset(button_id.removeprefix("preset-"))
+
+    def _apply_preset(self, level: str) -> None:
+        """Stage a one-click model preset across all stage cards (not saved yet)."""
+        picks = PRESET_MODELS.get(level)
+        if picks is None:
+            return
+        for stage in Stage:
+            try:
+                backend = self._selected_runtime(stage)
+                model = picks.get(backend)
+                if model is None:
+                    model = get_model_catalog(backend).default_model
+                self._set_stage_model(stage, model)
+            except (NoMatches, ValueError):
+                continue
+        status = self.query_one("#status-bar", Static)
+        status.update(f"Preset [bold]{level}[/bold] staged — review the cards, then Save.")
 
     # ── save ─────────────────────────────────────────────────────────
 
@@ -582,12 +629,19 @@ class SettingsApp(App[None]):
             ):
                 changes[key] = new_value
 
+        def record_backend(key: str, new_value: str) -> None:
+            old = get_value(self._raw, key) or get_value(self._defaults, key)
+            # claude_code → claude is the same backend; alias-only diffs are noise.
+            if _canonical_backend(old) == _canonical_backend(new_value):
+                return
+            record(key, new_value)
+
         global_runtime = self.query_one("#global-runtime", Select).value
         if not _is_blank(global_runtime):
-            record(GLOBAL_RUNTIME_FIELD.key, str(global_runtime))
+            record_backend(GLOBAL_RUNTIME_FIELD.key, str(global_runtime))
         llm_backend = self.query_one("#global-llm-backend", Select).value
         if not _is_blank(llm_backend):
-            record(GLOBAL_LLM_BACKEND_FIELD.key, str(llm_backend))
+            record_backend(GLOBAL_LLM_BACKEND_FIELD.key, str(llm_backend))
 
         for stage in Stage:
             runtime_field = stage_runtime_field(stage)
@@ -620,14 +674,38 @@ class SettingsApp(App[None]):
         if not changes:
             status.update("No changes to save.")
             return
+        old_values = {key: get_value(self._raw, key) for key in changes}
         try:
             persistence.apply_config_values(changes)
         except persistence.ConfigWriteError as exc:
             status.update(f"[red]Save failed:[/red] {exc}")
             return
         self._raw = persistence.load_raw_config()
-        summary = ", ".join(sorted(changes))
-        status.update(f"[green]Saved:[/green] {summary}")
+        status.update(self._save_summary(changes, old_values))
+
+    @staticmethod
+    def _save_summary(changes: dict[str, Any], old_values: dict[str, Any]) -> str:
+        """Render what changed (old → new) and flag keys needing an MCP reconnect."""
+        diffs = []
+        ordered = sorted(
+            changes, key=lambda k: (not k.startswith(_RECONNECT_KEY_PREFIXES), k)
+        )
+        for key in ordered:
+            old = old_values.get(key)
+            old_text = "unset" if old is None else str(old)
+            new_text = "unset" if changes[key] is None else str(changes[key])
+            short_key = key.rsplit(".", 1)[-1] if key.count(".") > 1 else key
+            diffs.append(f"{short_key}: {old_text} → {new_text}")
+        shown = "; ".join(diffs[:4])
+        if len(diffs) > 4:
+            shown += f"; … +{len(diffs) - 4} more"
+        summary = f"[green]Saved.[/green] {shown}"
+        if any(key.startswith(_RECONNECT_KEY_PREFIXES) for key in changes):
+            summary += (
+                "\n[yellow]⚠ backend changes apply to new sessions — "
+                "reconnect the MCP server to pick them up now.[/yellow]"
+            )
+        return summary
 
 
 __all__ = ["CUSTOM_SENTINEL", "INHERIT_SENTINEL", "INSTALL_REQUIRED_SUFFIX", "SettingsApp"]

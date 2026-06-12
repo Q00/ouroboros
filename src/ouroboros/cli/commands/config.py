@@ -182,6 +182,66 @@ def _agent_cell(backend: str, installed: dict[str, str | None]) -> str:
     return backend if installed.get(backend) else f"{backend} ⚠ not installed"
 
 
+def _effective_view_data(data: dict, config_path: Path) -> dict:
+    """Machine-readable effective view (what `show --json` emits)."""
+    from ouroboros.backends.model_catalog import installed_backends
+    from ouroboros.config_tui.fields import (
+        GLOBAL_LLM_BACKEND_FIELD,
+        GLOBAL_RUNTIME_FIELD,
+        STAGE_MODEL_FIELDS,
+        get_value,
+    )
+    from ouroboros.orchestrator_stage import Stage
+
+    installed = installed_backends()
+    agent_value, agent_source = _effective_value(
+        GLOBAL_RUNTIME_FIELD.env_vars,
+        get_value(data, GLOBAL_RUNTIME_FIELD.key),
+        "claude",
+    )
+    llm_value, llm_source = _effective_value(
+        GLOBAL_LLM_BACKEND_FIELD.env_vars,
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
+        "claude_code",
+    )
+    profile_default = get_value(data, "orchestrator.runtime_profile.default")
+    stages: dict[str, dict] = {}
+    for stage in Stage:
+        stage_agent = get_value(data, f"orchestrator.runtime_profile.stages.{stage.value}")
+        resolved = str(stage_agent or profile_default or agent_value)
+        model_field = STAGE_MODEL_FIELDS[stage]
+        model_value, model_source = _effective_value(
+            model_field.env_vars,
+            get_value(data, model_field.key),
+            "backend default",
+        )
+        stages[stage.value] = {
+            "agent": resolved,
+            "inherited": stage_agent is None,
+            "agent_installed": bool(installed.get(resolved)),
+            "model": model_value,
+            "model_source": model_source,
+            "model_key": model_field.key,
+        }
+    return {
+        "defaults": {
+            "default_agent": {
+                "value": agent_value,
+                "source": agent_source,
+                "installed": bool(installed.get(agent_value)),
+            },
+            "llm_backend": {"value": llm_value, "source": llm_source},
+        },
+        "stages": stages,
+        "environment": {
+            "config_path": str(config_path),
+            "cli_path": _resolve_cli_path(data),
+            "database": _resolve_db_path(data, config_path),
+            "log_level": str(data.get("logging", {}).get("level", "info")),
+        },
+    }
+
+
 def _render_effective_view(data: dict, config_path: Path) -> None:
     """GUI-equivalent effective view: defaults, per-stage agents/models, sources.
 
@@ -264,15 +324,26 @@ def show(
         str | None,
         typer.Argument(help="Configuration section to display (e.g., 'orchestrator')."),
     ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit the effective view as JSON (for agents/scripts)."),
+    ] = False,
 ) -> None:
     """Display the effective configuration.
 
     Without arguments, renders the GUI-equivalent effective view: defaults,
     per-stage agents and models with resolved inheritance, value sources
     (env override / config / default), and CLI install status. Pass a
-    section name for the raw section contents.
+    section name for the raw section contents, or --json for a
+    machine-readable effective view.
     """
     data, config_path = _load_config()
+
+    if json_output:
+        import json
+
+        typer.echo(json.dumps(_effective_view_data(data, config_path), indent=2))
+        return
 
     if section:
         section_data = data.get(section)
@@ -592,6 +663,41 @@ def set_value(
         print_success(f"{key}: {old_value} → {parsed_value}")
     else:
         print_success(f"{key}: {parsed_value}")
+
+
+@app.command()
+def undo() -> None:
+    """Restore the configuration saved before the last settings change.
+
+    Every successful save (GUI or `config set` via the settings layer)
+    keeps the previous file as config.yaml.bak; undo swaps it back in,
+    so running undo twice redoes the change.
+    """
+    from ouroboros.config.models import get_config_dir
+
+    config_path = get_config_dir() / "config.yaml"
+    backup_path = get_config_dir() / "config.yaml.bak"
+    if not backup_path.exists():
+        print_error("Nothing to undo: no config.yaml.bak found.")
+        raise typer.Exit(1)
+    if not config_path.exists():
+        print_error(f"Config not found: {config_path}")
+        raise typer.Exit(1)
+
+    current_text = config_path.read_text()
+    backup_text = backup_path.read_text()
+    config_path.write_text(backup_text)
+    try:
+        from ouroboros.config.loader import load_config
+
+        load_config()
+    except Exception as exc:
+        config_path.write_text(current_text)
+        print_error(f"Backup is not a valid config — undo aborted.\n{exc}")
+        raise typer.Exit(1) from None
+    # Swap: the replaced config becomes the new backup, so undo ↔ redo.
+    backup_path.write_text(current_text)
+    print_success("Restored previous configuration (run undo again to redo).")
 
 
 @app.command()

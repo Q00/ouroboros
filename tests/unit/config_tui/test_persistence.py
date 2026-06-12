@@ -92,3 +92,10 @@ def test_empty_batch_is_noop(config_dir: Path) -> None:
 
 def test_load_raw_config_missing_file_returns_empty(config_dir: Path) -> None:
     assert persistence.load_raw_config() == {}
+
+
+def test_apply_writes_backup_for_undo(config_dir: Path) -> None:
+    persistence.apply_config_values({"orchestrator.runtime_backend": "codex"})
+    before = (config_dir / "config.yaml").read_text()
+    persistence.apply_config_values({"orchestrator.runtime_backend": "hermes"})
+    assert (config_dir / "config.yaml.bak").read_text() == before
