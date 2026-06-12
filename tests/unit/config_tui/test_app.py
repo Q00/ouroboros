@@ -365,7 +365,7 @@ async def test_preset_button_stages_models_for_every_card(app_env) -> None:
 
 @pytest.mark.asyncio
 async def test_save_summary_shows_diff_and_reconnect_hint(app_env, monkeypatch) -> None:
-    monkeypatch.setattr(persistence, "apply_config_values", lambda values: None)
+    monkeypatch.setattr(persistence, "apply_config_values", lambda _values: None)
     app = SettingsApp()
     async with app.run_test() as pilot:
         pilot.app.query_one("#global-runtime", Select).value = "codex"
