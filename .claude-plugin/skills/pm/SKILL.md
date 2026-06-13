@@ -15,6 +15,16 @@ PM-focused Socratic interview that produces a Product Requirements Document.
 ToolSearch query: "+ouroboros pm_interview"
 ```
 
+**CRITICAL — deferred-schema guard (prevents "Invalid tool parameters"):**
+This is a multi-turn loop and each turn runs in a fresh tool context. A deferred
+tool's schema loaded on one turn is NOT guaranteed to still be loaded on the next.
+Calling `ouroboros_pm_interview` while its schema is unloaded in the **current**
+turn makes the runtime reject it with **"Invalid tool parameters"** every message.
+Therefore **re-run `ToolSearch query: "+ouroboros pm_interview"` immediately before
+EVERY `ouroboros_pm_interview` call** below (idempotent — a no-op if already
+loaded). If the load ever returns no matching tool, follow the not-found diagnosis
+below instead of retrying the failing call.
+
 If not found → **diagnose before telling user to run setup**:
 
 1. Check if MCP is already configured:
