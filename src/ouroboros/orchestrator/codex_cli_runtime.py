@@ -98,6 +98,8 @@ class CodexCliRuntime:
     _stdout_idle_timeout_seconds = 300.0
     _max_stderr_lines = 512
     _child_session_env_keys = DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS
+    _use_process_group = os.name == "posix"
+    _completed_process_group_shutdown_timeout_seconds = 0.2
 
     def __init__(
         self,
@@ -965,7 +967,12 @@ class CodexCliRuntime:
         ):
             yield line
 
-    async def _terminate_process(self, process: Any) -> None:
+    async def _terminate_process(
+        self,
+        process: Any,
+        *,
+        process_group_id: int | None = None,
+    ) -> None:
         """Best-effort subprocess shutdown used when task consumption is cancelled."""
         await terminate_runtime_process(
             process,
@@ -973,6 +980,8 @@ class CodexCliRuntime:
             logger=log,
             log_namespace=self._log_namespace,
             close_stdin=self._close_process_stdin,
+            terminate_process_group=self._use_process_group,
+            process_group_id=process_group_id,
         )
 
     async def _close_process_stdin(self, process: Any) -> None:
@@ -996,6 +1005,43 @@ class CodexCliRuntime:
                 asyncio.CancelledError,
             ):
                 await wait_closed()
+
+    def _subprocess_launch_kwargs(self) -> dict[str, Any]:
+        """Return platform-specific subprocess options for owned runtime workers."""
+        if not self._use_process_group:
+            return {}
+        return {"start_new_session": True}
+
+    def _process_group_id(self, process: Any) -> int | None:
+        """Return the subprocess group id while the parent process is still observable."""
+        if not self._use_process_group:
+            return None
+
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int):
+            return None
+
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            return os.getpgid(pid)
+        return None
+
+    async def _cleanup_completed_process_group(
+        self,
+        process: Any,
+        process_group_id: int | None,
+    ) -> None:
+        """Best-effort cleanup for companion shells after the main worker exits."""
+        if process_group_id is None:
+            return
+
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=self._completed_process_group_shutdown_timeout_seconds,
+            logger=log,
+            log_namespace=self._log_namespace,
+            terminate_process_group=True,
+            process_group_id=process_group_id,
+        )
 
     async def _observe_bound_runtime_handle(
         self,
@@ -1590,6 +1636,7 @@ class CodexCliRuntime:
         process: Any | None = None
         process_finished = False
         process_terminated = False
+        process_group_id: int | None = None
         control_state: dict[str, Any] | None = None
         stderr_task: asyncio.Task[list[str]] | None = None
 
@@ -1601,6 +1648,7 @@ class CodexCliRuntime:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_child_env(),
+                **self._subprocess_launch_kwargs(),
             )
         except FileNotFoundError as e:
             yield AgentMessage(
@@ -1628,6 +1676,8 @@ class CodexCliRuntime:
             )
             output_path.unlink(missing_ok=True)
             return
+
+        process_group_id = self._process_group_id(process)
 
         # Feed prompt via stdin to avoid OS ARG_MAX limits (~262KB on macOS).
         # Runtimes that accept prompt as a CLI arg (e.g. opencode) skip this.
@@ -1763,7 +1813,7 @@ class CodexCliRuntime:
         except asyncio.CancelledError:
             if process is not None:
                 log.warning(f"{self._log_namespace}.task_cancelled", cwd=self._cwd)
-                await self._terminate_process(process)
+                await self._terminate_process(process, process_group_id=process_group_id)
                 process_terminated = True
                 if control_state is not None:
                     control_state["terminated"] = True
@@ -1864,7 +1914,9 @@ class CodexCliRuntime:
                     and not process_terminated
                     and getattr(process, "returncode", None) is None
                 ):
-                    await self._terminate_process(process)
+                    await self._terminate_process(process, process_group_id=process_group_id)
+                elif process_finished:
+                    await self._cleanup_completed_process_group(process, process_group_id)
                 await self._close_process_stdin(process)
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
