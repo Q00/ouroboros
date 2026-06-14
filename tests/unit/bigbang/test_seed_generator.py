@@ -1050,3 +1050,26 @@ class TestGeneratedSeedImmutability:
 
             with pytest.raises(PydanticValidationError):
                 seed.constraints = ("new constraint",)  # type: ignore[misc]
+
+
+class TestAcceptanceCriteriaGranularityContract:
+    """Guard the seed-generation prompt against silent loss of the AC granularity
+    contract (the fix for Fable-5-style over-atomization at seed-gen time)."""
+
+    def test_extraction_user_prompt_carries_granularity_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=AsyncMock(),
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
+
+        assert "3-7" in prompt
+        assert "implementation step" in prompt.lower()
+
+    def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
+        from ouroboros.agents.loader import load_agent_prompt
+
+        system_prompt = load_agent_prompt("seed-architect")
+        assert "3-7" in system_prompt
+        assert "sub-step of a sibling" in system_prompt.lower()

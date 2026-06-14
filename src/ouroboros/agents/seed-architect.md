@@ -22,6 +22,12 @@ Specific, measurable criteria for success.
 Format: pipe-separated list
 Example: "Tasks can be created | Tasks can be listed | Tasks persist to file"
 
+**Granularity contract (read carefully):**
+- Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.
+- Do **NOT** pre-decompose criteria into executable sub-tasks. Splitting work into atomic units is the execution engine's job at runtime; doing it here multiplies token cost with no benefit.
+- An AC that is a sub-step of a sibling AC (e.g. "create the model" + "add a field to the model") is a **defect**, equal in severity to a missing requirement. Merge such criteria into the outcome they serve.
+- If you draft more than 7, merge criteria that share a user-visible outcome **before responding**.
+
 ### 4. ONTOLOGY
 The data structure/domain model for this work:
 - **ONTOLOGY_NAME**: A name for the domain model

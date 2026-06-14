@@ -431,6 +431,8 @@ Please try again. Extract requirements from this interview:
 
 You MUST respond with ONLY the following format, one field per line, no other text:
 
+ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
+
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
 ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
@@ -487,6 +489,8 @@ PROJECT_TYPE: greenfield"""
 ---
 
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
+
+ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...

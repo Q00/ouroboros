@@ -198,3 +198,68 @@ suggested_model_tier: medium
     assert runtime.prompt is not None
     assert "2-3 sub-ACs" in runtime.prompt
     assert "2-5 sub-ACs" not in runtime.prompt
+
+
+class _FixedResponseRuntime:
+    """Runtime that yields a single fixed decomposition response."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: object | None = None,
+        resume_session_id: str | None = None,
+    ):
+        del prompt, tools, system_prompt, resume_handle, resume_session_id
+        yield AgentMessage(type="result", content=self._content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        # Explicit atomic verdict the response STARTS WITH → atomic.
+        ("ATOMIC", None),
+        ("ATOMIC — this is one focused task", None),
+        # A real split that happens to contain the word "ATOMIC" in a negation
+        # must NOT be mis-read as atomic (the substring-match bug).
+        (
+            'NOT ATOMIC, decompose into: ["Sub-AC 1: build it", "Sub-AC 2: test it"]',
+            ["Sub-AC 1: build it", "Sub-AC 2: test it"],
+        ),
+        # A valid array whose elements merely mention "atomic" must still split.
+        (
+            '["update the atomic counter module", "add a regression test"]',
+            ["update the atomic counter module", "add a regression test"],
+        ),
+        # Unparseable / no verdict → fail closed to atomic (the frugal default).
+        ("I think this could go either way, hard to say.", None),
+    ],
+    ids=["bare_atomic", "atomic_prefix", "not_atomic_split", "array_mentions_atomic", "garbage"],
+)
+async def test_try_decompose_ac_parses_verdict_array_before_atomic_substring(
+    response: str, expected: list[str] | None
+) -> None:
+    """JSON array is parsed before the ATOMIC verdict, and only a leading ATOMIC
+    counts — so negated/atomic-mentioning splits are not mis-classified, and
+    unparseable responses fail closed to atomic."""
+    executor = ParallelACExecutor(
+        adapter=_FixedResponseRuntime(response),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+
+    result = await executor._try_decompose_ac(
+        ac_content="Some acceptance criterion.",
+        ac_index=0,
+        seed_goal="goal",
+        tools=["Read"],
+        system_prompt="system",
+    )
+
+    assert result == expected
