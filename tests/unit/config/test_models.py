@@ -207,8 +207,10 @@ class TestLLMConfig:
         assert config.permission_mode == "default"
         assert config.opencode_permission_mode == "acceptEdits"
         assert config.qa_model == DEFAULT_SONNET_MODEL
-        assert config.dependency_analysis_model == DEFAULT_OPUS_MODEL
-        assert config.ontology_analysis_model == DEFAULT_OPUS_MODEL
+        # Frugality: bounded structured-extraction meta-tasks default to Sonnet,
+        # not Opus (effort-first floor should not start at the priciest tier).
+        assert config.dependency_analysis_model == DEFAULT_SONNET_MODEL
+        assert config.ontology_analysis_model == DEFAULT_SONNET_MODEL
         assert config.context_compression_model == "gpt-4"
 
     def test_llm_config_accepts_claude_shorthand(self) -> None:

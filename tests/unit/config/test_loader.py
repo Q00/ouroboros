@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import (
     config_exists,
     create_default_config,
@@ -1488,6 +1489,40 @@ class TestLLMHelperLookups:
             ),
         ):
             assert get_dependency_analysis_model() == "gpt-5-coder"
+
+    def test_dependency_and_ontology_getters_default_to_sonnet_not_opus(self) -> None:
+        """The runtime getters — not just the Pydantic field default — must
+        resolve to Sonnet for the flipped meta-tasks, including the
+        config-absent (ConfigError) path that CI / fresh installs hit."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("no config"),
+            ),
+        ):
+            assert get_dependency_analysis_model() == DEFAULT_SONNET_MODEL
+            assert get_ontology_analysis_model() == DEFAULT_SONNET_MODEL
+            assert get_dependency_analysis_model() != DEFAULT_OPUS_MODEL
+
+    def test_dependency_pre_flip_opus_value_still_normalizes_for_non_claude(self) -> None:
+        """A config persisted before the Opus→Sonnet flip holds an Opus literal
+        for these two fields; a Claude-incapable backend must still normalize it
+        to the "default" sentinel rather than leak an unrunnable Claude id."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(
+                        dependency_analysis_model=DEFAULT_OPUS_MODEL,
+                        ontology_analysis_model="claude-opus-4-6",
+                    ),
+                ),
+            ),
+        ):
+            assert get_dependency_analysis_model(backend="copilot") == "default"
+            assert get_ontology_analysis_model(backend="copilot") == "default"
 
     def test_get_semantic_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for semantic evaluation model."""

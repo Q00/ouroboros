@@ -365,10 +365,10 @@ _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], obje
     "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
     "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
     "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
-    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_OPUS_MODEL),),
+    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_SONNET_MODEL),),
     "mechanical_detection": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
     "ontology_analysis": (
-        (("llm", "ontology_analysis_model"), DEFAULT_OPUS_MODEL),
+        (("llm", "ontology_analysis_model"), DEFAULT_SONNET_MODEL),
         (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
     ),
     "pm_interview": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
@@ -1639,8 +1639,8 @@ def _register_copilot_mcp_server() -> None:
 
 _COPILOT_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("llm", "qa_model", DEFAULT_SONNET_MODEL),
-    ("llm", "dependency_analysis_model", DEFAULT_OPUS_MODEL),
-    ("llm", "ontology_analysis_model", DEFAULT_OPUS_MODEL),
+    ("llm", "dependency_analysis_model", DEFAULT_SONNET_MODEL),
+    ("llm", "ontology_analysis_model", DEFAULT_SONNET_MODEL),
     ("llm", "context_compression_model", "gpt-4"),
     ("clarification", "default_model", DEFAULT_OPUS_MODEL),
     ("evaluation", "semantic_model", DEFAULT_OPUS_MODEL),
