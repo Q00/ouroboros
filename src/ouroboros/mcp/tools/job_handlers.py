@@ -69,6 +69,23 @@ _JOB_STREAM_ALIASES = {
     "subagents": "linked",
 }
 _JOB_STREAM_EVENT_LIMIT = 10
+_JOB_WAIT_FOR_ALIASES = {
+    "default": "raw",
+    "raw": "raw",
+    "any": "raw",
+    "change": "raw",
+    "event": "raw",
+    "events": "raw",
+    "ac": "ac_change",
+    "ac_change": "ac_change",
+    "progress": "ac_change",
+    "meaningful": "ac_change",
+    "phase": "phase_change",
+    "phase_change": "phase_change",
+    "terminal": "terminal",
+    "done": "terminal",
+    "completion": "terminal",
+}
 
 
 def _normalize_job_view(value: object) -> str:
@@ -87,6 +104,15 @@ def _normalize_job_stream(value: object) -> str:
         if stripped:
             return _JOB_STREAM_ALIASES.get(stripped, "progress")
     return "progress"
+
+
+def _normalize_job_wait_for(value: object) -> str:
+    """Normalize requested job wait wakeup significance."""
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped:
+            return _JOB_WAIT_FOR_ALIASES.get(stripped, "raw")
+    return "raw"
 
 
 def _content_items_from_result_payload(
@@ -171,6 +197,78 @@ async def _query_latest_workflow_event(event_store: EventStore, execution_id: st
         limit=1,
     )
     return events[0] if events else None
+
+
+async def _query_execution_progress_at_cursor(
+    event_store: EventStore,
+    execution_id: str,
+    *,
+    cursor: int | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Return execution progress visible at ``cursor`` and the latest rowid read."""
+    events, event_cursor = await event_store.get_events_after(
+        "execution",
+        execution_id,
+        0,
+        max_row_id=cursor,
+    )
+    progress = dict(_EMPTY_PROGRESS)
+    workflow_event = next(
+        (event for event in reversed(events) if event.type == "workflow.progress.updated"),
+        None,
+    )
+    subtask_events = [
+        event
+        for event in events
+        if event.type
+        in {
+            "execution.node.created",
+            "execution.node.updated",
+            "execution.subtask.updated",
+        }
+    ]
+    subtask_summary = summarize_subtask_events(subtask_events)
+    subtask_progress = format_subtask_progress_summary(subtask_summary)
+    if subtask_summary:
+        progress.update(
+            {
+                "current_phase": "Sub-AC work",
+                "activity": subtask_progress or "running",
+                "sub_ac_completed": subtask_summary.get("completed_count"),
+                "sub_ac_total": subtask_summary.get("total_count"),
+                "sub_ac_executing": subtask_summary.get("executing_count"),
+                "sub_ac_pending": subtask_summary.get("pending_count"),
+                "sub_ac_failed": subtask_summary.get("failed_count"),
+            }
+        )
+    if workflow_event is not None:
+        data = workflow_event.data
+        progress.update(
+            {
+                "ac_completed": data.get("completed_count"),
+                "ac_total": data.get("total_count"),
+                "current_phase": data.get("current_phase") or "Working",
+                "activity": data.get("activity_detail") or data.get("activity") or "running",
+            }
+        )
+    return progress, event_cursor
+
+
+def _job_wait_progress_changed(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    wait_for: str,
+) -> bool:
+    """Return true when progress satisfies a filtered job_wait wakeup."""
+    if wait_for == "phase_change":
+        return before.get("current_phase") != after.get("current_phase")
+    if wait_for == "ac_change":
+        return any(
+            before.get(key) != after.get(key)
+            for key in ("ac_completed", "sub_ac_completed", "current_phase")
+        )
+    return False
 
 
 def _event_scope(event: BaseEvent) -> str:
@@ -960,6 +1058,18 @@ class JobWaitHandler:
                     required=False,
                     default="progress",
                 ),
+                MCPToolParameter(
+                    name="wait_for",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "'raw' (default) returns on any job event, preserving existing "
+                        "behavior; 'ac_change' waits for AC/Sub-AC/phase progress or "
+                        "terminal status; 'phase_change' waits for phase transitions "
+                        "or terminal status; 'terminal' waits only for terminal status."
+                    ),
+                    required=False,
+                    default="raw",
+                ),
             ),
         )
 
@@ -996,6 +1106,7 @@ class JobWaitHandler:
         timeout_seconds = timeout_result.value
         view = _normalize_job_view(arguments.get("view"))
         stream = _normalize_job_stream(arguments.get("stream"))
+        wait_for = _normalize_job_wait_for(arguments.get("wait_for"))
 
         try:
             if stream == "linked":
@@ -1009,7 +1120,23 @@ class JobWaitHandler:
                     job_id,
                     cursor=cursor,
                     timeout_seconds=timeout_seconds,
+                    wait_for=wait_for,
                 )
+                meaningful_execution_changed = False
+            elif wait_for != "raw":
+                (
+                    snapshot,
+                    changed,
+                    stream_cursor,
+                    meaningful_execution_changed,
+                ) = await self._wait_for_meaningful_change(
+                    job_id,
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                    wait_for=wait_for,
+                )
+                stream_events = []
+                stream_has_more = False
             else:
                 snapshot, changed = await self._job_manager.wait_for_change(
                     job_id,
@@ -1019,6 +1146,7 @@ class JobWaitHandler:
                 stream_events = []
                 stream_cursor = cursor
                 stream_has_more = False
+                meaningful_execution_changed = False
         except ValueError as exc:
             return Result.err(
                 MCPToolError(
@@ -1058,9 +1186,12 @@ class JobWaitHandler:
                 snapshot.links.execution_id,
                 cursor,
             )
-            execution_progress_changed = any(
-                event.type in _JOB_PROGRESS_EVENT_TYPES for event in execution_events
-            )
+            if wait_for == "raw":
+                execution_progress_changed = any(
+                    event.type in _JOB_PROGRESS_EVENT_TYPES for event in execution_events
+                )
+            else:
+                execution_progress_changed = meaningful_execution_changed
             response_cursor = max(response_cursor, execution_cursor)
             if response_cursor != snapshot.cursor:
                 snapshot = replace(snapshot, cursor=response_cursor)
@@ -1131,6 +1262,7 @@ class JobWaitHandler:
                     "changed": response_changed,
                     "view": view,
                     "stream": stream,
+                    "wait_for": wait_for,
                     "stream_events": stream_items,
                     "stream_has_more": stream_has_more,
                     **progress,
@@ -1138,15 +1270,73 @@ class JobWaitHandler:
             )
         )
 
+    async def _wait_for_meaningful_change(
+        self,
+        job_id: str,
+        *,
+        cursor: int,
+        timeout_seconds: int,
+        wait_for: str,
+    ) -> tuple[JobSnapshot, bool, int, bool]:
+        """Long-poll until a filtered progress signal or terminal job status."""
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        baseline_progress: dict[str, Any] | None = None
+        latest_execution_cursor = cursor
+
+        while True:
+            snapshot, job_changed = await self._job_manager.wait_for_change(
+                job_id,
+                cursor=cursor,
+                timeout_seconds=0,
+            )
+            if snapshot.is_terminal:
+                return snapshot, True, latest_execution_cursor, False
+
+            execution_changed = False
+            if wait_for != "terminal" and snapshot.links.execution_id:
+                if baseline_progress is None:
+                    baseline_progress, _baseline_cursor = await _query_execution_progress_at_cursor(
+                        self._event_store,
+                        snapshot.links.execution_id,
+                        cursor=cursor,
+                    )
+                (
+                    latest_progress,
+                    latest_execution_cursor,
+                ) = await _query_execution_progress_at_cursor(
+                    self._event_store,
+                    snapshot.links.execution_id,
+                )
+                execution_changed = _job_wait_progress_changed(
+                    baseline_progress,
+                    latest_progress,
+                    wait_for=wait_for,
+                )
+                if execution_changed:
+                    response_cursor = max(snapshot.cursor, latest_execution_cursor, cursor)
+                    if response_cursor != snapshot.cursor:
+                        snapshot = replace(snapshot, cursor=response_cursor)
+                    return snapshot, job_changed, latest_execution_cursor, True
+
+            if asyncio.get_running_loop().time() >= deadline:
+                response_cursor = max(snapshot.cursor, latest_execution_cursor, cursor)
+                if response_cursor != snapshot.cursor:
+                    snapshot = replace(snapshot, cursor=response_cursor)
+                return snapshot, False, latest_execution_cursor, False
+
+            await asyncio.sleep(0.5)
+
     async def _wait_for_linked_change(
         self,
         job_id: str,
         *,
         cursor: int,
         timeout_seconds: int,
+        wait_for: str,
     ) -> tuple[JobSnapshot, bool, list[BaseEvent], int, bool]:
         """Long-poll job plus linked child/session event streams."""
         deadline = asyncio.get_running_loop().time() + timeout_seconds
+        baseline_progress: dict[str, Any] | None = None
         while True:
             snapshot, changed = await self._job_manager.wait_for_change(
                 job_id,
@@ -1158,9 +1348,29 @@ class JobWaitHandler:
                 snapshot,
                 cursor,
             )
+            progress_changed = False
+            if wait_for != "raw" and wait_for != "terminal" and snapshot.links.execution_id:
+                if baseline_progress is None:
+                    baseline_progress, _baseline_cursor = await _query_execution_progress_at_cursor(
+                        self._event_store,
+                        snapshot.links.execution_id,
+                        cursor=cursor,
+                    )
+                (
+                    latest_progress,
+                    _latest_execution_cursor,
+                ) = await _query_execution_progress_at_cursor(
+                    self._event_store,
+                    snapshot.links.execution_id,
+                )
+                progress_changed = _job_wait_progress_changed(
+                    baseline_progress,
+                    latest_progress,
+                    wait_for=wait_for,
+                )
             if (
-                changed
-                or events
+                (wait_for == "raw" and (changed or events))
+                or (wait_for != "raw" and (snapshot.is_terminal or progress_changed))
                 or snapshot.is_terminal
                 or asyncio.get_running_loop().time() >= deadline
             ):
