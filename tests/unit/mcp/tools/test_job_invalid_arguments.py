@@ -88,7 +88,7 @@ async def test_job_result_invalid_handle_returns_structured_error(event_store) -
 
 
 @pytest.mark.asyncio
-async def test_job_result_rejects_expired_terminal_handle(event_store) -> None:
+async def test_job_result_returns_expired_terminal_handle_result(event_store) -> None:
     job_id = "job_expired_result"
     expired_at = datetime.now(UTC) - timedelta(hours=2)
     await event_store.append(
@@ -123,14 +123,9 @@ async def test_job_result_rejects_expired_terminal_handle(event_store) -> None:
 
     result = await handler.handle({"job_id": job_id})
 
-    assert result.is_err
-    assert result.error.tool_name == "ouroboros_job_result"
-    assert result.error.error_code == "job_handle_expired"
-    assert result.error.message == f"Job handle expired: {job_id}. Result unavailable."
-    assert result.error.details == {
-        "job_id": job_id,
-        "lifecycle_status": "expired",
-        "is_terminal": True,
-        "result_available": False,
-        "reason": "expired",
-    }
+    assert result.is_ok
+    assert result.value.content[0].text == "stale result"
+    assert result.value.meta["job_id"] == job_id
+    assert result.value.meta["lifecycle_status"] == "completed"
+    assert result.value.meta["is_terminal"] is True
+    assert result.value.meta["result_available"] is True

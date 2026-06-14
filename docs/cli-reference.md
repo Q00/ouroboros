@@ -120,15 +120,12 @@ not a successful `auto` result. Next steps are to inspect
 the detached auto flow or resume from the surfaced auto session, execution, or
 lineage handle when one is present. The CLI prints the stable cancellation
 output and exits non-zero because the terminal result is an error result.
-When `ouroboros job result JOB_ID` reports `expired`, the job is terminal
-tracked background work whose retained result is no longer available through
-that job handle. `ouroboros job status JOB_ID` still reports the stored terminal
-lifecycle status, while result retrieval returns stable expiration error
-details rather than a detached `auto` result. Next steps are to inspect any
-surfaced auto session, execution, or lineage handle, then resume from that
-handle or restart the detached auto flow when no recoverable handle is present.
-Unknown, expired, or otherwise unavailable handles fail through the CLI with a
-non-zero status and through MCP with an error response.
+When a terminal job is older than the in-memory handle TTL,
+`ouroboros job result JOB_ID` still retrieves the persisted terminal result for
+that job handle. `ouroboros job status JOB_ID` reports the stored terminal
+lifecycle status, and result retrieval returns the durable result artifact rather
+than an expiration error. Unknown or otherwise unavailable handles fail through
+the CLI with a non-zero status and through MCP with an error response.
 When CLI status cannot resolve the supplied handle, treat the detached work as
 `invalid` or unavailable rather than as running or completed. The stable
 observable status is the non-zero CLI exit plus the human-readable error for
@@ -161,7 +158,7 @@ Example expired CLI retrieval output:
 
 ```bash
 $ ouroboros job result job_auto_docs_expired
-Job handle expired: job_auto_docs_expired. Result unavailable.
+detached auto result artifact: expired seed.yaml
 ```
 
 > **`ooo auto` does not accept `--opencode-mode`.** OpenCode mode is

@@ -150,23 +150,6 @@ def _read_owner_identity(created_data: dict[str, Any]) -> tuple[int | None, floa
     return pid, start
 
 
-def is_terminal_job_expired(
-    snapshot: JobSnapshot,
-    *,
-    now: datetime | None = None,
-    ttl: timedelta | None = None,
-) -> bool:
-    """Return true when a terminal job handle is past the retrieval TTL."""
-    if not snapshot.is_terminal:
-        return False
-    ttl = ttl if ttl is not None else _JOB_TTL
-    current = now or datetime.now(UTC)
-    updated = snapshot.updated_at
-    if updated.tzinfo is None:
-        updated = updated.replace(tzinfo=UTC)
-    return updated < current - ttl
-
-
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
     """Drain a detached task result so forced cleanup does not log noise."""
     try:
