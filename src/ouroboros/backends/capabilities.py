@@ -328,6 +328,21 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # ourocode is an LLM-completion backend only: it streams a single Claude
+        # turn over ACP (`ourocode --acp`, its OAuth `:claude_api`) with no tool
+        # use, so it backs completions (interview/seed/qa/evaluate) but NOT the
+        # agentic orchestrator runtime or interview driving. SDK-free and
+        # `claude -p`-free Claude.
+        name="ourocode",
+        supports_runtime=False,
+        supports_llm=True,
+        supports_interview_driver=False,
+        switchable_runtime=False,
+        cli_name="ourocode",
+        cli_config_key="ourocode_cli_path",
+        supports_tool_envelope=False,
+    ),
+    BackendCapability(
         name="litellm",
         aliases=("openai", "openrouter"),
         supports_llm=True,

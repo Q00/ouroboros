@@ -1,0 +1,100 @@
+"""Tests for the ourocode LLM adapter (ACP-backed completion path)."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from ouroboros.providers.base import CompletionConfig, Message, MessageRole
+from ouroboros.providers.ourocode_acp_client import AcpClientError, AcpTurnResult
+from ouroboros.providers.ourocode_llm_adapter import OurocodeLLMAdapter
+
+
+@pytest.mark.asyncio
+async def test_complete_returns_completion_response() -> None:
+    adapter = OurocodeLLMAdapter()
+    turn = AcpTurnResult(text="hi there", stop_reason="end_turn", session_id="s1")
+    with (
+        patch.object(OurocodeLLMAdapter, "_compose_prompt", return_value="composed"),
+        patch(
+            "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+            new=AsyncMock(return_value=turn),
+        ),
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="claude-sonnet-4-6"),
+        )
+
+    assert result.is_ok
+    response = result.value
+    assert response.content == "hi there"
+    assert response.model == "claude-sonnet-4-6"
+    # ACP carries no token usage — honestly zero, not fabricated.
+    assert response.usage.total_tokens == 0
+    assert response.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_not_signed_in_to_provider_error() -> None:
+    adapter = OurocodeLLMAdapter()
+    err = AcpClientError("not signed in", error_type="not_signed_in")
+    with patch(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+        new=AsyncMock(side_effect=err),
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="claude-sonnet-4-6"),
+        )
+
+    assert result.is_err
+    assert result.error.provider == "ourocode"
+    assert result.error.status_code == 401
+    assert result.error.details["error_type"] == "not_signed_in"
+
+
+def test_compose_prompt_single_user_message() -> None:
+    composed = OurocodeLLMAdapter._compose_prompt(
+        [Message(role=MessageRole.USER, content="just do it")]
+    )
+    assert composed == "just do it"
+
+
+def test_compose_prompt_includes_system_and_history() -> None:
+    composed = OurocodeLLMAdapter._compose_prompt(
+        [
+            Message(role=MessageRole.SYSTEM, content="be terse"),
+            Message(role=MessageRole.USER, content="q1"),
+            Message(role=MessageRole.ASSISTANT, content="a1"),
+            Message(role=MessageRole.USER, content="q2"),
+        ]
+    )
+    assert "## System Instructions\nbe terse" in composed
+    assert "User: q1" in composed
+    assert "Assistant: a1" in composed
+    assert "User: q2" in composed
+
+
+@pytest.mark.asyncio
+async def test_complete_via_fake_acp_end_to_end(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end through the real ACP client against the fake server."""
+    from pathlib import Path
+
+    fake = Path(__file__).parents[2] / "fixtures" / "fake_ourocode_acp.py"
+    monkeypatch.setenv("FAKE_ACP_MODE", "ok")
+    adapter = OurocodeLLMAdapter(cli_path=fake, cwd=tmp_path, timeout=20.0)
+    result = await adapter.complete(
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        config=CompletionConfig(model="claude-sonnet-4-6"),
+    )
+    assert result.is_ok
+    assert result.value.content == "Hello, world!"
+
+
+def test_adapter_coalesces_none_timeout_to_bounded_default() -> None:
+    """The factory passes timeout=None; the adapter must never store None
+    (which would disable the per-turn wait_for guard)."""
+    assert OurocodeLLMAdapter(timeout=None)._timeout == 600.0
+    assert OurocodeLLMAdapter(timeout=12.0)._timeout == 12.0
