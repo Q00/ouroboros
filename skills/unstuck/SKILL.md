@@ -137,7 +137,7 @@ The handler ran the prompt builder internally and returned ready-to-use markdown
 
 ##### Solo (any runtime)
 
-Present the persona's approach summary, reframing prompt, questions to consider, and a `📍 Next:` suggestion routing back to the workflow.
+Present the persona's approach summary, reframing prompt, questions to consider, and a `◆ Current state → next:` suggestion routing back to the workflow.
 
 ##### Debate, runtime supports sub-agent dispatch (Claude Code Task tool, Codex CLI sub-agent, etc.)
 
@@ -179,7 +179,7 @@ Do **not** auto-emit a verdict. Present:
 <your single best read of the debate, clearly labeled as your
 recommendation, not a verdict>
 
-📍 Next: pick an option, or `ooo lateral debate <subset>` to drill into a disagreement
+◆ Current state → next: pick an option, or `ooo lateral debate <subset>` to drill into a disagreement
 ```
 
 The verdict is the user's. Never auto-progress to the next workflow step on the user's behalf — wait for their choice.
@@ -211,7 +211,7 @@ User: I'm stuck on the database schema design.
 Start with exactly 2 tables. If you can't build the core feature
 with 2 tables, you haven't found the core feature yet.
 
-📍 Next: try this, then `ooo run` — or `ooo interview` to re-examine.
+◆ Current state → next: try this, then `ooo run` — or `ooo interview` to re-examine.
 ```
 
 ### Debate (default — Claude Code / Codex CLI)
@@ -248,7 +248,7 @@ with 2 tables, you haven't found the core feature yet.
 Lean toward C+E: validate the need (E) before scoping (C); A and B
 both assume the feature is wanted.
 
-📍 Next: pick an option, or `ooo lateral debate hacker contrarian` to drill in.
+◆ Current state → next: pick an option, or `ooo lateral debate hacker contrarian` to drill in.
 ```
 
 ### Autonomous chain from interview
@@ -264,3 +264,13 @@ both assume the feature is wanted.
 [User picks an option — or asks for a follow-up debate]
 [Main session resumes the interview with the chosen framing]
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

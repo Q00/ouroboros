@@ -353,3 +353,13 @@ Next steps:
 - **Non-destructive**: Creates new issues only, never modifies existing ones
 - **Cross-repo support**: All `gh` commands use `-R <TARGET_REPO>`, so seeds can be published to any repository the user has write access to
 - **Works with both seed formats**: YAML seeds from `ooo seed` and JSON seeds from `ooo pm` are both supported — the parser auto-detects format by file extension
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

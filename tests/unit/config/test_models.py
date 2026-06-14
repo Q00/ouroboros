@@ -271,15 +271,18 @@ class TestExecutionConfig:
         config = ExecutionConfig(
             max_iterations_per_ac=20,
             retrospective_interval=5,
+            tui_autolaunch=True,
         )
         assert config.max_iterations_per_ac == 20
         assert config.retrospective_interval == 5
+        assert config.tui_autolaunch is True
 
     def test_execution_config_defaults(self) -> None:
         """ExecutionConfig has sensible defaults."""
         config = ExecutionConfig()
         assert config.max_iterations_per_ac == 10
         assert config.retrospective_interval == 3
+        assert config.tui_autolaunch is False
 
 
 class TestResilienceConfig:
