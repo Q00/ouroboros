@@ -262,32 +262,34 @@ Frontier → Standard → Frugal
 
 Similar task patterns (Jaccard similarity >= 0.80) inherit tier preferences from previously successful tasks.
 
-### Phase 2: Double Diamond
+### Phase 2: Execution
 
-The execution phase uses the Double Diamond design process with recursive decomposition.
+The execution phase fans seed acceptance criteria out to agent runtimes,
+optionally splitting an AC into sub-ACs when it genuinely spans multiple
+independently-verifiable units.
+
+> **Note:** an earlier methodology-first executor (`execution/double_diamond.py`
+> + `execution/decomposition.py` + `execution/atomicity.py`) was removed once it
+> was found to have no live caller. Its philosophy (understand-then-judge,
+> disciplined recursion) survives as the live executor's discipline; the modules
+> below are the live path.
 
 **Components:**
-- `execution/double_diamond.py` - Four-phase execution cycle
-- `execution/decomposition.py` - Hierarchical task decomposition
-- `execution/atomicity.py` - Atomicity detection for tasks
-- `execution/subagent.py` - Isolated subagent execution
-
-**Four Phases:**
-1. **Discover** (divergent) - Explore the problem space broadly
-2. **Define** (convergent) - Converge on the core problem
-3. **Design** (divergent) - Explore solution approaches
-4. **Deliver** (convergent) - Converge on implementation
+- `orchestrator/parallel_executor.py` - Live recursive AC executor (dependency-staged fan-out, profile-based decomposition, evidence-gated delivery)
+- `orchestrator/decomposition_params.py` - Profile-driven decomposition prompts (axis / `min_unit` / branching)
+- `orchestrator/runner.py` - Orchestration entry point and dependency analysis
 
 **Recursive Decomposition:**
 
-Each AC goes through Discover and Define, then atomicity is checked:
-- **Atomic** (single-focused, 1-2 files) → proceed to Design and Deliver
-- **Non-atomic** → decompose into 2-5 child ACs, recurse on each child
+Each AC defaults to **atomic** execution. It is split into
+`MIN_SUB_ACS`–`MAX_SUB_ACS` (2–5) sub-ACs only when it genuinely spans multiple
+units along the profile's axis — splitting is conservative because each sub-AC
+costs a full agent session. Sub-ACs recurse within a bounded depth.
 
 Key constraints:
-- `MAX_DEPTH = 5` — hard recursion limit
-- `COMPRESSION_DEPTH = 3` — context truncated to 500 chars at depth 3+
-- Children are dependency-sorted and executed in parallel within each level
+- `DEFAULT_MAX_DECOMPOSITION_DEPTH = 2` — soft depth cap (env/CLI overridable via `OUROBOROS_MAX_DECOMPOSITION_DEPTH`); at the cap a non-atomic unit executes as atomic with a recorded depth-warning
+- Failures are handled by an attempt-then-bounce loop (bounded retries + evaluation feedback) rather than ever-deeper pre-execution splitting
+- Children are dependency-sorted and executed within each level
 
 For the current recursive execution flow, see [parallel_executor.py](../src/ouroboros/orchestrator/parallel_executor.py) and [runner.py](../src/ouroboros/orchestrator/runner.py).
 

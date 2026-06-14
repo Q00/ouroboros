@@ -156,28 +156,24 @@ Downgrade: 5 consecutive successes triggers downgrade
 
 Similar task patterns (Jaccard similarity >= 0.80) inherit tier preferences.
 
-### Phase 2: Double Diamond
+### Phase 2: Execution
 
 Components:
-  execution/double_diamond.py  Four-phase execution cycle
-  execution/decomposition.py   Hierarchical task decomposition
-  execution/atomicity.py       Atomicity detection
-  execution/subagent.py        Isolated subagent execution
+  orchestrator/parallel_executor.py    Live recursive AC executor (fan-out, decomposition, evidence-gated delivery)
+  orchestrator/decomposition_params.py Profile-driven decomposition prompts (axis / min_unit / branching)
+  orchestrator/runner.py               Orchestration entry point + dependency analysis
 
-Four phases:
-  1. Discover (divergent) — Explore problem space
-  2. Define (convergent) — Converge on core problem
-  3. Design (divergent) — Explore solution approaches
-  4. Deliver (convergent) — Converge on implementation
+(The earlier execution/double_diamond.py + decomposition.py + atomicity.py stack
+was removed once found to have no live caller; parallel_executor.py is the live path.)
 
 Recursive decomposition:
-  Each AC -> Discover + Define -> atomicity check
-  Atomic (single-focused, 1-2 files) -> Design + Deliver
-  Non-atomic -> decompose into 2-5 child ACs, recurse
+  Each AC defaults to ATOMIC; split into 2-5 sub-ACs only when it genuinely
+  spans multiple units along the profile axis (each sub-AC costs a full agent
+  session, so splitting is conservative). Sub-ACs recurse within a bounded depth.
 
 Constraints:
-  MAX_DEPTH = 5           hard recursion limit
-  COMPRESSION_DEPTH = 3   context truncated to 500 chars at depth 3+
+  DEFAULT_MAX_DECOMPOSITION_DEPTH = 2   soft depth cap (OUROBOROS_MAX_DECOMPOSITION_DEPTH override)
+  Failures use an attempt-then-bounce loop, not ever-deeper pre-execution splits
 
 ### Phase 3: Resilience
 
