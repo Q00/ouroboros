@@ -446,6 +446,31 @@ class TestSeed:
         assert reconstructed.ontology_schema.name == full_seed.ontology_schema.name
         assert reconstructed.metadata.ambiguity_score == full_seed.metadata.ambiguity_score
 
+    def test_seed_from_dict_coerces_string_principles_and_conditions(self) -> None:
+        """Seed.from_dict() accepts prose lists from hand-written seed YAML."""
+        reconstructed = Seed.from_dict(
+            {
+                "goal": "Build a CLI task manager",
+                "ontology_schema": {
+                    "name": "TaskManager",
+                    "description": "Task management domain",
+                },
+                "evaluation_principles": ["Prefer simple code"],
+                "exit_conditions": ["All invariant tests are green"],
+                "metadata": {"ambiguity_score": 0.15},
+            }
+        )
+
+        assert reconstructed.evaluation_principles[0].name == "principle_1"
+        assert reconstructed.evaluation_principles[0].description == "Prefer simple code"
+        assert reconstructed.evaluation_principles[0].weight == 1.0
+        assert reconstructed.exit_conditions[0].name == "condition_1"
+        assert reconstructed.exit_conditions[0].description == "All invariant tests are green"
+        assert (
+            reconstructed.exit_conditions[0].evaluation_criteria
+            == "All invariant tests are green"
+        )
+
     def test_seed_roundtrip_serialization(self, full_seed: Seed) -> None:
         """Seed can roundtrip through dict serialization."""
         seed_dict = full_seed.to_dict()
