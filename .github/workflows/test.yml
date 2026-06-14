@@ -72,7 +72,7 @@ jobs:
           path: coverage
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6.0.1
+        uses: codecov/codecov-action@v7.0.0
         with:
           files: ./coverage/coverage-3.12/coverage.xml,./coverage/coverage-3.13/coverage.xml,./coverage/coverage-3.14/coverage.xml
           use_oidc: true
