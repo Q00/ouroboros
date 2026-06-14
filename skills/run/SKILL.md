@@ -26,6 +26,8 @@ Execute a Seed specification through the Ouroboros workflow engine.
 3. **Execution**: The orchestrator runs the workflow with PAL routing
 4. **Progress**: Real-time progress updates via session tracking
 5. **Result**: Execution summary with pass/fail status
+6. **Verification status**: Run-only results are `executed_unverified` until
+   `ooo evaluate <session_id>` performs formal 3-stage verification
 
 ## Instructions
 
@@ -238,7 +240,9 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 
 10. **Post-execution QA** (automatic):
    `ouroboros_start_execute_seed` automatically runs QA after successful execution.
-   The QA verdict is included in the final job result text.
+   The QA verdict is included in the final job result text. This QA check is
+   **not** the formal 3-stage evaluator, so the run result remains
+   `executed_unverified` and `evaluated: false` until `ooo evaluate` runs.
    To skip: pass `skip_qa: true` to the tool.
 
    Present QA verdict with next step:
@@ -289,6 +293,8 @@ Result:
   Goal: Build a CLI task manager
   Duration: 45.2s
   Messages Processed: 12
+  Verification Status: executed_unverified
+  Formal Evaluation: NOT evaluated by the 3-stage evaluator
 
   Next: `ooo evaluate orch_x1y2z3` for formal 3-stage verification
 ```

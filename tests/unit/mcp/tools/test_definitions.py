@@ -322,6 +322,91 @@ class TestExecuteSeedHandler:
         assert captured_runtime_kwargs["model"] == "openai-codex/gpt-5.4-mini"
         assert captured_runtime_kwargs["llm_backend"] == "claude_code"
 
+    async def test_handle_marks_completed_run_as_unverified_without_formal_evaluation(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A completed execute_seed run is not the same as 3-stage evaluation."""
+        running_tracker = SessionTracker.create(
+            "exec_verify",
+            "test-seed-123",
+            session_id="orch_verify",
+        )
+        completed_tracker = running_tracker.with_status(SessionStatus.COMPLETED)
+        workspace = SimpleNamespace(
+            effective_cwd="/tmp/ouroboros-worktree",
+            worktree_path="/tmp/ouroboros-worktree",
+            branch="ooo/test",
+            lock_path="/tmp/ouroboros.lock",
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "orch_verify"
+                return Result.ok(completed_tracker)
+
+            async def mark_failed(self, session_id: str, *, error_message: str) -> None:
+                raise AssertionError(f"unexpected failure mark for {session_id}: {error_message}")
+
+        class FakeRunner:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def prepare_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(running_tracker)
+
+            async def execute_precreated_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(
+                    SimpleNamespace(
+                        success=True,
+                        execution_id="exec_verify",
+                        summary={},
+                        final_message="done",
+                    )
+                )
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        monkeypatch.setattr("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner", FakeRunner)
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+            lambda **_kwargs: SimpleNamespace(runtime_backend="test"),
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.maybe_prepare_task_workspace",
+            lambda *_args, **_kwargs: workspace,
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.release_lock", lambda *_args: None
+        )
+
+        handler = ExecuteSeedHandler(event_store=memory_event_store)
+
+        result = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "skip_qa": True},
+            execution_id="exec_verify",
+            session_id_override="orch_verify",
+            synchronous=True,
+        )
+
+        assert result.is_ok
+        assert result.value.is_error is False
+        assert result.value.meta["status"] == "completed"
+        assert result.value.meta["success"] is True
+        assert result.value.meta["evaluated"] is False
+        assert result.value.meta["verification_status"] == "executed_unverified"
+        assert result.value.meta["formal_evaluation_required"] is True
+        assert result.value.meta["next_step"] == "ooo evaluate orch_verify"
+        assert "Verification Status: executed_unverified" in result.value.text_content
+        assert "Formal Evaluation: NOT evaluated" in result.value.text_content
+        assert "Next: ooo evaluate orch_verify" in result.value.text_content
+
     async def test_handle_rejects_removed_legacy_execution_mode(self) -> None:
         """MCP execute_seed matches the CLI removal of the legacy selector."""
         handler = ExecuteSeedHandler()
@@ -1811,6 +1896,34 @@ class TestAsyncJobHandlers:
         assert result.is_ok
         assert result.value.meta["execution_id"].startswith("exec_")
         assert result.value.meta["session_id"].startswith("orch_")
+        assert result.value.meta["evaluated"] is False
+        assert result.value.meta["verification_status"] == "executed_unverified"
+        assert result.value.meta["formal_evaluation_required"] is True
+        assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
+        assert "Verification Status: executed_unverified" in result.value.text_content
+        assert "Formal Evaluation: NOT evaluated" in result.value.text_content
+        assert "Next: ooo evaluate orch_" in result.value.text_content
+
+    async def test_start_execute_seed_plugin_marks_delegation_unverified(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Plugin-dispatched execute runs are delegated but still not formally evaluated."""
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_ok
+        assert result.value.meta["job_id"] is None
+        assert result.value.meta["status"] == "delegated_to_plugin"
+        assert result.value.meta["evaluated"] is False
+        assert result.value.meta["verification_status"] == "delegated_unverified"
+        assert result.value.meta["formal_evaluation_required"] is True
+        assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
 
     async def test_start_execute_seed_plugin_rejects_removed_legacy_execution_mode(
         self,
