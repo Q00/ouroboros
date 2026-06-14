@@ -35,6 +35,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -52,6 +53,11 @@ from ouroboros.plugin.hooks import (
     HOOK_COMPLETED_EVENT,
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
+    HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+    HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
+    HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+    HOOK_TOOL_INTERCEPT_SCOPE,
+    HOOK_TOOL_OBSERVE_RECORDED_EVENT,
     TERMINAL_OBSERVABILITY_HOOK_KINDS,
     HookFailurePolicy,
     HookKind,
@@ -323,7 +329,7 @@ def _event_envelope(
 
 
 def _matching_hooks(manifest: PluginManifest, hook_kind: HookKind) -> tuple[HookSpec, ...]:
-    if manifest.schema_version != "0.3":
+    if manifest.schema_version not in {"0.3", "0.4"}:
         return ()
     return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
 
@@ -1272,10 +1278,523 @@ def invoke_plugin(
     )
 
 
+# ---------------------------------------------------------------------------
+# #939 PR F-2 — tool-call hook dispatcher helpers
+#
+# F-1 (#1277) reserved the ``before_tool_call`` / ``after_tool_call`` hook
+# kinds, the ``plugin:tool:intercept`` / ``plugin:tool:observe`` scopes, and
+# the four ``plugin.tool.*`` audit event names, but left end-to-end tool-call
+# hook firing inert. This section provides the dispatcher specified by
+# ``docs/rfc/plugin-tool-call-hook-contract.md`` (§3 payload, §4 scopes,
+# §5 failure policy, §6 audit events).
+#
+# Unlike ``invoke_plugin`` (which wraps a single plugin command subprocess),
+# tool-call hooks fire *during* a plugin-mediated tool invocation, so the
+# dispatcher is a module-level helper a tool-mediation caller must invoke per
+# tool call. ``invoke_plugin`` does not call these helpers yet, so v0.4
+# manifests can declare the hooks and tests can exercise the helper contract,
+# but production command dispatch remains inert until the real mediation path
+# is wired through this boundary. The helpers correlate back to the parent
+# ``plugin.invoked`` run via ``correlation_id`` and pair ``before``/``after``
+# callbacks via ``invocation_id``.
+# ---------------------------------------------------------------------------
+
+TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION = "0.4"
+
+#: Max length of the ``args_preview`` field that crosses the trust boundary
+#: into a tool-call hook process (RFC § 3.1). Longer previews are truncated
+#: with a single-character ellipsis sentinel.
+TOOL_CALL_ARGS_PREVIEW_LIMIT = 256
+
+#: Environment variable used to deliver the bounded, redacted tool-call hook
+#: payload (digests + bounded preview only — never raw args/output) to the
+#: hook subprocess, mirroring the other ``OUROBOROS_PLUGIN_*`` runtime env
+#: contracts. RFC § 3: only digests and the bounded preview cross the trust
+#: boundary.
+TOOL_CALL_HOOK_PAYLOAD_ENV = "OUROBOROS_PLUGIN_TOOL_CALL_PAYLOAD"
+
+
+@dataclass(frozen=True)
+class ToolCallDecision:
+    """Outcome of dispatching tool-call hooks for one tool invocation.
+
+    ``allowed`` is ``False`` only when an ``intercept`` ``before_tool_call``
+    hook vetoes the call — an explicit non-zero return, or a ``fail_closed``
+    intercept hook that errored (RFC § 6 ``plugin.tool.intercept.blocked``).
+    ``after_tool_call`` dispatch never blocks and always reports
+    ``allowed=True``. ``events`` carries the audit events emitted (also pushed
+    to the ``event_sink``) so in-process callers can inspect the decision.
+    """
+
+    allowed: bool
+    status: Literal["allowed", "blocked"]
+    message: str = ""
+    events: tuple[dict, ...] = field(default_factory=tuple)
+
+
+def _bounded_preview(text: str, limit: int = TOOL_CALL_ARGS_PREVIEW_LIMIT) -> str:
+    """Truncate ``text`` to ``limit`` chars with a ``…`` sentinel (RFC § 3.1)."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+_SECRET_PREVIEW_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Bearer\s+[^\"'\s,}\]]+"),
+    re.compile(r"gh[oprsu]_[A-Za-z0-9]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+)
+_SECRET_PREVIEW_NAMED_VALUE_RE = re.compile(
+    r"(?i)([\"']?\b(?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|password|"
+    r"passwd|secret|client[_-]?secret|authorization|bearer)\b[\"']?\s*[:=]\s*[\"']?)"
+    r"([^\"'\s,}\]]+)"
+)
+_SECRET_PREVIEW_FLAG_VALUE_RE = re.compile(
+    r"(?i)(--(?:token|password|passwd|api-key|apikey|secret|auth|authorization|"
+    r"client-secret|access-token|refresh-token|bearer|credential|credentials)"
+    r"(?:=|\s+))([^\"'\s]+)"
+)
+
+
+def _redact_tool_call_args_preview(text: str) -> str:
+    """Redact secret-shaped before-tool-call previews at the hook boundary."""
+
+    redacted = _SECRET_PREVIEW_NAMED_VALUE_RE.sub(rf"\1{_REDACTED}", text)
+    redacted = _SECRET_PREVIEW_FLAG_VALUE_RE.sub(rf"\1{_REDACTED}", redacted)
+    for pattern in _SECRET_PREVIEW_VALUE_PATTERNS:
+        redacted = pattern.sub(_REDACTED, redacted)
+    return redacted
+
+
+def _matching_tool_call_hooks(
+    manifest: PluginManifest, hook_kind: HookKind
+) -> tuple[HookSpec, ...]:
+    """Return v0.4 manifest hooks declaring ``hook_kind``.
+
+    Tool-call hooks are a v0.4 vocabulary addition; v0.1/0.2/0.3 manifests
+    never carry them, so any other schema version matches nothing.
+    """
+    if manifest.schema_version != "0.4":
+        return ()
+    return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
+
+
+def _is_intercept_hook(hook: HookSpec) -> bool:
+    """True iff ``hook`` holds ``plugin:tool:intercept`` (may veto a call)."""
+    return HOOK_TOOL_INTERCEPT_SCOPE in hook.permissions
+
+
+def _unauthorized_intercept_tool_permissions(
+    manifest: PluginManifest, tool_permissions: Iterable[str]
+) -> tuple[str, ...]:
+    """Return current tool scopes not covered by the firewall trust gate.
+
+    Tool-call intercept authority is two-part: a hook must hold
+    ``plugin:tool:intercept`` and the plugin invocation must already be
+    authorized for every permission required by the current tool call. The
+    firewall trust gate authorizes required top-level manifest permissions, so
+    an intercept subprocess cannot run for scopes outside that required set.
+    """
+    required_permissions = frozenset(_required_permissions(manifest))
+    return tuple(scope for scope in tool_permissions if scope not in required_permissions)
+
+
+def _coerce_bytes(value: object) -> bytes:
+    """Normalize a runner's stdout/stderr return shape to ``bytes``."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="surrogateescape")
+    return b""
+
+
+def _tool_hook_runtime_env(
+    manifest: PluginManifest, plugin_home: Path | None, payload_json: str
+) -> dict[str, str]:
+    """Build the hook subprocess env, carrying only the bounded payload."""
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    workdir = Path.cwd()
+    env["OUROBOROS_PLUGIN_WORKDIR"] = str(workdir)
+    env["OUROBOROS_PLUGIN_OUTPUT_DIR"] = str(
+        workdir / ".ouroboros" / "plugin-artifacts" / manifest.name
+    )
+    if plugin_home is not None:
+        env["OUROBOROS_PLUGIN_HOME"] = str(plugin_home)
+    env[TOOL_CALL_HOOK_PAYLOAD_ENV] = payload_json
+    return env
+
+
+def _run_tool_call_hook(
+    hook: HookSpec,
+    *,
+    plugin_home: Path | None,
+    runner: Callable[..., subprocess.CompletedProcess],
+    env: dict[str, str],
+) -> tuple[str, dict[str, str]]:
+    """Run one tool-call hook subprocess.
+
+    Returns ``(hook_error, provenance)``. ``hook_error`` is empty on a clean
+    (exit 0) run; otherwise it is a bounded human-readable cause. The
+    provenance dict carries only string values (returncode + output digests)
+    so it satisfies the audit envelope's ``dict[str, str]`` contract.
+    """
+    provenance: dict[str, str] = {}
+    try:
+        hook_argv = shlex.split(hook.entrypoint.command)
+    except ValueError as exc:
+        return f"hook entrypoint is not parseable: {exc}", provenance
+    if not hook_argv:
+        return "hook entrypoint command is empty after tokenization", provenance
+    try:
+        completed = runner(
+            hook_argv,
+            capture_output=True,
+            check=False,
+            timeout=_hook_timeout_seconds(hook),
+            cwd=str(plugin_home) if plugin_home is not None else None,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        provenance["stdout_sha256"] = hashlib.sha256(_coerce_bytes(exc.stdout)).hexdigest()
+        provenance["stderr_sha256"] = hashlib.sha256(_coerce_bytes(exc.stderr)).hexdigest()
+        return (
+            f"hook {hook.name} timed out after {_hook_timeout_seconds(hook):g}s: "
+            f"{type(exc).__name__}",
+            provenance,
+        )
+    except OSError as exc:
+        return f"hook {hook.name} failed to start: {type(exc).__name__}: {exc}", provenance
+    stdout = _coerce_bytes(completed.stdout)
+    stderr = _coerce_bytes(completed.stderr)
+    provenance["returncode"] = str(completed.returncode)
+    provenance["stdout_sha256"] = hashlib.sha256(stdout).hexdigest()
+    provenance["stderr_sha256"] = hashlib.sha256(stderr).hexdigest()
+    if completed.returncode != 0:
+        return f"hook {hook.name} exited with code {completed.returncode}", provenance
+    return "", provenance
+
+
+def dispatch_before_tool_call(
+    *,
+    manifest: PluginManifest,
+    tool: str,
+    args_digest: str,
+    args_preview: str,
+    correlation_id: str,
+    invocation_id: str,
+    event_sink: EventSink,
+    tool_permissions: Iterable[str] | None = None,
+    namespace: str = "",
+    command_name: str = "",
+    trust_state: str = "trusted",
+    plugin_home: Path | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess] | None = None,
+) -> ToolCallDecision:
+    """Dispatch ``before_tool_call`` hooks for one plugin-mediated tool call.
+
+    Mirrors the lifecycle-hook precedent (``_run_lifecycle_hooks``): an
+    ``intercept`` hook (holding ``plugin:tool:intercept``) may veto the call
+    when it returns non-zero, but only after the current tool permission set is
+    covered by required top-level permissions that passed the firewall trust
+    gate. A ``fail_closed`` intercept authorization or subprocess failure
+    blocks; a ``fail_open`` intercept failure is recorded as
+    ``plugin.hook.failed`` and the call proceeds. ``observe``-only hooks never
+    block. Raw arguments never reach the hook — only the digest and the bounded
+    preview cross the trust boundary (RFC § 3).
+    """
+    emitted: list[dict] = []
+    runner = subprocess_runner or subprocess.run
+    tool_permissions_were_provided = tool_permissions is not None
+    current_tool_permissions = tuple(tool_permissions or ())
+
+    def _emit(event: dict) -> None:
+        emitted.append(event)
+        event_sink(event)
+
+    payload = {
+        "tool": tool,
+        "args_digest": args_digest,
+        "args_preview": _bounded_preview(_redact_tool_call_args_preview(args_preview)),
+        "correlation_id": correlation_id,
+        "invocation_id": invocation_id,
+        "permissions": list(current_tool_permissions),
+    }
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    env = _tool_hook_runtime_env(manifest, plugin_home, payload_json)
+
+    for hook in _matching_tool_call_hooks(manifest, HookKind.BEFORE_TOOL_CALL):
+        intercept = _is_intercept_hook(hook)
+        provenance: dict[str, str] = {
+            "correlation_id": correlation_id,
+            "invocation_id": invocation_id,
+            "hook_name": hook.name,
+            "tool": tool,
+            "args_digest": args_digest,
+            "args_preview": payload["args_preview"],
+            "failure_policy": hook.failure_policy,
+            "permissions": json.dumps(
+                payload["permissions"], sort_keys=True, separators=(",", ":")
+            ),
+            "scope": "intercept" if intercept else "observe",
+        }
+        if intercept:
+            _emit(
+                _event_envelope(
+                    event_type=HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=None,
+                    trust_state=trust_state,
+                    permissions_used=hook.permissions,
+                    provenance=provenance,
+                    schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                )
+            )
+            if not tool_permissions_were_provided:
+                hook_error = (
+                    "intercept hook requires explicit current tool permissions; "
+                    "pass tool_permissions=... or use observe-only hooks for "
+                    "permissionless dispatch"
+                )
+                provenance["missing_tool_permissions"] = "omitted"
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=None,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={"status": "blocked", "message": hook_error},
+                        provenance=provenance,
+                        schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                return ToolCallDecision(
+                    allowed=False,
+                    status="blocked",
+                    message=hook_error,
+                    events=tuple(emitted),
+                )
+            unauthorized_permissions = _unauthorized_intercept_tool_permissions(
+                manifest, current_tool_permissions
+            )
+            if unauthorized_permissions:
+                hook_error = (
+                    "intercept hook is not authorized for current tool permissions: "
+                    + ", ".join(unauthorized_permissions)
+                )
+                provenance["missing_tool_permissions"] = json.dumps(
+                    list(unauthorized_permissions), sort_keys=True, separators=(",", ":")
+                )
+                if hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value:
+                    _emit(
+                        _event_envelope(
+                            event_type=HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                            manifest=manifest,
+                            namespace=namespace,
+                            command_name=command_name,
+                            argv=None,
+                            trust_state=trust_state,
+                            permissions_used=hook.permissions,
+                            result={"status": "blocked", "message": hook_error},
+                            provenance=provenance,
+                            schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                        )
+                    )
+                    return ToolCallDecision(
+                        allowed=False,
+                        status="blocked",
+                        message=hook_error,
+                        events=tuple(emitted),
+                    )
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_FAILED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=None,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={"status": "failed", "message": hook_error},
+                        provenance=provenance,
+                        schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                continue
+        hook_error, run_provenance = _run_tool_call_hook(
+            hook, plugin_home=plugin_home, runner=runner, env=env
+        )
+        provenance.update(run_provenance)
+
+        if hook_error:
+            blocks_call = intercept and hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value
+            if blocks_call:
+                _emit(
+                    _event_envelope(
+                        event_type=HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
+                        manifest=manifest,
+                        namespace=namespace,
+                        command_name=command_name,
+                        argv=None,
+                        trust_state=trust_state,
+                        permissions_used=hook.permissions,
+                        result={"status": "blocked", "message": hook_error},
+                        provenance=provenance,
+                        schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                    )
+                )
+                return ToolCallDecision(
+                    allowed=False,
+                    status="blocked",
+                    message=hook_error,
+                    events=tuple(emitted),
+                )
+            # fail_open intercept failure, or any observe-class failure: the
+            # tool call is not masked. Reuse the existing plugin.hook.failed
+            # event rather than a parallel tool-specific one (RFC § 6).
+            _emit(
+                _event_envelope(
+                    event_type=HOOK_FAILED_EVENT,
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=None,
+                    trust_state=trust_state,
+                    permissions_used=hook.permissions,
+                    result={"status": "failed", "message": hook_error},
+                    provenance=provenance,
+                    schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                )
+            )
+            continue
+
+        _emit(
+            _event_envelope(
+                event_type=(
+                    HOOK_TOOL_INTERCEPT_COMPLETED_EVENT
+                    if intercept
+                    else HOOK_TOOL_OBSERVE_RECORDED_EVENT
+                ),
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=None,
+                trust_state=trust_state,
+                permissions_used=hook.permissions,
+                provenance=provenance,
+                schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+            )
+        )
+
+    return ToolCallDecision(allowed=True, status="allowed", events=tuple(emitted))
+
+
+def dispatch_after_tool_call(
+    *,
+    manifest: PluginManifest,
+    tool: str,
+    status: str,
+    output_digest: str,
+    duration_ms: int,
+    correlation_id: str,
+    invocation_id: str,
+    event_sink: EventSink,
+    exit_code: int | None = None,
+    namespace: str = "",
+    command_name: str = "",
+    trust_state: str = "trusted",
+    plugin_home: Path | None = None,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess] | None = None,
+) -> ToolCallDecision:
+    """Dispatch ``after_tool_call`` observation hooks for one tool call.
+
+    ``after_tool_call`` is observation-only (RFC § 5): it is always
+    ``fail_open`` and never blocks. A clean hook records
+    ``plugin.tool.observe.recorded``; a failed hook records the shared
+    ``plugin.hook.failed`` event and the outcome is left untouched. Raw
+    output never reaches the hook — only ``output_digest`` crosses the
+    boundary.
+    """
+    emitted: list[dict] = []
+    runner = subprocess_runner or subprocess.run
+
+    def _emit(event: dict) -> None:
+        emitted.append(event)
+        event_sink(event)
+
+    payload = {
+        "tool": tool,
+        "status": status,
+        "exit_code": exit_code,
+        "output_digest": output_digest,
+        "duration_ms": duration_ms,
+        "correlation_id": correlation_id,
+        "invocation_id": invocation_id,
+    }
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    env = _tool_hook_runtime_env(manifest, plugin_home, payload_json)
+
+    for hook in _matching_tool_call_hooks(manifest, HookKind.AFTER_TOOL_CALL):
+        provenance: dict[str, str] = {
+            "correlation_id": correlation_id,
+            "invocation_id": invocation_id,
+            "hook_name": hook.name,
+            "tool": tool,
+            "tool_status": status,
+            "failure_policy": hook.failure_policy,
+            "scope": "observe",
+        }
+        hook_error, run_provenance = _run_tool_call_hook(
+            hook, plugin_home=plugin_home, runner=runner, env=env
+        )
+        provenance.update(run_provenance)
+        if hook_error:
+            _emit(
+                _event_envelope(
+                    event_type=HOOK_FAILED_EVENT,
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=None,
+                    trust_state=trust_state,
+                    permissions_used=hook.permissions,
+                    result={"status": "failed", "message": hook_error},
+                    provenance=provenance,
+                    schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+                )
+            )
+            continue
+        _emit(
+            _event_envelope(
+                event_type=HOOK_TOOL_OBSERVE_RECORDED_EVENT,
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=None,
+                trust_state=trust_state,
+                permissions_used=hook.permissions,
+                provenance=provenance,
+                schema_version=TOOL_CALL_HOOK_AUDIT_SCHEMA_VERSION,
+            )
+        )
+
+    return ToolCallDecision(allowed=True, status="allowed", events=tuple(emitted))
+
+
 __all__ = [
     "ConfirmFn",
     "EventSink",
     "InvocationResult",
     "SCHEMA_VERSION",
+    "ToolCallDecision",
+    "dispatch_after_tool_call",
+    "dispatch_before_tool_call",
     "invoke_plugin",
 ]

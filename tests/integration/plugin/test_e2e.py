@@ -667,5 +667,9 @@ def test_envelopes_carry_all_current_v0_emitted_event_types() -> None:
         "plugin.hook.completed",
         "plugin.hook.blocked",
         "plugin.hook.failed",
+        "plugin.tool.intercept.requested",
+        "plugin.tool.intercept.completed",
+        "plugin.tool.intercept.blocked",
+        "plugin.tool.observe.recorded",
     }
     assert set(AUDIT_EVENT_TYPES) == expected

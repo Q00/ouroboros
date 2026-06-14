@@ -165,9 +165,13 @@ Each required field is load-bearing for some part of the lifecycle, lockfile,
 or firewall; each optional field has a sensible default the firewall provides
 unconditionally.
 
-Core supports v0.1 and a local v0.2 extension. Archived v0.1 manifests do
-not accept top-level `hooks`; v0.2 adds optional hook declarations while
-preserving the v0.1 fields.
+Core supports v0.1 plus local v0.2, v0.3, and v0.4 extensions. Archived
+v0.1 manifests do not accept top-level `hooks`; v0.2 adds optional hook
+declarations while preserving the v0.1 fields. v0.3 wires lifecycle
+dispatch for `before_invocation`, `after_invocation`, `on_error`, and
+`on_cancel`; v0.4 adds the `before_tool_call` / `after_tool_call`
+manifest schema and standalone firewall helper dispatch, but production
+tool-call mediation is not wired through those helpers yet.
 
 The `source.type` enum is `local_path | plugin_home | first_party`. Per
 [Q00/ouroboros-plugins#8](https://github.com/Q00/ouroboros-plugins/issues/8),
@@ -327,8 +331,8 @@ the contract and keeps review scope small.
 |---|---|---|---|---|---|
 | `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin:lifecycle:read` for read-only, `plugin:lifecycle:policy` for policy/veto decisions | **Included** |
 | `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin:lifecycle:read` | **Included** |
-| `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin:tool:intercept` | Deferred |
-| `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin:tool:observe` | Deferred |
+| `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin:tool:intercept` | Schema/helper available; production mediation not wired |
+| `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` | `plugin:tool:observe` | Schema/helper available; production mediation not wired |
 | `before_artifact_write` | Before artifact service writes plugin-provided output | Policy / mutation gate | `fail_closed` | artifact-specific write permission | Deferred |
 | `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin:artifact:observe` | Deferred |
 | `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | **Included** |

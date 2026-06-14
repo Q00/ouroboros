@@ -80,7 +80,7 @@ def _make_program(tmp_path: Path, payload: dict | None = None):
 def _hook_manifest_payload(schema_version: str) -> dict:
     payload = json.loads(json.dumps(REFERENCE_MANIFEST))
     payload["schema_version"] = schema_version
-    if schema_version == "0.3":
+    if schema_version in {"0.3", "0.4"}:
         payload["permissions"].append(
             {
                 "scope": HOOK_LIFECYCLE_READ_SCOPE,
@@ -335,6 +335,101 @@ def test_v03_hook_manifest_runs_and_emits_hook_events(tmp_path: Path) -> None:
         trust_record=trust,
         event_sink=events.append,
         correlation_id="corr-v03-hooks",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "success"
+    assert calls == [
+        ["python", "-m", "hook_before"],
+        ["python", "-m", "fake_plugin", "review", "https://example.com/pr/1"],
+        ["python", "-m", "hook_after"],
+    ]
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.completed",
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+    ]
+    assert all(
+        event["schema_version"] == "0.3"
+        for event in events
+        if event["event_type"].startswith("plugin.hook.")
+    )
+
+
+def test_v04_fail_closed_before_hook_blocks_without_command_launch(tmp_path: Path) -> None:
+    program = _make_program(tmp_path, _hook_manifest_payload("0.4"))
+    trust = _grant_trust_scopes(
+        tmp_path,
+        "github:read",
+        HOOK_LIFECYCLE_POLICY_SCOPE,
+        HOOK_LIFECYCLE_READ_SCOPE,
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        calls.append(list(argv))
+        if argv[:3] == ["python", "-m", "hook_before"]:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=13,
+                stdout="raw hook stdout",
+                stderr="raw hook stderr",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v04-before-blocks",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "blocked"
+    assert calls == [["python", "-m", "hook_before"]]
+    assert "before_invocation hook blocked invocation" in result.message
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.blocked",
+    ]
+    assert "exited with code 13" in events[1]["result"]["message"]
+    assert all(event["schema_version"] == "0.3" for event in events)
+    serialized = json.dumps(events)
+    assert "raw hook stdout" not in serialized
+    assert "raw hook stderr" not in serialized
+
+
+def test_v04_after_hook_still_runs_after_successful_invocation(tmp_path: Path) -> None:
+    program = _make_program(tmp_path, _hook_manifest_payload("0.4"))
+    trust = _grant_trust_scopes(
+        tmp_path,
+        "github:read",
+        HOOK_LIFECYCLE_POLICY_SCOPE,
+        HOOK_LIFECYCLE_READ_SCOPE,
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v04-after-success",
         subprocess_runner=runner,
     )
 

@@ -37,7 +37,7 @@ from collections.abc import Callable
 import copy
 import uuid
 
-from ouroboros.plugin.hooks import HOOK_EVENT_TYPES
+from ouroboros.plugin.hooks import HOOK_EVENT_TYPES, HOOK_TOOL_CALL_AUDIT_EVENTS
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
@@ -53,6 +53,7 @@ AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.completed",
     "plugin.failed",
     *tuple(sorted(HOOK_EVENT_TYPES)),
+    *tuple(sorted(HOOK_TOOL_CALL_AUDIT_EVENTS)),
 )
 
 

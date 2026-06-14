@@ -27,6 +27,19 @@ SCHEMA_0_3_PATH = Path(__file__).resolve().parents[3] / (
 )
 AUDIT_SCHEMA_0_3 = json.loads(SCHEMA_0_3_PATH.read_text())
 AUDIT_VALIDATOR_0_3 = Draft202012Validator(AUDIT_SCHEMA_0_3)
+SCHEMA_0_4_PATH = Path(__file__).resolve().parents[3] / (
+    "src/ouroboros/plugin/schemas/0.4/audit-event.schema.json"
+)
+AUDIT_SCHEMA_0_4 = json.loads(SCHEMA_0_4_PATH.read_text())
+AUDIT_VALIDATOR_0_4 = Draft202012Validator(AUDIT_SCHEMA_0_4)
+
+
+def _schema_version_for_event_type(event_type: str) -> str:
+    if event_type.startswith("plugin.tool."):
+        return "0.4"
+    if event_type.startswith("plugin.hook."):
+        return "0.3"
+    return "0.1"
 
 
 def _audit_event(event_type: str, *, schema_version: str = "0.1", **overrides) -> dict:
@@ -48,7 +61,11 @@ def _audit_event(event_type: str, *, schema_version: str = "0.1", **overrides) -
     }
     base.update(overrides)
     # Confirm the test fixture itself validates against the schema.
-    validator = AUDIT_VALIDATOR_0_3 if schema_version == "0.3" else AUDIT_VALIDATOR
+    validator = {
+        "0.1": AUDIT_VALIDATOR,
+        "0.3": AUDIT_VALIDATOR_0_3,
+        "0.4": AUDIT_VALIDATOR_0_4,
+    }[schema_version]
     errs = list(validator.iter_errors(base))
     assert not errs, f"test fixture invalid: {errs}"
     return base
@@ -156,9 +173,19 @@ def test_audit_event_types_include_schema_vendored_hook_events() -> None:
         "plugin.hook.completed",
         "plugin.hook.failed",
         "plugin.hook.invoked",
+        "plugin.tool.intercept.blocked",
+        "plugin.tool.intercept.completed",
+        "plugin.tool.intercept.requested",
+        "plugin.tool.observe.recorded",
     )
     assert tuple(AUDIT_SCHEMA["properties"]["event_type"]["enum"]) == AUDIT_EVENT_TYPES[:7]
-    assert set(AUDIT_EVENT_TYPES) == set(AUDIT_SCHEMA_0_3["properties"]["event_type"]["enum"])
+    assert set(AUDIT_EVENT_TYPES) - {
+        "plugin.tool.intercept.blocked",
+        "plugin.tool.intercept.completed",
+        "plugin.tool.intercept.requested",
+        "plugin.tool.observe.recorded",
+    } == set(AUDIT_SCHEMA_0_3["properties"]["event_type"]["enum"])
+    assert set(AUDIT_EVENT_TYPES) == set(AUDIT_SCHEMA_0_4["properties"]["event_type"]["enum"])
 
 
 def test_v0_3_hook_invoked_and_completed_round_trip() -> None:
@@ -174,8 +201,10 @@ def test_v0_3_hook_invoked_and_completed_round_trip() -> None:
 def test_round_trip_for_all_audit_event_types() -> None:
     """Round-trip every event type defined in the schema."""
     for event_type in AUDIT_EVENT_TYPES:
-        schema_version = "0.3" if event_type.startswith("plugin.hook.") else "0.1"
-        ev = _audit_event(event_type, schema_version=schema_version)
+        ev = _audit_event(
+            event_type,
+            schema_version=_schema_version_for_event_type(event_type),
+        )
         env = wrap_plugin_event(ev, correlation_id=f"corr-{event_type}")
         recovered = unwrap_plugin_event(env)
         assert recovered == ev, f"{event_type} did not round-trip"
@@ -276,8 +305,10 @@ def test_envelope_event_type_matches_payload_event_type() -> None:
     (so the events_table.event_type column is queryable without parsing
     the JSON payload)."""
     for event_type in AUDIT_EVENT_TYPES:
-        schema_version = "0.3" if event_type.startswith("plugin.hook.") else "0.1"
-        ev = _audit_event(event_type, schema_version=schema_version)
+        ev = _audit_event(
+            event_type,
+            schema_version=_schema_version_for_event_type(event_type),
+        )
         env = wrap_plugin_event(ev, correlation_id="x")
         assert env["event_type"] == env["payload"]["event_type"] == event_type
 

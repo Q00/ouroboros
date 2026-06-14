@@ -314,12 +314,15 @@ def test_audit_events_accept_full_explicit_vocabulary(tmp_path: Path) -> None:
     """Manifests may opt into every event emitted by their schema version."""
     raw = json.loads(json.dumps(REFERENCE_MANIFEST))
     raw["schema_version"] = "0.3"
-    raw["audit"] = {"events": list(AUDIT_EVENT_TYPES)}
+    expected_events = tuple(
+        event_type for event_type in AUDIT_EVENT_TYPES if not event_type.startswith("plugin.tool.")
+    )
+    raw["audit"] = {"events": list(expected_events)}
 
     manifest = load_manifest(_write(tmp_path, raw))
 
     assert manifest.schema_version == "0.3"
-    assert manifest.audit.events == AUDIT_EVENT_TYPES
+    assert manifest.audit.events == expected_events
 
 
 def test_audit_events_reject_unknown_names(tmp_path: Path) -> None:
