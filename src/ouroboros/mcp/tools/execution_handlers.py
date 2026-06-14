@@ -232,6 +232,36 @@ def _classify_synchronous_execution_status(
     return "unknown", False, True, "Seed Execution FINISHED"
 
 
+def _run_only_verification_meta(
+    session_id: str | None,
+    *,
+    verification_status: str = "executed_unverified",
+) -> dict[str, Any]:
+    """Expose that execute_seed completion is not formal 3-stage verification."""
+    next_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return {
+        "evaluated": False,
+        "verification_status": verification_status,
+        "formal_evaluation_required": True,
+        "next_step": next_step,
+    }
+
+
+def _run_only_verification_text(
+    session_id: str | None,
+    *,
+    verification_status: str = "executed_unverified",
+) -> str:
+    """Render the run-only verification warning for human-readable tool output."""
+    next_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return (
+        f"Verification Status: {verification_status}\n"
+        "Formal Evaluation: NOT evaluated by the 3-stage evaluator\n"
+        "Warning: execution results are run-only and must not be treated as verified.\n"
+        f"Next: {next_step}\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Delegation context extraction
 # ---------------------------------------------------------------------------
@@ -805,6 +835,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
                 )
+                message += _run_only_verification_text(tracker.session_id)
                 if pause_metadata:
                     if pause_metadata.get("pause_kind") is not None:
                         message += f"Pause Kind: {pause_metadata['pause_kind']}\n"
@@ -835,6 +866,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "runtime_backend": effective_runtime_backend,
                     "llm_backend": resolved_llm_backend,
                     "resume_requested": is_resume,
+                    **_run_only_verification_meta(tracker.session_id),
                 }
                 if success is not None:
                     meta["success"] = success
@@ -1181,12 +1213,16 @@ class StartExecuteSeedHandler:
             )
         if idempotency_key and idempotency_key in self._idempotency_meta:
             cached_meta = dict(self._idempotency_meta[idempotency_key])
+            cached_session_id = (
+                str(cached_meta.get("session_id")) if cached_meta.get("session_id") else None
+            )
             text = (
                 "Replayed prior background execution via idempotency key.\n\n"
                 f"Idempotency Key: {idempotency_key}\n"
                 f"Job ID: {cached_meta.get('job_id') or 'pending'}\n"
                 f"Session ID: {cached_meta.get('session_id') or 'pending'}\n"
-                f"Execution ID: {cached_meta.get('execution_id') or 'pending'}\n"
+                f"Execution ID: {cached_meta.get('execution_id') or 'pending'}\n\n"
+                + _run_only_verification_text(cached_session_id)
             )
             return Result.ok(
                 MCPToolResult(
@@ -1291,6 +1327,10 @@ class StartExecuteSeedHandler:
                 "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
+                **_run_only_verification_meta(
+                    plugin_session_id,
+                    verification_status="delegated_unverified",
+                ),
             }
             # Cache for idempotent replay: a second handle() with the same
             # key must NOT re-dispatch (no second subagent_dispatched event)
@@ -1400,6 +1440,7 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n\n"
+            f"{_run_only_verification_text(snapshot.links.session_id)}\n"
             "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
             "ouroboros_job_result(job_id) for the final output."
         )
@@ -1411,6 +1452,7 @@ class StartExecuteSeedHandler:
             "cursor": snapshot.cursor,
             "runtime_backend": runtime_backend,
             "llm_backend": llm_backend,
+            **_run_only_verification_meta(snapshot.links.session_id),
         }
         if idempotency_key:
             self._idempotency_meta[idempotency_key] = dict(meta)
