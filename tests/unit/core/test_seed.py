@@ -467,8 +467,7 @@ class TestSeed:
         assert reconstructed.exit_conditions[0].name == "condition_1"
         assert reconstructed.exit_conditions[0].description == "All invariant tests are green"
         assert (
-            reconstructed.exit_conditions[0].evaluation_criteria
-            == "All invariant tests are green"
+            reconstructed.exit_conditions[0].evaluation_criteria == "All invariant tests are green"
         )
 
     def test_seed_roundtrip_serialization(self, full_seed: Seed) -> None:
