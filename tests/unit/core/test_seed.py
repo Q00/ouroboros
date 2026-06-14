@@ -353,6 +353,39 @@ class TestSeed:
         assert len(full_seed.evaluation_principles) == 2
         assert len(full_seed.exit_conditions) == 1
 
+    def test_seed_coerces_string_evaluation_principles(self) -> None:
+        """Hand-written seed principle string lists are lifted into objects."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            evaluation_principles=("Prefer simple code", "Keep UX clear"),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert seed.evaluation_principles[0].name == "principle_1"
+        assert seed.evaluation_principles[0].description == "Prefer simple code"
+        assert seed.evaluation_principles[0].weight == 1.0
+        assert seed.evaluation_principles[1].name == "principle_2"
+
+    def test_seed_coerces_string_exit_conditions(self) -> None:
+        """Hand-written seed exit condition string lists are lifted into objects."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            exit_conditions=("All invariant tests are green",),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert seed.exit_conditions[0].name == "condition_1"
+        assert seed.exit_conditions[0].description == "All invariant tests are green"
+        assert seed.exit_conditions[0].evaluation_criteria == "All invariant tests are green"
+
     def test_seed_goal_immutability(self, minimal_seed: Seed) -> None:
         """Seed.goal cannot be modified (frozen=True raises error)."""
         with pytest.raises(PydanticValidationError):

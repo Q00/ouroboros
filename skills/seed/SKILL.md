@@ -351,6 +351,20 @@ ontology_schema:
     - name: title
       type: string
       description: Task title
+evaluation_principles:
+  - name: completeness
+    description: All requirements are implemented
+    weight: 1.0
+  - name: usability
+    description: CLI commands are clear and easy to use
+    weight: 0.7
+exit_conditions:
+  - name: all_criteria_met
+    description: All acceptance criteria pass
+    criteria: 100% of acceptance criteria are satisfied
+  - name: tests_green
+    description: The project test suite passes
+    criteria: Required automated tests exit successfully
 metadata:
   ambiguity_score: 0.15
 ```
