@@ -23,6 +23,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.observability.spend import format_stage_breakdown
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 
@@ -1113,6 +1114,10 @@ def _format_footer(progress_data: Mapping[str, Any]) -> str | None:
     estimated_cost = progress_data.get("estimated_cost_usd")
     if isinstance(estimated_cost, int | float) and estimated_cost > 0:
         parts.append(f"${estimated_cost:.2f}")
+
+    stage_breakdown = format_stage_breakdown(progress_data.get("stage_breakdown"))
+    if stage_breakdown:
+        parts.append(f"stages: {stage_breakdown}")
 
     if not parts:
         return None

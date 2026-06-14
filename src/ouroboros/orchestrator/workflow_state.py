@@ -26,6 +26,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.mcp.types import MCPToolResult
+from ouroboros.observability.spend import normalize_stage_breakdown, single_stage_breakdown
 from ouroboros.orchestrator.mcp_tools import serialize_tool_result
 from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 
@@ -426,6 +427,7 @@ class WorkflowState:
         tool_calls_count: Total tool calls.
         estimated_tokens: Estimated token count.
         estimated_cost_usd: Estimated cost in USD.
+        stage_breakdown: Per-stage spend attribution.
         start_time: When execution started.
         activity_log: Recent activity entries.
         last_update: Most recent normalized runtime/message artifact snapshot.
@@ -443,6 +445,7 @@ class WorkflowState:
     tool_calls_count: int = 0
     estimated_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    stage_breakdown: dict[str, dict[str, float | int]] = field(default_factory=dict)
     start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     activity_log: list[str] = field(default_factory=list)
     max_activity_log: int = 3
@@ -570,6 +573,7 @@ class WorkflowState:
             "tool_calls_count": self.tool_calls_count,
             "estimated_tokens": self.estimated_tokens,
             "estimated_cost_usd": self.estimated_cost_usd,
+            "stage_breakdown": dict(self.stage_breakdown),
             "last_update": dict(self.last_update),
         }
 
@@ -694,6 +698,7 @@ class WorkflowStateTracker:
 
         # Update phase based on progress
         self._update_phase()
+        self._refresh_stage_breakdown()
 
     def process_runtime_message(self, message: AgentMessage) -> None:
         """Project a runtime message through the existing state-update path."""
@@ -755,6 +760,15 @@ class WorkflowStateTracker:
         input_cost = (input_tokens / 1_000_000) * CLAUDE_INPUT_PRICE_PER_1M
         output_cost = (output_tokens / 1_000_000) * CLAUDE_OUTPUT_PRICE_PER_1M
         self._state.estimated_cost_usd = input_cost + output_cost
+        self._refresh_stage_breakdown()
+
+    def _refresh_stage_breakdown(self) -> None:
+        """Attribute current aggregate estimates to the current workflow stage."""
+        self._state.stage_breakdown = single_stage_breakdown(
+            self._state.current_phase.value,
+            tokens=self._state.estimated_tokens,
+            cost_usd=self._state.estimated_cost_usd,
+        )
 
     def _update_activity_from_tool(self, tool_name: str, content: str) -> None:
         """Update activity type based on tool usage.
@@ -995,6 +1009,7 @@ class WorkflowStateTracker:
             "tool_calls_count": self._state.tool_calls_count,
             "estimated_tokens": self._state.estimated_tokens,
             "estimated_cost_usd": self._state.estimated_cost_usd,
+            "stage_breakdown": normalize_stage_breakdown(self._state.stage_breakdown),
             "elapsed_seconds": self._state.elapsed_seconds,
             "last_update": dict(self._state.last_update),
             "acceptance_criteria": [

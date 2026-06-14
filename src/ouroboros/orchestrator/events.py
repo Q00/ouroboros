@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.observability.spend import normalize_stage_breakdown
 from ouroboros.orchestrator.capabilities import CapabilityDescriptor, CapabilityGraph
 from ouroboros.orchestrator.policy import PolicyContext, PolicyDecision
 
@@ -445,6 +446,7 @@ def create_workflow_progress_event(
     tool_calls_count: int = 0,
     estimated_tokens: int = 0,
     estimated_cost_usd: float = 0.0,
+    stage_breakdown: dict[str, dict[str, float | int]] | None = None,
     last_update: dict[str, Any] | None = None,
 ) -> BaseEvent:
     """Create workflow progress event.
@@ -468,6 +470,7 @@ def create_workflow_progress_event(
         tool_calls_count: Total tool calls made.
         estimated_tokens: Estimated token usage.
         estimated_cost_usd: Estimated cost in USD.
+        stage_breakdown: Per-stage spend attribution.
         last_update: Optional normalized artifact snapshot from the latest runtime message.
 
     Returns:
@@ -488,6 +491,7 @@ def create_workflow_progress_event(
         "tool_calls_count": tool_calls_count,
         "estimated_tokens": estimated_tokens,
         "estimated_cost_usd": estimated_cost_usd,
+        "stage_breakdown": normalize_stage_breakdown(stage_breakdown),
         "timestamp": datetime.now(UTC).isoformat(),
     }
     if last_update:

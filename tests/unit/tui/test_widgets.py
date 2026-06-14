@@ -565,12 +565,14 @@ class TestCostTrackerWidget:
             total_tokens=5000,
             total_cost_usd=0.025,
             tokens_this_phase=1000,
+            stage_breakdown={"execute": {"tokens": 5000, "cost_usd": 0.025}},
             model_name="gpt-4",
         )
 
         assert widget.total_tokens == 5000
         assert widget.total_cost_usd == 0.025
         assert widget.tokens_this_phase == 1000
+        assert widget.stage_breakdown == {"execute": {"tokens": 5000, "cost_usd": 0.025}}
         assert widget.model_name == "gpt-4"
 
     def test_format_tokens_small(self) -> None:
@@ -625,11 +627,24 @@ class TestCostTrackerWidget:
             total_tokens=10000,
             total_cost_usd=0.05,
             tokens_this_phase=2000,
+            stage_breakdown={"stage3": {"tokens": 1000, "cost_usd": 0.02}},
         )
 
         assert widget.total_tokens == 10000
         assert widget.total_cost_usd == 0.05
         assert widget.tokens_this_phase == 2000
+        assert widget.stage_breakdown == {"consensus": {"tokens": 1000, "cost_usd": 0.02}}
+
+    def test_format_stage_breakdown(self) -> None:
+        """Test stage breakdown formatting."""
+        widget = CostTrackerWidget(
+            stage_breakdown={
+                "interview": {"tokens": 500, "cost_usd": 0.005},
+                "execute": {"tokens": 1500, "cost_usd": 0.04},
+            },
+        )
+
+        assert widget._format_stage_breakdown() == "Stages: interview $0.01/500, execute $0.04/1.5K"
 
     def test_add_tokens(self) -> None:
         """Test adding tokens to totals."""
