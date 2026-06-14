@@ -683,10 +683,10 @@ def test_cli_detached_auto_result_with_invalid_job_handle_exits_nonzero(
     assert "Job handle not found: missing_detached_auto. Result unavailable." in result.output
 
 
-def test_cli_detached_auto_result_with_expired_job_handle_exits_nonzero(
+def test_cli_detached_auto_result_with_expired_job_handle_returns_persisted_result(
     monkeypatch, tmp_path
 ) -> None:
-    """Verify CLI result retrieval fails clearly for an expired detached job handle."""
+    """Verify CLI result retrieval keeps terminal persisted results after handle TTL."""
     from ouroboros.cli.commands import job as job_command
     from ouroboros.cli.main import app
 
@@ -746,9 +746,9 @@ def test_cli_detached_auto_result_with_expired_job_handle_exits_nonzero(
 
     result = runner.invoke(app, ["job", "result", job_id])
 
-    assert result.exit_code == 1
-    assert f"Job handle expired: {job_id}" in result.output
-    assert "Result unavailable." in result.output
+    assert result.exit_code == 0
+    assert "stale detached auto result" in result.output
+    assert f"Job handle expired: {job_id}" not in result.output
 
 
 def test_cli_wait_and_status_with_invalid_detached_auto_handle_fail_stably(
