@@ -27,9 +27,9 @@ dependencies = [
 # this metadata, NOT from uv.lock). Motivated by the 2026-03 litellm
 # 1.82.7/1.82.8 supply-chain incident. Updates land via reviewed Dependabot
 # PRs; uv.lock additionally hash-pins the full transitive graph for repo/CI.
-claude = ["claude-agent-sdk==0.2.87", "anthropic==0.105.2"]
+claude = ["claude-agent-sdk==0.2.93", "anthropic==0.107.1"]
 copilot = []
-litellm = ["litellm==1.86.2"]
+litellm = ["litellm==1.88.0"]
 dashboard = []
 mcp = ["mcp==1.27.2"]
 tui = ["textual==8.2.7", "textual-serve==1.1.3"]
