@@ -107,12 +107,6 @@ ADVANCED_MODEL_FIELDS: tuple[SettingField, ...] = (
         "Context compression model",
         ("OUROBOROS_CONTEXT_COMPRESSION_MODEL",),
     ),
-    SettingField("execution.atomicity_model", "Atomicity model", ("OUROBOROS_ATOMICITY_MODEL",)),
-    SettingField(
-        "execution.decomposition_model",
-        "Decomposition model",
-        ("OUROBOROS_DECOMPOSITION_MODEL",),
-    ),
     SettingField("resilience.wonder_model", "Wonder model", ("OUROBOROS_WONDER_MODEL",)),
     SettingField(
         "evaluation.assertion_extraction_model",

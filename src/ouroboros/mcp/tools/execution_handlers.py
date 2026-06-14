@@ -18,6 +18,7 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import get_max_parallel_workers
 from ouroboros.core.errors import ConfigError, ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
@@ -83,7 +84,7 @@ def _resolve_execution_model(runtime_backend: str | None) -> str | None:
         stripped = execution_model.strip()
         return stripped or None
     if runtime_backend == "claude":
-        return "claude-sonnet-4-6"
+        return DEFAULT_SONNET_MODEL
     return None
 
 

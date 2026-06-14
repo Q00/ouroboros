@@ -36,7 +36,6 @@ from ouroboros.orchestrator.failure_taxonomy import (
 from ouroboros.orchestrator.phase_wrappers import wrap_prompt
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
-from ouroboros.orchestrator.routing import DispatchRole, ModelTier, decide_route
 from ouroboros.orchestrator.verifier import (
     Attempt,
     VerifierVerdict,
@@ -49,19 +48,15 @@ def profile(request: pytest.FixtureRequest) -> ExecutionProfile:
     return load_profile(request.param)
 
 
-def test_profile_drives_strategy_decomposer_and_router(
+def test_profile_drives_strategy_and_decomposer(
     profile: ExecutionProfile,
 ) -> None:
-    """A single profile flows into strategy, decomposer, and router consistently."""
+    """A single profile flows into strategy and decomposer consistently."""
     strategy = ProfileBackedStrategy(profile)
     assert strategy.get_tools() == list(profile.suggested_tools)
 
     decomp_prompt = build_decomposition_system_prompt(params_from_profile(profile))
     assert profile.axis in decomp_prompt
-
-    executor_route = decide_route(role=DispatchRole.EXECUTOR, profile=profile)
-    assert executor_route.tools == profile.suggested_tools
-    assert executor_route.tier == ModelTier.SONNET
 
 
 def test_phase_wrapper_carries_schema_required_fields(

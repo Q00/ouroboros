@@ -1416,11 +1416,11 @@ def get_dependency_analysis_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.dependency_analysis_model,
-            default_model=DEFAULT_OPUS_MODEL,
+            default_model=DEFAULT_SONNET_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
+        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
 
 
 def get_ontology_analysis_model(backend: str | None = None) -> str:
@@ -1433,11 +1433,11 @@ def get_ontology_analysis_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.ontology_analysis_model,
-            default_model=DEFAULT_OPUS_MODEL,
+            default_model=DEFAULT_SONNET_MODEL,
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend(DEFAULT_OPUS_MODEL, backend=backend)
+        return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
 
 
 def get_context_compression_model(backend: str | None = None) -> str:

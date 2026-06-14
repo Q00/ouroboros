@@ -53,7 +53,19 @@ DEFAULT_CONSENSUS_OPUS_MODEL = "openrouter/anthropic/claude-opus-4.8"
 # a Claude id to a backend that cannot execute it (Q00/ouroboros#1324 review).
 LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
     DEFAULT_OPUS_MODEL: ("claude-opus-4-6",),
-    DEFAULT_SONNET_MODEL: ("claude-sonnet-4-20250514",),
+    DEFAULT_SONNET_MODEL: (
+        "claude-sonnet-4-20250514",
+        # dependency_analysis_model and ontology_analysis_model shipped Opus as
+        # their default until they were flipped to Sonnet (frugality). A config
+        # persisted before that flip holds an Opus literal for those two fields;
+        # it was a shipped default the user never chose, so Claude-incapable
+        # backends must still normalize it to the "default" sentinel rather than
+        # leak an unrunnable Claude id. (These two getters resolve against the
+        # Sonnet pin; the Opus-default getters — clarification/wonder/reflect/
+        # semantic — recognize the same literals via the Opus pin above.)
+        DEFAULT_OPUS_MODEL,
+        "claude-opus-4-6",
+    ),
     DEFAULT_CONSENSUS_OPUS_MODEL: ("openrouter/anthropic/claude-opus-4-6",),
 }
 

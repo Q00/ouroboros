@@ -138,8 +138,12 @@ class LLMConfig(BaseModel, frozen=True):
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     qa_model: str = DEFAULT_SONNET_MODEL
-    dependency_analysis_model: str = DEFAULT_OPUS_MODEL
-    ontology_analysis_model: str = DEFAULT_OPUS_MODEL
+    # Dependency and ontology analysis are bounded structured-extraction tasks;
+    # Sonnet is sufficient and Opus is waste. (The "stable tier for reproducible
+    # grading" rationale covers evaluation/consensus, not these.) Effort-first:
+    # the floor should not start at the most expensive tier.
+    dependency_analysis_model: str = DEFAULT_SONNET_MODEL
+    ontology_analysis_model: str = DEFAULT_SONNET_MODEL
     context_compression_model: str = "gpt-4"
 
 

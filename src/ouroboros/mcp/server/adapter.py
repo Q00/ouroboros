@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.core.types import Result
 from ouroboros.events.io import new_call_id
 from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
@@ -1343,7 +1344,7 @@ def create_ouroboros_server(
     # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
     execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
     if execution_model is None and resolved_runtime_backend == "claude":
-        execution_model = "claude-sonnet-4-6"
+        execution_model = DEFAULT_SONNET_MODEL
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
     # Stage 1 (mechanical checks: lint/build/test) can be enabled via env var.
@@ -1599,7 +1600,7 @@ def create_ouroboros_server(
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL")
         if validation_model is None and resolved_runtime_backend == "claude":
-            validation_model = "claude-sonnet-4-6"
+            validation_model = DEFAULT_SONNET_MODEL
         validation_adapter = create_agent_runtime(
             backend=resolved_runtime_backend,
             model=validation_model,
