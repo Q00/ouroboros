@@ -226,10 +226,10 @@ class TestLLMConfig:
         config = LLMConfig(backend="pi")
         assert config.backend == "pi"
 
-    def test_llm_config_rejects_gjc_until_adapter_lands(self) -> None:
-        """Stack 2 wires GJC runtime only; LLM selection lands later."""
-        with pytest.raises(ValidationError):
-            LLMConfig(backend="gjc")  # type: ignore[arg-type]
+    def test_llm_config_accepts_gjc_backend(self) -> None:
+        """LLMConfig accepts GJC now that the GJC LLM adapter is registered."""
+        config = LLMConfig(backend="gjc")
+        assert config.backend == "gjc"
 
 
 class TestLLMTaskProfileConfig:
