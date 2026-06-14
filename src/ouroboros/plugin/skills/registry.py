@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 import re
@@ -60,6 +60,7 @@ class SkillMetadata:
         name: Skill name (directory name)
         path: Path to skill directory
         trigger_keywords: Natural language triggers
+        localized_triggers: Locale-keyed natural language triggers for discovery/matching
         magic_prefixes: Magic prefixes like "ooo:", "ouroboros:"
         description: Brief description from SKILL.md
         version: Skill version
@@ -74,6 +75,7 @@ class SkillMetadata:
     name: str
     path: Path
     trigger_keywords: tuple[str, ...] = ()
+    localized_triggers: dict[str, tuple[str, ...]] = field(default_factory=dict)
     magic_prefixes: tuple[str, ...] = ()
     description: str = ""
     version: str = "1.0.0"
@@ -437,6 +439,7 @@ class SkillRegistry:
             name=skill_name,
             path=skill_dir,
             trigger_keywords=self._extract_trigger_keywords(frontmatter),
+            localized_triggers=self._extract_localized_triggers(frontmatter),
             magic_prefixes=self._extract_magic_prefixes(frontmatter, skill_name),
             description=frontmatter.get("description", spec.get("first_line", "")),
             version=frontmatter.get("version", "1.0.0"),
@@ -562,6 +565,31 @@ class SkillRegistry:
     ) -> tuple[str, ...]:
         """Extract trigger keywords from frontmatter."""
         return self._normalize_string_sequence(frontmatter.get("triggers"))
+
+    def _extract_localized_triggers(
+        self,
+        frontmatter: dict[str, Any],
+    ) -> dict[str, tuple[str, ...]]:
+        """Extract locale-keyed trigger phrases from matching metadata."""
+        matching = frontmatter.get("matching")
+        if not isinstance(matching, Mapping):
+            return {}
+
+        raw_localized_triggers = matching.get("localized_triggers")
+        if not isinstance(raw_localized_triggers, Mapping):
+            return {}
+
+        localized_triggers: dict[str, tuple[str, ...]] = {}
+        for raw_locale, raw_triggers in raw_localized_triggers.items():
+            locale = str(raw_locale).strip().lower()
+            if not locale:
+                continue
+
+            triggers = self._normalize_string_sequence(raw_triggers)
+            if triggers:
+                localized_triggers[locale] = triggers
+
+        return localized_triggers
 
     def _extract_intercept_metadata(
         self,
@@ -696,7 +724,10 @@ class SkillRegistry:
             metadata: The skill metadata.
         """
         # Index trigger keywords
-        for keyword in metadata.trigger_keywords:
+        localized_keywords = tuple(
+            keyword for triggers in metadata.localized_triggers.values() for keyword in triggers
+        )
+        for keyword in (*metadata.trigger_keywords, *localized_keywords):
             if keyword not in self._trigger_index:
                 self._trigger_index[keyword] = set()
             self._trigger_index[keyword].add(skill_name)

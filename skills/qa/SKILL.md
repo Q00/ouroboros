@@ -1,6 +1,13 @@
 ---
 name: qa
 description: "General-purpose QA verdict for any artifact type"
+matching:
+  localized_triggers:
+    ko:
+      - 품질을 검사해줘
+      - QA 확인해줘
+      - 산출물을 검토해줘
+      - 빠르게 품질 평가해줘
 ---
 
 # /ouroboros:qa

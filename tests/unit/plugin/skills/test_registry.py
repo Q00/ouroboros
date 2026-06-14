@@ -51,6 +51,7 @@ class TestSkillMetadata:
         assert metadata.name == "test-skill"
         assert metadata.path == Path("/test/skill")
         assert metadata.trigger_keywords == ()
+        assert metadata.localized_triggers == {}
         assert metadata.magic_prefixes == ()
         assert metadata.description == ""
         assert metadata.version == "1.0.0"
@@ -67,6 +68,7 @@ class TestSkillMetadata:
             name="full-skill",
             path=Path("/full/skill"),
             trigger_keywords=("autopilot", "build"),
+            localized_triggers={"ko": ("자동으로 해줘", "빌드해줘")},
             magic_prefixes=("ooo:", "ouroboros:"),
             description="A full skill",
             version="2.0.0",
@@ -79,6 +81,7 @@ class TestSkillMetadata:
 
         assert metadata.name == "full-skill"
         assert metadata.trigger_keywords == ("autopilot", "build")
+        assert metadata.localized_triggers == {"ko": ("자동으로 해줘", "빌드해줘")}
         assert metadata.magic_prefixes == ("ooo:", "ouroboros:")
         assert metadata.description == "A full skill"
         assert metadata.version == "2.0.0"
@@ -238,6 +241,44 @@ triggers: autopilot, parallel
 
             assert registry._trigger_index["autopilot"] == {"triggered"}
             assert registry._trigger_index["parallel"] == {"triggered"}
+
+    async def test_discover_all_indexes_localized_matching_triggers(self) -> None:
+        """Test discovery indexes locale-keyed matching triggers without renaming skills."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "interview"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+name: interview
+description: Interview skill
+matching:
+  localized_triggers:
+    ko:
+      - 요구사항을 먼저 정리해줘
+      - 애매한 요구사항을 명확히 해줘
+---
+
+# Interview
+""",
+                encoding="utf-8",
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["interview"]
+
+            assert metadata.name == "interview"
+            assert metadata.localized_triggers == {
+                "ko": (
+                    "요구사항을 먼저 정리해줘",
+                    "애매한 요구사항을 명확히 해줘",
+                )
+            }
+            assert registry._trigger_index["요구사항을 먼저 정리해줘"] == {"interview"}
+            assert "요구사항을 먼저 정리해줘" not in registry._skills
 
     async def test_discover_all_marks_intercept_eligible_for_valid_frontmatter(self) -> None:
         """Test valid MCP frontmatter enables interception metadata."""

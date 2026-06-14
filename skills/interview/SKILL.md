@@ -1,6 +1,13 @@
 ---
 name: interview
 description: "Socratic interview to crystallize vague requirements"
+matching:
+  localized_triggers:
+    ko:
+      - 요구사항을 먼저 정리해줘
+      - 요구사항을 먼저 명확히 해줘
+      - 애매한 요구사항을 명확히 해줘
+      - 먼저 인터뷰해줘
 mcp_tool: ouroboros_interview
 mcp_args:
   initial_context: "$1"

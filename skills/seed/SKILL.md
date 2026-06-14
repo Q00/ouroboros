@@ -1,6 +1,13 @@
 ---
 name: seed
 description: "Generate validated Seed specifications from interview results"
+matching:
+  localized_triggers:
+    ko:
+      - 시드를 생성해줘
+      - 인터뷰 결과로 시드를 만들어줘
+      - 요구사항으로 seed 명세를 만들어줘
+      - 검증된 시드 명세를 작성해줘
 mcp_tool: ouroboros_generate_seed
 mcp_args:
   session_id: "$1"

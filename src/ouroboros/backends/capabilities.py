@@ -360,6 +360,22 @@ def render_backend_skill_capability_guide(name: str) -> str:
                 "",
             )
         )
+    if capability.name == "codex":
+        lines.extend(
+            (
+                "### Codex App Localized Skill Matching",
+                (
+                    "Ouroboros packaged skills may declare `matching.localized_triggers` "
+                    "frontmatter for discovery-only natural-language matching. Canonical "
+                    "skill names, `ooo <skill>` commands, `/ouroboros:<skill>` commands, "
+                    "and MCP tool identifiers remain English and unchanged. If a Codex App "
+                    "surface does not consume custom localized metadata directly, treat "
+                    "these phrases as fallback guidance when deciding whether an installed "
+                    "Ouroboros skill should be invoked implicitly from a non-English prompt."
+                ),
+                "",
+            )
+        )
     return "\n".join(lines).rstrip() + "\n"
 
 
