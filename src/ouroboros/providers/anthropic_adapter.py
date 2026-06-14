@@ -237,6 +237,13 @@ class AnthropicAdapter:
         if config.stop:
             kwargs["stop_sequences"] = config.stop
 
+        # Effort-first investment dial (RFC #1405). The GA effort parameter lives
+        # under ``output_config.effort`` on current Claude models — this is NOT
+        # the removed ``thinking.budget_tokens`` knob (which 400s on Opus 4.7+ /
+        # Fable 5). Omitted when unset to preserve prior behavior.
+        if config.reasoning_effort:
+            kwargs["output_config"] = {"effort": config.reasoning_effort}
+
         log.debug(
             "anthropic.request.started",
             model=model,
@@ -250,7 +257,11 @@ class AnthropicAdapter:
                 prompt_text = _serialise_prompt_for_hash(
                     api_messages,
                     system_parts,
-                    {"top_p": config.top_p, "stop_sequences": config.stop},
+                    {
+                        "top_p": config.top_p,
+                        "stop_sequences": config.stop,
+                        "reasoning_effort": config.reasoning_effort,
+                    },
                 )
                 async with io_recorder.record_llm_call(
                     model_id=model,
@@ -258,7 +269,11 @@ class AnthropicAdapter:
                     caller="anthropic_adapter",
                     max_tokens=config.max_tokens,
                     temperature=config.temperature,
-                    extra={"top_p": config.top_p, "stop_sequences": config.stop},
+                    extra={
+                        "top_p": config.top_p,
+                        "stop_sequences": config.stop,
+                        "reasoning_effort": config.reasoning_effort,
+                    },
                 ) as call:
                     response = await client.messages.create(**kwargs)
                     parsed = self._parse_response(response, model, json_prefill)

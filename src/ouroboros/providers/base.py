@@ -6,7 +6,7 @@ communicating with LLM providers in a unified way.
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -57,6 +57,14 @@ class CompletionConfig:
         role: Optional logical Ouroboros task role used to resolve llm_profiles.
         profile: Optional explicit Ouroboros llm_profiles key.
         max_turns: Optional per-request agent turn budget for CLI-backed providers.
+        reasoning_effort: Optional reasoning-effort dial ("low"/"medium"/"high").
+            The effort-first investment lever (RFC #1405). Adapters with a native
+            effort knob translate it: LiteLLM forwards a ``reasoning_effort`` kwarg
+            (provider-agnostic), and the Anthropic-direct adapter maps it to
+            ``output_config.effort`` (the GA effort parameter — NOT the removed
+            ``thinking.budget_tokens``, which 400s on current Claude models).
+            Adapters without an effort knob ignore it. ``None`` preserves prior
+            behavior everywhere.
         model_is_explicit: True when ``model`` is a request-level pin that must
             not be replaced by role-based profile resolution.
     """
@@ -70,6 +78,7 @@ class CompletionConfig:
     role: str | None = None
     profile: str | None = None
     max_turns: int | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     model_is_explicit: bool = False
 
 

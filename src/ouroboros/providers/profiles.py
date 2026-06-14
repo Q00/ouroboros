@@ -161,6 +161,11 @@ def resolve_completion_profile(
             profile.max_turns,
             config.max_turns,
         ),
+        reasoning_effort=_coalesce(
+            provider.reasoning_effort if provider is not None else None,
+            profile.reasoning_effort,
+            config.reasoning_effort,
+        ),
     )
 
     return ResolvedCompletionProfile(
