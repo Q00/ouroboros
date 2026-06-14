@@ -70,10 +70,10 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    - Show progress information
    - If drift measured, show the drift report
    - If drift exceeds threshold (0.3), warn and suggest actions
-   - End with a `📍` next-step based on context:
-     - No drift measured: `📍 Session active — say "am I drifting?" to measure drift, or continue with ooo run`
-     - Drift ≤ 0.3: `📍 On track — continue with ooo run or ooo evaluate when ready`
-     - Drift > 0.3: `📍 Warning: significant drift detected. Consider ooo interview to re-clarify, or ooo evolve to course-correct`
+   - End with a state breadcrumb based on context:
+     - No drift measured: `◆ Session active — say "am I drifting?" to measure drift, or continue with ooo run`
+     - Drift ≤ 0.3: `◆ On track — continue with ooo run or ooo evaluate when ready`
+     - Drift > 0.3: `◆ Significant drift detected → next: ooo interview to re-clarify, or ooo evolve to course-correct`
 
 ## Drift Thresholds
 
@@ -117,5 +117,15 @@ Component Breakdown:
 
 You're on track. Goal alignment is strong.
 
-📍 On track — continue with `ooo run` or `ooo evaluate` when ready
+◆ On track — continue with `ooo run` or `ooo evaluate` when ready
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

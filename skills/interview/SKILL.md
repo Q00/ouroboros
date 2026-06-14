@@ -564,7 +564,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    When the Restate gate passes, suggest `ooo seed`.
 
 11. After completion, suggest the next step:
-   `📍 Next: ooo seed to crystallize these requirements into a specification`
+   `◆ Current state → next: ooo seed to crystallize these requirements into a specification`
 
 #### Dialectic Rhythm Guard
 
@@ -635,8 +635,8 @@ If the MCP tool is NOT available, fall back to agent-based interview:
    to MCP" in Path B; the conversation context is the source of truth.
 9. Continue until the user says "done"
 10. Interview results live in conversation context (not persisted)
-11. After completion, suggest the next step in `📍 Next:` format:
-   `📍 Next: ooo seed to crystallize these requirements into a specification`
+11. After completion, suggest the next step in `◆ Current state → next:` format:
+   `◆ Current state → next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior
 
@@ -702,9 +702,19 @@ MCP signals seed-ready; Acceptance Guard passes
 → Restate again: "Add Stripe payments with charges, webhooks, refunds, failed-payment rollback, and no retry scheduling."
 → User: "Yes, generate seed"
 
-📍 Next: `ooo seed` to crystallize these requirements into a specification
+◆ Current state → next: `ooo seed` to crystallize these requirements into a specification
 ```
 
 ## Next Steps
 
 After interview completion, use `ooo seed` to generate the Seed specification.
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

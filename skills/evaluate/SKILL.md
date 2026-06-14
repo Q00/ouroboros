@@ -80,12 +80,12 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    - Highlight the final approval decision
    - If rejected, explain the failure reason
    - Suggest fixes if evaluation fails
-   - Always end with a 📍 suggestion based on the outcome:
-     - **APPROVED**: `📍 Done! Your implementation passes all checks. Optional: ooo evolve to iteratively refine`
-     - **REJECTED at Stage 1** (mechanical, `code_changes_detected: true`): `📍 Next: Fix the build/test failures above, then ooo evaluate — or ooo ralph for automated fix loop`
-     - **REJECTED at Stage 1** (mechanical, `code_changes_detected: false`): `📍 Next: Run ooo run first to produce code, then ooo evaluate`
-     - **REJECTED at Stage 2** (semantic): `📍 Next: ooo run to re-execute with fixes — or ooo evolve for iterative refinement`
-     - **REJECTED at Stage 3** (consensus): `📍 Next: ooo interview to re-examine requirements — or ooo unstuck to challenge assumptions`
+   - Always end with a state breadcrumb based on the outcome:
+     - **APPROVED**: `◆ Evaluation approved → next: accept, or ooo evolve to iteratively refine`
+     - **REJECTED at Stage 1** (mechanical, `code_changes_detected: true`): `◆ Current state → next: Fix the build/test failures above, then ooo evaluate — or ooo ralph for automated fix loop`
+     - **REJECTED at Stage 1** (mechanical, `code_changes_detected: false`): `◆ Current state → next: Run ooo run first to produce code, then ooo evaluate`
+     - **REJECTED at Stage 2** (semantic): `◆ Current state → next: ooo run to re-execute with fixes — or ooo evolve for iterative refinement`
+     - **REJECTED at Stage 3** (consensus): `◆ Current state → next: ooo interview to re-examine requirements — or ooo unstuck to challenge assumptions`
 
 ## Fallback (No MCP Server)
 
@@ -116,5 +116,15 @@ Stage 2: Semantic Evaluation
   Goal Alignment: 0.90
   Drift Score: 0.08
 
-📍 Done! Your implementation passes all checks. Optional: `ooo evolve` to iteratively refine
+◆ Evaluation approved → next: accept, or `ooo evolve` to iteratively refine
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

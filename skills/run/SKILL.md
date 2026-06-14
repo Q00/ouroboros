@@ -78,6 +78,24 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 
 5. **Recommended monitoring stance: relay compact progress in the main session.**
 
+   **TUI surfacing at job start (RFC #1392):**
+
+   After `job_id`, `session_id`, and `execution_id` are returned, surface the
+   live dashboard once for this run before entering the relay loop:
+
+   - If `execution.tui_autolaunch: true` (or legacy top-level
+     `tui_autolaunch: true`) is present in the loaded Ouroboros config, run
+     `ouroboros tui open` unconditionally and mention the dashboard in one
+     short line.
+   - Otherwise offer once: "Want a live dashboard? I can open the TUI in a new
+     terminal window with `ouroboros tui open`." Remember the answer for this
+     session and do not repeat the offer during the same run.
+   - If the user accepts, run `ouroboros tui open`.
+   - If `ouroboros tui open` reports a manual command because the environment
+     is headless, SSH, or unsupported, relay that command once and continue.
+   - Always keep the in-session compact progress relay below as the baseline;
+     the dashboard is additive, not a replacement for relay updates.
+
    After IDs are returned, print only this short handoff:
 
    ```
@@ -292,3 +310,13 @@ Result:
 
   Next: `ooo evaluate orch_x1y2z3` for formal 3-stage verification
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.
