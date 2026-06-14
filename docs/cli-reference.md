@@ -91,7 +91,14 @@ CLI users wait and retrieve with the standard job surfaces:
 ouroboros job status JOB_ID
 ouroboros job wait JOB_ID
 ouroboros job result JOB_ID
+ouroboros job events JOB_ID --since 0 --limit 100
 ```
+
+`ouroboros job events` is the low-cost external observability surface for
+dashboards and schedulers. It opens `~/.ouroboros/ouroboros.db` read-only,
+does not create schema or write WAL/checkpoint state, and prints cursor-paged
+JSON for the job aggregate. Pass the returned `cursor` back as `--since` on
+the next poll.
 
 MCP clients use the matching job tools:
 
