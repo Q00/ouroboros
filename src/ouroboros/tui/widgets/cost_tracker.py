@@ -11,6 +11,8 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, Static
 
+from ouroboros.observability.spend import format_stage_breakdown, normalize_stage_breakdown
+
 
 class CostTrackerWidget(Widget):
     """Widget displaying cost and token usage.
@@ -22,6 +24,7 @@ class CostTrackerWidget(Widget):
         total_tokens: Total tokens consumed.
         total_cost_usd: Estimated total cost in USD.
         tokens_this_phase: Tokens used in current phase.
+        stage_breakdown: Per-stage spend attribution.
         model_name: Name of the model being used.
     """
 
@@ -83,11 +86,22 @@ class CostTrackerWidget(Widget):
         margin-top: 1;
         margin-bottom: 1;
     }
+
+    CostTrackerWidget > .breakdown {
+        height: auto;
+        width: 100%;
+        margin-top: 1;
+        color: $text-muted;
+    }
     """
 
     total_tokens: reactive[int] = reactive(0)
     total_cost_usd: reactive[float] = reactive(0.0)
     tokens_this_phase: reactive[int] = reactive(0)
+    stage_breakdown: reactive[dict[str, dict[str, float | int]]] = reactive(
+        {},
+        always_update=True,
+    )
     model_name: reactive[str] = reactive("")
 
     def __init__(
@@ -95,6 +109,7 @@ class CostTrackerWidget(Widget):
         total_tokens: int = 0,
         total_cost_usd: float = 0.0,
         tokens_this_phase: int = 0,
+        stage_breakdown: dict[str, dict[str, float | int]] | None = None,
         model_name: str = "",
         *,
         name: str | None = None,
@@ -107,6 +122,7 @@ class CostTrackerWidget(Widget):
             total_tokens: Initial total tokens.
             total_cost_usd: Initial total cost.
             tokens_this_phase: Initial phase tokens.
+            stage_breakdown: Initial per-stage spend attribution.
             model_name: Model name being used.
             name: Widget name.
             id: Widget ID.
@@ -116,6 +132,7 @@ class CostTrackerWidget(Widget):
         self._total_tokens_value: Static | None = None
         self._phase_tokens_value: Static | None = None
         self._cost_value: Static | None = None
+        self._breakdown_value: Static | None = None
         self._model_value: Static | None = None
         self._cost_container: Widget | None = None
 
@@ -123,6 +140,7 @@ class CostTrackerWidget(Widget):
         self.total_tokens = total_tokens
         self.total_cost_usd = total_cost_usd
         self.tokens_this_phase = tokens_this_phase
+        self.stage_breakdown = normalize_stage_breakdown(stage_breakdown)
         self.model_name = model_name
 
     def compose(self) -> ComposeResult:
@@ -148,6 +166,12 @@ class CostTrackerWidget(Widget):
                 classes="value",
             )
             yield self._cost_value
+
+        self._breakdown_value = Static(
+            self._format_stage_breakdown(),
+            classes="breakdown",
+        )
+        yield self._breakdown_value
 
     def _format_tokens(self, tokens: int) -> str:
         """Format token count for display.
@@ -194,6 +218,12 @@ class CostTrackerWidget(Widget):
             return model[:12] + "..."
         return model
 
+    def _format_stage_breakdown(self) -> str:
+        breakdown = format_stage_breakdown(self.stage_breakdown)
+        if not breakdown:
+            return "Stages: no attribution yet"
+        return f"Stages: {breakdown}"
+
     def _get_cost_class(self) -> str:
         """Get CSS class based on cost level."""
         if self.total_cost_usd >= 10.0:
@@ -212,6 +242,9 @@ class CostTrackerWidget(Widget):
 
         if self._cost_value is not None:
             self._cost_value.update(self._format_cost(self.total_cost_usd))
+
+        if self._breakdown_value is not None:
+            self._breakdown_value.update(self._format_stage_breakdown())
 
         if self._cost_container is not None:
             self._cost_container.remove_class("high")
@@ -235,6 +268,10 @@ class CostTrackerWidget(Widget):
         """React to tokens_this_phase changes."""
         self._update_display()
 
+    def watch_stage_breakdown(self, new_value: dict[str, dict[str, float | int]]) -> None:
+        """React to stage_breakdown changes."""
+        self._update_display()
+
     def watch_model_name(self, new_value: str) -> None:
         """React to model_name changes."""
         self._update_display()
@@ -244,6 +281,7 @@ class CostTrackerWidget(Widget):
         total_tokens: int | None = None,
         total_cost_usd: float | None = None,
         tokens_this_phase: int | None = None,
+        stage_breakdown: dict[str, dict[str, float | int]] | None = None,
         model_name: str | None = None,
     ) -> None:
         """Update cost metrics.
@@ -252,6 +290,7 @@ class CostTrackerWidget(Widget):
             total_tokens: New total tokens.
             total_cost_usd: New total cost.
             tokens_this_phase: New phase tokens.
+            stage_breakdown: New per-stage spend attribution.
             model_name: New model name.
         """
         if total_tokens is not None:
@@ -260,6 +299,8 @@ class CostTrackerWidget(Widget):
             self.total_cost_usd = total_cost_usd
         if tokens_this_phase is not None:
             self.tokens_this_phase = tokens_this_phase
+        if stage_breakdown is not None:
+            self.stage_breakdown = normalize_stage_breakdown(stage_breakdown)
         if model_name is not None:
             self.model_name = model_name
 

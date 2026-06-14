@@ -340,6 +340,7 @@ class SessionRepository:
             "tool_calls_count",
             "estimated_tokens",
             "estimated_cost_usd",
+            "stage_breakdown",
             "last_update",
         ):
             value = event_data.get(key)

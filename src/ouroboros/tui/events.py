@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any
 
 from textual.message import Message
 
+from ouroboros.observability.spend import normalize_stage_breakdown
+
 if TYPE_CHECKING:
     from ouroboros.events.base import BaseEvent
 
@@ -144,6 +146,7 @@ class CostUpdated(Message):
         total_tokens: Total tokens consumed.
         total_cost_usd: Estimated cost in USD.
         tokens_this_phase: Tokens used in current phase.
+        stage_breakdown: Per-stage spend attribution.
     """
 
     def __init__(
@@ -152,6 +155,7 @@ class CostUpdated(Message):
         total_tokens: int,
         total_cost_usd: float,
         tokens_this_phase: int,
+        stage_breakdown: dict[str, dict[str, float | int]] | None = None,
     ) -> None:
         """Initialize CostUpdated message.
 
@@ -160,12 +164,14 @@ class CostUpdated(Message):
             total_tokens: Total tokens consumed.
             total_cost_usd: Estimated cost in USD.
             tokens_this_phase: Tokens used in current phase.
+            stage_breakdown: Per-stage spend attribution.
         """
         super().__init__()
         self.execution_id = execution_id
         self.total_tokens = total_tokens
         self.total_cost_usd = total_cost_usd
         self.tokens_this_phase = tokens_this_phase
+        self.stage_breakdown = normalize_stage_breakdown(stage_breakdown)
 
 
 class LogMessage(Message):
@@ -333,6 +339,7 @@ class WorkflowProgressUpdated(Message):
         tool_calls_count: Total tool calls made.
         estimated_tokens: Estimated token usage.
         estimated_cost_usd: Estimated cost in USD.
+        stage_breakdown: Per-stage spend attribution.
         last_update: Normalized artifact snapshot from the latest runtime message.
     """
 
@@ -352,6 +359,7 @@ class WorkflowProgressUpdated(Message):
         tool_calls_count: int = 0,
         estimated_tokens: int = 0,
         estimated_cost_usd: float = 0.0,
+        stage_breakdown: dict[str, dict[str, float | int]] | None = None,
         last_update: dict[str, Any] | None = None,
     ) -> None:
         """Initialize WorkflowProgressUpdated message."""
@@ -370,6 +378,7 @@ class WorkflowProgressUpdated(Message):
         self.tool_calls_count = tool_calls_count
         self.estimated_tokens = estimated_tokens
         self.estimated_cost_usd = estimated_cost_usd
+        self.stage_breakdown = normalize_stage_breakdown(stage_breakdown)
         self.last_update = last_update or {}
 
 
@@ -601,6 +610,7 @@ class TUIState:
     combined_drift: float = 0.0
     total_tokens: int = 0
     total_cost_usd: float = 0.0
+    stage_breakdown: dict[str, dict[str, float | int]] = field(default_factory=dict)
     is_paused: bool = False
     ac_tree: dict[str, Any] = field(default_factory=dict)
     logs: list[dict[str, Any]] = field(default_factory=list)
@@ -751,6 +761,7 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             total_tokens=data.get("total_tokens", 0),
             total_cost_usd=data.get("total_cost_usd", 0.0),
             tokens_this_phase=data.get("tokens_this_phase", 0),
+            stage_breakdown=data.get("stage_breakdown"),
         )
 
     elif event_type.startswith("decomposition.ac.") or event_type in {
@@ -809,6 +820,7 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             tool_calls_count=data.get("tool_calls_count", 0),
             estimated_tokens=data.get("estimated_tokens", 0),
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
+            stage_breakdown=data.get("stage_breakdown"),
             last_update=data.get("last_update"),
         )
 

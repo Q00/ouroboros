@@ -2372,6 +2372,7 @@ class OrchestratorRunner:
                             tool_calls_count=progress_data["tool_calls_count"],
                             estimated_tokens=progress_data["estimated_tokens"],
                             estimated_cost_usd=progress_data["estimated_cost_usd"],
+                            stage_breakdown=progress_data.get("stage_breakdown"),
                             last_update=progress_data.get("last_update"),
                         )
                         await self._event_store.append(workflow_event)
@@ -3295,6 +3296,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                             tool_calls_count=progress_data["tool_calls_count"],
                             estimated_tokens=progress_data["estimated_tokens"],
                             estimated_cost_usd=progress_data["estimated_cost_usd"],
+                            stage_breakdown=progress_data.get("stage_breakdown"),
                             last_update=progress_data.get("last_update"),
                         )
                         await self._event_store.append(workflow_event)

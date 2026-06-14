@@ -469,6 +469,7 @@ class DashboardScreen(Screen[None]):
                 total_tokens=message.total_tokens,
                 total_cost_usd=message.total_cost_usd,
                 tokens_this_phase=message.tokens_this_phase,
+                stage_breakdown=message.stage_breakdown,
             )
 
     def on_ac_updated(self, message: ACUpdated) -> None:
@@ -498,6 +499,7 @@ class DashboardScreen(Screen[None]):
             self._cost_tracker.update_cost(
                 total_tokens=message.estimated_tokens,
                 total_cost_usd=message.estimated_cost_usd,
+                stage_breakdown=message.stage_breakdown,
             )
 
         # Update status panel with current AC and activity
@@ -671,6 +673,7 @@ class DashboardScreen(Screen[None]):
             self._cost_tracker.update_cost(
                 total_tokens=state.total_tokens,
                 total_cost_usd=state.total_cost_usd,
+                stage_breakdown=state.stage_breakdown,
             )
 
         if self._ac_tree is not None:

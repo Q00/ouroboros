@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ouroboros.observability.spend import format_stage_breakdown
+
 MAX_AC_TREE_RENDER_DEPTH = 3
 DEFAULT_AC_TREE_MAX_NODES = 50
 
@@ -259,6 +261,10 @@ def _render_footer(snapshot: Mapping[str, Any]) -> str:
     cost = snapshot.get("estimated_cost_usd")
     if isinstance(cost, int | float) and cost > 0:
         parts.append(f"${cost:.2f}")
+
+    stage_breakdown = format_stage_breakdown(snapshot.get("stage_breakdown"))
+    if stage_breakdown:
+        parts.append(f"stages: {stage_breakdown}")
 
     return " | ".join(parts)
 

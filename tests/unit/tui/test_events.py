@@ -123,12 +123,14 @@ class TestCostUpdated:
             total_tokens=10000,
             total_cost_usd=0.05,
             tokens_this_phase=2500,
+            stage_breakdown={"Deliver": {"tokens": 10000, "cost_usd": 0.05}},
         )
 
         assert msg.execution_id == "exec_123"
         assert msg.total_tokens == 10000
         assert msg.total_cost_usd == 0.05
         assert msg.tokens_this_phase == 2500
+        assert msg.stage_breakdown == {"execute": {"tokens": 10000, "cost_usd": 0.05}}
 
 
 class TestLogMessage:
@@ -594,6 +596,7 @@ class TestCreateMessageFromEvent:
                 "total_tokens": 15000,
                 "total_cost_usd": 0.075,
                 "tokens_this_phase": 3000,
+                "stage_breakdown": {"evaluate": {"tokens": 5000, "cost_usd": 0.025}},
             },
         )
 
@@ -604,6 +607,7 @@ class TestCreateMessageFromEvent:
         assert msg.total_tokens == 15000
         assert msg.total_cost_usd == 0.075
         assert msg.tokens_this_phase == 3000
+        assert msg.stage_breakdown == {"evaluate": {"tokens": 5000, "cost_usd": 0.025}}
 
     def test_cost_updated_event_defaults(self) -> None:
         """Test converting cost.updated event with missing fields."""
@@ -620,6 +624,7 @@ class TestCreateMessageFromEvent:
         assert msg.total_tokens == 0
         assert msg.total_cost_usd == 0.0
         assert msg.tokens_this_phase == 0
+        assert msg.stage_breakdown == {}
 
     def test_session_cancelled_event(self) -> None:
         """Test converting session.cancelled event to ExecutionUpdated with cancelled status."""

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from textual.app import App
 from textual.binding import Binding
 
+from ouroboros.observability.spend import normalize_stage_breakdown
 from ouroboros.tui.events import (
     ACUpdated,
     AgentThinkingUpdated,
@@ -471,6 +472,7 @@ class OuroborosTUI(App[None]):
         elif event_type == "observability.cost.updated":
             self._state.total_tokens = data.get("total_tokens", 0)
             self._state.total_cost_usd = data.get("total_cost_usd", 0.0)
+            self._state.stage_breakdown = normalize_stage_breakdown(data.get("stage_breakdown"))
         elif event_type == "ac.decomposition.completed":
             # Handle AC decomposition - add children to tree
             parent_ac_id = event.aggregate_id
@@ -527,6 +529,7 @@ class OuroborosTUI(App[None]):
         self._state.combined_drift = 0.0
         self._state.total_tokens = 0
         self._state.total_cost_usd = 0.0
+        self._state.stage_breakdown = {}
         self._state.is_paused = False
         self._state.ac_tree = {}
         self._state.logs = []
@@ -570,6 +573,7 @@ class OuroborosTUI(App[None]):
     def on_cost_updated(self, message: CostUpdated) -> None:
         self._state.total_tokens = message.total_tokens
         self._state.total_cost_usd = message.total_cost_usd
+        self._state.stage_breakdown = dict(message.stage_breakdown)
         self._forward_to_dashboard("on_cost_updated", message)
 
     def on_ac_updated(self, message: ACUpdated) -> None:
@@ -692,6 +696,7 @@ class OuroborosTUI(App[None]):
         # Update cost/tokens in state
         self._state.total_tokens = message.estimated_tokens
         self._state.total_cost_usd = message.estimated_cost_usd
+        self._state.stage_breakdown = dict(message.stage_breakdown)
 
         # Update phase in state
         if message.current_phase:

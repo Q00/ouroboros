@@ -226,12 +226,14 @@ class TestOuroborosTUIMessageHandlers:
             total_tokens=10000,
             total_cost_usd=0.05,
             tokens_this_phase=2500,
+            stage_breakdown={"execute": {"tokens": 10000, "cost_usd": 0.05}},
         )
 
         app.on_cost_updated(msg)
 
         assert app.state.total_tokens == 10000
         assert app.state.total_cost_usd == 0.05
+        assert app.state.stage_breakdown == {"execute": {"tokens": 10000, "cost_usd": 0.05}}
 
     def test_on_subtask_updated_preserves_runtime_activity_on_tree_node(self) -> None:
         """Sub-AC runtime snapshots should remain attached to the rendered tree node."""

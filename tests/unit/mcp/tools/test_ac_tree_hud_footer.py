@@ -81,6 +81,7 @@ async def test_handle_renders_footer_metrics_from_progress_event_payload(
                 "messages_count": 8,
                 "tool_calls_count": 3,
                 "estimated_cost_usd": 0.04,
+                "stage_breakdown": {"execute": {"tokens": 1200, "cost_usd": 0.04}},
             },
         )
     )
@@ -89,4 +90,7 @@ async def test_handle_renders_footer_metrics_from_progress_event_payload(
     result = await handler.handle({"session_id": "sess_footer_event", "cursor": 0, "view": "tree"})
 
     assert result.is_ok
-    assert "Metrics: elapsed 1m 05s · 8 msgs · 3 tools · $0.04" in result.value.text_content
+    assert (
+        "Metrics: elapsed 1m 05s · 8 msgs · 3 tools · $0.04 · stages: execute $0.04/1.2K"
+        in result.value.text_content
+    )
