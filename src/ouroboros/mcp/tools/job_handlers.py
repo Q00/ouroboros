@@ -21,7 +21,6 @@ from ouroboros.mcp.job_manager import (
     JobManager,
     JobSnapshot,
     JobStatus,
-    is_terminal_job_expired,
 )
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
@@ -1228,22 +1227,6 @@ class JobResultHandler:
                         "result_available": False,
                         "reason": "not_found",
                         "source_error": str(exc),
-                    },
-                )
-            )
-
-        if is_terminal_job_expired(snapshot):
-            return Result.err(
-                MCPToolError(
-                    f"Job handle expired: {snapshot.job_id}. Result unavailable.",
-                    tool_name="ouroboros_job_result",
-                    error_code="job_handle_expired",
-                    details={
-                        "job_id": snapshot.job_id,
-                        "lifecycle_status": "expired",
-                        "is_terminal": snapshot.is_terminal,
-                        "result_available": False,
-                        "reason": "expired",
                     },
                 )
             )

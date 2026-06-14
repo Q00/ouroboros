@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import os
 from unittest.mock import AsyncMock, patch
 
@@ -1761,6 +1761,52 @@ class TestJobManager:
             )
         finally:
             await store.close()
+
+    async def test_job_result_handler_returns_expired_terminal_result(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        job_id = "job_expired_terminal_result"
+        expired_at = datetime.now(UTC) - timedelta(hours=2)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    id="evt_expired_terminal_created",
+                    type="mcp.job.created",
+                    timestamp=expired_at,
+                    aggregate_type="job",
+                    aggregate_id=job_id,
+                    data={
+                        "job_type": "execute_seed",
+                        "status": JobStatus.QUEUED.value,
+                        "message": "Queued execute_seed",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    id="evt_expired_terminal_completed",
+                    type="mcp.job.completed",
+                    timestamp=expired_at + timedelta(seconds=1),
+                    aggregate_type="job",
+                    aggregate_id=job_id,
+                    data={
+                        "status": JobStatus.COMPLETED.value,
+                        "message": "Job complete",
+                        "result_text": "overnight QA verdict",
+                        "result_meta": {"qa_passed": True},
+                    },
+                )
+            )
+
+            result = await JobResultHandler(event_store=store).handle({"job_id": job_id})
+        finally:
+            await store.close()
+
+        assert result.is_ok
+        assert result.value.content[0].text == "overnight QA verdict"
+        assert result.value.meta["result_available"] is True
+        assert result.value.meta["qa_passed"] is True
 
     async def test_start_job_default_allocates_job_id(self, tmp_path) -> None:
         store = _build_store(tmp_path)

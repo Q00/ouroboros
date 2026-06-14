@@ -285,8 +285,8 @@ Treat `running` or other non-terminal status output as progress only. A
 `auto` result. Wait with `ouroboros_job_wait`, then fetch the completed result
 with `ouroboros_job_result` after the job reaches a terminal lifecycle status.
 When MCP status reports `completed`, `ouroboros_job_result(job_id="JOB_ID")`
-retrieves the stable completed `auto` result for that job handle. Unknown,
-expired, or otherwise unavailable handles return an MCP error response.
+retrieves the stable completed `auto` result for that job handle. Unknown or
+otherwise unavailable handles return an MCP error response.
 When MCP status cannot resolve the supplied handle, treat the detached work as
 `invalid` or unavailable rather than as running or completed. The stable
 observable status is the MCP error response for that handle, not a detached
@@ -362,24 +362,22 @@ meta.is_terminal = true
 meta.error = "user requested cancellation"
 ```
 
-When `ouroboros_job_result(job_id="JOB_ID")` reports `expired`, the job is
-terminal tracked background work whose retained result is no longer available
-through that job handle. `ouroboros_job_status` still reports the stored
-terminal lifecycle status, while result retrieval returns stable expiration
-error details rather than a detached `auto` result. Next steps are to inspect
-any surfaced auto session, execution, or lineage handle, then resume from that
-handle or restart the detached auto flow when no recoverable handle is present.
+When a terminal job is older than the in-memory handle TTL,
+`ouroboros_job_result(job_id="JOB_ID")` still retrieves the persisted terminal
+result for that job handle. `ouroboros_job_status` reports the stored terminal
+lifecycle status, and result retrieval returns the durable result artifact
+rather than an expiration error.
 
 ```text
 ouroboros_job_result(job_id="job_auto_docs_expired")
 
-error.message = "Job handle expired: job_auto_docs_expired. Result unavailable."
-error.error_code = "job_handle_expired"
-error.details.job_id = "job_auto_docs_expired"
-error.details.lifecycle_status = "expired"
-error.details.is_terminal = true
-error.details.result_available = false
-error.details.reason = "expired"
+is_error = false
+content[0].text = "detached auto result artifact: expired seed.yaml"
+meta.job_id = "job_auto_docs_expired"
+meta.status = "completed"
+meta.lifecycle_status = "completed"
+meta.is_terminal = true
+meta.result_available = true
 ```
 
 ### `ouroboros_brownfield` Scan Boundaries

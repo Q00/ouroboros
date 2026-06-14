@@ -761,35 +761,24 @@ def test_docs_verify_expired_state_has_stable_status_semantics_and_next_steps() 
     cli_compact = " ".join(cli_docs.split())
     mcp_compact = " ".join(mcp_docs.split())
 
-    assert "When `ouroboros job result JOB_ID` reports `expired`" in cli_compact
-    assert "retained result is no longer available through that job handle" in cli_compact
-    assert "`ouroboros job status JOB_ID` still reports the stored terminal" in cli_compact
-    assert "result retrieval returns stable expiration error details" in cli_compact
-    assert "rather than a detached `auto` result" in cli_compact
-    assert "Next steps are to inspect any surfaced auto session" in cli_compact
-    assert "resume from that handle or restart the detached auto flow" in cli_compact
-    assert "when no recoverable handle is present" in cli_compact
+    assert "When a terminal job is older than the in-memory handle TTL" in cli_compact
+    assert "`ouroboros job result JOB_ID` still retrieves the persisted terminal" in cli_compact
+    assert "`ouroboros job status JOB_ID` reports the stored terminal" in cli_compact
+    assert "result retrieval returns the durable result artifact" in cli_compact
+    assert "rather than an expiration error" in cli_compact
 
-    assert 'When `ouroboros_job_result(job_id="JOB_ID")` reports `expired`' in mcp_compact
-    assert "retained result is no longer available through that job handle" in mcp_compact
-    assert "`ouroboros_job_status` still reports the stored terminal" in mcp_compact
-    assert "result retrieval returns stable expiration error details" in mcp_compact
-    assert "rather than a detached `auto` result" in mcp_compact
-    assert "Next steps are to inspect any surfaced auto session" in mcp_compact
-    assert "resume from that handle or restart the detached auto flow" in mcp_compact
-    assert "when no recoverable handle is present" in mcp_compact
+    assert "When a terminal job is older than the in-memory handle TTL" in mcp_compact
+    assert 'ouroboros_job_result(job_id="JOB_ID")` still retrieves the persisted' in mcp_compact
+    assert "`ouroboros_job_status` reports the stored terminal" in mcp_compact
+    assert "result retrieval returns the durable result artifact" in mcp_compact
+    assert "rather than an expiration error" in mcp_compact
     assert "ouroboros job result job_auto_docs_expired" in cli_docs
-    assert "Job handle expired: job_auto_docs_expired. Result unavailable." in cli_docs
+    assert "detached auto result artifact: expired seed.yaml" in cli_docs
     assert 'ouroboros_job_result(job_id="job_auto_docs_expired")' in mcp_docs
-    assert (
-        'error.message = "Job handle expired: job_auto_docs_expired. Result unavailable."'
-        in mcp_docs
-    )
-    assert 'error.error_code = "job_handle_expired"' in mcp_docs
-    assert 'error.details.lifecycle_status = "expired"' in mcp_docs
-    assert "error.details.is_terminal = true" in mcp_docs
-    assert "error.details.result_available = false" in mcp_docs
-    assert 'error.details.reason = "expired"' in mcp_docs
+    assert 'content[0].text = "detached auto result artifact: expired seed.yaml"' in mcp_docs
+    assert 'meta.lifecycle_status = "completed"' in mcp_docs
+    assert "meta.is_terminal = true" in mcp_docs
+    assert "meta.result_available = true" in mcp_docs
 
 
 def test_docs_api_check_verifies_expired_detached_work_observable_contract(
@@ -853,19 +842,12 @@ def test_docs_api_check_verifies_expired_detached_work_observable_contract(
 
     api_result = asyncio.run(_persist_expired_auto_job_and_fetch_result())
 
-    assert api_result.is_err
-    assert api_result.error.tool_name == "ouroboros_job_result"
-    assert api_result.error.error_code == "job_handle_expired"
-    assert api_result.error.message == (
-        "Job handle expired: job_auto_docs_expired. Result unavailable."
-    )
-    assert api_result.error.details == {
-        "job_id": job_id,
-        "lifecycle_status": "expired",
-        "is_terminal": True,
-        "result_available": False,
-        "reason": "expired",
-    }
+    assert api_result.is_ok
+    assert api_result.value.content[0].text == ("detached auto result artifact: expired seed.yaml")
+    assert api_result.value.meta["job_id"] == job_id
+    assert api_result.value.meta["lifecycle_status"] == "completed"
+    assert api_result.value.meta["is_terminal"] is True
+    assert api_result.value.meta["result_available"] is True
 
     monkeypatch.setattr(
         job_command,
@@ -874,17 +856,15 @@ def test_docs_api_check_verifies_expired_detached_work_observable_contract(
     )
     cli_result = runner.invoke(app, ["job", "result", job_id])
 
-    assert cli_result.exit_code == 1
-    assert api_result.error.message in cli_result.output
+    assert cli_result.exit_code == 0
+    assert api_result.value.content[0].text in cli_result.output
     assert f"$ ouroboros job result {job_id}" in cli_docs
-    assert api_result.error.message in cli_docs
+    assert api_result.value.content[0].text in cli_docs
     assert f'ouroboros_job_result(job_id="{job_id}")' in mcp_docs
-    assert f'error.message = "{api_result.error.message}"' in mcp_docs
-    assert f'error.error_code = "{api_result.error.error_code}"' in mcp_docs
-    assert 'error.details.lifecycle_status = "expired"' in mcp_docs
-    assert "error.details.is_terminal = true" in mcp_docs
-    assert "error.details.result_available = false" in mcp_docs
-    assert 'error.details.reason = "expired"' in mcp_docs
+    assert f'content[0].text = "{api_result.value.content[0].text}"' in mcp_docs
+    assert 'meta.lifecycle_status = "completed"' in mcp_docs
+    assert "meta.is_terminal = true" in mcp_docs
+    assert "meta.result_available = true" in mcp_docs
 
 
 def test_docs_verify_invalid_detached_work_has_stable_status_semantics_and_next_steps() -> None:
@@ -895,7 +875,7 @@ def test_docs_verify_invalid_detached_work_has_stable_status_semantics_and_next_
     cli_compact = " ".join(cli_docs.split())
     mcp_compact = " ".join(mcp_docs.split())
 
-    assert "Unknown, expired, or otherwise unavailable handles fail" in cli_compact
+    assert "Unknown or otherwise unavailable handles fail" in cli_compact
     assert (
         "When CLI status cannot resolve the supplied handle, treat the detached work "
         "as `invalid` or unavailable rather than as running or completed" in cli_compact
@@ -906,10 +886,7 @@ def test_docs_verify_invalid_detached_work_has_stable_status_semantics_and_next_
     assert "inspect any surfaced auto session, execution, or lineage handle" in cli_compact
     assert "restart the detached auto flow when no valid handle can be recovered" in cli_compact
 
-    assert (
-        "Unknown, expired, or otherwise unavailable handles return an MCP error response"
-        in mcp_compact
-    )
+    assert "Unknown or otherwise unavailable handles return an MCP error response" in mcp_compact
     assert (
         "When MCP status cannot resolve the supplied handle, treat the detached work "
         "as `invalid` or unavailable rather than as running or completed" in mcp_compact
