@@ -159,6 +159,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GEMINI_CLI_PATH",
         "OUROBOROS_PI_CLI_PATH",
         "OUROBOROS_GJC_CLI_PATH",
+        "OUROBOROS_OUROCODE_CLI_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -1147,6 +1148,31 @@ def get_gjc_cli_path() -> str | None:
         config = load_config()
         if config.orchestrator.gjc_cli_path:
             return config.orchestrator.gjc_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_ourocode_cli_path() -> str | None:
+    """Get ourocode CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_OUROCODE_CLI_PATH environment variable
+        2. config.yaml orchestrator.ourocode_cli_path
+        3. None (resolve ``ourocode`` from PATH at runtime)
+
+    Returns:
+        Path to the ourocode executable or None.
+    """
+    env_path = os.environ.get("OUROBOROS_OUROCODE_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.ourocode_cli_path:
+            return config.orchestrator.ourocode_cli_path
     except ConfigError:
         pass
 

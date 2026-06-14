@@ -134,6 +134,7 @@ class LLMConfig(BaseModel, frozen=True):
         "hermes",
         "goose",
         "pi",
+        "ourocode",
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
@@ -517,6 +518,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     goose_cli_path: str | None = None
     pi_cli_path: str | None = None
     gjc_cli_path: str | None = None
+    ourocode_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -536,6 +538,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "goose_cli_path",
         "pi_cli_path",
         "gjc_cli_path",
+        "ourocode_cli_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:

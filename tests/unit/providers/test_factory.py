@@ -543,3 +543,12 @@ class TestCopilotBackend:
         self._stub_copilot_cli(monkeypatch, tmp_path)
         adapter = create_llm_adapter(backend="copilot_cli")
         assert isinstance(adapter, CopilotCliLLMAdapter)
+
+
+def test_ourocode_backend_builds_ourocode_llm_adapter() -> None:
+    """The ``ourocode`` backend resolves to the ACP-backed LLM adapter."""
+    from ouroboros.providers.factory import create_llm_adapter
+    from ouroboros.providers.ourocode_llm_adapter import OurocodeLLMAdapter
+
+    adapter = create_llm_adapter(backend="ourocode")
+    assert isinstance(adapter, OurocodeLLMAdapter)
