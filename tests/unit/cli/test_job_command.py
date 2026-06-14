@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import json
+from pathlib import Path
 import re
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from ouroboros.core.types import Result
@@ -394,6 +399,139 @@ def test_documented_job_result_command_exits_zero(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "final auto result" in result.output
+
+
+def test_job_events_command_reads_job_events_with_cursor(tmp_path: Path) -> None:
+    """Read-only job event polling returns JSON and an EventStore row cursor."""
+    from ouroboros.cli.main import app
+
+    db_path = tmp_path / "job-events.db"
+    job_id = "job_events_cli"
+
+    async def _persist_job_events() -> None:
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        try:
+            await store.append(
+                BaseEvent(
+                    id="evt_job_events_created",
+                    type="mcp.job.created",
+                    timestamp=datetime(2026, 6, 14, 1, 0, tzinfo=UTC),
+                    aggregate_type="job",
+                    aggregate_id=job_id,
+                    data={
+                        "job_type": "execute_seed",
+                        "status": JobStatus.QUEUED.value,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    id="evt_unrelated_execution",
+                    type="workflow.progress.updated",
+                    timestamp=datetime(2026, 6, 14, 1, 1, tzinfo=UTC),
+                    aggregate_type="execution",
+                    aggregate_id="exec_other",
+                    data={"completed_count": 1},
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    id="evt_job_events_updated",
+                    type="mcp.job.updated",
+                    timestamp=datetime(2026, 6, 14, 1, 2, tzinfo=UTC),
+                    aggregate_type="job",
+                    aggregate_id=job_id,
+                    data={
+                        "status": JobStatus.RUNNING.value,
+                        "message": "Running execute_seed",
+                    },
+                )
+            )
+        finally:
+            await store.close()
+
+    asyncio.run(_persist_job_events())
+
+    first = runner.invoke(
+        app,
+        [
+            "job",
+            "events",
+            job_id,
+            "--db-path",
+            str(db_path),
+            "--since",
+            "0",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert first.exit_code == 0
+    first_payload = json.loads(first.output)
+    assert first_payload["job_id"] == job_id
+    assert first_payload["read_only"] is True
+    assert first_payload["count"] == 1
+    assert first_payload["cursor"] == 1
+    assert first_payload["events"][0]["type"] == "mcp.job.created"
+    assert first_payload["events"][0]["data"]["status"] == "queued"
+
+    second = runner.invoke(
+        app,
+        [
+            "job",
+            "events",
+            job_id,
+            "--db-path",
+            str(db_path),
+            "--since",
+            str(first_payload["cursor"]),
+        ],
+    )
+
+    assert second.exit_code == 0
+    second_payload = json.loads(second.output)
+    assert second_payload["count"] == 1
+    assert second_payload["cursor"] == 3
+    assert second_payload["events"][0]["type"] == "mcp.job.updated"
+    assert second_payload["events"][0]["data"]["status"] == "running"
+
+
+def test_job_events_command_does_not_create_missing_database(tmp_path: Path) -> None:
+    """Read-only polling must not create ~/.ouroboros or a missing DB."""
+    from ouroboros.cli.main import app
+
+    missing_db = tmp_path / "missing" / "ouroboros.db"
+
+    result = runner.invoke(
+        app,
+        ["job", "events", "job_missing", "--db-path", str(missing_db)],
+    )
+
+    assert result.exit_code == 1
+    assert "EventStore database not found" in result.output
+    assert not missing_db.exists()
+
+
+@pytest.mark.asyncio
+async def test_job_events_read_only_store_rejects_writes(tmp_path: Path) -> None:
+    """The job event poller opens SQLite in true read-only mode."""
+    from ouroboros.cli.commands.job import _open_read_only_event_store
+
+    db_path = tmp_path / "job-events-readonly.db"
+    bootstrap = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    await bootstrap.initialize()
+    await bootstrap.close()
+
+    event_store = await _open_read_only_event_store(str(db_path))
+    try:
+        with pytest.raises(OperationalError) as excinfo:
+            async with event_store._engine.begin() as conn:  # type: ignore[union-attr]
+                await conn.execute(text("DELETE FROM events"))
+        assert "readonly database" in str(excinfo.value).lower()
+    finally:
+        await event_store.close()
 
 
 def test_cli_retrieves_previously_tracked_detached_auto_result(monkeypatch, tmp_path) -> None:
