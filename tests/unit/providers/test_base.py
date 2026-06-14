@@ -85,6 +85,12 @@ class TestCompletionConfig:
         assert config.model_is_explicit is False
         assert config.stop is None
         assert config.top_p == 1.0
+        assert config.reasoning_effort is None
+
+    def test_completion_config_accepts_reasoning_effort(self) -> None:
+        """The effort-first dial is an optional, None-defaulted field."""
+        config = CompletionConfig(model="claude-sonnet-4-6", reasoning_effort="high")
+        assert config.reasoning_effort == "high"
 
     def test_completion_config_custom_values(self) -> None:
         """CompletionConfig accepts custom values."""

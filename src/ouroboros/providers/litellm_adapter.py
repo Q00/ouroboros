@@ -86,6 +86,8 @@ def _request_options_for_hash(config: CompletionConfig) -> dict[str, Any]:
         options["stop"] = config.stop
     if config.response_format:
         options["response_format"] = config.response_format
+    if config.reasoning_effort:
+        options["reasoning_effort"] = config.reasoning_effort
     return options
 
 
@@ -283,6 +285,13 @@ class LiteLLMAdapter:
 
         if config.response_format:
             kwargs["response_format"] = config.response_format
+
+        # Effort-first investment dial (RFC #1405). LiteLLM forwards
+        # ``reasoning_effort`` to each provider's native knob (Anthropic's
+        # output_config.effort, OpenAI-style reasoning_effort, etc.), so this is
+        # the provider-agnostic path. Omitted when unset to preserve behavior.
+        if config.reasoning_effort:
+            kwargs["reasoning_effort"] = config.reasoning_effort
 
         api_key = self._get_api_key(config.model)
         if api_key:

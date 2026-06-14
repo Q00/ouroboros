@@ -751,3 +751,23 @@ class TestLiteLLMAdapterProtocolCompliance:
 
         # Type check - can be assigned to protocol type
         _: LLMAdapter = adapter  # This should not raise type errors
+
+
+class TestReasoningEffortPassthrough:
+    """LiteLLM forwards the effort-first dial as a provider-agnostic kwarg."""
+
+    def test_reasoning_effort_forwarded_when_set(self) -> None:
+        adapter = LiteLLMAdapter()
+        kwargs = adapter._build_completion_kwargs(
+            [Message(role=MessageRole.USER, content="hi")],
+            CompletionConfig(model="claude-sonnet-4-6", reasoning_effort="high"),
+        )
+        assert kwargs["reasoning_effort"] == "high"
+
+    def test_reasoning_effort_omitted_when_unset(self) -> None:
+        adapter = LiteLLMAdapter()
+        kwargs = adapter._build_completion_kwargs(
+            [Message(role=MessageRole.USER, content="hi")],
+            CompletionConfig(model="claude-sonnet-4-6"),
+        )
+        assert "reasoning_effort" not in kwargs

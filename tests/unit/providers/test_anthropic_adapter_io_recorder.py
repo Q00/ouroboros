@@ -305,9 +305,66 @@ async def test_complete_records_top_p_and_stop_sequences_in_journal_extra() -> N
 
     assert result.is_ok
     started = store.appended[0]
-    assert started.data["extra"] == {"top_p": 0.7, "stop_sequences": ["STOP"]}
+    assert started.data["extra"] == {
+        "top_p": 0.7,
+        "stop_sequences": ["STOP"],
+        "reasoning_effort": None,
+    }
     fake_client.messages.create.assert_awaited_once()
     kwargs = fake_client.messages.create.await_args.kwargs
     assert kwargs["system"] == "sys a\n\nsys b"
     assert kwargs["top_p"] == 0.7
     assert kwargs["stop_sequences"] == ["STOP"]
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_reasoning_effort_to_output_config() -> None:
+    """The effort dial maps to output_config.effort (the GA effort parameter),
+    NOT the removed thinking.budget_tokens (which 400s on current Claude models)."""
+    adapter = AnthropicAdapter(api_key="dummy")
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = "ok"
+    stub_response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=1, output_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=stub_response)
+    adapter._client = fake_client
+
+    await adapter.complete(
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        config=CompletionConfig(model="claude-sonnet-4-6", reasoning_effort="high"),
+    )
+
+    kwargs = fake_client.messages.create.call_args.kwargs
+    assert kwargs["output_config"] == {"effort": "high"}
+    assert "thinking" not in kwargs
+    assert "budget_tokens" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_complete_omits_output_config_when_no_effort() -> None:
+    adapter = AnthropicAdapter(api_key="dummy")
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = "ok"
+    stub_response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=1, output_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=stub_response)
+    adapter._client = fake_client
+
+    await adapter.complete(
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        config=CompletionConfig(model="claude-sonnet-4-6"),
+    )
+
+    assert "output_config" not in fake_client.messages.create.call_args.kwargs
