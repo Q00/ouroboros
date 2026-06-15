@@ -1367,6 +1367,20 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend="codex") == "gpt-5"
             assert get_assertion_extraction_model(backend="codex") == "gpt-5-nano"
 
+    def test_codex_backend_preserves_explicit_opus_for_sonnet_default_fields(self) -> None:
+        """Only dependency/ontology treat pre-flip Opus as a shipped default."""
+        explicit_opus_config = OuroborosConfig(
+            llm=LLMConfig(qa_model=DEFAULT_OPUS_MODEL),
+            evaluation=EvaluationConfig(assertion_extraction_model=DEFAULT_OPUS_MODEL),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=explicit_opus_config),
+        ):
+            assert get_qa_model(backend="codex") == DEFAULT_OPUS_MODEL
+            assert get_assertion_extraction_model(backend="codex") == DEFAULT_OPUS_MODEL
+
     @pytest.mark.parametrize("backend", ["codex", "copilot", "hermes", "kiro"])
     def test_legacy_shipped_default_models_still_normalize_to_sentinel(self, backend: str) -> None:
         """Regression for #1324 (ouroboros-agent[bot] req_1780385373_60).

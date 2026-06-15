@@ -1308,6 +1308,7 @@ def _normalize_configured_model_for_backend(
     *,
     default_model: str,
     backend: str | None = None,
+    extra_shipped_defaults: tuple[str, ...] = (),
 ) -> str:
     """Normalize config-backed models while preserving backend-safe defaults."""
     candidate = configured_model.strip()
@@ -1320,7 +1321,10 @@ def _normalize_configured_model_for_backend(
     # and for Claude-incapable backends it must normalize to the sentinel just
     # like the current default would. Genuinely explicit, never-shipped ids are
     # absent from this set and fall through to be preserved verbatim.
-    is_shipped_default = candidate in recognized_shipped_defaults(default_model)
+    is_shipped_default = candidate in (
+        *recognized_shipped_defaults(default_model),
+        *extra_shipped_defaults,
+    )
     if resolved in _CODEX_LLM_BACKENDS and is_shipped_default:
         return _CODEX_DEFAULT_MODEL
     if resolved in _KIRO_LLM_BACKENDS and is_shipped_default:
@@ -1418,6 +1422,7 @@ def get_dependency_analysis_model(backend: str | None = None) -> str:
             config.llm.dependency_analysis_model,
             default_model=DEFAULT_SONNET_MODEL,
             backend=backend,
+            extra_shipped_defaults=recognized_shipped_defaults(DEFAULT_OPUS_MODEL),
         )
     except ConfigError:
         return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
@@ -1435,6 +1440,7 @@ def get_ontology_analysis_model(backend: str | None = None) -> str:
             config.llm.ontology_analysis_model,
             default_model=DEFAULT_SONNET_MODEL,
             backend=backend,
+            extra_shipped_defaults=recognized_shipped_defaults(DEFAULT_OPUS_MODEL),
         )
     except ConfigError:
         return _default_model_for_backend(DEFAULT_SONNET_MODEL, backend=backend)
