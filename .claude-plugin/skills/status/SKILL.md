@@ -1,6 +1,13 @@
 ---
 name: status
 description: "Check session status and measure goal drift"
+matching:
+  localized_triggers:
+    ko:
+      - 상태를 확인해줘
+      - 세션 상태를 알려줘
+      - 드리프트를 확인해줘
+      - 목표에서 벗어났는지 확인해줘
 mcp_tool: ouroboros_session_status
 mcp_args:
   session_id: "$1"

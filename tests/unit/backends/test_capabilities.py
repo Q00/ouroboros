@@ -114,6 +114,7 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
     assert "### Codex App Localized Skill Matching" in guide
     assert "`matching.localized_triggers`" in guide
     assert "Canonical skill names" in guide
+    assert "fail closed" in guide
 
 
 def test_renders_generic_skill_capability_guides_for_runtime_backends() -> None:

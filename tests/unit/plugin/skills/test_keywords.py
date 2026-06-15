@@ -35,6 +35,33 @@ matching:
     return registry
 
 
+async def _discover_collision_registry(tmp_path: Path) -> SkillRegistry:
+    skill_dir = tmp_path / "skills"
+    skill_dir.mkdir()
+
+    for skill_name in ("evaluate", "qa"):
+        skill_path = skill_dir / skill_name
+        skill_path.mkdir()
+        (skill_path / "SKILL.md").write_text(
+            f"""---
+name: {skill_name}
+description: {skill_name} skill
+matching:
+  localized_triggers:
+    ko:
+      - 산출물을 검토해줘
+---
+
+# {skill_name}
+""",
+            encoding="utf-8",
+        )
+
+    registry = SkillRegistry(skill_dir=skill_dir)
+    await registry.discover_all()
+    return registry
+
+
 class TestExactMagicCommandEligibility:
     """Test deterministic intercept eligibility checks."""
 
@@ -157,4 +184,36 @@ class TestExactMagicKeywordRouting:
             registry.stop_watcher()
 
         assert skill_name == "run"
+        assert match_type == MatchType.EXACT_PREFIX
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_localized_trigger_fails_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Discovery-only localized phrases must not guess between colliding skills."""
+        registry = await _discover_collision_registry(tmp_path)
+
+        try:
+            skill_name, match_type = route_to_skill("산출물을 검토해줘", registry)
+        finally:
+            registry.stop_watcher()
+
+        assert skill_name is None
+        assert match_type == MatchType.FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_exact_prefix_still_resolves_collision(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Canonical commands remain the deterministic collision escape hatch."""
+        registry = await _discover_collision_registry(tmp_path)
+
+        try:
+            skill_name, match_type = route_to_skill("ooo qa 산출물을 검토해줘", registry)
+        finally:
+            registry.stop_watcher()
+
+        assert skill_name == "qa"
         assert match_type == MatchType.EXACT_PREFIX

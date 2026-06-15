@@ -317,6 +317,32 @@ class TestLoadPackagedCodexSkills:
         assert "ko:" in skill
         assert expected_phrase in skill
 
+    @pytest.mark.parametrize(
+        ("skill_name", "expected_phrase"),
+        [
+            ("interview", "요구사항을 먼저 명확히 해줘"),
+            ("seed", "시드를 생성해줘"),
+            ("run", "시드를 실행해줘"),
+            ("evaluate", "실행 결과를 평가해줘"),
+            ("qa", "품질을 검사해줘"),
+            ("status", "세션 상태를 알려줘"),
+        ],
+    )
+    def test_claude_plugin_core_skills_mirror_korean_matching_metadata(
+        self,
+        skill_name: str,
+        expected_phrase: str,
+    ) -> None:
+        """Runtime-neutral matching metadata must not be Codex-only dead metadata."""
+        skill_path = Path(".claude-plugin") / "skills" / skill_name / "SKILL.md"
+        skill = skill_path.read_text(encoding="utf-8")
+
+        assert f"name: {skill_name}" in skill
+        assert "matching:" in skill
+        assert "localized_triggers:" in skill
+        assert "ko:" in skill
+        assert expected_phrase in skill
+
     def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
         """Missing skill entrypoints should fail fast."""
         packaged_skills_dir = tmp_path / "packaged-skills"

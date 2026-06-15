@@ -113,7 +113,27 @@ class MagicKeywordDetector:
             The best match if found, None otherwise.
         """
         matches = self.detect(user_input)
-        return matches[0] if matches else None
+        if not matches:
+            return None
+
+        best = matches[0]
+        if best.match_type != MatchType.TRIGGER_KEYWORD:
+            return best
+
+        tied_skill_names = {
+            match.skill_name
+            for match in matches
+            if match.match_type == best.match_type and match.confidence == best.confidence
+        }
+        if len(tied_skill_names) > 1:
+            log.info(
+                "plugin.skill.trigger_match_ambiguous",
+                skills=sorted(tied_skill_names),
+                confidence=best.confidence,
+            )
+            return None
+
+        return best
 
     def _detect_prefixes(self, user_input: str) -> list[KeywordMatch]:
         """Detect magic prefix matches in user input.

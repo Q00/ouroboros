@@ -314,7 +314,10 @@ def render_backend_skill_capability_guide(name: str) -> str:
                     "and MCP tool identifiers remain English and unchanged. If a Codex App "
                     "surface does not consume custom localized metadata directly, treat "
                     "these phrases as fallback guidance when deciding whether an installed "
-                    "Ouroboros skill should be invoked implicitly from a non-English prompt."
+                    "Ouroboros skill should be invoked implicitly from a non-English prompt. "
+                    "When two skills match with the same confidence, fail closed and ask for "
+                    "a canonical `ooo <skill>` or `/ouroboros:<skill>` command instead of "
+                    "guessing."
                 ),
                 "",
             )

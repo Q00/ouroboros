@@ -1,6 +1,13 @@
 ---
 name: run
 description: "Execute a Seed specification through the workflow engine"
+matching:
+  localized_triggers:
+    ko:
+      - 시드를 실행해줘
+      - seed 파일을 실행해줘
+      - 워크플로우를 실행해줘
+      - 명세를 실행해줘
 mcp_tool: ouroboros_execute_seed
 mcp_args:
   seed_path: "$1"
