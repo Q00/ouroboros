@@ -16,5 +16,8 @@ runtime_probe_kinds:
   - headless_run
   - stdout_golden
 
+expected_output_files:
+  - habits.json
+
 # 30-minute soft budget honored by the opt-in live canonical runner.
 wall_clock_budget_seconds: 1800

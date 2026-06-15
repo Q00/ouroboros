@@ -18,6 +18,8 @@ Two cost regimes:
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -25,6 +27,113 @@ import pytest
 from ouroboros.core.types import Result
 
 from .conftest import CanonicalScenario
+
+
+def _expected_output_paths(scenario: CanonicalScenario, workdir: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for declared in scenario.expected_output_files:
+        relative_path = Path(declared)
+        assert not relative_path.is_absolute(), (
+            f"{scenario.slug}: expected_output_files entries must be relative; got {declared!r}"
+        )
+        paths.append(workdir / relative_path)
+    return tuple(paths)
+
+
+def _find_generated_cli_artifact(scenario: CanonicalScenario, workdir: Path) -> Path:
+    candidates = [
+        path
+        for path in workdir.glob("*.py")
+        if path.is_file() and not path.name.startswith((".", "_"))
+    ]
+    preferred_tokens = ("habit", "todo", "cli", "main", "app")
+    preferred = [
+        path for path in candidates if any(token in path.stem.lower() for token in preferred_tokens)
+    ]
+    selected = preferred or candidates
+    assert selected, (
+        f"{scenario.slug}: no generated Python CLI artifact found at {workdir}; "
+        "expected a root-level .py file from the live product run"
+    )
+    assert len(selected) == 1, (
+        f"{scenario.slug}: expected exactly one generated CLI artifact; "
+        f"found {[str(path) for path in selected]}"
+    )
+    return selected[0]
+
+
+def _run_cli_command(
+    artifact: Path, args: tuple[str, ...], cwd: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        (sys.executable, str(artifact), *args),
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+
+def _command_summary(
+    artifact: Path,
+    commands: tuple[tuple[tuple[str, ...], subprocess.CompletedProcess[str]], ...],
+) -> str:
+    parts: list[str] = []
+    for args, completed in commands:
+        rendered = " ".join((sys.executable, str(artifact), *args))
+        parts.append(f"{rendered} -> {completed.returncode}")
+    return "; ".join(parts)
+
+
+def _assert_cli_todo_product_reality(
+    scenario: CanonicalScenario,
+    workdir: Path,
+) -> tuple[Path, str]:
+    assert scenario.slug == "cli-todo", (
+        "_assert_cli_todo_product_reality is intentionally scoped to cli-todo; "
+        f"got {scenario.slug!r}"
+    )
+    artifact = _find_generated_cli_artifact(scenario, workdir)
+    expected_paths = _expected_output_paths(scenario, workdir)
+
+    add_result = _run_cli_command(artifact, ("add", "drink water"), workdir)
+    list_result = _run_cli_command(artifact, ("list",), workdir)
+    done_result = _run_cli_command(artifact, ("done", "drink water"), workdir)
+    invalid_result = _run_cli_command(artifact, (), workdir)
+
+    smoke_commands = (
+        (("add", "drink water"), add_result),
+        (("list",), list_result),
+        (("done", "drink water"), done_result),
+        ((), invalid_result),
+    )
+    summary = _command_summary(artifact, smoke_commands)
+
+    assert add_result.returncode == 0, (
+        f"{scenario.slug}: add command failed ({summary})\n"
+        f"stdout={add_result.stdout!r}\nstderr={add_result.stderr!r}"
+    )
+    assert list_result.returncode == 0, (
+        f"{scenario.slug}: list command failed ({summary})\n"
+        f"stdout={list_result.stdout!r}\nstderr={list_result.stderr!r}"
+    )
+    assert "drink water" in list_result.stdout.lower(), (
+        f"{scenario.slug}: list output did not include the added habit "
+        f"({summary}); stdout={list_result.stdout!r}"
+    )
+    assert done_result.returncode == 0, (
+        f"{scenario.slug}: done command failed ({summary})\n"
+        f"stdout={done_result.stdout!r}\nstderr={done_result.stderr!r}"
+    )
+    assert invalid_result.returncode != 0, (
+        f"{scenario.slug}: invalid-input command unexpectedly succeeded ({summary})"
+    )
+    for expected_path in expected_paths:
+        assert expected_path.is_file(), (
+            f"{scenario.slug}: declared output file was not created: {expected_path}"
+        )
+    return artifact, summary
 
 
 def test_scenario_has_nonempty_goal(scenario: CanonicalScenario) -> None:
@@ -373,10 +482,19 @@ async def test_scenario_live_run_or_skip(
             f"{scenario.slug}: product_complete scenario must not stop at an "
             f"unverified run handoff: {tool_result.meta}"
         )
+    artifact_path: Path | None = None
+    smoke_summary = "not_run"
+    if scenario.slug == "cli-todo":
+        artifact_path, smoke_summary = _assert_cli_todo_product_reality(scenario, workdir)
     print(
         f"CANONICAL {scenario.slug}: status={tool_result.meta['status']} "
         f"phase={tool_result.meta.get('phase')} "
-        f"closure_mode={closure_mode} completion_mode={scenario.completion_mode}"
+        f"closure_mode={closure_mode} completion_mode={scenario.completion_mode} "
+        f"artifact={artifact_path or 'n/a'} smoke={smoke_summary} "
+        f"auto_session_id={tool_result.meta.get('auto_session_id')} "
+        f"execution_id={tool_result.meta.get('execution_id')} "
+        f"run_session_id={tool_result.meta.get('run_session_id')} "
+        f"evidence={evidence_path}"
     )
 
 
@@ -403,6 +521,61 @@ async def test_live_run_opt_in_invokes_auto_handler(
 
     async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> Result[object, str]:
         calls.append((selected.slug, workdir))
+        (workdir / "habit_tracker.py").write_text(
+            """
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+STORE = Path("habits.json")
+
+
+def _load() -> list[dict[str, object]]:
+    if not STORE.exists():
+        return []
+    return json.loads(STORE.read_text(encoding="utf-8"))
+
+
+def _save(habits: list[dict[str, object]]) -> None:
+    STORE.write_text(json.dumps(habits), encoding="utf-8")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        print("usage: habit_tracker.py add|list|done ...", file=sys.stderr)
+        return 2
+    command = argv[1]
+    habits = _load()
+    if command == "add" and len(argv) == 3:
+        habits.append({"name": argv[2], "done": False})
+        _save(habits)
+        print(f"added {argv[2]}")
+        return 0
+    if command == "list" and len(argv) == 2:
+        for habit in habits:
+            marker = "x" if habit.get("done") else " "
+            print(f"[{marker}] {habit['name']}")
+        return 0
+    if command == "done" and len(argv) == 3:
+        for habit in habits:
+            if habit.get("name") == argv[2]:
+                habit["done"] = True
+                _save(habits)
+                print(f"done {argv[2]}")
+                return 0
+        print("habit not found", file=sys.stderr)
+        return 1
+    print("invalid command", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+""".lstrip(),
+            encoding="utf-8",
+        )
         return Result.ok(_ToolResult())
 
     monkeypatch.setattr(

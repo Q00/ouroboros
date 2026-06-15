@@ -72,6 +72,18 @@ class CanonicalScenario:
         return tuple(out)
 
     @property
+    def expected_output_files(self) -> tuple[str, ...]:
+        value = self.metadata.get("expected_output_files", ())
+        if not value:
+            return ()
+        assert isinstance(value, (list, tuple))
+        out: list[str] = []
+        for item in value:
+            assert isinstance(item, str)
+            out.append(item)
+        return tuple(out)
+
+    @property
     def wall_clock_budget_seconds(self) -> int:
         value = self.metadata.get("wall_clock_budget_seconds", _DEFAULT_WALL_CLOCK_BUDGET_SECONDS)
         assert isinstance(value, int)
