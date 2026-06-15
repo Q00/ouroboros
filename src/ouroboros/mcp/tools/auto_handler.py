@@ -489,17 +489,22 @@ class AutoHandler:
         # OpenCode plugin mode is intentionally preserved here: unlike
         # interview/Seed authoring, Ralph can surface a plugin delegation
         # receipt to the caller.
+        ralph_opencode_mode = (
+            state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
+            if runtime_plan.execute.runtime_backend == "opencode"
+            else None
+        )
         ralph_handler = None
         if complete_product:
             ralph_handler = (
                 self.ralph_handler_factory(
                     runtime_plan.execute.runtime_backend,
-                    runtime_plan.execute.opencode_mode,
+                    ralph_opencode_mode,
                 )
                 if self.ralph_handler_factory is not None
                 else RalphHandler(
                     agent_runtime_backend=runtime_plan.execute.runtime_backend,
-                    opencode_mode=runtime_plan.execute.opencode_mode,
+                    opencode_mode=ralph_opencode_mode,
                 )
             )
         ralph_starter = (

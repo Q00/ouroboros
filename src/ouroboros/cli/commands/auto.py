@@ -54,6 +54,7 @@ from ouroboros.auto.state import (
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
@@ -468,7 +469,7 @@ async def _run_auto(
     runtime_plan = resolve_auto_stage_runtime_plan(
         runtime_override=runtime_override,
         fallback_runtime_backend=runtime,
-        fallback_opencode_mode=state.opencode_mode,
+        fallback_opencode_mode=state.opencode_mode or get_opencode_mode(),
     )
     runtime = runtime_plan.default.runtime_backend
     raw_default_opencode_mode = runtime_plan.default.opencode_mode
@@ -551,7 +552,11 @@ async def _run_auto(
         # bare RalphHandler so job-mode Ralph has an EvolutionaryLoop.
         _build_configured_ralph_handler(
             runtime=runtime_plan.execute.runtime_backend,
-            opencode_mode=runtime_plan.execute.opencode_mode,
+            opencode_mode=(
+                state.ralph_opencode_mode or runtime_plan.execute.opencode_mode
+                if runtime_plan.execute.runtime_backend == "opencode"
+                else None
+            ),
         )
         if complete_product
         else None
