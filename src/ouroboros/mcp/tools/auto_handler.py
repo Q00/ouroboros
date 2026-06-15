@@ -463,16 +463,19 @@ class AutoHandler:
         # Issue #1248 — construct ``lateral_thinker`` ahead of the driver so
         # the safe-default escalation path (interview phase, runs regardless
         # of complete-product mode) has the same lateral handle the
-        # EVALUATE → UNSTUCK_LATERAL path uses below. ``LateralThinkHandler``
-        # is plugin-mode-skipped because it dispatches to OpenCode Task
-        # panes — the synchronous auto pipeline cannot consume that
-        # out-of-band response.
-        opencode_plugin_mode = opencode_mode == "plugin"
+        # EVALUATE → UNSTUCK_LATERAL path uses below. Gate this on the
+        # resolved REFLECT stage rather than the default runtime: a default
+        # OpenCode plugin profile can still route reflect work to an inline
+        # backend that the synchronous auto pipeline can consume.
+        reflect_plugin_mode = should_dispatch_via_plugin(
+            runtime_plan.reflect.runtime_backend,
+            runtime_plan.reflect.opencode_mode,
+        )
         lateral_thinker = None
-        if not opencode_plugin_mode:
+        if not reflect_plugin_mode:
             lateral_handler = LateralThinkHandler(
                 agent_runtime_backend=runtime_plan.reflect.runtime_backend,
-                opencode_mode=runtime_plan.reflect.opencode_mode,
+                opencode_mode=demote_plugin_opencode_mode(runtime_plan.reflect.opencode_mode),
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
@@ -524,18 +527,14 @@ class AutoHandler:
         # RUN/skip-run transitions. For OpenCode plugin sessions, use the same
         # demoted authoring mode as Interview/GenerateSeed so QA executes
         # inline instead of emitting an out-of-band ``_subagent`` envelope that
-        # the synchronous pipeline cannot consume. Keep the optional
-        # complete-product execution evaluator plugin-skipped: that later
-        # EVALUATE-stage advisory path still grades post-run artifacts and
-        # cannot consume plugin Task-pane output.
+        # the synchronous pipeline cannot consume.
         #
         # Issue #1248 — ``lateral_thinker`` is constructed above (before
         # the driver) so it is available to both the driver's
         # safe-default escalation path and the pipeline's
-        # EVALUATE → UNSTUCK_LATERAL path. The EVALUATE side stays gated
-        # by ``evaluator``, which keeps the complete-product invariant
-        # for that callsite without re-instantiating ``lateral_thinker``
-        # here.
+        # EVALUATE → UNSTUCK_LATERAL path. The complete-product evaluator is
+        # plugin-skipped based on the resolved EVALUATE stage, not the default
+        # runtime, so explicit non-plugin stage overrides remain consumable.
         evaluator = None
         seed_qa_handler = QAHandler(
             llm_backend=self.llm_backend,
@@ -543,8 +542,17 @@ class AutoHandler:
             opencode_mode=authoring_opencode_mode,
         )
         seed_qa_evaluator = HandlerSeedQAEvaluator(seed_qa_handler)
-        if complete_product and not opencode_plugin_mode:
-            evaluator = HandlerEvaluator(seed_qa_handler)
+        evaluate_plugin_mode = should_dispatch_via_plugin(
+            runtime_plan.evaluate.runtime_backend,
+            runtime_plan.evaluate.opencode_mode,
+        )
+        if complete_product and not evaluate_plugin_mode:
+            evaluation_handler = QAHandler(
+                llm_backend=self.llm_backend,
+                agent_runtime_backend=runtime_plan.evaluate.runtime_backend,
+                opencode_mode=demote_plugin_opencode_mode(runtime_plan.evaluate.opencode_mode),
+            )
+            evaluator = HandlerEvaluator(evaluation_handler)
         watchdog_event_store = self.event_store or EventStore()
         await watchdog_event_store.initialize()
         watchdog = Watchdog(

@@ -1380,6 +1380,65 @@ async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
 
 
 @pytest.mark.asyncio
+async def test_auto_handler_routes_complete_product_evaluate_and_reflect_from_stage_plan(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, seed_generator, **kwargs):  # noqa: ANN001, ANN003, ARG002
+            evaluator = kwargs["evaluator"]
+            lateral_thinker = kwargs["lateral_thinker"]
+            captured["evaluator_runtime"] = evaluator.qa_handler.agent_runtime_backend
+            captured["evaluator_mode"] = evaluator.qa_handler.opencode_mode
+            captured["lateral_runtime"] = lateral_thinker.handler.agent_runtime_backend
+            captured["lateral_mode"] = lateral_thinker.handler.opencode_mode
+            captured["seed_qa_runtime"] = kwargs[
+                "seed_qa_evaluator"
+            ].qa_handler.agent_runtime_backend
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["state_runtime"] = run_state.runtime_backend
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(
+        auto_module,
+        "resolve_auto_stage_runtime_plan",
+        lambda **_kwargs: AutoStageRuntimePlan(
+            default=StageRuntime("opencode", "plugin"),
+            interview=StageRuntime("gjc", None),
+            execute=StageRuntime("pi", None),
+            evaluate=StageRuntime("codex", None),
+            reflect=StageRuntime("hermes", None),
+        ),
+    )
+
+    result = await AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin").handle(
+        {"goal": "Build a CLI", "cwd": str(tmp_path), "complete_product": True}
+    )
+
+    assert result.is_ok
+    assert captured == {
+        "evaluator_runtime": "codex",
+        "evaluator_mode": None,
+        "lateral_runtime": "hermes",
+        "lateral_mode": None,
+        "seed_qa_runtime": "gjc",
+        "state_runtime": "opencode",
+    }
+
+
+@pytest.mark.asyncio
 async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_server_cwd(
     monkeypatch, tmp_path
 ) -> None:
