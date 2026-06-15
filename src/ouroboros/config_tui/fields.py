@@ -62,19 +62,15 @@ def stage_runtime_field(stage: Stage) -> SettingField:
 
 
 # Friendly per-stage model bindings. "seed" is not a separate stage: it
-# shares clarification config with interview (see Stage docstring).
+# shares clarification config with interview (see Stage docstring). Execute is
+# runtime-only here: the old execution model key was removed from the config
+# schema, and no replacement execution model contract exists.
 STAGE_MODEL_FIELDS: dict[Stage, SettingField] = {
     Stage.INTERVIEW: SettingField(
         key="clarification.default_model",
         label="Interview & Seed model",
         env_vars=("OUROBOROS_CLARIFICATION_MODEL",),
         stage=Stage.INTERVIEW.value,
-    ),
-    Stage.EXECUTE: SettingField(
-        key="execution.double_diamond_model",
-        label="Execution model",
-        env_vars=("OUROBOROS_DOUBLE_DIAMOND_MODEL",),
-        stage=Stage.EXECUTE.value,
     ),
     Stage.EVALUATE: SettingField(
         key="evaluation.semantic_model",

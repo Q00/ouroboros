@@ -471,10 +471,10 @@ class SettingsApp(App[None]):
 
     def _compose_stage_card(self, stage: Stage) -> ComposeResult:
         runtime_field = stage_runtime_field(stage)
-        model_field = STAGE_MODEL_FIELDS[stage]
+        model_field = STAGE_MODEL_FIELDS.get(stage)
         stage_value = get_value(self._raw, runtime_field.key)
         effective_backend = self._effective_stage_backend(stage)
-        current_model = str(self._current(model_field.key) or "")
+        current_model = str(self._current(model_field.key) or "") if model_field else ""
 
         with Container(classes="stage-card", id=f"stage-card-{stage.value}"):
             yield Static(
@@ -498,21 +498,22 @@ class SettingsApp(App[None]):
                 classes="install-warning hidden",
                 id=f"stage-install-warning-{stage.value}",
             )
-            yield Static(model_field.label, classes="field-label")
-            warning = _env_warning_text(model_field)
-            if warning:
-                yield Static(warning, classes="env-warning")
-            yield Select(
-                self._model_options(effective_backend, current_model),
-                value=current_model if current_model else Select.NULL,
-                allow_blank=True,
-                id=f"stage-model-{stage.value}",
-            )
-            yield Input(
-                placeholder="custom model id",
-                classes="hidden",
-                id=f"stage-model-custom-{stage.value}",
-            )
+            if model_field is not None:
+                yield Static(model_field.label, classes="field-label")
+                warning = _env_warning_text(model_field)
+                if warning:
+                    yield Static(warning, classes="env-warning")
+                yield Select(
+                    self._model_options(effective_backend, current_model),
+                    value=current_model if current_model else Select.NULL,
+                    allow_blank=True,
+                    id=f"stage-model-{stage.value}",
+                )
+                yield Input(
+                    placeholder="custom model id",
+                    classes="hidden",
+                    id=f"stage-model-custom-{stage.value}",
+                )
 
     # ── events ───────────────────────────────────────────────────────
 
@@ -530,7 +531,8 @@ class SettingsApp(App[None]):
         if select_id.startswith("stage-runtime-"):
             stage = Stage(select_id.removeprefix("stage-runtime-"))
             self._update_resolved_caption(stage)
-            self._refresh_stage_model_options(stage)
+            if stage in STAGE_MODEL_FIELDS:
+                self._refresh_stage_model_options(stage)
             self._refresh_install_warning(stage, event.value)
         elif select_id == "global-runtime":
             # Cascade: every inheriting card re-resolves its agent and pulls
@@ -566,6 +568,8 @@ class SettingsApp(App[None]):
         )
 
     def _set_stage_model(self, stage: Stage, model: str | None) -> None:
+        if stage not in STAGE_MODEL_FIELDS:
+            return
         backend = self._selected_runtime(stage)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
         model_select.set_options(self._model_options(backend, model))
@@ -575,7 +579,7 @@ class SettingsApp(App[None]):
     def _sync_stage_card(self, stage: Stage) -> None:
         runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
         self._update_resolved_caption(stage)
-        if runtime_select.value == INHERIT_SENTINEL:
+        if stage in STAGE_MODEL_FIELDS and runtime_select.value == INHERIT_SENTINEL:
             self._refresh_stage_model_options(stage)
 
     def _update_resolved_caption(self, stage: Stage) -> None:
@@ -610,6 +614,8 @@ class SettingsApp(App[None]):
         is replaced by that backend's catalog default rather than carried
         over (the user changed the agent; the old model id is stale).
         """
+        if stage not in STAGE_MODEL_FIELDS:
+            return
         backend = self._selected_runtime(stage)
         self._request_model_listing(backend)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
@@ -647,6 +653,8 @@ class SettingsApp(App[None]):
         if picks is None:
             return
         for stage in Stage:
+            if stage not in STAGE_MODEL_FIELDS:
+                continue
             try:
                 backend = self._selected_runtime(stage)
                 model = picks.get(backend)
@@ -692,21 +700,24 @@ class SettingsApp(App[None]):
             elif not _is_blank(runtime_value):
                 record(runtime_field.key, str(runtime_value))
 
-            model_field = STAGE_MODEL_FIELDS[stage]
-            model_value = self.query_one(f"#stage-model-{stage.value}", Select).value
-            if model_value == CUSTOM_SENTINEL:
-                custom = self.query_one(f"#stage-model-custom-{stage.value}", Input).value.strip()
-                if custom:
-                    record(model_field.key, custom)
-            elif not _is_blank(model_value):
-                model_text = str(model_value)
-                if model_text == DEFAULT_MODEL_SENTINEL and not uses_default_model_sentinel(
-                    self._selected_llm_backend()
-                ):
-                    if get_value(self._raw, model_field.key) == DEFAULT_MODEL_SENTINEL:
-                        changes[model_field.key] = None
-                    continue
-                record(model_field.key, model_text)
+            model_field = STAGE_MODEL_FIELDS.get(stage)
+            if model_field is not None:
+                model_value = self.query_one(f"#stage-model-{stage.value}", Select).value
+                if model_value == CUSTOM_SENTINEL:
+                    custom = self.query_one(
+                        f"#stage-model-custom-{stage.value}", Input
+                    ).value.strip()
+                    if custom:
+                        record(model_field.key, custom)
+                elif not _is_blank(model_value):
+                    model_text = str(model_value)
+                    if model_text == DEFAULT_MODEL_SENTINEL and not uses_default_model_sentinel(
+                        self._selected_llm_backend()
+                    ):
+                        if get_value(self._raw, model_field.key) == DEFAULT_MODEL_SENTINEL:
+                            changes[model_field.key] = None
+                        continue
+                    record(model_field.key, model_text)
 
         for field in ADVANCED_MODEL_FIELDS:
             raw_value = self.query_one(f"#adv-{_slug(field.key)}", Input).value.strip()

@@ -836,9 +836,9 @@ llm:
   backend: claude_code
   permission_mode: default
   opencode_permission_mode: acceptEdits
-  qa_model: claude-sonnet-4-20250514
-  dependency_analysis_model: claude-opus-4-6
-  ontology_analysis_model: claude-opus-4-6
+  qa_model: claude-sonnet-4-6
+  dependency_analysis_model: claude-sonnet-4-6
+  ontology_analysis_model: claude-sonnet-4-6
   context_compression_model: gpt-4
 
 economics:

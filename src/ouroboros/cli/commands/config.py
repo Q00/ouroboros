@@ -227,19 +227,23 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
     for stage in Stage:
         stage_agent = get_value(data, f"orchestrator.runtime_profile.stages.{stage.value}")
         resolved = str(stage_agent or profile_default or agent_value)
-        model_field = STAGE_MODEL_FIELDS[stage]
-        model_value, model_source = _effective_value(
-            model_field.env_vars,
-            get_value(data, model_field.key),
-            "backend default",
-        )
+        model_field = STAGE_MODEL_FIELDS.get(stage)
+        if model_field is None:
+            model_value, model_source, model_key = None, "not configurable", None
+        else:
+            model_value, model_source = _effective_value(
+                model_field.env_vars,
+                get_value(data, model_field.key),
+                "backend default",
+            )
+            model_key = model_field.key
         stages[stage.value] = {
             "agent": resolved,
             "inherited": stage_agent is None,
             "agent_installed": bool(installed.get(resolved)),
             "model": model_value,
             "model_source": model_source,
-            "model_key": model_field.key,
+            "model_key": model_key,
         }
     return {
         "defaults": {
@@ -308,12 +312,15 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
         else:
             resolved = str(profile_default or agent_value)
             agent_cell = f"(inherit) → {_agent_cell(resolved, installed)}"
-        model_field = STAGE_MODEL_FIELDS[stage]
-        model_value, model_source = _effective_value(
-            model_field.env_vars,
-            get_value(data, model_field.key),
-            "backend default",
-        )
+        model_field = STAGE_MODEL_FIELDS.get(stage)
+        if model_field is None:
+            model_value, model_source = "n/a", "not configurable"
+        else:
+            model_value, model_source = _effective_value(
+                model_field.env_vars,
+                get_value(data, model_field.key),
+                "backend default",
+            )
         stages_table.add_row(stage.value, agent_cell, model_value, model_source)
     print_table(stages_table)
 

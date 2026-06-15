@@ -23,6 +23,7 @@ from ouroboros.config_tui.app import (
     ModelSearchScreen,
     SettingsApp,
 )
+from ouroboros.config_tui.fields import STAGE_MODEL_FIELDS
 from ouroboros.orchestrator_stage import Stage
 
 
@@ -63,7 +64,12 @@ async def test_stage_cards_render_for_all_stages(app_env) -> None:
         for stage in Stage:
             assert pilot.app.query_one(f"#stage-card-{stage.value}")
             assert pilot.app.query_one(f"#stage-runtime-{stage.value}", Select)
-            assert pilot.app.query_one(f"#stage-model-{stage.value}", Select)
+            if stage in STAGE_MODEL_FIELDS:
+                assert pilot.app.query_one(f"#stage-model-{stage.value}", Select)
+            else:
+                assert not list(
+                    pilot.app.query(f"#stage-model-{stage.value}").results(Select)
+                )
         assert pilot.app.query_one("#global-runtime", Select)
         assert pilot.app.query_one("#global-llm-backend", Select)
 
@@ -227,16 +233,14 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
     async with app.run_test() as pilot:
         stage = Stage.EXECUTE.value  # fixture pins execute to codex
         caption = pilot.app.query_one(f"#stage-resolved-{stage}", Static)
-        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         runtime_select = pilot.app.query_one(f"#stage-runtime-{stage}", Select)
         assert runtime_select.value == "codex"
-        before_value = model_select.value
 
         pilot.app.query_one("#global-runtime", Select).value = "hermes"
         await pilot.pause()
 
         assert "codex" in str(caption.render())
-        assert model_select.value == before_value
+        assert not list(pilot.app.query(f"#stage-model-{stage}").results(Select))
 
 
 @pytest.mark.asyncio
@@ -364,15 +368,16 @@ async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
 @pytest.mark.asyncio
 async def test_preset_button_stages_models_for_every_card(app_env) -> None:
     """One click sets a coherent model tier across all stages, respecting
-    each card's effective backend (claude inherit vs explicit codex)."""
+    each card's effective backend when the stage has a model selector."""
     app = SettingsApp()
     async with app.run_test() as pilot:
         await pilot.click("#preset-frugal")
         await pilot.pause()
         interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
         assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
-        execute_model = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
-        assert execute_model.value == "gpt-5-mini"  # codex frugal
+        assert not list(
+            pilot.app.query(f"#stage-model-{Stage.EXECUTE.value}").results(Select)
+        )
         status = pilot.app.query_one("#status-bar", Static)
         assert "frugal" in str(status.render())
         assert "Save" in str(status.render())  # staged, not saved
@@ -412,7 +417,7 @@ async def test_save_skips_default_sentinel_when_llm_backend_is_claude(monkeypatc
 
     app = SettingsApp()
     async with app.run_test() as pilot:
-        stage = Stage.EXECUTE.value
+        stage = Stage.INTERVIEW.value
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
         await pilot.pause()
         assert pilot.app.query_one(f"#stage-model-{stage}", Select).value == "default"
@@ -420,8 +425,8 @@ async def test_save_skips_default_sentinel_when_llm_backend_is_claude(monkeypatc
         pilot.app.action_save()
         await pilot.pause()
 
-    assert captured["orchestrator.runtime_profile.stages.execute"] == "codex"
-    assert "execution.double_diamond_model" not in captured
+    assert captured["orchestrator.runtime_profile.stages.interview"] == "codex"
+    assert "clarification.default_model" not in captured
 
 
 @pytest.mark.asyncio
@@ -435,7 +440,9 @@ async def test_save_keeps_default_sentinel_when_llm_backend_supports_it(
     async with app.run_test() as pilot:
         pilot.app.query_one("#global-llm-backend", Select).value = "codex"
         await pilot.pause()
-        stage = Stage.EXECUTE.value
+        stage = Stage.INTERVIEW.value
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
         pilot.app.query_one(f"#stage-model-{stage}", Select).value = "default"
         await pilot.pause()
 
@@ -443,7 +450,8 @@ async def test_save_keeps_default_sentinel_when_llm_backend_supports_it(
         await pilot.pause()
 
     assert captured["llm.backend"] == "codex"
-    assert captured["execution.double_diamond_model"] == "default"
+    assert captured["orchestrator.runtime_profile.stages.interview"] == "codex"
+    assert captured["clarification.default_model"] == "default"
 
 
 def test_save_summary_without_backend_change_has_no_reconnect_hint() -> None:
