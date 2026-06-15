@@ -57,8 +57,7 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
 
     for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
         assert "the same tool-discovery load query you used above" not in "\n".join(
-            skill_path.read_text(encoding="utf-8")
-            for skill_path in root.glob("*/SKILL.md")
+            skill_path.read_text(encoding="utf-8") for skill_path in root.glob("*/SKILL.md")
         )
         for skill, pairs in expected.items():
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
