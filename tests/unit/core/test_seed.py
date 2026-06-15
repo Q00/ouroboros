@@ -353,6 +353,39 @@ class TestSeed:
         assert len(full_seed.evaluation_principles) == 2
         assert len(full_seed.exit_conditions) == 1
 
+    def test_seed_coerces_string_evaluation_principles(self) -> None:
+        """Hand-written seed principle string lists are lifted into objects."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            evaluation_principles=("Prefer simple code", "Keep UX clear"),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert seed.evaluation_principles[0].name == "principle_1"
+        assert seed.evaluation_principles[0].description == "Prefer simple code"
+        assert seed.evaluation_principles[0].weight == 1.0
+        assert seed.evaluation_principles[1].name == "principle_2"
+
+    def test_seed_coerces_string_exit_conditions(self) -> None:
+        """Hand-written seed exit condition string lists are lifted into objects."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            exit_conditions=("All invariant tests are green",),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert seed.exit_conditions[0].name == "condition_1"
+        assert seed.exit_conditions[0].description == "All invariant tests are green"
+        assert seed.exit_conditions[0].evaluation_criteria == "All invariant tests are green"
+
     def test_seed_goal_immutability(self, minimal_seed: Seed) -> None:
         """Seed.goal cannot be modified (frozen=True raises error)."""
         with pytest.raises(PydanticValidationError):
@@ -412,6 +445,30 @@ class TestSeed:
         assert reconstructed.acceptance_criteria == full_seed.acceptance_criteria
         assert reconstructed.ontology_schema.name == full_seed.ontology_schema.name
         assert reconstructed.metadata.ambiguity_score == full_seed.metadata.ambiguity_score
+
+    def test_seed_from_dict_coerces_string_principles_and_conditions(self) -> None:
+        """Seed.from_dict() accepts prose lists from hand-written seed YAML."""
+        reconstructed = Seed.from_dict(
+            {
+                "goal": "Build a CLI task manager",
+                "ontology_schema": {
+                    "name": "TaskManager",
+                    "description": "Task management domain",
+                },
+                "evaluation_principles": ["Prefer simple code"],
+                "exit_conditions": ["All invariant tests are green"],
+                "metadata": {"ambiguity_score": 0.15},
+            }
+        )
+
+        assert reconstructed.evaluation_principles[0].name == "principle_1"
+        assert reconstructed.evaluation_principles[0].description == "Prefer simple code"
+        assert reconstructed.evaluation_principles[0].weight == 1.0
+        assert reconstructed.exit_conditions[0].name == "condition_1"
+        assert reconstructed.exit_conditions[0].description == "All invariant tests are green"
+        assert (
+            reconstructed.exit_conditions[0].evaluation_criteria == "All invariant tests are green"
+        )
 
     def test_seed_roundtrip_serialization(self, full_seed: Seed) -> None:
         """Seed can roundtrip through dict serialization."""

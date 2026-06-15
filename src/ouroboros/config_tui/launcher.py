@@ -67,7 +67,7 @@ def launch_settings(
             hosts where no local screen exists).
         host: Bind address for web mode. Use ``0.0.0.0`` to reach the GUI
             from another machine (e.g. when the agent runs on a server).
-        port: Fixed port for web mode; ``None`` picks a free one.
+        port: Fixed port for web mode; ``None`` or ``0`` picks a free one.
         open_browser: Override browser auto-open. ``None`` = open only when
             this is not a remote session.
     """
@@ -115,7 +115,7 @@ def _launch_web(
         print_info("Manual fallback: run [bold]uv run ouroboros config[/] in a regular terminal.")
         raise SystemExit(1)
 
-    if port is None:
+    if port in (None, 0):
         port = _free_port()
     display_host = "localhost" if host in ("localhost", "127.0.0.1", "0.0.0.0") else host
     url = f"http://{display_host}:{port}"

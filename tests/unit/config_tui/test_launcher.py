@@ -85,6 +85,24 @@ def test_launch_web_serves_and_opens_browser(monkeypatch) -> None:
     assert opened == ["http://localhost:50123"]
 
 
+def test_launch_web_treats_zero_port_as_free_port(monkeypatch) -> None:
+    served: dict[str, object] = {}
+
+    class _FakeServer:
+        def __init__(self, command, host="localhost", port=8000, title=None) -> None:
+            served.update(host=host, port=port)
+
+        def serve(self) -> None:
+            served["serving"] = True
+
+    monkeypatch.setattr(launcher, "_import_server", lambda: _FakeServer)
+    monkeypatch.setattr(launcher, "_free_port", lambda: 50125)
+
+    launcher._launch_web(port=0, open_browser=False)
+
+    assert served == {"host": "localhost", "port": 50125, "serving": True}
+
+
 def test_launch_web_without_textual_serve_prints_hint(monkeypatch, capsys) -> None:
     monkeypatch.setattr(launcher, "_import_server", lambda: None)
     with pytest.raises(SystemExit):

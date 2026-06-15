@@ -1943,9 +1943,17 @@ class TestAsyncJobHandlers:
         handler = JobWaitHandler()
         params = {p.name: p for p in handler.definition.parameters}
         param_names = set(params)
-        assert param_names == {"job_id", "cursor", "timeout_seconds", "view", "stream"}
+        assert param_names == {
+            "job_id",
+            "cursor",
+            "timeout_seconds",
+            "view",
+            "stream",
+            "wait_for",
+        }
         assert params["view"].default == "full"
         assert params["stream"].default == "progress"
+        assert params["wait_for"].default == "raw"
         assert params["timeout_seconds"].default == 0
 
     def test_job_result_definition_name(self) -> None:

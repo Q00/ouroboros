@@ -16,6 +16,7 @@ from ouroboros.core.worktree import (
     maybe_prepare_task_workspace,
     maybe_restore_task_workspace,
     prepare_task_workspace,
+    release_lock,
     restore_task_workspace,
 )
 
@@ -57,18 +58,21 @@ class TestMaybePrepareTaskWorkspace:
         assert result is None
         prepare_mock.assert_not_called()
 
-    def test_returns_none_for_dirty_delegated_parent_workspace(self, tmp_path: Path) -> None:
+    def test_allows_dirty_delegated_parent_workspace(self, tmp_path: Path) -> None:
         repo_root = tmp_path / "repo"
+        prepared_workspace = _workspace(tmp_path)
         with (
             patch("ouroboros.core.worktree._worktrees_enabled", return_value=True),
             patch("ouroboros.core.worktree._try_resolve_repo_root", return_value=repo_root),
-            patch("ouroboros.core.worktree._checkout_is_dirty", return_value=True),
-            patch("ouroboros.core.worktree.prepare_task_workspace") as prepare_mock,
+            patch(
+                "ouroboros.core.worktree.prepare_task_workspace",
+                return_value=prepared_workspace,
+            ) as prepare_mock,
         ):
             result = maybe_prepare_task_workspace(tmp_path, "orch_test", allow_dirty=True)
 
-        assert result is None
-        prepare_mock.assert_not_called()
+        assert result == prepared_workspace
+        prepare_mock.assert_called_once_with(tmp_path, "orch_test", allow_dirty=True)
 
 
 class TestMaybeRestoreTaskWorkspace:
@@ -260,6 +264,27 @@ class TestRestoreTaskWorkspace:
 class TestWorktreeHardening:
     """Tests for malformed lock and invalid durable-id handling."""
 
+    @staticmethod
+    def _git(repo: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    @classmethod
+    def _init_repo(cls, repo: Path) -> None:
+        repo.mkdir()
+        cls._git(repo, "init", "-b", "main")
+        cls._git(repo, "config", "user.email", "test@example.com")
+        cls._git(repo, "config", "user.name", "Test User")
+        (repo / "tracked.txt").write_text("initial\n", encoding="utf-8")
+        cls._git(repo, "add", "tracked.txt")
+        cls._git(repo, "commit", "-m", "initial")
+
     def test_acquire_lock_raises_worktree_error_for_malformed_lock_file(
         self, tmp_path: Path
     ) -> None:
@@ -296,3 +321,34 @@ class TestWorktreeHardening:
         ):
             with pytest.raises(WorktreeError, match="Invalid durable task identifier"):
                 prepare_task_workspace(repo_root, "bad id")
+
+    def test_maybe_prepare_creates_worktree_from_dirty_source_when_allowed(
+        self, tmp_path: Path
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+        (repo_root / "dirty.txt").write_text("uncommitted caller work\n", encoding="utf-8")
+
+        with (
+            patch("ouroboros.core.worktree._worktrees_enabled", return_value=True),
+            patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+        ):
+            workspace = maybe_prepare_task_workspace(
+                repo_root,
+                "orch_test_dirty",
+                allow_dirty=True,
+            )
+
+        try:
+            assert workspace is not None
+            assert workspace.worktree_path != str(repo_root)
+            assert Path(workspace.worktree_path).is_dir()
+            assert workspace.effective_cwd == workspace.worktree_path
+            assert not (Path(workspace.worktree_path) / "dirty.txt").exists()
+            assert (repo_root / "dirty.txt").read_text(encoding="utf-8") == (
+                "uncommitted caller work\n"
+            )
+        finally:
+            if workspace is not None:
+                release_lock(workspace.lock_path)

@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import signal
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -93,13 +94,17 @@ class _FakeProcess:
         *,
         stdout_stream: _FakeStream | None = None,
         stderr_stream: _FakeStream | None = None,
+        pid: int | None = None,
     ) -> None:
         self.stdin = _FakeStdin()
         self.stdout = stdout_stream or _FakeStream(stdout_lines)
         self.stderr = stderr_stream or _FakeStream(stderr_lines)
+        self.pid = pid
+        self.returncode: int | None = None
         self._returncode = returncode
 
     async def wait(self) -> int:
+        self.returncode = self._returncode
         return self._returncode
 
 
@@ -632,6 +637,42 @@ class TestCodexCliRuntime:
         assert messages[0].data["recoverable"] is True
         assert messages[0].data["recovery"]["kind"] == "resume_retry"
         assert messages[0].data["recovery"]["resume_session_id"] == "thread-123"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_starts_codex_in_dedicated_process_session(self) -> None:
+        """Codex workers run in their own session so cleanup can reap descendants."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime._use_process_group = True
+        runtime._completed_process_group_shutdown_timeout_seconds = 0.001
+        captured_kwargs: dict[str, Any] = {}
+        sent_signals: list[int] = []
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            del command
+            captured_kwargs.update(kwargs)
+            return _FakeProcess(
+                stdout_lines=[],
+                stderr_lines=[],
+                returncode=0,
+                pid=4242,
+            )
+
+        def fake_killpg(_pgid: int, sig: int) -> None:
+            sent_signals.append(sig)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch("ouroboros.orchestrator.codex_cli_runtime.os.getpgid", return_value=4242),
+            patch("ouroboros.providers.codex_cli_stream.os.killpg", side_effect=fake_killpg),
+        ):
+            messages = [message async for message in runtime.execute_task("complete the task")]
+
+        assert captured_kwargs["start_new_session"] is True
+        assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+        assert messages[-1].content == "Codex CLI task completed."
 
     def test_convert_thread_started_event(self) -> None:
         """Converts thread.started to a system message with a resume handle."""

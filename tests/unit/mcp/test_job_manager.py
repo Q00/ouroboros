@@ -3081,6 +3081,141 @@ class TestJobManager:
         assert result.value.meta["changed"] is False
         assert result.value.meta["cursor"] == 5
 
+    async def test_job_wait_raw_mode_preserves_any_event_wakeup(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        snapshot = JobSnapshot(
+            job_id="job_wait_raw",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(execution_id="exec_wait_raw"),
+        )
+
+        class RawJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 0
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="execution.output",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait_raw",
+                    data={"message": "fine-grained backend event"},
+                )
+            )
+            handler = JobWaitHandler(event_store=store, job_manager=RawJobManager())
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_raw",
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                    "view": "compact",
+                }
+            )
+
+            assert result.is_ok
+            assert result.value.meta["changed"] is False
+            assert result.value.meta["wait_for"] == "raw"
+            assert result.value.meta["cursor"] > 0
+        finally:
+            await store.close()
+
+    async def test_job_wait_ac_change_ignores_raw_events_until_progress_changes(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        snapshot = JobSnapshot(
+            job_id="job_wait_ac_change",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(execution_id="exec_wait_ac_change"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 0
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        async def append_events() -> None:
+            await asyncio.sleep(0.05)
+            await store.append(
+                BaseEvent(
+                    type="execution.output",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait_ac_change",
+                    data={"message": "raw backend event"},
+                )
+            )
+            await asyncio.sleep(0.65)
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait_ac_change",
+                    data={
+                        "execution_id": "exec_wait_ac_change",
+                        "completed_count": 1,
+                        "total_count": 4,
+                        "current_phase": "Implement",
+                        "activity": "Running",
+                    },
+                )
+            )
+
+        task = asyncio.create_task(append_events())
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            started_at = asyncio.get_running_loop().time()
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_ac_change",
+                    "cursor": 0,
+                    "timeout_seconds": 2,
+                    "view": "compact",
+                    "wait_for": "ac_change",
+                }
+            )
+            elapsed = asyncio.get_running_loop().time() - started_at
+
+            assert result.is_ok
+            assert elapsed >= 0.5
+            assert result.value.meta["changed"] is True
+            assert result.value.meta["wait_for"] == "ac_change"
+            assert result.value.meta["ac_completed"] == 1
+            assert result.value.text_content.startswith(
+                "job_wait_ac_change | running | Implement | AC 1/4 | cursor "
+            )
+        finally:
+            await task
+            await store.close()
+
     async def test_job_wait_rejects_invalid_cursor_argument(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         handler = JobWaitHandler(event_store=store)

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import signal
 from typing import Any
 from unittest.mock import patch
 
@@ -15,7 +16,7 @@ from ouroboros.config.models import OuroborosConfig
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
-from ouroboros.providers.codex_cli_stream import collect_stream_lines
+from ouroboros.providers.codex_cli_stream import collect_stream_lines, terminate_runtime_process
 
 
 class _FakeStream:
@@ -113,6 +114,79 @@ class _LegacyFakeProcess:
     async def communicate(self, _input: bytes | None = None) -> tuple[bytes, bytes]:
         self.communicate_calls += 1
         return self._stdout, self._stderr
+
+
+class _ProcessGroupFakeProcess:
+    def __init__(self) -> None:
+        self.pid = 4242
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self._done = asyncio.Event()
+
+    async def wait(self) -> int:
+        await self._done.wait()
+        return -1 if self.returncode is None else self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+        self._done.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self._done.set()
+
+
+@pytest.mark.asyncio
+async def test_terminate_runtime_process_signals_process_group_before_fallback() -> None:
+    """Group-aware cleanup reaches wrapper descendants instead of only the parent."""
+    process = _ProcessGroupFakeProcess()
+    sent_signals: list[int] = []
+
+    def fake_killpg(_pgid: int, sig: int) -> None:
+        sent_signals.append(sig)
+        if sig == signal.SIGKILL:
+            process.returncode = -9
+            process._done.set()
+
+    with (
+        patch("ouroboros.providers.codex_cli_stream.os.getpgid", return_value=4242),
+        patch("ouroboros.providers.codex_cli_stream.os.killpg", side_effect=fake_killpg),
+    ):
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=0.001,
+            terminate_process_group=True,
+        )
+
+    assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+    assert process.terminated is False
+    assert process.killed is False
+
+
+@pytest.mark.asyncio
+async def test_terminate_runtime_process_signals_saved_group_after_parent_exit() -> None:
+    """Completed parent processes can still reap companion process group members."""
+    process = _ProcessGroupFakeProcess()
+    process.returncode = 0
+    sent_signals: list[int] = []
+
+    def fake_killpg(_pgid: int, sig: int) -> None:
+        sent_signals.append(sig)
+
+    with patch("ouroboros.providers.codex_cli_stream.os.killpg", side_effect=fake_killpg):
+        await terminate_runtime_process(
+            process,
+            shutdown_timeout=0.001,
+            terminate_process_group=True,
+            process_group_id=4242,
+        )
+
+    assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+    assert process.terminated is False
+    assert process.killed is False
 
 
 class TestCodexCliLLMAdapter:

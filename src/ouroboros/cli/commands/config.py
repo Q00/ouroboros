@@ -45,7 +45,7 @@ def main(
     ] = "localhost",
     port: Annotated[
         int | None,
-        typer.Option("--port", help="Web-mode port (default: a free port)."),
+        typer.Option("--port", help="Web-mode port (0 or omitted picks a free port)."),
     ] = None,
     no_browser: Annotated[
         bool,

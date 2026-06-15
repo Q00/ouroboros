@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -277,6 +277,42 @@ class Seed(BaseModel, frozen=True):
         ...,
         description="Generation metadata (version, timestamp, etc.)",
     )
+
+    @field_validator("evaluation_principles", mode="before")
+    @classmethod
+    def _coerce_string_evaluation_principles(cls, value: Any) -> Any:
+        """Accept prose lists for hand-written seeds.
+
+        Human-authored seed drafts often express evaluation principles as a
+        simple YAML string list. Lift those entries into the documented object
+        shape so manual ``ooo run`` users get a usable seed instead of an
+        opaque Pydantic ``model_type`` error.
+        """
+        if isinstance(value, list | tuple):
+            return tuple(
+                {"name": f"principle_{index}", "description": item}
+                if isinstance(item, str)
+                else item
+                for index, item in enumerate(value, start=1)
+            )
+        return value
+
+    @field_validator("exit_conditions", mode="before")
+    @classmethod
+    def _coerce_string_exit_conditions(cls, value: Any) -> Any:
+        """Accept prose lists for hand-written seed exit conditions."""
+        if isinstance(value, list | tuple):
+            return tuple(
+                {
+                    "name": f"condition_{index}",
+                    "description": item,
+                    "criteria": item,
+                }
+                if isinstance(item, str)
+                else item
+                for index, item in enumerate(value, start=1)
+            )
+        return value
 
     def to_dict(self) -> dict[str, Any]:
         """Convert seed to dictionary for serialization.

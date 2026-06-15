@@ -15,6 +15,8 @@ import asyncio
 import codecs
 from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
+import os
+import signal
 from typing import Any, Protocol
 
 from ouroboros.core.errors import ProviderError
@@ -232,6 +234,8 @@ async def terminate_runtime_process(
     logger: _StructLogger | None = None,
     log_namespace: str | None = None,
     close_stdin: Callable[[Any], Awaitable[None]] | None = None,
+    terminate_process_group: bool = False,
+    process_group_id: int | None = None,
 ) -> None:
     """Best-effort runtime subprocess shutdown (SIGTERM then SIGKILL).
 
@@ -247,8 +251,21 @@ async def terminate_runtime_process(
         log_namespace: Namespace prefix for failure log events.
         close_stdin: Optional coroutine to close the process stdin before
             terminating (best-effort).
+        terminate_process_group: When true, signal the subprocess process group
+            instead of only the immediate process.
+        process_group_id: Pre-resolved process group id. Useful after the
+            immediate subprocess has exited but descendants may still be alive.
     """
-    if getattr(process, "returncode", None) is not None:
+    pgid = process_group_id if terminate_process_group else None
+    if terminate_process_group:
+        if pgid is None:
+            pid = getattr(process, "pid", None)
+            if isinstance(pid, int):
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    pgid = os.getpgid(pid)
+
+    process_exited = getattr(process, "returncode", None) is not None
+    if process_exited and pgid is None:
         return
 
     if close_stdin is not None:
@@ -258,7 +275,9 @@ async def terminate_runtime_process(
     kill_fn = getattr(process, "kill", None)
 
     try:
-        if callable(terminate_fn):
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
+        elif callable(terminate_fn):
             terminate_fn()
         elif callable(kill_fn):
             kill_fn()
@@ -275,6 +294,18 @@ async def terminate_runtime_process(
             )
         return
 
+    if process_exited:
+        try:
+            await asyncio.sleep(shutdown_timeout)
+        except asyncio.CancelledError:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(pgid, signal.SIGKILL)
+            raise
+
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+        return
+
     try:
         await asyncio.wait_for(process.wait(), timeout=shutdown_timeout)
         return
@@ -289,11 +320,14 @@ async def terminate_runtime_process(
             )
         return
 
-    if not callable(kill_fn):
+    if pgid is None and not callable(kill_fn):
         return
 
     try:
-        kill_fn()
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            kill_fn()
     except ProcessLookupError:
         return
     except Exception as exc:

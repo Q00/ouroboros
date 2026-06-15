@@ -349,6 +349,22 @@ class TestConfigValidate:
             result = runner.invoke(app, ["validate"])
         assert result.exit_code == 0
 
+    def test_gjc_runtime_and_llm_backend_are_valid(self, tmp_path: Path) -> None:
+        """validate should accept the config written by `config backend gjc`."""
+        config = {
+            "orchestrator": {"runtime_backend": "gjc", "gjc_cli_path": "/usr/bin/gjc"},
+            "llm": {"backend": "gjc"},
+        }
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 0
+
     @pytest.mark.parametrize(
         "alias",
         ["claude_code", "codex_cli", "opencode_cli", "gemini_cli", "hermes_cli"],
