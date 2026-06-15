@@ -57,6 +57,12 @@ def test_litellm_catalog_is_custom_only() -> None:
     assert catalog.default_model == mc.DEFAULT_MODEL_SENTINEL
 
 
+def test_ourocode_catalog_is_custom_only() -> None:
+    catalog = mc.get_model_catalog("ourocode")
+    assert catalog.models == ()
+    assert catalog.default_model == mc.DEFAULT_MODEL_SENTINEL
+
+
 def test_unknown_backend_raises() -> None:
     with pytest.raises(ValueError, match="No model catalog"):
         mc.get_model_catalog("not-a-backend")
@@ -109,6 +115,14 @@ def test_detect_backend_cli_prefers_configured_path(monkeypatch) -> None:
     monkeypatch.setattr(config_loader, "get_codex_cli_path", lambda: "/opt/bin/codex")
     monkeypatch.setattr(mc.shutil, "which", lambda _name: "/usr/bin/should-not-win")
     assert mc.detect_backend_cli("codex") == "/opt/bin/codex"
+
+
+def test_detect_backend_cli_uses_configured_ourocode_path(monkeypatch) -> None:
+    from ouroboros.config import loader as config_loader
+
+    monkeypatch.setattr(config_loader, "get_ourocode_cli_path", lambda: "/opt/bin/ourocode")
+    monkeypatch.setattr(mc.shutil, "which", lambda _name: "/usr/bin/should-not-win")
+    assert mc.detect_backend_cli("ourocode") == "/opt/bin/ourocode"
 
 
 def test_detect_backend_cli_falls_back_to_path_lookup(monkeypatch) -> None:

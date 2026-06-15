@@ -175,3 +175,9 @@ def test_adapter_coalesces_none_timeout_to_bounded_default() -> None:
     (which would disable the per-turn wait_for guard)."""
     assert OurocodeLLMAdapter(timeout=None)._timeout == 600.0
     assert OurocodeLLMAdapter(timeout=12.0)._timeout == 12.0
+
+
+def test_ourocode_llm_adapter_accessible_from_providers_package() -> None:
+    import ouroboros.providers as providers
+
+    assert providers.OurocodeLLMAdapter is OurocodeLLMAdapter

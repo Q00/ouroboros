@@ -202,6 +202,7 @@ orchestrator:
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `copilot_cli_path` | `string \| null` | `null` | Absolute path to the GitHub Copilot CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_COPILOT_CLI_PATH`. |
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
+| `ourocode_cli_path` | `string \| null` | `null` | Absolute path to the ourocode CLI binary (`~` is expanded). Used by the LLM-only `ourocode` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OUROCODE_CLI_PATH`. |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
 
 ---
@@ -223,7 +224,7 @@ llm:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. |
+| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"ourocode"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` is LLM-only and is not valid for `orchestrator.runtime_backend`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-20250514"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
@@ -598,6 +599,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary. |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
 | `OUROBOROS_PI_CLI_PATH` | `orchestrator.pi_cli_path` | Path to the Pi CLI binary. |
+| `OUROBOROS_OUROCODE_CLI_PATH` | `orchestrator.ourocode_cli_path` | Path to the ourocode CLI binary used by the LLM-only `ourocode` backend. |
 | `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow
@@ -830,6 +832,7 @@ orchestrator:
   codex_cli_path: null
   opencode_cli_path: null
   pi_cli_path: null
+  ourocode_cli_path: null
   default_max_turns: 10
 
 llm:
