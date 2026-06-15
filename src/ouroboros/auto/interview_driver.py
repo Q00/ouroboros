@@ -612,7 +612,7 @@ class AutoInterviewDriver:
         except TimeoutError as exc:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
             if interview_tool_name == "interview.start":
-                fallback = self._try_close_after_backend_start_failure(state, ledger, exc)
+                fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
                 if fallback is not None:
                     return fallback
             message = str(exc)
@@ -626,7 +626,7 @@ class AutoInterviewDriver:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
             action = "resume" if interview_tool_name == "interview.resume" else "start"
             if action == "start":
-                fallback = self._try_close_after_backend_start_failure(state, ledger, exc)
+                fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
                 if fallback is not None:
                     return fallback
             blocker = f"interview {action} failed: {exc}"
@@ -1091,7 +1091,7 @@ class AutoInterviewDriver:
                 interview_session_id=state.interview_session_id,
             )
             await self._emit_event(
-                "auto.closure.partial_seed_generated",
+                "auto.closure.safe_default_blocked",
                 state.auto_session_id,
                 aggregate_type="auto_session",
                 **partial_payload,
@@ -1158,7 +1158,7 @@ class AutoInterviewDriver:
             "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
         )
 
-    def _try_close_after_backend_start_failure(
+    async def _try_close_after_backend_start_failure(
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
@@ -1176,6 +1176,8 @@ class AutoInterviewDriver:
         if not _is_authoring_backend_unavailable(exc):
             return None
         closure_mode = "ledger_only_no_backend"
+        finalization = None
+        open_gaps_before_finalization = list(ledger.open_gaps())
         if not ledger.is_seed_ready():
             finalization = finalize_safe_defaultable_gaps(
                 ledger,
@@ -1189,6 +1191,30 @@ class AutoInterviewDriver:
                     _revert_safe_default_entries(ledger, finalization.defaulted_sections)
                 return None
             closure_mode = "safe_default_no_backend"
+
+        if closure_mode == "safe_default_no_backend" and finalization is not None:
+            await self._emit_event(
+                "auto.closure.safe_default_entered",
+                state.auto_session_id,
+                aggregate_type="auto_session",
+                backend_done=False,
+                ledger_done=False,
+                open_gaps=open_gaps_before_finalization,
+                ambiguity_score=None,
+                max_rounds=self.max_rounds,
+                closure_mode=closure_mode,
+                error=str(exc),
+            )
+            await self._emit_event(
+                "auto.closure.safe_default_closed",
+                state.auto_session_id,
+                aggregate_type="auto_session",
+                closure_mode=closure_mode,
+                defaulted_sections=list(finalization.defaulted_sections),
+                synthesis_pushed=False,
+                interview_session_id=state.interview_session_id,
+                backend_start_failed=True,
+            )
 
         state.ledger = ledger.to_dict()
         state.pending_question = None

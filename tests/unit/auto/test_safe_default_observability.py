@@ -222,6 +222,50 @@ async def test_safe_default_logs_synthesis_nonclosure(tmp_path) -> None:
     assert "did not close" in (result.blocker or "")
 
 
+@pytest.mark.asyncio
+async def test_no_backend_safe_default_persists_closure_events(tmp_path) -> None:
+    """No-backend safe-default success has queryable closure evidence."""
+    ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
+
+    async def start(goal: str, cwd: str, *, interview_id: str | None = None) -> InterviewTurn:  # noqa: ARG001
+        raise RuntimeError("codex profile failed before first question")
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("answer must not run when start fails")
+
+    state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    event_store = _RecordingEventStore()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, is_session_persisted=lambda _id: False),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+        event_store=event_store,
+    )
+
+    result = await driver.run(state, ledger)
+    await driver.wait_for_pending_emits()
+
+    closure_events = [
+        event for event in event_store.appended if event.type.startswith("auto.closure.")
+    ]
+    assert [event.type for event in closure_events] == [
+        "auto.closure.safe_default_entered",
+        "auto.closure.safe_default_closed",
+    ]
+    assert all(event.aggregate_type == "auto_session" for event in closure_events)
+    assert all(event.aggregate_id == state.auto_session_id for event in closure_events)
+    assert closure_events[0].data["closure_mode"] == "safe_default_no_backend"
+    assert closure_events[0].data["open_gaps"]
+    assert closure_events[1].data["closure_mode"] == "safe_default_no_backend"
+    assert closure_events[1].data["backend_start_failed"] is True
+    assert closure_events[1].data["defaulted_sections"]
+    assert result.status == "seed_ready"
+    assert state.interview_closure_mode == "safe_default_no_backend"
+
+
 # ---------------------------------------------------------------------------
 # Test 3: unsafe_context_match logs pattern_name and safe metrics
 # ---------------------------------------------------------------------------
