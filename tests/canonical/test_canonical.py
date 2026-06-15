@@ -173,7 +173,6 @@ def test_scenario_runtime_probe_kinds_subset_of_l1_catalog(
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Live product-reality smoke checks (#1452)
 # ---------------------------------------------------------------------------
@@ -208,8 +207,7 @@ def _run_product_reality_smoke_checks(
     if scenario.product_artifact_path:
         artifact_path = _resolve_canonical_path(workdir, scenario.product_artifact_path)
         assert artifact_path.is_file(), (
-            f"{scenario.slug}: expected generated artifact at {artifact_path}; "
-            f"auto meta was {meta}"
+            f"{scenario.slug}: expected generated artifact at {artifact_path}; auto meta was {meta}"
         )
 
     smoke_results: list[dict[str, Any]] = []
@@ -248,7 +246,9 @@ def _run_product_reality_smoke_checks(
             )
     for output_path in scenario.declared_output_paths:
         expected = _resolve_canonical_path(workdir, output_path)
-        assert expected.exists(), f"{scenario.slug}: expected declared output path {expected} to exist"
+        assert expected.exists(), (
+            f"{scenario.slug}: expected declared output path {expected} to exist"
+        )
     return smoke_results
 
 
@@ -559,6 +559,6 @@ else:
     obs_files = list((tmp_path / scenario.slug / ".ooo-observability").glob("canonical-*.json"))
     assert obs_files, "expected at least one evidence file"
     evidence_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in obs_files]
-    assert any(
-        payload["product_reality"]["smoke_results"] for payload in evidence_payloads
-    ), "expected product-reality smoke results in persisted evidence"
+    assert any(payload["product_reality"]["smoke_results"] for payload in evidence_payloads), (
+        "expected product-reality smoke results in persisted evidence"
+    )

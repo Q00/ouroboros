@@ -77,7 +77,6 @@ class CanonicalScenario:
         assert isinstance(value, int)
         return value
 
-
     @property
     def declared_output_paths(self) -> tuple[str, ...]:
         value = self.metadata.get("declared_output_paths", ())
@@ -214,7 +213,6 @@ def _load_scenario(directory: Path) -> CanonicalScenario:
     )
 
 
-
 def _validate_product_reality_metadata(slug: str, metadata: dict[str, object]) -> None:
     """Validate optional live product-reality smoke metadata."""
     artifact_path = metadata.get("product_artifact_path")
@@ -247,7 +245,11 @@ def _validate_product_reality_metadata(slug: str, metadata: dict[str, object]) -
                 pytrace=False,
             )
         argv = command.get("argv")
-        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or not all(isinstance(item, str) for item in argv)
+        ):
             pytest.fail(
                 f"canonical scenario {slug!r} product_smoke_commands[{index}].argv must be a non-empty string list",
                 pytrace=False,
@@ -261,7 +263,8 @@ def _validate_product_reality_metadata(slug: str, metadata: dict[str, object]) -
         for key in ("stdout_contains", "stderr_contains"):
             value = command.get(key, ())
             if value and (
-                not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value)
+                not isinstance(value, (list, tuple))
+                or not all(isinstance(item, str) for item in value)
             ):
                 pytest.fail(
                     f"canonical scenario {slug!r} product_smoke_commands[{index}].{key} must be a list of strings",
