@@ -2787,3 +2787,39 @@ def test_pipeline_accepts_keyword_sees_closure_mode_on_production_signatures() -
         "SeedRepairer.converge must declare closure_mode so the "
         "pipeline REPAIR-phase forwarder activates"
     )
+
+
+def test_grade_gate_flags_over_fragmented_acceptance_criteria() -> None:
+    """A seed with >9 outcome criteria gets an *advisory* over-fragmentation
+    finding — the mirror of under-specification — that is visible but must NOT
+    block a runnable seed (frugality is goal-subordinate; we surface waste, we
+    do not halt on it)."""
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    ac = tuple(
+        f"`habit step{i}` prints stable stdout containing step {i} result" for i in range(10)
+    )
+    seed = _seed(ac=ac)
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    codes = {finding.code for finding in result.findings}
+    assert "over_fragmented_criteria" in codes
+    # Advisory contract: the finding must not flip the grade or block the run.
+    # All 10 ACs are otherwise clean (observable, non-vague), so the seed stays A.
+    assert result.grade == SeedGrade.A
+    assert result.may_run
+    # And it must NOT be counted as an untestable finding (the code deliberately
+    # omits the "acceptance_criteria" substring): testability stays high.
+    assert result.scores["testability"] >= 0.9
+
+
+def test_grade_gate_no_over_fragmentation_flag_for_normal_seed() -> None:
+    ledger = SeedDraftLedger.from_goal("Build a habit tracker")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(ac=("`habit list` prints stable stdout containing created habits",))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    codes = {finding.code for finding in result.findings}
+    assert "over_fragmented_criteria" not in codes

@@ -1783,7 +1783,10 @@ class TestProfileAwareDecompositionAudit:
         assert event.data["decomposition_profile"] == {
             "profile": "code",
             "axis": "testable_unit",
-            "min_unit": "single function or module with at least one runnable test",
+            "min_unit": (
+                "a cohesive change verified by one test-command run — typically a "
+                "function or module plus its tests; never split below a single function"
+            ),
             "cut_signal": "sub-AC produces an independently runnable test",
             "max_branching": 5,
         }

@@ -4680,10 +4680,16 @@ class ParallelACExecutor:
 {ac_content}
 
 ## Instructions
-If this AC is complex (requires multiple distinct steps that could run independently),
-decompose it into {MIN_SUB_ACS}-{MAX_SUB_ACS} smaller Sub-ACs.
+Default to ATOMIC. Each Sub-AC you create becomes a separate agent session with
+its own full context, so decomposing has a real token cost — only split when it
+clearly pays for itself.
 
-If the AC is simple/atomic (can be done in one focused task), respond with: ATOMIC
+Decompose into {MIN_SUB_ACS}-{MAX_SUB_ACS} Sub-ACs ONLY if this AC bundles
+multiple independently *valuable* outcomes that would each be verified
+differently. Needing several steps, or touching several files, is NOT by itself a
+reason to decompose — the executor handles multi-step work within one unit.
+
+If the AC is a single focused outcome (the common case), respond with: ATOMIC
 
 If decomposing, respond with ONLY a JSON array of Sub-AC descriptions:
 ["Sub-AC 1: description", "Sub-AC 2: description", ...]
@@ -4738,10 +4744,40 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         else:
                             response_text = message.content
 
-            # Parse response
+            # Parse response.
+            #
+            # Check for an explicit Sub-AC JSON array FIRST, before the ATOMIC
+            # verdict. A bare ``"ATOMIC" in text`` substring match (the previous
+            # behavior) mis-reads a legitimate split such as
+            # ``"NOT ATOMIC, decompose into: [...]"`` — or an array element that
+            # merely mentions the word "atomic" — as a verdict of atomic. By
+            # parsing the array first and only then accepting an ATOMIC verdict
+            # that the response *starts with*, both false-atomic and false-split
+            # directions are closed. Anything we cannot parse fails closed to
+            # atomic (no split): an erroneous split multiplies token cost across
+            # the whole subtree, so atomic is the frugal default.
             response_text = response_text.strip()
 
-            if "ATOMIC" in response_text.upper():
+            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if json_match:
+                try:
+                    sub_acs = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    sub_acs = None
+                if (
+                    isinstance(sub_acs, list)
+                    and all(isinstance(s, str) for s in sub_acs)
+                    and min_sub_acs <= len(sub_acs) <= max_sub_acs
+                ):
+                    log.info(
+                        "parallel_executor.decomposition.success",
+                        ac_index=ac_index,
+                        sub_ac_count=len(sub_acs),
+                        **profile_metadata,
+                    )
+                    return sub_acs
+
+            if response_text.upper().startswith("ATOMIC"):
                 log.info(
                     "parallel_executor.decomposition.atomic",
                     ac_index=ac_index,
@@ -4749,22 +4785,8 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 )
                 return None
 
-            # Try to extract JSON array
-            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
-            if json_match:
-                sub_acs = json.loads(json_match.group())
-                if isinstance(sub_acs, list) and all(isinstance(s, str) for s in sub_acs):
-                    if min_sub_acs <= len(sub_acs) <= max_sub_acs:
-                        log.info(
-                            "parallel_executor.decomposition.success",
-                            ac_index=ac_index,
-                            sub_ac_count=len(sub_acs),
-                            **profile_metadata,
-                        )
-                        return sub_acs
-
             log.warning(
-                "parallel_executor.decomposition.parse_failed",
+                "parallel_executor.decomposition.unparseable_defaulting_atomic",
                 ac_index=ac_index,
                 response_preview=response_text[:100],
                 **profile_metadata,

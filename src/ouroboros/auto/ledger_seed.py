@@ -99,7 +99,7 @@ def synthesize_seed_from_ledger(
     if non_goals:
         constraints = (*constraints, *[f"Non-goal: {item}" for item in non_goals])
 
-    acceptance_criteria = _lines_from_section(ledger, "acceptance_criteria")
+    acceptance_criteria = _lines_from_section(ledger, "acceptance_criteria", split_clauses=False)
     verification_plan = _joined_section(ledger, "verification_plan")
     failure_modes = _joined_section(ledger, "failure_modes")
 
@@ -272,7 +272,7 @@ def partial_seed_from_evidence(
             f"Known unresolved slot ({slot}): treat as next-step requirement, not implicit success."
         )
 
-    acceptance = _lines_from_section(ledger, "acceptance_criteria")
+    acceptance = _lines_from_section(ledger, "acceptance_criteria", split_clauses=False)
     if not acceptance:
         acceptance = _PARTIAL_DEFAULT_ACCEPTANCE
 
@@ -382,10 +382,22 @@ def _joined_section(ledger: SeedDraftLedger, section_name: str) -> str:
     return "; ".join(_active_values(ledger, section_name))
 
 
-def _lines_from_section(ledger: SeedDraftLedger, section_name: str) -> tuple[str, ...]:
+def _lines_from_section(
+    ledger: SeedDraftLedger, section_name: str, *, split_clauses: bool = True
+) -> tuple[str, ...]:
+    """Split a ledger section's active values into deduplicated lines.
+
+    With ``split_clauses=False`` only explicit bullet/newline markers split a
+    value; bare semicolons are preserved. This stops a model that writes dense,
+    clause-rich prose (e.g. ``"Tasks persist to file; survives restart"``) from
+    being mechanically exploded into many tiny acceptance criteria — each extra
+    AC costs a full agent session at execution time, so over-atomization here is
+    pure token waste.
+    """
+    pattern = r"\r?\n\s*[-*]\s+" if not split_clauses else r"(?:\r?\n\s*[-*]\s+|\s*;\s+)"
     lines: list[str] = []
     for value in _active_values(ledger, section_name):
-        parts = re.split(r"(?:\r?\n\s*[-*]\s+|\s*;\s+)", value)
+        parts = re.split(pattern, value)
         for part in parts:
             cleaned = part.strip(" \t\r\n-*:;.")
             if cleaned:
