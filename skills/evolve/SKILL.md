@@ -61,10 +61,13 @@ guaranteed to still be loaded on the next. If you call any `ouroboros_*` MCP too
 while its schema is not loaded in the **current** turn, the runtime rejects the
 call with **"Invalid tool parameters"** before it ever reaches the server.
 Therefore: **immediately before EVERY `ouroboros_*` MCP call in this skill, re-run
-the same tool-discovery load query you used above** (idempotent — a no-op when the
-schema is already loaded) so the schema is guaranteed present for that call. If a
-load ever returns no matching tool, switch to the documented fallback / Path B
-instead of retrying the failing call.
+the tool-discovery load query for the specific MCP tool or documented tool family
+you are about to call**. Use `"+ouroboros evolve"` for `ouroboros_evolve_step`,
+`ouroboros_lineage_status`, and the evolve flow's documented tool family;
+use `"+ouroboros interview"` before `ouroboros_interview`, `"+ouroboros seed"`
+before `ouroboros_generate_seed`, and `"+ouroboros lateral"` before
+`ouroboros_lateral_think`. If a load returns no matching tool, switch to the
+documented fallback / Path B instead of retrying the failing call.
 
 ### Path A: MCP Available (loaded via ToolSearch above)
 

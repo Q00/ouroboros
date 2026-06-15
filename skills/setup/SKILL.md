@@ -421,6 +421,14 @@ This may take a moment...
 
 **Implementation — use MCP tools only, do NOT use CLI or Python scripts:**
 
+**CRITICAL — deferred-schema guard (prevents "Invalid tool parameters"):**
+`setup` can call `ouroboros_brownfield` before and after a user-selection turn.
+A deferred schema loaded before scan is NOT guaranteed to remain loaded for the
+later `set_defaults` call. Immediately before EVERY `ouroboros_brownfield` call
+in this section, re-run `ToolSearch query: "+ouroboros brownfield"` (idempotent —
+a no-op when already loaded). If the load returns no matching tool, use the
+non-MCP setup fallback instead of retrying the failing call.
+
 1. Load the brownfield MCP tool: `ToolSearch query: "+ouroboros brownfield"`
 2. Call scan+register:
    ```
@@ -493,7 +501,7 @@ Use `AskUserQuestion` with the current default numbers from the scan response.
 
 The user can select the recommended defaults (if any), choose "None", or type custom numbers.
 
-After the user responds, use ONE MCP call to update all defaults at once:
+After the user responds, re-run `ToolSearch query: "+ouroboros brownfield"`, then use ONE MCP call to update all defaults at once:
 
 ```
 Tool: ouroboros_brownfield

@@ -41,6 +41,14 @@ This may take a moment...
 
 **Implementation — use MCP tools only, do NOT use CLI or Python scripts:**
 
+**CRITICAL — deferred-schema guard (prevents "Invalid tool parameters"):**
+This skill can call `ouroboros_brownfield` across multiple turns (`scan`,
+`set_defaults`, `defaults`, and `set`). A deferred schema loaded for one turn is
+NOT guaranteed to remain loaded for the next. Immediately before EVERY
+`ouroboros_brownfield` call, re-run `ToolSearch query: "+ouroboros brownfield"`
+(idempotent — a no-op when already loaded). If the load returns no matching tool,
+stop with the MCP-not-available message instead of retrying the failing call.
+
 1. Load the brownfield MCP tool: `ToolSearch query: "+ouroboros brownfield"`
 2. Call scan+register:
    ```
@@ -117,7 +125,7 @@ Then stop.
 
 The user can select the recommended defaults (if any), choose "None", or type custom numbers.
 
-After the user responds, use ONE MCP call to update all defaults at once:
+After the user responds, re-run `ToolSearch query: "+ouroboros brownfield"`, then use ONE MCP call to update all defaults at once:
 
 ```
 Tool: ouroboros_brownfield
@@ -155,7 +163,7 @@ Scan only, no default selection prompt. Show the numbered list and stop.
 
 ### Subcommand: `defaults`
 
-Load the brownfield MCP tool and call:
+Re-run `ToolSearch query: "+ouroboros brownfield"`, then call:
 ```
 Tool: ouroboros_brownfield
 Arguments: { "action": "scan" }
@@ -170,7 +178,7 @@ No default repos set. Run 'ooo brownfield' to configure.
 
 ### Subcommand: `set <indices>`
 
-Directly set defaults without scanning. Parse the comma-separated indices from the user's input and call:
+Directly set defaults without scanning. Parse the comma-separated indices from the user's input, re-run `ToolSearch query: "+ouroboros brownfield"`, and call:
 
 ```
 Tool: ouroboros_brownfield

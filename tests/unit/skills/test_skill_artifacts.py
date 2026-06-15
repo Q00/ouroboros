@@ -38,6 +38,12 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
     """Multi-tool skill guards must not reuse the wrong deferred schema query."""
     repo_root = Path(__file__).resolve().parents[3]
     expected = {
+        "brownfield": [
+            ('"+ouroboros brownfield"', "ouroboros_brownfield"),
+        ],
+        "setup": [
+            ('"+ouroboros brownfield"', "ouroboros_brownfield"),
+        ],
         "seed": [
             ('"+ouroboros seed"', "ouroboros_generate_seed"),
             ('"+ouroboros qa"', "ouroboros_qa"),
@@ -50,10 +56,13 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
     }
 
     for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        assert "the same tool-discovery load query you used above" not in "\n".join(
+            skill_path.read_text(encoding="utf-8")
+            for skill_path in root.glob("*/SKILL.md")
+        )
         for skill, pairs in expected.items():
             text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
-            assert "the specific MCP tool you are about to call" in text
-            assert "the same tool-discovery load query you used above" not in text
+            assert "deferred-schema guard" in text
             for query, tool in pairs:
                 assert query in text
                 assert tool in text
