@@ -14,12 +14,17 @@ tool-using orchestrator runtime.
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.events.io_recorder import get_current_io_journal_recorder
@@ -47,6 +52,8 @@ _ERROR_STATUS: dict[str, int] = {
     "cli_unavailable": 503,
     "timeout": 504,
 }
+
+_STRUCTURED_RESPONSE_ATTEMPTS = 3
 
 
 class OurocodeLLMAdapter:
@@ -95,15 +102,34 @@ class OurocodeLLMAdapter:
     ) -> Result[CompletionResponse, ProviderError]:
         """Run one Claude turn through ourocode and return its text.
 
-        ``reasoning_effort`` / ``response_format`` / sampling params have no ACP
-        equivalent on ourocode's ``:claude_api`` turn and are ignored.
+        ``reasoning_effort`` and sampling params have no ACP equivalent on
+        ourocode's ``:claude_api`` turn and are ignored. Structured
+        ``response_format`` requests are cooperatively enforced through prompt
+        instructions plus adapter-side JSON extraction and validation.
         """
         profile_result = resolve_completion_profile_result(config, backend="ourocode")
         if profile_result.is_err:
             return Result.err(profile_result.error)
         config = profile_result.value.config
 
-        prompt_text = self._compose_prompt(messages)
+        response_format = config.response_format
+        if response_format:
+            directive = self._build_response_format_directive(response_format)
+            if not directive:
+                return Result.err(
+                    ProviderError(
+                        message="Unsupported ourocode structured response_format request",
+                        provider="ourocode",
+                        details={
+                            "response_format_type": response_format.get("type"),
+                        },
+                    )
+                )
+            prompt_text = self._compose_prompt(
+                [Message(role=MessageRole.SYSTEM, content=directive), *messages]
+            )
+        else:
+            prompt_text = self._compose_prompt(messages)
         client = OurocodeAcpClient(
             cli_path=self._cli_path,
             cwd=self._cwd,
@@ -123,18 +149,51 @@ class OurocodeLLMAdapter:
                     temperature=config.temperature,
                     extra={"backend": "ourocode", "ourocode_model": self._model},
                 ) as call:
-                    parsed = await self._run(client, prompt_text, config)
-                    call.record_completion(
-                        completion_text=parsed.content,
-                        finish_reason=parsed.finish_reason,
-                        token_count_in=None,
-                        token_count_out=None,
-                    )
-                return Result.ok(parsed)
+                    result = await self._run_result(client, prompt_text, config)
+                    if result.is_ok:
+                        parsed = result.value
+                        call.record_completion(
+                            completion_text=parsed.content,
+                            finish_reason=parsed.finish_reason,
+                            token_count_in=None,
+                            token_count_out=None,
+                        )
+                return result
 
-            return Result.ok(await self._run(client, prompt_text, config))
+            return await self._run_result(client, prompt_text, config)
         except AcpClientError as exc:
             return Result.err(self._provider_error(exc))
+
+    async def _run_result(
+        self,
+        client: OurocodeAcpClient,
+        prompt_text: str,
+        config: CompletionConfig,
+    ) -> Result[CompletionResponse, ProviderError]:
+        if not config.response_format:
+            return Result.ok(await self._run(client, prompt_text, config))
+
+        last_response_preview = ""
+        for _attempt in range(_STRUCTURED_RESPONSE_ATTEMPTS):
+            parsed = await self._run(client, prompt_text, config)
+            last_response_preview = parsed.content[:240]
+            extracted = extract_json_payload(parsed.content)
+            if not extracted:
+                continue
+            validation_error = self._validate_response_format_payload(
+                extracted,
+                config.response_format,
+            )
+            if validation_error is None:
+                return Result.ok(replace(parsed, content=extracted))
+
+        return Result.err(
+            ProviderError(
+                message="JSON format required but ourocode returned non-conforming output",
+                provider="ourocode",
+                details={"last_response_preview": last_response_preview},
+            )
+        )
 
     async def _run(
         self,
@@ -158,6 +217,72 @@ class OurocodeLLMAdapter:
             usage=_ZERO_USAGE,
             finish_reason=self._finish_reason(result.stop_reason),
         )
+
+    @staticmethod
+    def _build_response_format_directive(
+        response_format: dict[str, object] | None,
+    ) -> str | None:
+        """Translate response_format into cooperative ourocode prompt instructions."""
+        if not response_format:
+            return None
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            return (
+                "Respond with ONLY a valid JSON object. Do not use markdown fences, "
+                "headers, or explanatory text."
+            )
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return None
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
+            top_type = (
+                schema_payload.get("type", "object")
+                if isinstance(schema_payload, dict)
+                else "object"
+            )
+            type_noun = {"array": "JSON array", "object": "JSON object"}.get(
+                str(top_type), "JSON value"
+            )
+            try:
+                rendered = json.dumps(schema_payload, indent=2, sort_keys=True)
+            except (TypeError, ValueError):
+                rendered = str(schema_payload)
+            return (
+                f"Respond with ONLY a valid {type_noun} that matches this schema. "
+                "Do not use markdown fences, headers, or explanatory text.\n\n"
+                f"JSON schema:\n{rendered}"
+            )
+        return None
+
+    @staticmethod
+    def _validate_response_format_payload(
+        payload: str,
+        response_format: dict[str, object],
+    ) -> str | None:
+        """Validate extracted JSON against the requested response_format."""
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            return f"invalid JSON: {exc}"
+
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            return None if isinstance(parsed, dict) else "expected a JSON object"
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return "json_schema response_format is missing a schema object"
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
+            try:
+                Draft202012Validator(schema_payload).validate(parsed)
+            except JsonSchemaValidationError as exc:
+                return exc.message
+        return None
 
     @staticmethod
     def _finish_reason(stop_reason: str) -> str:

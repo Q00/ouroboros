@@ -55,6 +55,83 @@ async def test_complete_maps_not_signed_in_to_provider_error() -> None:
     assert result.error.details["error_type"] == "not_signed_in"
 
 
+@pytest.mark.asyncio
+async def test_complete_extracts_json_object_response_format() -> None:
+    adapter = OurocodeLLMAdapter()
+    turn = AcpTurnResult(text='here is JSON: {"ok": true}', stop_reason="end_turn", session_id="s1")
+    run_turn = AsyncMock(return_value=turn)
+    with patch(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+        new=run_turn,
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="return status")],
+            config=CompletionConfig(
+                model="claude-sonnet-4-6",
+                response_format={"type": "json_object"},
+            ),
+        )
+
+    assert result.is_ok
+    assert result.value.content == '{"ok": true}'
+    prompt = run_turn.await_args.args[0]
+    assert "Respond with ONLY a valid JSON object" in prompt
+    assert "return status" in prompt
+
+
+@pytest.mark.asyncio
+async def test_complete_rejects_non_json_response_format_output() -> None:
+    adapter = OurocodeLLMAdapter()
+    turn = AcpTurnResult(text="plain prose, not json", stop_reason="end_turn", session_id="s1")
+    run_turn = AsyncMock(return_value=turn)
+    with patch(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+        new=run_turn,
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="return status")],
+            config=CompletionConfig(
+                model="claude-sonnet-4-6",
+                response_format={"type": "json_object"},
+            ),
+        )
+
+    assert result.is_err
+    assert result.error.provider == "ourocode"
+    assert result.error.details["last_response_preview"] == "plain prose, not json"
+    assert run_turn.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_complete_validates_json_schema_response_format() -> None:
+    adapter = OurocodeLLMAdapter()
+    turn = AcpTurnResult(text='{"ok": true}', stop_reason="end_turn", session_id="s1")
+    run_turn = AsyncMock(return_value=turn)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    with patch(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+        new=run_turn,
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="return status")],
+            config=CompletionConfig(
+                model="claude-sonnet-4-6",
+                response_format={"type": "json_schema", "json_schema": schema},
+            ),
+        )
+
+    assert result.is_ok
+    assert result.value.content == '{"ok": true}'
+    prompt = run_turn.await_args.args[0]
+    assert "JSON schema" in prompt
+    assert '"additionalProperties": false' in prompt
+
+
 def test_compose_prompt_single_user_message() -> None:
     composed = OurocodeLLMAdapter._compose_prompt(
         [Message(role=MessageRole.USER, content="just do it")]
