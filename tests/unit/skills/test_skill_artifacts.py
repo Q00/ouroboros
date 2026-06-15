@@ -32,3 +32,28 @@ def test_resolve_packaged_skills_dir_falls_back_to_repo_root_bundle_when_package
 
     with resolve_packaged_skills_dir(anchor_file=anchor_file) as resolved_dir:
         assert resolved_dir == repo_skills_dir
+
+
+def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
+    """Multi-tool skill guards must not reuse the wrong deferred schema query."""
+    repo_root = Path(__file__).resolve().parents[3]
+    expected = {
+        "seed": [
+            ('"+ouroboros seed"', "ouroboros_generate_seed"),
+            ('"+ouroboros qa"', "ouroboros_qa"),
+            ('"+ouroboros lateral"', "ouroboros_lateral_think"),
+        ],
+        "interview": [
+            ('"+ouroboros interview"', "ouroboros_interview"),
+            ('"+ouroboros lateral"', "ouroboros_lateral_think"),
+        ],
+    }
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill, pairs in expected.items():
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            assert "the specific MCP tool you are about to call" in text
+            assert "the same tool-discovery load query you used above" not in text
+            for query, tool in pairs:
+                assert query in text
+                assert tool in text
