@@ -74,7 +74,6 @@ conversationally over the scriptable surface:
    ouroboros config set orchestrator.runtime_backend <agent>
    ouroboros config set orchestrator.runtime_profile.stages.<interview|execute|evaluate|reflect> <agent>
    ouroboros config set clarification.default_model <model>        # interview & seed
-   ouroboros config set execution.double_diamond_model <model>     # execute
    ouroboros config set evaluation.semantic_model <model>          # evaluate
    ouroboros config set resilience.reflect_model <model>           # reflect
    ouroboros config set llm.backend <backend>                      # internal LLM calls

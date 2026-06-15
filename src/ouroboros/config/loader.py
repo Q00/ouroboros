@@ -1333,9 +1333,9 @@ def _normalize_configured_model_for_backend(
         return _COPILOT_DEFAULT_MODEL
     if resolved in _HERMES_LLM_BACKENDS and is_shipped_default:
         return _HERMES_DEFAULT_MODEL
-    if resolved in _PI_LLM_BACKENDS and candidate == default_model:
+    if resolved in _PI_LLM_BACKENDS and is_shipped_default:
         return _PI_DEFAULT_MODEL
-    if resolved in _GJC_LLM_BACKENDS and candidate == default_model:
+    if resolved in _GJC_LLM_BACKENDS and is_shipped_default:
         return _GJC_DEFAULT_MODEL
 
     return candidate
