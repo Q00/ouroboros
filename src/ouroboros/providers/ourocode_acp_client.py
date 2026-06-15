@@ -167,7 +167,11 @@ class OurocodeAcpClient:
         assert process.stdout is not None
         try:
             await self._request(
-                process, request_id=1, method="initialize", params={}, timeout=self._startup_timeout
+                process,
+                request_id=1,
+                method="initialize",
+                params={"protocolVersion": self._PROTOCOL_VERSION},
+                timeout=self._startup_timeout,
             )
             session_result = await self._request(
                 process,

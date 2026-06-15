@@ -66,15 +66,18 @@ def main() -> int:
         req_id = frame.get("id")
 
         if method == "initialize":
-            _result(
-                req_id,
-                {
-                    "protocolVersion": 1,
-                    "agentCapabilities": {"loadSession": False},
-                    "agentInfo": {"name": "fake-ourocode", "version": "0.0.0"},
-                    "authMethods": [],
-                },
-            )
+            if frame.get("params", {}).get("protocolVersion") != 1:
+                _error(req_id, -32602, "initialize requires protocolVersion 1")
+            else:
+                _result(
+                    req_id,
+                    {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {"loadSession": False},
+                        "agentInfo": {"name": "fake-ourocode", "version": "0.0.0"},
+                        "authMethods": [],
+                    },
+                )
         elif method == "session/new":
             if "cwd" not in frame.get("params", {}):
                 _error(req_id, -32602, "session/new requires an absolute cwd")
