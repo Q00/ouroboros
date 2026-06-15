@@ -41,6 +41,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `setup` | Detect runtimes and configure Ouroboros for your environment |
 | `init` | Start interactive interview to refine requirements |
 | `auto` | Run bounded goal → A-grade Seed → execution handoff pipeline |
+| `job` | Inspect detached job status, waits, results, and event streams |
 | `run` | Execute Ouroboros workflows |
 | `qa` | Evaluate an artifact against a natural-language quality bar |
 | `cancel` | Cancel stuck or orphaned executions |
