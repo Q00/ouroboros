@@ -345,16 +345,22 @@ async def test_complete_maps_reasoning_effort_to_adaptive_output_config() -> Non
     assert "budget_tokens" not in kwargs
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["claude-fable-5-20260101", "claude-mythos-5-20260101"],
+)
 @pytest.mark.asyncio
-async def test_complete_omits_thinking_for_fable_effort() -> None:
-    """Fable 5 keeps the effort field but does not need explicit thinking."""
+async def test_complete_omits_unsupported_fable_mythos_fields_for_effort(
+    model: str,
+) -> None:
+    """Fable/Mythos 5 effort requests omit unsupported sampling and prefill."""
     adapter = AnthropicAdapter(api_key="dummy")
     text_block = MagicMock()
     text_block.type = "text"
-    text_block.text = "ok"
+    text_block.text = '{"ok": true}'
     stub_response = _StubAnthropicResponse(
         content=[text_block],
-        model="claude-fable-5-20260101",
+        model=model,
         stop_reason="end_turn",
         usage=MagicMock(input_tokens=1, output_tokens=1),
     )
@@ -364,13 +370,23 @@ async def test_complete_omits_thinking_for_fable_effort() -> None:
 
     await adapter.complete(
         messages=[Message(role=MessageRole.USER, content="hi")],
-        config=CompletionConfig(model="claude-fable-5-20260101", reasoning_effort="medium"),
+        config=CompletionConfig(
+            model=model,
+            temperature=0.2,
+            top_p=0.4,
+            response_format={"type": "json_object"},
+            reasoning_effort="medium",
+        ),
     )
 
     kwargs = fake_client.messages.create.call_args.kwargs
     assert kwargs["output_config"] == {"effort": "medium"}
     assert "thinking" not in kwargs
     assert "budget_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert "top_p" not in kwargs
+    assert {"role": "assistant", "content": "{"} not in kwargs["messages"]
+    assert "valid JSON object" in kwargs["system"]
 
 
 @pytest.mark.asyncio

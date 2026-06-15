@@ -28,6 +28,11 @@ log = structlog.get_logger()
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
+def _is_fable_or_mythos_5(model: str) -> bool:
+    normalized = model.lower()
+    return "fable-5" in normalized or "mythos-5" in normalized
+
+
 def _requires_adaptive_thinking_for_effort(model: str) -> bool:
     """Return whether ``output_config.effort`` needs an explicit thinking mode.
 
@@ -37,8 +42,28 @@ def _requires_adaptive_thinking_for_effort(model: str) -> bool:
     ``thinking={"type": "adaptive"}``, so older model families get the
     explicit envelope when the effort dial is set.
     """
-    normalized = model.lower()
-    return "fable-5" not in normalized and "mythos-5" not in normalized
+    return not _is_fable_or_mythos_5(model)
+
+
+def _supports_sampling_and_prefill(model: str) -> bool:
+    """Return whether optional sampling knobs and assistant prefill are allowed."""
+    return not _is_fable_or_mythos_5(model)
+
+
+def _response_format_instruction(response_format: dict[str, object]) -> str:
+    """Translate Anthropic response_format into prompt steering without prefill."""
+    import json
+
+    fmt_type = response_format.get("type")
+    if fmt_type == "json_schema":
+        schema = response_format.get("json_schema", {})
+        schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        return (
+            "Respond only with valid JSON that conforms to this JSON schema. "
+            f"Do not include prose or Markdown.\nSchema: {schema_json}"
+        )
+
+    return "Respond only with a valid JSON object. Do not include prose or Markdown."
 
 
 def _serialise_prompt_for_hash(
@@ -226,23 +251,31 @@ class AnthropicAdapter:
         if not api_messages:
             api_messages.append({"role": "user", "content": "(empty)"})
 
-        # Anthropic doesn't support response_format natively.
-        # Use assistant prefill to nudge JSON output when requested.
+        supports_sampling_and_prefill = _supports_sampling_and_prefill(model)
+
+        # Anthropic doesn't support response_format natively. Use assistant
+        # prefill where the model family supports it; Fable/Mythos 5 reject
+        # prefill, so steer JSON through system instructions instead.
         json_prefill = False
         if config.response_format and config.response_format.get("type") in (
             "json_object",
             "json_schema",
         ):
-            api_messages.append({"role": "assistant", "content": "{"})
-            json_prefill = True
+            if supports_sampling_and_prefill:
+                api_messages.append({"role": "assistant", "content": "{"})
+                json_prefill = True
+            else:
+                system_parts.append(_response_format_instruction(config.response_format))
 
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": api_messages,
             "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-            "top_p": config.top_p,
         }
+
+        if supports_sampling_and_prefill:
+            kwargs["temperature"] = config.temperature
+            kwargs["top_p"] = config.top_p
 
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
