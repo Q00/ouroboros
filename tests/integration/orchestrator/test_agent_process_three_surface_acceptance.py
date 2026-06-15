@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+import hashlib
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -28,7 +30,12 @@ from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator.agent_process import run_with_agent_process
+from ouroboros.orchestrator.agent_process import (
+    AgentProcessHandle,
+    AgentProcessStatus,
+    run_with_agent_process,
+)
+from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -64,6 +71,35 @@ def _lifecycle_statuses(store: _FakeEventStore) -> list[str]:
     return [
         e.data["extra"]["lifecycle_status"]
         for e in store.appended
+        if getattr(e, "type", None) == "control.directive.emitted"
+    ]
+
+
+async def _wait_for_status(
+    handle: AgentProcessHandle,
+    status: AgentProcessStatus,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while handle.status() is not status and loop.time() < deadline:
+        await asyncio.sleep(0.01)
+    assert handle.status() is status
+
+
+def _event_directives(events: list[Any]) -> list[str]:
+    return [
+        e.data["directive"]
+        for e in events
+        if getattr(e, "type", None) == "control.directive.emitted"
+    ]
+
+
+def _event_statuses(events: list[Any]) -> list[str]:
+    return [
+        e.data["extra"]["lifecycle_status"]
+        for e in events
         if getattr(e, "type", None) == "control.directive.emitted"
     ]
 
@@ -300,6 +336,84 @@ async def test_production_start_surfaces_emit_running_then_converge(
     assert _directive_intents(store) == [expected_intent, expected_intent]
     assert job_manager.job_types == [expected_job_type]
     assert len(job_manager.runner_results) == 1
+
+
+@pytest.mark.asyncio
+async def test_ralph_agent_process_pause_inspect_resume_preserves_event_tail(
+    tmp_path: Path,
+) -> None:
+    """Closeout audit: Ralph-scoped AgentProcess pause/resume keeps continuity."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    checkpoint_store = CheckpointStore(base_path=tmp_path / "checkpoints")
+    process_id = "ralph:lin_closeout:job_1448"
+    captured_handle: asyncio.Future[AgentProcessHandle] = asyncio.get_running_loop().create_future()
+    first_generation_done = asyncio.Event()
+    release_pause_checkpoint = asyncio.Event()
+    observed_generations: list[str] = []
+
+    async def _ralph_fixture_work(handle: AgentProcessHandle) -> MCPToolResult:
+        captured_handle.set_result(handle)
+        observed_generations.append("generation-1")
+        first_generation_done.set()
+        await release_pause_checkpoint.wait()
+        await handle.wait_unpaused()
+        observed_generations.append("generation-2")
+        return MCPToolResult(
+            content=(MCPContentItem(type=ContentType.TEXT, text="ralph fixture complete"),),
+            meta={
+                "lineage_id": "lin_closeout",
+                "status": "completed",
+                "generations": list(observed_generations),
+            },
+        )
+
+    task = asyncio.create_task(
+        run_with_agent_process(
+            event_store=event_store,
+            checkpoint_store=checkpoint_store,
+            intent="ralph",
+            process_id=process_id,
+            work_fn=_ralph_fixture_work,
+        )
+    )
+
+    try:
+        handle = await asyncio.wait_for(captured_handle, timeout=2.0)
+        await asyncio.wait_for(first_generation_done.wait(), timeout=2.0)
+        await handle.pause(reason="closeout audit pause", store=checkpoint_store)
+        release_pause_checkpoint.set()
+        await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+        paused_events = await event_store.replay("agent_process", process_id)
+        assert _event_directives(paused_events) == ["continue", "wait"]
+        assert _event_statuses(paused_events) == ["running", "paused"]
+        assert AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store) is True
+        pause_checkpoint_key = f"agent_process_{hashlib.sha256(process_id.encode()).hexdigest()}"
+        paused_checkpoint = checkpoint_store.load(pause_checkpoint_key)
+        assert paused_checkpoint.is_ok
+        assert paused_checkpoint.value.phase == "agent_process_paused"
+        assert observed_generations == ["generation-1"]
+
+        pre_resume_rowid = await event_store.get_current_rowid()
+        await handle.resume(store=checkpoint_store)
+        result = await asyncio.wait_for(task, timeout=2.0)
+
+        post_resume_tail, _ = await event_store.get_events_after(
+            "agent_process",
+            process_id,
+            pre_resume_rowid,
+        )
+        assert _event_directives(post_resume_tail) == ["continue", "converge"]
+        assert _event_statuses(post_resume_tail) == ["running", "completed"]
+        assert result.meta["generations"] == ["generation-1", "generation-2"]
+        assert observed_generations == ["generation-1", "generation-2"]
+        assert AgentProcessHandle.load_persisted_pause(process_id, store=checkpoint_store) is False
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await event_store.close()
 
 
 @pytest.mark.asyncio
