@@ -270,7 +270,7 @@ class GradeGate:
         # (the seed still runs) nor distorts the scores; it surfaces in the grade
         # report for visibility. Frugality is goal-subordinate: we surface waste,
         # we do not block a runnable seed on it. The trigger is >9 (not the
-        # prompt-level 3-7 target) to leave generous slack for genuinely
+        # prompt-level 3-7 target) to leave generous room for genuinely
         # multi-outcome goals and only flag clear over-decomposition.
         advisory_findings: list[GradeFinding] = []
         if len(seed.acceptance_criteria) > 9:
