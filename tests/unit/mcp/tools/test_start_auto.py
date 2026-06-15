@@ -21,6 +21,7 @@ import pytest
 
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
+from ouroboros.auto.runtime_routing import AutoStageRuntimePlan, StageRuntime
 from ouroboros.auto.state import (
     AutoCommitPolicy,
     AutoPipelineState,
@@ -1337,6 +1338,53 @@ class TestBackgroundJobPath:
         assert body["auto_session_id"] == meta["auto_session_id"]
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stage_routed_interview_bypasses_opencode_plugin_dispatch(
+        self, event_store, tmp_path, fake_inner_auto, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-OpenCode interview stages should run as normal jobs."""
+
+        from ouroboros.mcp.tools import auto_handler as auto_module
+
+        monkeypatch.setattr(
+            auto_module,
+            "resolve_auto_stage_runtime_plan",
+            lambda **_kwargs: AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime("gjc", None),
+                execute=StageRuntime("pi", None),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
+        )
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        snapshot = MagicMock()
+        snapshot.job_id = "job_auto_stage_routed"
+
+        async def _start_job(*, runner, **_):
+            if inspect.iscoroutine(runner):
+                runner.close()
+            return snapshot
+
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "job"
+        assert result.value.meta["job_id"] == "job_auto_stage_routed"
+        job_manager.start_job.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_plugin_detached_auto_response_is_deterministic_after_scrubbing_handles(

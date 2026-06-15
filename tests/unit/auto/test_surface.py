@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.adapters import HandlerInterviewBackend
+from ouroboros.auto.runtime_routing import AutoStageRuntimePlan, StageRuntime
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.main import app
 from ouroboros.core.types import Result
@@ -659,17 +660,14 @@ def test_cli_opencode_plugin_uses_subprocess_for_plain_cli(monkeypatch) -> None:
         def __init__(self, **kwargs):
             captured["start_mode"] = kwargs.get("opencode_mode")
 
-    monkeypatch.setattr(auto_command, "get_opencode_mode", lambda: "plugin")
     monkeypatch.setattr(auto_command, "InterviewHandler", FakeInterviewHandler)
     monkeypatch.setattr(auto_command, "GenerateSeedHandler", FakeGenerateSeedHandler)
     monkeypatch.setattr(auto_command, "ExecuteSeedHandler", FakeExecuteSeedHandler)
     monkeypatch.setattr(auto_command, "StartExecuteSeedHandler", FakeStartExecuteSeedHandler)
 
     # Instantiate the dependency block without running the whole pipeline.
-    opencode_mode = auto_command.get_opencode_mode()
-    if opencode_mode == "plugin":
-        opencode_mode = "subprocess"
-    authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
+    opencode_mode = auto_command.demote_plugin_opencode_mode("plugin")
+    authoring_opencode_mode = auto_command.demote_plugin_opencode_mode(opencode_mode)
     auto_command.InterviewHandler(
         agent_runtime_backend="opencode", opencode_mode=authoring_opencode_mode
     )
@@ -735,6 +733,70 @@ def test_auto_handler_explicit_cwd_rejects_regular_file(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="not a directory"):
         _resolve_cwd(str(file_path))
+
+
+@pytest.mark.asyncio
+async def test_cli_auto_routes_interview_and_execute_from_stage_plan(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.cli.commands import auto as auto_command
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, seed_generator, **kwargs):  # noqa: ANN001, ANN003
+            run_starter = kwargs["run_starter"]
+            captured["interview_runtime"] = driver.backend.handler.agent_runtime_backend
+            captured["seed_runtime"] = seed_generator.handler.agent_runtime_backend
+            captured["run_runtime"] = run_starter.handler.agent_runtime_backend
+            captured["execute_runtime"] = run_starter.handler.execute_handler.agent_runtime_backend
+            captured["qa_runtime"] = kwargs["seed_qa_evaluator"].qa_handler.agent_runtime_backend
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["state_runtime"] = run_state.runtime_backend
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_command, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_command, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_command, "ensure_auto_worktree", lambda _state: None)
+    monkeypatch.setattr(auto_command, "release_auto_worktree", lambda _workspace: None)
+    monkeypatch.setattr(auto_command, "resolve_agent_runtime_backend", lambda value=None: value or "opencode")
+    monkeypatch.setattr(
+        auto_command,
+        "resolve_auto_stage_runtime_plan",
+        lambda **_kwargs: AutoStageRuntimePlan(
+            default=StageRuntime("opencode", "plugin"),
+            interview=StageRuntime("gjc", None),
+            execute=StageRuntime("pi", None),
+            evaluate=StageRuntime("opencode", "plugin"),
+            reflect=StageRuntime("opencode", "plugin"),
+        ),
+    )
+
+    result = await auto_command._run_auto(
+        goal="Build a CLI",
+        resume=None,
+        runtime=None,
+        max_interview_rounds=1,
+        max_repair_rounds=1,
+        skip_run=False,
+    )
+
+    assert result.status == "complete"
+    assert captured == {
+        "interview_runtime": "gjc",
+        "seed_runtime": "gjc",
+        "run_runtime": "pi",
+        "execute_runtime": "pi",
+        "qa_runtime": "gjc",
+        "state_runtime": "opencode",
+    }
 
 
 @pytest.mark.asyncio
@@ -1258,6 +1320,62 @@ async def test_auto_handler_resume_rebuilds_injected_handlers_for_persisted_runt
         "run_llm_backend": "anthropic",
         "run_mcp_manager": manager,
         "run_mcp_prefix": "bridge__",
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, seed_generator, **kwargs):  # noqa: ANN001, ANN003
+            run_starter = kwargs["run_starter"]
+            captured["interview_runtime"] = driver.backend.handler.agent_runtime_backend
+            captured["seed_runtime"] = seed_generator.handler.agent_runtime_backend
+            captured["run_runtime"] = run_starter.handler.agent_runtime_backend
+            captured["execute_runtime"] = run_starter.handler.execute_handler.agent_runtime_backend
+            captured["qa_runtime"] = kwargs["seed_qa_evaluator"].qa_handler.agent_runtime_backend
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["state_runtime"] = run_state.runtime_backend
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(
+        auto_module,
+        "resolve_auto_stage_runtime_plan",
+        lambda **_kwargs: AutoStageRuntimePlan(
+            default=StageRuntime("opencode", "plugin"),
+            interview=StageRuntime("gjc", None),
+            execute=StageRuntime("pi", None),
+            evaluate=StageRuntime("opencode", "plugin"),
+            reflect=StageRuntime("opencode", "plugin"),
+        ),
+    )
+
+    result = await AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin").handle(
+        {"goal": "Build a CLI", "cwd": str(tmp_path)}
+    )
+
+    assert result.is_ok
+    assert captured == {
+        "interview_runtime": "gjc",
+        "seed_runtime": "gjc",
+        "run_runtime": "pi",
+        "execute_runtime": "pi",
+        "qa_runtime": "gjc",
+        "state_runtime": "opencode",
     }
 
 
