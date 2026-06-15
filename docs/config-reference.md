@@ -216,8 +216,8 @@ llm:
   permission_mode: default
   opencode_permission_mode: acceptEdits
   qa_model: claude-sonnet-4-20250514
-  dependency_analysis_model: claude-opus-4-6
-  ontology_analysis_model: claude-opus-4-6
+  dependency_analysis_model: claude-sonnet-4-20250514
+  ontology_analysis_model: claude-sonnet-4-20250514
   context_compression_model: gpt-4
 ```
 
@@ -227,8 +227,8 @@ llm:
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-20250514"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
-| `dependency_analysis_model` | `string` | `"claude-opus-4-6"` | Model used for AC dependency analysis. Overridable via `OUROBOROS_DEPENDENCY_ANALYSIS_MODEL`. |
-| `ontology_analysis_model` | `string` | `"claude-opus-4-6"` | Model used for ontological analysis. Overridable via `OUROBOROS_ONTOLOGY_ANALYSIS_MODEL`. |
+| `dependency_analysis_model` | `string` | `"claude-sonnet-4-20250514"` | Model used for AC dependency analysis. Overridable via `OUROBOROS_DEPENDENCY_ANALYSIS_MODEL`. |
+| `ontology_analysis_model` | `string` | `"claude-sonnet-4-20250514"` | Model used for ontological analysis. Overridable via `OUROBOROS_ONTOLOGY_ANALYSIS_MODEL`. |
 | `context_compression_model` | `string` | `"gpt-4"` | Model used for workflow context compression. Overridable via `OUROBOROS_CONTEXT_COMPRESSION_MODEL`. |
 
 ---
