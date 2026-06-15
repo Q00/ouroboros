@@ -23,12 +23,13 @@ from ouroboros.tui.events import (
 )
 
 
-async def _wait_for_status(app: OuroborosTUI, status: str, *, timeout: float = 1.0) -> None:
+async def _wait_for_status(app: OuroborosTUI, status: str, *, timeout: float = 5.0) -> None:
     """Wait for the async subscription poller to apply a status update."""
     deadline = asyncio.get_running_loop().time() + timeout
     while app.state.status != status:
         if asyncio.get_running_loop().time() >= deadline:
-            return
+            msg = f"Timed out waiting for TUI status {status!r}; current={app.state.status!r}"
+            raise AssertionError(msg)
         await asyncio.sleep(0.01)
 
 
