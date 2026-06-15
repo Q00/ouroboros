@@ -1387,6 +1387,49 @@ class TestBackgroundJobPath:
         job_manager.start_job.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_stage_routed_execute_plugin_dispatches_before_job_enqueue(
+        self, event_store, tmp_path, fake_inner_auto, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Execute-stage plugin dispatch must be visible to the bridge."""
+
+        from ouroboros.mcp.tools import auto_handler as auto_module
+
+        monkeypatch.setattr(
+            auto_module,
+            "resolve_auto_stage_runtime_plan",
+            lambda **_kwargs: AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime("gjc", None),
+                execute=StageRuntime("opencode", "plugin"),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
+        )
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        job_manager.start_job = AsyncMock()
+        store = AutoStore(tmp_path)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        result = await h.handle({"goal": "build a CLI"})
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["job_id"] is None
+        assert meta["dispatch_mode"] == "plugin"
+        assert meta["status"] == "delegated_to_plugin"
+        assert meta["_subagent"]["context"]["arguments"]["resume"] == meta["auto_session_id"]
+        job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_plugin_detached_auto_response_is_deterministic_after_scrubbing_handles(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:

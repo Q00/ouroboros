@@ -1126,10 +1126,15 @@ def _state_dispatches_via_plugin(
         fallback_runtime_backend=runtime_backend,
         fallback_opencode_mode=opencode_mode,
     )
-    return should_dispatch_via_plugin(
+    interview_dispatch = should_dispatch_via_plugin(
         runtime_plan.interview.runtime_backend,
         runtime_plan.interview.opencode_mode,
     )
+    execute_dispatch = (not state.skip_run) and should_dispatch_via_plugin(
+        runtime_plan.execute.runtime_backend,
+        runtime_plan.execute.opencode_mode,
+    )
+    return interview_dispatch or execute_dispatch
 
 
 def _start_auto_lease_token_from_arguments(arguments: dict[str, Any]) -> str | None:
