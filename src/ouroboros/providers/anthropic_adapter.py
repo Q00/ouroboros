@@ -28,6 +28,19 @@ log = structlog.get_logger()
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
+def _requires_adaptive_thinking_for_effort(model: str) -> bool:
+    """Return whether ``output_config.effort`` needs an explicit thinking mode.
+
+    Claude 5-series Fable/Mythos models run adaptive thinking by default and do
+    not require the ``thinking`` request field. Current Claude 4.6/4.7/4.8
+    effort examples pair ``output_config.effort`` with
+    ``thinking={"type": "adaptive"}``, so older model families get the
+    explicit envelope when the effort dial is set.
+    """
+    normalized = model.lower()
+    return "fable-5" not in normalized and "mythos-5" not in normalized
+
+
 def _serialise_prompt_for_hash(
     api_messages: list[dict[str, str]],
     system_parts: list[str],
@@ -238,11 +251,15 @@ class AnthropicAdapter:
             kwargs["stop_sequences"] = config.stop
 
         # Effort-first investment dial (RFC #1405). The GA effort parameter lives
-        # under ``output_config.effort`` on current Claude models — this is NOT
-        # the removed ``thinking.budget_tokens`` knob (which 400s on Opus 4.7+ /
-        # Fable 5). Omitted when unset to preserve prior behavior.
+        # under ``output_config.effort`` on current Claude models. It is paired
+        # with adaptive thinking for model families that still require an
+        # explicit thinking mode, and deliberately avoids the removed
+        # ``thinking.budget_tokens`` knob (which 400s on Opus 4.7+ / Fable 5).
+        # Omitted when unset to preserve prior behavior.
         if config.reasoning_effort:
             kwargs["output_config"] = {"effort": config.reasoning_effort}
+            if _requires_adaptive_thinking_for_effort(model):
+                kwargs["thinking"] = {"type": "adaptive"}
 
         log.debug(
             "anthropic.request.started",

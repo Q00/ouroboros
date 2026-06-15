@@ -318,9 +318,8 @@ async def test_complete_records_top_p_and_stop_sequences_in_journal_extra() -> N
 
 
 @pytest.mark.asyncio
-async def test_complete_maps_reasoning_effort_to_output_config() -> None:
-    """The effort dial maps to output_config.effort (the GA effort parameter),
-    NOT the removed thinking.budget_tokens (which 400s on current Claude models)."""
+async def test_complete_maps_reasoning_effort_to_adaptive_output_config() -> None:
+    """Claude 4 effort requires output_config.effort plus adaptive thinking."""
     adapter = AnthropicAdapter(api_key="dummy")
     text_block = MagicMock()
     text_block.type = "text"
@@ -342,6 +341,34 @@ async def test_complete_maps_reasoning_effort_to_output_config() -> None:
 
     kwargs = fake_client.messages.create.call_args.kwargs
     assert kwargs["output_config"] == {"effort": "high"}
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_complete_omits_thinking_for_fable_effort() -> None:
+    """Fable 5 keeps the effort field but does not need explicit thinking."""
+    adapter = AnthropicAdapter(api_key="dummy")
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = "ok"
+    stub_response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-fable-5-20260101",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=1, output_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=stub_response)
+    adapter._client = fake_client
+
+    await adapter.complete(
+        messages=[Message(role=MessageRole.USER, content="hi")],
+        config=CompletionConfig(model="claude-fable-5-20260101", reasoning_effort="medium"),
+    )
+
+    kwargs = fake_client.messages.create.call_args.kwargs
+    assert kwargs["output_config"] == {"effort": "medium"}
     assert "thinking" not in kwargs
     assert "budget_tokens" not in kwargs
 

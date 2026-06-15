@@ -61,8 +61,9 @@ class CompletionConfig:
             The effort-first investment lever (RFC #1405). Adapters with a native
             effort knob translate it: LiteLLM forwards a ``reasoning_effort`` kwarg
             (provider-agnostic), and the Anthropic-direct adapter maps it to
-            ``output_config.effort`` (the GA effort parameter — NOT the removed
-            ``thinking.budget_tokens``, which 400s on current Claude models).
+            ``output_config.effort`` plus adaptive thinking where required (the
+            GA effort parameter — NOT the removed ``thinking.budget_tokens``,
+            which 400s on current Claude models).
             Adapters without an effort knob ignore it. ``None`` preserves prior
             behavior everywhere.
         model_is_explicit: True when ``model`` is a request-level pin that must
