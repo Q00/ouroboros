@@ -482,6 +482,29 @@ class TestV04LoaderRequiredPermissions:
             load_manifest(_write(tmp_path, payload))
         assert exc_info.value.json_pointer == "/permissions"
 
+    def test_v04_mixed_tool_call_scopes_require_each_declared_scope(self, tmp_path: Path) -> None:
+        # A hook that declares intercept+observe is classified as intercept
+        # by the dispatcher, so intercept cannot remain an optional grant.
+        payload = _v04_manifest()
+        payload["hooks"] = [
+            _tool_call_hook(
+                name="before_tool_call",
+                failure_policy="fail_open",
+                scope=HOOK_TOOL_OBSERVE_SCOPE,
+            )
+        ]
+        payload["hooks"][0]["permissions"] = [
+            HOOK_TOOL_INTERCEPT_SCOPE,
+            HOOK_TOOL_OBSERVE_SCOPE,
+        ]
+        _set_permission_required(payload, HOOK_TOOL_INTERCEPT_SCOPE, False)
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/permissions"
+        assert HOOK_TOOL_INTERCEPT_SCOPE in str(exc_info.value.got)
+
     def test_v04_tool_call_required_permission_accepted(self, tmp_path: Path) -> None:
         # Positive control: with the intercept scope required (the
         # _v04_manifest default), a fail_closed tool-call hook loads.

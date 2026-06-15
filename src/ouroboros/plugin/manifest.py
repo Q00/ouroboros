@@ -800,16 +800,17 @@ def _validate_tool_call_hook_permission(
             expected=f"one of {sorted(HOOK_TOOL_CALL_SCOPES)!r} in hooks[].permissions",
             got=permissions,
         )
-    if not declared_tool_scopes.intersection(declared_required_permission_scopes):
+    optional_tool_scopes = declared_tool_scopes.difference(declared_required_permission_scopes)
+    if optional_tool_scopes:
         raise PluginManifestError(
-            "v0.4 tool-call hook permission must be required",
+            "v0.4 tool-call hook permissions must be required",
             path=str(manifest_path),
             json_pointer="/permissions",
             expected=(
-                "top-level tool-call permission with required=true for one of "
-                f"{sorted(declared_tool_scopes)!r}"
+                "top-level permission with required=true for every declared "
+                f"tool-call scope {sorted(declared_tool_scopes)!r}"
             ),
-            got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+            got=f"optional tool-call permissions {sorted(optional_tool_scopes)!r}",
         )
     if raw["name"] == HookKind.AFTER_TOOL_CALL.value:
         if HOOK_TOOL_OBSERVE_SCOPE not in permissions:
