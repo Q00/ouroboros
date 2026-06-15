@@ -67,9 +67,7 @@ async def test_stage_cards_render_for_all_stages(app_env) -> None:
             if stage in STAGE_MODEL_FIELDS:
                 assert pilot.app.query_one(f"#stage-model-{stage.value}", Select)
             else:
-                assert not list(
-                    pilot.app.query(f"#stage-model-{stage.value}").results(Select)
-                )
+                assert not list(pilot.app.query(f"#stage-model-{stage.value}").results(Select))
         assert pilot.app.query_one("#global-runtime", Select)
         assert pilot.app.query_one("#global-llm-backend", Select)
 
@@ -375,9 +373,7 @@ async def test_preset_button_stages_models_for_every_card(app_env) -> None:
         await pilot.pause()
         interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
         assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
-        assert not list(
-            pilot.app.query(f"#stage-model-{Stage.EXECUTE.value}").results(Select)
-        )
+        assert not list(pilot.app.query(f"#stage-model-{Stage.EXECUTE.value}").results(Select))
         status = pilot.app.query_one("#status-bar", Static)
         assert "frugal" in str(status.render())
         assert "Save" in str(status.render())  # staged, not saved
