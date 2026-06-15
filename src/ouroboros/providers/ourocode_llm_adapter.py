@@ -1,15 +1,18 @@
 """LLM adapter that delegates Claude completions to ``ourocode --acp``.
 
-This is the SDK-free Claude completion backend. Instead of ``claude_agent_sdk``
-or ``claude -p``, it speaks the Agent Client Protocol to ourocode, whose
-``:claude_api`` model streams a Claude Pro/Max OAuth ``/v1/messages`` turn. See
+This is the SDK-free Claude completion backend by default. Instead of
+``claude_agent_sdk`` or ``claude -p``, it speaks the Agent Client Protocol to
+ourocode, whose ``:claude_api`` model streams a Claude Pro/Max OAuth
+``/v1/messages`` turn. Advanced callers may select another ourocode ACP backend
+selector (``codex`` / ``gemini``), but raw model IDs are rejected because
+``OUROCODE_MODEL`` maps backend selectors, not provider slugs. See
 :mod:`ouroboros.providers.ourocode_acp_client` for the wire protocol.
 
 Scope: this implements the in-process **completion** path (interview / seed / qa
 / evaluate / wonder / reflect) — the single-turn LLM calls that today depend on
-``claude_agent_sdk``. ourocode's ACP ``:claude_api`` is a plain streamed text
-turn with no tool use, so it intentionally does not back the agentic
-tool-using orchestrator runtime.
+``claude_agent_sdk``. The ACP turn is a plain streamed text turn with no tool
+use, so it intentionally does not back the agentic tool-using orchestrator
+runtime.
 """
 
 from __future__ import annotations
@@ -23,6 +26,11 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 import structlog
 
+from ouroboros.config._model_defaults import (
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+    recognized_shipped_defaults,
+)
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
@@ -54,6 +62,13 @@ _ERROR_STATUS: dict[str, int] = {
 }
 
 _STRUCTURED_RESPONSE_ATTEMPTS = 3
+_OUROCODE_MODEL_SELECTORS = frozenset({"claude", "claude_api", "codex", "gemini"})
+_SHIPPED_CLAUDE_MODELS = frozenset(
+    (
+        *recognized_shipped_defaults(DEFAULT_OPUS_MODEL),
+        *recognized_shipped_defaults(DEFAULT_SONNET_MODEL),
+    )
+)
 
 
 class OurocodeLLMAdapter:
@@ -112,6 +127,11 @@ class OurocodeLLMAdapter:
             return Result.err(profile_result.error)
         config = profile_result.value.config
 
+        model_result = self._resolve_ourocode_model(config.model)
+        if model_result.is_err:
+            return Result.err(model_result.error)
+        ourocode_model = model_result.value
+
         response_format = config.response_format
         if response_format:
             directive = self._build_response_format_directive(response_format)
@@ -133,23 +153,26 @@ class OurocodeLLMAdapter:
         client = OurocodeAcpClient(
             cli_path=self._cli_path,
             cwd=self._cwd,
-            model=self._model,
+            model=ourocode_model,
             startup_timeout=self._startup_timeout,
             turn_timeout=self._timeout,
         )
+        response_model = ourocode_model
 
         recorder = get_current_io_journal_recorder() or self._io_recorder
         try:
             if recorder is not None and recorder.is_active:
                 async with recorder.record_llm_call(
-                    model_id=config.model,
+                    model_id=response_model,
                     prompt_text=prompt_text,
                     caller="ourocode_acp",
                     max_tokens=config.max_tokens,
                     temperature=config.temperature,
-                    extra={"backend": "ourocode", "ourocode_model": self._model},
+                    extra={"backend": "ourocode", "ourocode_model": ourocode_model},
                 ) as call:
-                    result = await self._run_result(client, prompt_text, config)
+                    result = await self._run_result(
+                        client, prompt_text, config, response_model=response_model
+                    )
                     if result.is_ok:
                         parsed = result.value
                         call.record_completion(
@@ -160,7 +183,9 @@ class OurocodeLLMAdapter:
                         )
                 return result
 
-            return await self._run_result(client, prompt_text, config)
+            return await self._run_result(
+                client, prompt_text, config, response_model=response_model
+            )
         except AcpClientError as exc:
             return Result.err(self._provider_error(exc))
 
@@ -169,13 +194,17 @@ class OurocodeLLMAdapter:
         client: OurocodeAcpClient,
         prompt_text: str,
         config: CompletionConfig,
+        *,
+        response_model: str,
     ) -> Result[CompletionResponse, ProviderError]:
         if not config.response_format:
-            return Result.ok(await self._run(client, prompt_text, config))
+            return Result.ok(
+                await self._run(client, prompt_text, config, response_model=response_model)
+            )
 
         last_response_preview = ""
         for _attempt in range(_STRUCTURED_RESPONSE_ATTEMPTS):
-            parsed = await self._run(client, prompt_text, config)
+            parsed = await self._run(client, prompt_text, config, response_model=response_model)
             last_response_preview = parsed.content[:240]
             extracted = extract_json_payload(parsed.content)
             if not extracted:
@@ -200,6 +229,8 @@ class OurocodeLLMAdapter:
         client: OurocodeAcpClient,
         prompt_text: str,
         config: CompletionConfig,
+        *,
+        response_model: str,
     ) -> CompletionResponse:
         result = await client.run_turn(prompt_text)
         content = result.text
@@ -213,9 +244,44 @@ class OurocodeLLMAdapter:
             content = content[:MAX_LLM_RESPONSE_LENGTH]
         return CompletionResponse(
             content=content,
-            model=config.model,
+            model=response_model,
             usage=_ZERO_USAGE,
             finish_reason=self._finish_reason(result.stop_reason),
+            raw_response={"ourocode_model": response_model},
+        )
+
+    def _resolve_ourocode_model(
+        self,
+        configured_model: str,
+    ) -> Result[str, ProviderError]:
+        """Resolve a CompletionConfig model into an ``OUROCODE_MODEL`` selector.
+
+        ourocode's ACP server currently maps known backend selectors only
+        (``claude``/``claude_api``/``codex``/``gemini``). Shipped Anthropic model
+        pins and the ``default`` sentinel mean "use ourocode's Claude OAuth
+        backend" here; arbitrary raw model ids would make audit metadata claim a
+        selector the child process cannot actually honor, so reject them.
+        """
+        candidate = configured_model.strip()
+        if not candidate or candidate == "default" or candidate in _SHIPPED_CLAUDE_MODELS:
+            return Result.ok(self._model)
+
+        normalized = candidate.lower().replace("-", "_")
+        if normalized in _OUROCODE_MODEL_SELECTORS:
+            return Result.ok(normalized)
+
+        return Result.err(
+            ProviderError(
+                message=(
+                    "Unsupported ourocode model selector. Use one of: "
+                    "claude, claude_api, codex, gemini"
+                ),
+                provider="ourocode",
+                details={
+                    "model": configured_model,
+                    "supported_selectors": sorted(_OUROCODE_MODEL_SELECTORS),
+                },
+            )
         )
 
     @staticmethod

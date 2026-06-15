@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.config.models import OuroborosConfig
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.ourocode_acp_client import AcpClientError, AcpTurnResult
 from ouroboros.providers.ourocode_llm_adapter import OurocodeLLMAdapter
@@ -30,7 +31,8 @@ async def test_complete_returns_completion_response() -> None:
     assert result.is_ok
     response = result.value
     assert response.content == "hi there"
-    assert response.model == "claude-sonnet-4-6"
+    assert response.model == "claude"
+    assert response.raw_response["ourocode_model"] == "claude"
     # ACP carries no token usage — honestly zero, not fabricated.
     assert response.usage.total_tokens == 0
     assert response.finish_reason == "stop"
@@ -53,6 +55,69 @@ async def test_complete_maps_not_signed_in_to_provider_error() -> None:
     assert result.error.provider == "ourocode"
     assert result.error.status_code == 401
     assert result.error.details["error_type"] == "not_signed_in"
+
+
+@pytest.mark.asyncio
+async def test_complete_passes_profile_model_selector_to_acp_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ourocode provider profile must select the actual OUROCODE_MODEL."""
+    captured: list[dict[str, object]] = []
+
+    class CapturingClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+        async def run_turn(self, _prompt_text: str) -> AcpTurnResult:
+            return AcpTurnResult(text="profiled", stop_reason="end_turn", session_id="s1")
+
+    config = OuroborosConfig(
+        llm_profiles={
+            "oauth": {
+                "providers": {
+                    "ourocode": {
+                        "model": "claude_api",
+                    },
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient",
+        CapturingClient,
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        result = await OurocodeLLMAdapter().complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="default", profile="oauth"),
+        )
+
+    assert result.is_ok
+    assert captured[0]["model"] == "claude_api"
+    assert result.value.model == "claude_api"
+    assert result.value.raw_response["ourocode_model"] == "claude_api"
+
+
+@pytest.mark.asyncio
+async def test_complete_rejects_unsupported_raw_model_selector() -> None:
+    """Arbitrary model ids must not be recorded while ourocode runs a fallback."""
+    run_turn = AsyncMock(
+        return_value=AcpTurnResult(text="should not run", stop_reason="end_turn", session_id="s1")
+    )
+    with patch(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+        new=run_turn,
+    ):
+        result = await OurocodeLLMAdapter().complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="gpt-5"),
+        )
+
+    assert result.is_err
+    assert result.error.provider == "ourocode"
+    assert result.error.details["model"] == "gpt-5"
+    assert run_turn.await_count == 0
 
 
 @pytest.mark.asyncio

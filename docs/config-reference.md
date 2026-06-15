@@ -232,6 +232,11 @@ llm:
 | `ontology_analysis_model` | `string` | `"claude-opus-4-6"` | Model used for ontological analysis. Overridable via `OUROBOROS_ONTOLOGY_ANALYSIS_MODEL`. |
 | `context_compression_model` | `string` | `"gpt-4"` | Model used for workflow context compression. Overridable via `OUROBOROS_CONTEXT_COMPRESSION_MODEL`. |
 
+When `llm.backend` is `ourocode`, model fields are `OUROCODE_MODEL` selectors,
+not raw Anthropic model IDs. The supported selectors are `claude`, `claude_api`,
+`codex`, and `gemini`; `default` and shipped Claude default pins resolve to
+`claude` so journal metadata matches the ACP child process.
+
 ---
 
 ## `llm_profiles` and `llm_role_profiles`

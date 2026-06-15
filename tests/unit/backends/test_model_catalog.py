@@ -57,10 +57,10 @@ def test_litellm_catalog_is_custom_only() -> None:
     assert catalog.default_model == mc.DEFAULT_MODEL_SENTINEL
 
 
-def test_ourocode_catalog_is_custom_only() -> None:
+def test_ourocode_catalog_lists_supported_acp_selectors() -> None:
     catalog = mc.get_model_catalog("ourocode")
-    assert catalog.models == ()
-    assert catalog.default_model == mc.DEFAULT_MODEL_SENTINEL
+    assert catalog.models == ("claude", "claude_api", "codex", "gemini")
+    assert catalog.default_model == "claude"
 
 
 def test_unknown_backend_raises() -> None:
