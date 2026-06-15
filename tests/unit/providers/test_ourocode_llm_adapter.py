@@ -121,6 +121,27 @@ async def test_complete_rejects_unsupported_raw_model_selector() -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_rejects_unsupported_constructor_model_selector() -> None:
+    """The adapter-level fallback model must also be an ACP selector."""
+    run_turn = AsyncMock(
+        return_value=AcpTurnResult(text="should not run", stop_reason="end_turn", session_id="s1")
+    )
+    with patch(
+        "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+        new=run_turn,
+    ):
+        result = await OurocodeLLMAdapter(model="gpt-5").complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert result.error.provider == "ourocode"
+    assert result.error.details["adapter_model"] == "gpt-5"
+    assert run_turn.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_complete_extracts_json_object_response_format() -> None:
     adapter = OurocodeLLMAdapter()
     turn = AcpTurnResult(text='here is JSON: {"ok": true}', stop_reason="end_turn", session_id="s1")

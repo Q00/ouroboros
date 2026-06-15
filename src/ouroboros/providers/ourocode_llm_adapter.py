@@ -264,8 +264,26 @@ class OurocodeLLMAdapter:
         """
         candidate = configured_model.strip()
         if not candidate or candidate == "default" or candidate in _SHIPPED_CLAUDE_MODELS:
-            return Result.ok(self._model)
+            return self._normalize_ourocode_model_selector(
+                self._model,
+                details_key="adapter_model",
+            )
 
+        return self._normalize_ourocode_model_selector(
+            configured_model,
+            details_key="model",
+        )
+
+    @staticmethod
+    def _normalize_ourocode_model_selector(
+        model: str,
+        *,
+        details_key: str,
+    ) -> Result[str, ProviderError]:
+        """Normalize a public model value into an ``OUROCODE_MODEL`` selector."""
+        candidate = model.strip()
+        if not candidate or candidate == "default" or candidate in _SHIPPED_CLAUDE_MODELS:
+            return Result.ok("claude")
         normalized = candidate.lower().replace("-", "_")
         if normalized in _OUROCODE_MODEL_SELECTORS:
             return Result.ok(normalized)
@@ -278,7 +296,7 @@ class OurocodeLLMAdapter:
                 ),
                 provider="ourocode",
                 details={
-                    "model": configured_model,
+                    details_key: model,
                     "supported_selectors": sorted(_OUROCODE_MODEL_SELECTORS),
                 },
             )

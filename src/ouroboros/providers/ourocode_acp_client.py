@@ -127,7 +127,11 @@ class OurocodeAcpClient:
         # The ACP process must not inherit Ouroboros runtime/backend selectors
         # (they would confuse a nested invocation), and OUROCODE_MODEL selects
         # the Claude backend for the whole ACP process.
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
+        for key in (
+            "OUROBOROS_AGENT_RUNTIME",
+            "OUROBOROS_LLM_BACKEND",
+            "OUROBOROS_RUNTIME",
+        ):
             env.pop(key, None)
         env["OUROCODE_MODEL"] = self._model
         return env

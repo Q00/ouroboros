@@ -23,6 +23,21 @@ def _client(tmp_path: Path) -> OurocodeAcpClient:
     )
 
 
+def test_build_env_strips_nested_ouroboros_backend_selectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "codex")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "codex")
+
+    env = OurocodeAcpClient(cli_path=_FAKE_ACP, cwd=tmp_path)._build_env()
+
+    assert "OUROBOROS_AGENT_RUNTIME" not in env
+    assert "OUROBOROS_LLM_BACKEND" not in env
+    assert "OUROBOROS_RUNTIME" not in env
+    assert env["OUROCODE_MODEL"] == "claude"
+
+
 @pytest.mark.asyncio
 async def test_run_turn_streams_chunks_and_returns_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
