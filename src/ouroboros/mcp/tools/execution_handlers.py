@@ -507,6 +507,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
                     "model_tier": model_tier,
+                    **_run_only_verification_meta(
+                        session_id, verification_status="delegated_unverified"
+                    ),
                 },
             )
 

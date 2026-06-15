@@ -421,6 +421,27 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "execution_mode='legacy' was removed" in str(result.error)
 
+    async def test_handle_plugin_marks_direct_delegation_unverified(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Direct plugin-dispatched execute_seed still reports formal evaluation state."""
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_subagent"
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert result.value.meta["evaluated"] is False
+        assert result.value.meta["verification_status"] == "delegated_unverified"
+        assert result.value.meta["formal_evaluation_required"] is True
+        assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
+
     async def test_handle_plugin_rejects_removed_legacy_execution_mode(
         self,
         memory_event_store: EventStore,

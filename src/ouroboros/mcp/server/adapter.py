@@ -5,6 +5,8 @@ protocol using the MCP SDK (FastMCP). It handles tool registration, resource
 handling, and server lifecycle.
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Sequence
 import inspect
