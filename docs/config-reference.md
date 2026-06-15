@@ -224,7 +224,7 @@ llm:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"ourocode"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` is LLM-only and is not valid for `orchestrator.runtime_backend`. |
+| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"goose"` \| `"pi"` \| `"ourocode"` \| `"gjc"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. `ourocode` is LLM-only and is not valid for `orchestrator.runtime_backend`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-20250514"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
@@ -706,7 +706,7 @@ backends:
   # Declare a safe budget for a CLI runtime, then raise its fan-out cap
   # (via OUROBOROS_MAX_CONCURRENCY) knowing dispatch will be paced.
   # Use the runtime name you select with `runtime_backend` (hermes, codex,
-  # gemini, copilot, opencode, goose, pi, kiro) — the `*_cli` adapter handles
+  # gemini, copilot, opencode, goose, pi, kiro, gjc) — the `*_cli` adapter handles
   # canonicalize to these, so either form resolves to the same entry.
   hermes:
     max_concurrency: 4
