@@ -77,6 +77,39 @@ class CanonicalScenario:
         assert isinstance(value, int)
         return value
 
+
+    @property
+    def declared_output_paths(self) -> tuple[str, ...]:
+        value = self.metadata.get("declared_output_paths", ())
+        if not value:
+            return ()
+        assert isinstance(value, (list, tuple))
+        out: list[str] = []
+        for item in value:
+            assert isinstance(item, str)
+            out.append(item)
+        return tuple(out)
+
+    @property
+    def product_artifact_path(self) -> str | None:
+        value = self.metadata.get("product_artifact_path")
+        if value is None:
+            return None
+        assert isinstance(value, str)
+        return value
+
+    @property
+    def product_smoke_commands(self) -> tuple[dict[str, object], ...]:
+        value = self.metadata.get("product_smoke_commands", ())
+        if not value:
+            return ()
+        assert isinstance(value, (list, tuple))
+        out: list[dict[str, object]] = []
+        for item in value:
+            assert isinstance(item, dict)
+            out.append(dict(item))
+        return tuple(out)
+
     @property
     def env_dir(self) -> Path | None:
         candidate = self.directory / "env"
@@ -171,12 +204,69 @@ def _load_scenario(directory: Path) -> CanonicalScenario:
             pytrace=False,
         )
 
+    _validate_product_reality_metadata(slug, raw_metadata)
+
     return CanonicalScenario(
         slug=slug,
         directory=directory,
         goal=goal,
         metadata=dict(raw_metadata),
     )
+
+
+
+def _validate_product_reality_metadata(slug: str, metadata: dict[str, object]) -> None:
+    """Validate optional live product-reality smoke metadata."""
+    artifact_path = metadata.get("product_artifact_path")
+    if artifact_path is not None and not isinstance(artifact_path, str):
+        pytest.fail(
+            f"canonical scenario {slug!r} product_artifact_path must be a string",
+            pytrace=False,
+        )
+    declared_paths = metadata.get("declared_output_paths", ())
+    if declared_paths:
+        if not isinstance(declared_paths, (list, tuple)) or not all(
+            isinstance(item, str) and item for item in declared_paths
+        ):
+            pytest.fail(
+                f"canonical scenario {slug!r} declared_output_paths must be a list of strings",
+                pytrace=False,
+            )
+    commands = metadata.get("product_smoke_commands", ())
+    if not commands:
+        return
+    if not isinstance(commands, (list, tuple)):
+        pytest.fail(
+            f"canonical scenario {slug!r} product_smoke_commands must be a list",
+            pytrace=False,
+        )
+    for index, command in enumerate(commands):
+        if not isinstance(command, dict):
+            pytest.fail(
+                f"canonical scenario {slug!r} product_smoke_commands[{index}] must be a mapping",
+                pytrace=False,
+            )
+        argv = command.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+            pytest.fail(
+                f"canonical scenario {slug!r} product_smoke_commands[{index}].argv must be a non-empty string list",
+                pytrace=False,
+            )
+        expected_exit = command.get("expect_exit_code", 0)
+        if isinstance(expected_exit, bool) or not isinstance(expected_exit, int):
+            pytest.fail(
+                f"canonical scenario {slug!r} product_smoke_commands[{index}].expect_exit_code must be an integer",
+                pytrace=False,
+            )
+        for key in ("stdout_contains", "stderr_contains"):
+            value = command.get(key, ())
+            if value and (
+                not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value)
+            ):
+                pytest.fail(
+                    f"canonical scenario {slug!r} product_smoke_commands[{index}].{key} must be a list of strings",
+                    pytrace=False,
+                )
 
 
 def _runtime_is_inside_repo(runtime_file: Path, repo_root: Path) -> bool:

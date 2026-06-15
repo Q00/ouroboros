@@ -17,7 +17,9 @@ Two cost regimes:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
 from typing import Any
 
 import pytest
@@ -171,6 +173,85 @@ def test_scenario_runtime_probe_kinds_subset_of_l1_catalog(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Live product-reality smoke checks (#1452)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_canonical_path(workdir: Path, relative_path: str) -> Path:
+    candidate = (workdir / relative_path).resolve()
+    root = workdir.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise AssertionError(f"canonical path escapes workdir: {relative_path!r}") from exc
+    return candidate
+
+
+def _run_product_reality_smoke_checks(
+    scenario: CanonicalScenario,
+    workdir: Path,
+    meta: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Execute scenario-declared product smoke commands after live completion.
+
+    The harness intentionally reads commands from ``expected.yaml`` so adding
+    future canonical scenarios does not require new Python code. Commands run
+    relative to the generated product workdir and may reference the generated
+    artifact through the ``{artifact}`` placeholder.
+    """
+    if not scenario.product_artifact_path and not scenario.product_smoke_commands:
+        return []
+
+    artifact_path: Path | None = None
+    if scenario.product_artifact_path:
+        artifact_path = _resolve_canonical_path(workdir, scenario.product_artifact_path)
+        assert artifact_path.is_file(), (
+            f"{scenario.slug}: expected generated artifact at {artifact_path}; "
+            f"auto meta was {meta}"
+        )
+
+    smoke_results: list[dict[str, Any]] = []
+    timeout_seconds = min(float(scenario.wall_clock_budget_seconds), 30.0)
+    for index, command in enumerate(scenario.product_smoke_commands):
+        argv = list(command["argv"])
+        if artifact_path is not None:
+            argv = [part.format(artifact=str(artifact_path)) for part in argv]
+        completed = subprocess.run(  # noqa: S603 - canonical smoke command
+            argv,
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        expected_exit = int(command.get("expect_exit_code", 0))
+        smoke_record = {
+            "argv": argv,
+            "exit_code": completed.returncode,
+            "stdout_preview": completed.stdout[:1000],
+            "stderr_preview": completed.stderr[:1000],
+        }
+        smoke_results.append(smoke_record)
+        assert completed.returncode == expected_exit, (
+            f"{scenario.slug}: smoke command {index} expected exit {expected_exit}, "
+            f"got {completed.returncode}: {smoke_record}"
+        )
+        for expected in command.get("stdout_contains", ()):
+            assert expected in completed.stdout, (
+                f"{scenario.slug}: smoke command {index} stdout missing {expected!r}: {smoke_record}"
+            )
+        for expected in command.get("stderr_contains", ()):
+            assert expected in completed.stderr, (
+                f"{scenario.slug}: smoke command {index} stderr missing {expected!r}: {smoke_record}"
+            )
+    for output_path in scenario.declared_output_paths:
+        expected = _resolve_canonical_path(workdir, output_path)
+        assert expected.exists(), f"{scenario.slug}: expected declared output path {expected} to exist"
+    return smoke_results
+
+
 # ---------------------------------------------------------------------------
 # Live invocation (opt-in via OUROBOROS_RUN_CANONICAL=1)
 # ---------------------------------------------------------------------------
@@ -211,6 +292,8 @@ def _persist_raw_evidence(
     workdir: Path,
     result: Any,
     request: pytest.FixtureRequest,
+    *,
+    product_smoke_results: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Persist the verbatim MCP handler response under
     ``<workdir>/.ooo-observability/`` as JSON evidence.
@@ -271,6 +354,14 @@ def _persist_raw_evidence(
         "mcp_result_meta": raw_meta,
         "mcp_result_content": raw_content_repr,
         "mcp_result_fallback_text": raw_text,
+        "product_reality": {
+            "artifact_path": scenario.product_artifact_path,
+            "declared_output_paths": list(scenario.declared_output_paths),
+            "smoke_results": product_smoke_results or [],
+            "auto_session_id": raw_meta.get("auto_session_id"),
+            "execution_id": raw_meta.get("execution_id"),
+            "run_session_id": raw_meta.get("run_session_id"),
+        },
     }
     out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return out_path
@@ -373,10 +464,25 @@ async def test_scenario_live_run_or_skip(
             f"{scenario.slug}: product_complete scenario must not stop at an "
             f"unverified run handoff: {tool_result.meta}"
         )
+    product_smoke_results = _run_product_reality_smoke_checks(scenario, workdir, tool_result.meta)
+    if product_smoke_results:
+        evidence_path = _persist_raw_evidence(
+            scenario,
+            workdir,
+            result,
+            request,
+            product_smoke_results=product_smoke_results,
+        )
+        print(f"CANONICAL {scenario.slug}: product reality smoke -> {evidence_path}")
     print(
         f"CANONICAL {scenario.slug}: status={tool_result.meta['status']} "
         f"phase={tool_result.meta.get('phase')} "
-        f"closure_mode={closure_mode} completion_mode={scenario.completion_mode}"
+        f"closure_mode={closure_mode} completion_mode={scenario.completion_mode} "
+        f"artifact={scenario.product_artifact_path or 'none'} "
+        f"smoke_commands={len(product_smoke_results)} "
+        f"auto_session_id={tool_result.meta.get('auto_session_id')} "
+        f"execution_id={tool_result.meta.get('execution_id')} "
+        f"run_session_id={tool_result.meta.get('run_session_id')}"
     )
 
 
@@ -403,6 +509,37 @@ async def test_live_run_opt_in_invokes_auto_handler(
 
     async def fake_invoke(selected: CanonicalScenario, workdir: Path) -> Result[object, str]:
         calls.append((selected.slug, workdir))
+        (workdir / "habit_tracker.py").write_text(
+            """
+from __future__ import annotations
+import json
+import sys
+from pathlib import Path
+
+store = Path('habits.json')
+habits = json.loads(store.read_text()) if store.exists() else []
+if len(sys.argv) < 2:
+    sys.exit(2)
+cmd = sys.argv[1]
+name = ' '.join(sys.argv[2:])
+if cmd == 'add' and name:
+    habits.append({'name': name, 'done': False})
+    store.write_text(json.dumps(habits))
+    print(name)
+elif cmd == 'list':
+    for item in habits:
+        print(item['name'])
+elif cmd == 'done' and name:
+    for item in habits:
+        if item['name'] == name:
+            item['done'] = True
+    store.write_text(json.dumps(habits))
+    print(name)
+else:
+    sys.exit(2)
+""".strip(),
+            encoding="utf-8",
+        )
         return Result.ok(_ToolResult())
 
     monkeypatch.setattr(
@@ -420,4 +557,8 @@ async def test_live_run_opt_in_invokes_auto_handler(
     assert calls == [(scenario.slug, tmp_path / scenario.slug)]
     # PR-γ evidence-integrity contract: the raw envelope must be persisted.
     obs_files = list((tmp_path / scenario.slug / ".ooo-observability").glob("canonical-*.json"))
-    assert len(obs_files) == 1, f"expected one evidence file; found {obs_files}"
+    assert obs_files, "expected at least one evidence file"
+    evidence_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in obs_files]
+    assert any(
+        payload["product_reality"]["smoke_results"] for payload in evidence_payloads
+    ), "expected product-reality smoke results in persisted evidence"

@@ -18,3 +18,21 @@ runtime_probe_kinds:
 
 # 30-minute soft budget honored by the opt-in live canonical runner.
 wall_clock_budget_seconds: 1800
+
+# Live product-reality smoke contract (#1452). The live harness executes
+# these after ouroboros_auto reaches a successful product terminal.
+product_artifact_path: habit_tracker.py
+declared_output_paths:
+  - habits.json
+product_smoke_commands:
+  - argv: ["python", "{artifact}", "add", "drink water"]
+    expect_exit_code: 0
+    stdout_contains: ["drink water"]
+  - argv: ["python", "{artifact}", "list"]
+    expect_exit_code: 0
+    stdout_contains: ["drink water"]
+  - argv: ["python", "{artifact}", "done", "drink water"]
+    expect_exit_code: 0
+    stdout_contains: ["drink water"]
+  - argv: ["python", "{artifact}", "unknown-command"]
+    expect_exit_code: 2

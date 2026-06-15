@@ -46,7 +46,8 @@ OUROBOROS_RUN_CANONICAL=1 uv run pytest tests/canonical/ -v
 ```
 
 This command invokes the `ouroboros_auto` MCP tool against each
-scenario and asserts the documented terminal state — **use sparingly**,
+scenario, asserts the documented terminal state, and then executes any
+scenario-declared generated-artifact smoke commands — **use sparingly**,
 each scenario will consume real LLM tokens (cli-todo ≈ \$1,
 kart-racer ≈ \$5 with Sonnet-class models). Without the environment
 variable, the live test skips and only the hermetic shape/catalog checks
@@ -72,7 +73,7 @@ Each `tests/canonical/<slug>/` directory contains:
 | File | Purpose |
 |---|---|
 | `goal.txt` | One-line goal string fed to `ooo auto`. No leading/trailing whitespace beyond a final newline. |
-| `expected.yaml` | Frozen metadata: `domain_class`, `completion_mode`, `runtime_probe_kinds`, optional `wall_clock_budget_seconds`. |
+| `expected.yaml` | Frozen metadata: `domain_class`, `completion_mode`, `runtime_probe_kinds`, optional `wall_clock_budget_seconds`, and optional live product-reality smoke checks. |
 | `env/` *(optional)* | Fixture files seeded into the temp workdir before `ouroboros_auto` is invoked. Often empty for greenfield scenarios. |
 
 `expected.yaml` schema (validated by `conftest.py`):
@@ -87,6 +88,17 @@ runtime_probe_kinds:
   - headless_run
   - stdout_golden
 wall_clock_budget_seconds: 600       # default: 7200
+
+# optional live product-reality smoke checks
+product_artifact_path: habit_tracker.py
+declared_output_paths:
+  - habits.json
+product_smoke_commands:
+  - argv: ["python", "{artifact}", "add", "drink water"]
+    expect_exit_code: 0
+    stdout_contains: ["drink water"]
+  - argv: ["python", "{artifact}", "unknown-command"]
+    expect_exit_code: 2
 ```
 
 ## When to extend
@@ -151,7 +163,17 @@ Schema (stable, parseable):
   "mcp_result_is_error": false,
   "mcp_result_meta": { ... raw envelope ... },
   "mcp_result_content": [ ... raw content items ... ],
-  "mcp_result_fallback_text": null
+  "mcp_result_fallback_text": null,
+  "product_reality": {
+    "artifact_path": "habit_tracker.py",
+    "declared_output_paths": ["habits.json"],
+    "smoke_results": [
+      {"argv": ["python", "/tmp/.../habit_tracker.py", "list"], "exit_code": 0, "stdout_preview": "...", "stderr_preview": ""}
+    ],
+    "auto_session_id": "...",
+    "execution_id": "...",
+    "run_session_id": "..."
+  }
 }
 ```
 
