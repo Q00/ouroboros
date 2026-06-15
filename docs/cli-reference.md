@@ -81,9 +81,9 @@ Auto mode starts execution only after the generated Seed reaches A-grade. If a p
 Detached `auto` work is non-terminal tracked background work. Starting it does
 not mean the workflow has completed; the returned `job_id` is a handle for a
 tracked job whose lifecycle remains observable until it reaches a terminal
-state such as `completed`, `failed`, or `cancelled`. Expired retention is
-reported by `ouroboros job result` when the stored terminal result is no longer
-available.
+state such as `completed`, `failed`, or `cancelled`. Terminal results are read
+from persisted job events; the in-memory handle TTL only bounds live registry
+cleanup, not completed result retrieval.
 
 CLI users wait and retrieve with the standard job surfaces:
 

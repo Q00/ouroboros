@@ -267,9 +267,9 @@ skill routing.
 background work. A successful start response returns a `job_id` immediately;
 that handle identifies tracked background work, not a completed workflow result.
 The job remains observable through its lifecycle status until it reaches a
-terminal state such as `completed`, `failed`, or `cancelled`. Expired retention
-is reported by `ouroboros_job_result` when the stored terminal result is no
-longer available.
+terminal state such as `completed`, `failed`, or `cancelled`. Terminal results
+are read from persisted job events; the in-memory handle TTL only bounds live
+registry cleanup, not completed result retrieval.
 
 MCP clients wait for and retrieve detached `auto` results with the standard job
 tools:

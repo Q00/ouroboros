@@ -57,7 +57,8 @@ def test_mcp_docs_describe_detached_auto_as_tracked_non_terminal_background_work
         "that handle identifies tracked background work, not a completed workflow result" in compact
     )
     assert "terminal state such as `completed`, `failed`, or `cancelled`" in compact
-    assert "Expired retention is reported by `ouroboros_job_result`" in compact
+    assert "in-memory handle TTL only bounds live registry cleanup" in compact
+    assert "not completed result retrieval" in compact
 
     for mcp_tool in (
         'ouroboros_job_status(job_id="JOB_ID")',
