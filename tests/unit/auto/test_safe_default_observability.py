@@ -64,13 +64,13 @@ def _ledger_all_filled_except(
     return ledger
 
 
-
 class _RecordingEventStore:
     def __init__(self) -> None:
         self.appended = []
 
     async def append(self, event, **_kwargs) -> None:
         self.appended.append(event)
+
 
 # ---------------------------------------------------------------------------
 # Test 1: no_gaps_to_default + mutual_agreement_deadlock_at_max_rounds
