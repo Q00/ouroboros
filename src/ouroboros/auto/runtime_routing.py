@@ -42,9 +42,7 @@ def resolve_auto_stage_runtime_plan(
     ``orchestrator.runtime_profile.stages`` using the shared stage resolver.
     """
 
-    default_runtime = resolve_agent_runtime_backend(
-        runtime_override or fallback_runtime_backend
-    )
+    default_runtime = resolve_agent_runtime_backend(runtime_override or fallback_runtime_backend)
     default = StageRuntime(
         runtime_backend=default_runtime,
         opencode_mode=_opencode_mode_for_runtime(default_runtime, fallback_opencode_mode),

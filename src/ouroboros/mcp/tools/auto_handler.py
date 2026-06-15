@@ -436,9 +436,7 @@ class AutoHandler:
             fallback_runtime_backend=runtime_backend,
             fallback_opencode_mode=opencode_mode,
         )
-        authoring_opencode_mode = demote_plugin_opencode_mode(
-            runtime_plan.interview.opencode_mode
-        )
+        authoring_opencode_mode = demote_plugin_opencode_mode(runtime_plan.interview.opencode_mode)
         interview_handler = _authoring_interview_handler(
             self.interview_handler,
             llm_backend=self.llm_backend,

@@ -736,9 +736,7 @@ def test_auto_handler_explicit_cwd_rejects_regular_file(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cli_auto_routes_interview_and_execute_from_stage_plan(
-    monkeypatch, tmp_path
-) -> None:
+async def test_cli_auto_routes_interview_and_execute_from_stage_plan(monkeypatch, tmp_path) -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.auto.state import AutoStore
     from ouroboros.cli.commands import auto as auto_command
@@ -766,7 +764,9 @@ async def test_cli_auto_routes_interview_and_execute_from_stage_plan(
     monkeypatch.setattr(auto_command, "AutoPipeline", FakePipeline)
     monkeypatch.setattr(auto_command, "ensure_auto_worktree", lambda _state: None)
     monkeypatch.setattr(auto_command, "release_auto_worktree", lambda _workspace: None)
-    monkeypatch.setattr(auto_command, "resolve_agent_runtime_backend", lambda value=None: value or "opencode")
+    monkeypatch.setattr(
+        auto_command, "resolve_agent_runtime_backend", lambda value=None: value or "opencode"
+    )
     monkeypatch.setattr(
         auto_command,
         "resolve_auto_stage_runtime_plan",
