@@ -184,7 +184,12 @@ class TestJobManager:
             )
 
             assert snapshot.result_text == "Execution complete: 2/2 ACs completed"
+            assert snapshot.message == "Execution complete; formal evaluation not run"
             assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["evaluated"] is False
+            assert snapshot.result_meta["verification_status"] == "executed_unverified"
+            assert snapshot.result_meta["formal_evaluation_required"] is True
+            assert snapshot.result_meta["next_step"] == "ooo evaluate orch_complete"
             events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
             terminal_events = [
                 event
@@ -1038,7 +1043,11 @@ class TestJobManager:
                 )
 
                 assert snapshot.result_text == "Execution complete: 1/1 ACs completed"
+                assert snapshot.message == "Execution complete; formal evaluation not run"
                 assert snapshot.result_meta["completed_from_execution_terminal"] is True
+                assert snapshot.result_meta["evaluated"] is False
+                assert snapshot.result_meta["verification_status"] == "executed_unverified"
+                assert snapshot.result_meta["next_step"] == "ooo evaluate orch_stubborn"
                 assert manager.has_live_job_task(started.job_id) is False
                 events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
                 assert [
@@ -1101,7 +1110,12 @@ class TestJobManager:
             snapshot = await manager.get_snapshot("job_recover_complete")
 
             assert snapshot.status is JobStatus.COMPLETED
+            assert snapshot.message == "Execution complete; formal evaluation not run"
             assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["evaluated"] is False
+            assert snapshot.result_meta["verification_status"] == "executed_unverified"
+            assert snapshot.result_meta["formal_evaluation_required"] is True
+            assert snapshot.result_meta["next_step"] == "ooo evaluate orch_recover"
             events, _ = await store.get_events_after("job", "job_recover_complete", last_row_id=0)
             terminal_events = [
                 event.type
@@ -1408,7 +1422,11 @@ class TestJobManager:
             snapshot = await read_only_manager.get_snapshot("job_recover_read_only")
 
             assert snapshot.status is JobStatus.COMPLETED
+            assert snapshot.message == "Execution complete; formal evaluation not run"
             assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["evaluated"] is False
+            assert snapshot.result_meta["verification_status"] == "executed_unverified"
+            assert snapshot.result_meta["next_step"] == "ooo evaluate orch_recover_read_only"
             events, _ = await read_only_store.get_events_after(
                 "job",
                 "job_recover_read_only",
@@ -1675,7 +1693,11 @@ class TestJobManager:
             )
 
             assert snapshot.result_text == "Execution complete"
+            assert snapshot.message == "Execution complete; formal evaluation not run"
             assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["evaluated"] is False
+            assert snapshot.result_meta["verification_status"] == "executed_unverified"
+            assert snapshot.result_meta["next_step"] == "ooo evaluate orch_partial_progress"
         finally:
             stop.set()
             await _cancel_manager_tasks(manager)

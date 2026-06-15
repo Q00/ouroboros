@@ -209,7 +209,23 @@ def _snapshot_with_status_event(
     )
 
 
-def _execution_completed_job_event(job_id: str, result_text: str) -> BaseEvent:
+def _run_only_verification_meta(session_id: str | None) -> dict[str, Any]:
+    """Metadata that keeps execution completion separate from formal evaluation."""
+    next_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return {
+        "evaluated": False,
+        "verification_status": "executed_unverified",
+        "formal_evaluation_required": True,
+        "next_step": next_step,
+    }
+
+
+def _execution_completed_job_event(
+    job_id: str,
+    result_text: str,
+    *,
+    session_id: str | None = None,
+) -> BaseEvent:
     """Build the synthetic/persisted job-completion event for execution recovery."""
     return BaseEvent(
         id=f"{_RECOVERED_COMPLETION_EVENT_ID_PREFIX}{job_id}",
@@ -218,9 +234,12 @@ def _execution_completed_job_event(job_id: str, result_text: str) -> BaseEvent:
         aggregate_id=job_id,
         data={
             "status": JobStatus.COMPLETED.value,
-            "message": "Job complete",
+            "message": "Execution complete; formal evaluation not run",
             "result_text": result_text,
-            "result_meta": {"completed_from_execution_terminal": True},
+            "result_meta": {
+                "completed_from_execution_terminal": True,
+                **_run_only_verification_meta(session_id),
+            },
             "is_error": False,
             "timestamp": datetime.now(UTC).isoformat(),
         },
@@ -624,6 +643,7 @@ class JobManager:
         job_id: str,
         result_text: str,
         *,
+        session_id: str | None = None,
         check_current: bool = True,
         event_id: str | None = None,
     ) -> bool:
@@ -637,9 +657,14 @@ class JobManager:
             job_id,
             {
                 "status": JobStatus.COMPLETED.value,
-                "message": "Job complete",
+                "message": "Execution complete; formal evaluation not run",
                 "result_text": result_text,
-                "result_meta": {"completed_from_execution_terminal": True},
+                "result_meta": {
+                    "completed_from_execution_terminal": True,
+                    **_run_only_verification_meta(
+                        session_id or snapshot.links.session_id if check_current else session_id
+                    ),
+                },
                 "is_error": False,
             },
             event_id=event_id,
@@ -1000,7 +1025,11 @@ class JobManager:
             return snapshot
         if getattr(self._event_store, "_read_only", False):
             event = (
-                _execution_completed_job_event(snapshot.job_id, completed_result)
+                _execution_completed_job_event(
+                    snapshot.job_id,
+                    completed_result,
+                    session_id=snapshot.links.session_id,
+                )
                 if completed_result is not None
                 else _progress_accounting_failed_job_event(snapshot.job_id, progress_blocker or "")
             )
@@ -1024,6 +1053,7 @@ class JobManager:
                     recovered = await self._append_execution_completed_event(
                         snapshot.job_id,
                         completed_result,
+                        session_id=snapshot.links.session_id,
                         check_current=False,
                         event_id=f"{_RECOVERED_COMPLETION_EVENT_ID_PREFIX}{snapshot.job_id}",
                     )
