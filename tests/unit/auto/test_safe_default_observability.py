@@ -64,6 +64,14 @@ def _ledger_all_filled_except(
     return ledger
 
 
+
+class _RecordingEventStore:
+    def __init__(self) -> None:
+        self.appended = []
+
+    async def append(self, event, **_kwargs) -> None:
+        self.appended.append(event)
+
 # ---------------------------------------------------------------------------
 # Test 1: no_gaps_to_default + mutual_agreement_deadlock_at_max_rounds
 # ---------------------------------------------------------------------------
@@ -136,15 +144,18 @@ async def test_safe_default_logs_closed_path(tmp_path) -> None:
         return InterviewTurn("What else should we know?", session_id, seed_ready=False)
 
     state = AutoPipelineState(goal="Build a tiny local CLI", cwd=str(tmp_path))
+    event_store = _RecordingEventStore()
     driver = AutoInterviewDriver(
         FunctionInterviewBackend(start, answer),
         store=AutoStore(tmp_path),
         max_rounds=1,
         timeout_seconds=1,
+        event_store=event_store,
     )
 
     with capture_logs() as captured:
         result = await driver.run(state, ledger)
+    await driver.wait_for_pending_emits()
 
     events = [e["event"] for e in captured]
     assert "auto.interview.safe_default.entered" in events
@@ -155,6 +166,18 @@ async def test_safe_default_logs_closed_path(tmp_path) -> None:
     assert len(closed_events) == 1
     defaulted = closed_events[0]["defaulted_sections"]
     assert "runtime_context" in defaulted
+
+    closure_events = [
+        event for event in event_store.appended if event.type.startswith("auto.closure.")
+    ]
+    assert [event.type for event in closure_events] == [
+        "auto.closure.safe_default_entered",
+        "auto.closure.safe_default_closed",
+    ]
+    assert all(event.aggregate_type == "auto_session" for event in closure_events)
+    assert all(event.aggregate_id == state.auto_session_id for event in closure_events)
+    assert closure_events[0].data["open_gaps"]
+    assert "runtime_context" in closure_events[1].data["defaulted_sections"]
 
     # Behaviour unchanged: seed ready after safe-default closure.
     assert result.status == "seed_ready"

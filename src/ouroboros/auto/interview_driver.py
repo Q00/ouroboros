@@ -292,6 +292,8 @@ class AutoInterviewDriver:
         event_type: str,
         aggregate_id: str,
         data: dict[str, object],
+        *,
+        aggregate_type: str = "auto_interview",
     ) -> None:
         """Append a single event with bounded fail-open semantics.
 
@@ -306,7 +308,7 @@ class AutoInterviewDriver:
                 self.event_store.append(
                     BaseEvent(
                         type=event_type,
-                        aggregate_type="auto_interview",
+                        aggregate_type=aggregate_type,
                         aggregate_id=aggregate_id,
                         data=data,
                     )
@@ -339,6 +341,8 @@ class AutoInterviewDriver:
         self,
         event_type: str,
         aggregate_id: str | None,
+        *,
+        aggregate_type: str = "auto_interview",
         **data: object,
     ) -> None:
         """Schedule a typed ``auto.interview.*`` event for background
@@ -366,7 +370,9 @@ class AutoInterviewDriver:
         if not aggregate_id:
             return
         task = asyncio.create_task(
-            self._append_with_fail_open(event_type, aggregate_id, dict(data))
+            self._append_with_fail_open(
+                event_type, aggregate_id, dict(data), aggregate_type=aggregate_type
+            )
         )
         # Hold a strong reference so the task is not garbage-collected
         # mid-flight, and clean it up on completion so the set stays
@@ -867,14 +873,23 @@ class AutoInterviewDriver:
             )
 
         open_gaps = ledger.open_gaps()
+        entered_payload = {
+            "backend_done": backend_done,
+            "ledger_done": ledger_done,
+            "open_gaps": list(open_gaps),
+            "ambiguity_score": turn.ambiguity_score,
+            "max_rounds": self.max_rounds,
+        }
         log.info(
             "auto.interview.safe_default.entered",
             auto_session_id=state.auto_session_id,
-            backend_done=backend_done,
-            ledger_done=ledger_done,
-            open_gaps=list(open_gaps),
-            ambiguity_score=turn.ambiguity_score,
-            max_rounds=self.max_rounds,
+            **entered_payload,
+        )
+        await self._emit_event(
+            "auto.closure.safe_default_entered",
+            state.auto_session_id,
+            aggregate_type="auto_session",
+            **entered_payload,
         )
 
         finalization = None
@@ -1004,11 +1019,23 @@ class AutoInterviewDriver:
                     return AutoInterviewResult(
                         "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
                     )
+            closed_payload = {
+                "closure_mode": "safe_default",
+                "defaulted_sections": list(finalization.defaulted_sections),
+                "synthesis_pushed": synthesis_pushed,
+                "interview_session_id": state.interview_session_id,
+            }
             log.info(
                 "auto.interview.safe_default.closed",
                 auto_session_id=state.auto_session_id,
                 defaulted_sections=finalization.defaulted_sections,
                 synthesis_pushed=synthesis_pushed,
+            )
+            await self._emit_event(
+                "auto.closure.safe_default_closed",
+                state.auto_session_id,
+                aggregate_type="auto_session",
+                **closed_payload,
             )
             state.ledger = ledger.to_dict()
             state.pending_question = None
@@ -1049,6 +1076,12 @@ class AutoInterviewDriver:
             and finalization.defaulted_sections
             and finalization.unsafe_gaps
         ):
+            partial_payload = {
+                "defaulted_sections": list(finalization.defaulted_sections),
+                "unsafe_gaps": list(finalization.unsafe_gaps),
+                "ambiguity_score": turn.ambiguity_score,
+                "interview_session_id": state.interview_session_id,
+            }
             log.info(
                 "auto.interview.safe_default_partial_unsafe_gaps",
                 auto_session_id=state.auto_session_id,
@@ -1056,6 +1089,12 @@ class AutoInterviewDriver:
                 unsafe_gaps=finalization.unsafe_gaps,
                 ambiguity_score=turn.ambiguity_score,
                 interview_session_id=state.interview_session_id,
+            )
+            await self._emit_event(
+                "auto.closure.partial_seed_generated",
+                state.auto_session_id,
+                aggregate_type="auto_session",
+                **partial_payload,
             )
             _revert_safe_default_entries(ledger, finalization.defaulted_sections)
             blocker = (
