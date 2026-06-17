@@ -494,6 +494,12 @@ class OrchestratorRunner:
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        # Effort-first investment dial (RFC #1405): base level for the runner's own
+        # direct execution paths (single-AC / resume), which call execute_task
+        # without going through ParallelACExecutor. Resolved once; None ⇒ dormant.
+        from ouroboros.config import get_agent_reasoning_effort
+
+        self._reasoning_effort = get_agent_reasoning_effort()
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
@@ -513,6 +519,50 @@ class OrchestratorRunner:
             console=self._console,
             log_event="orchestrator.runner.param_degraded",
         )
+
+    async def _route_call_effort(
+        self,
+        *,
+        execution_id: str | None,
+        session_id: str | None,
+    ) -> dict[str, str]:
+        """Lay the runner's own execute_task paths on the effort contract.
+
+        These direct paths (single-AC execution, resume) do not go through
+        ParallelACExecutor, so without this they would silently skip effort
+        routing. Returns the execute_task kwargs (empty unless the runtime
+        enforces effort) and records an ``execution.ac.effort_routed`` event so the
+        proof sees the same data it gets from the parallel path. These are
+        top-level units, never decomposed children, so is_decomposed_child=False.
+        """
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            self._adapter,
+            base_effort=self._reasoning_effort,
+            is_decomposed_child=False,
+        )
+        if decision.level is not None:
+            from ouroboros.events.base import BaseEvent
+
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.ac.effort_routed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id or "",
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "is_decomposed_child": False,
+                        "effort_level": decision.level,
+                        "effort_mode": decision.mode,
+                        "base_reasoning_effort": self._reasoning_effort,
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "call_site": "runner",
+                    },
+                )
+            )
+        return kwargs
 
     def _plan_parallel_workers(self) -> int:
         """Return the effective fan-out worker count for the connected backend.
@@ -2279,12 +2329,17 @@ class OrchestratorRunner:
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                effort_kwargs = await self._route_call_effort(
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=prompt,
                         tools=merged_tools,
                         system_prompt=system_prompt,
                         resume_handle=active_runtime_handle,
+                        **effort_kwargs,
                     )
                 ) as message_stream:
                     async for message in message_stream:
@@ -3206,12 +3261,17 @@ Note: This is a resumed session. Please continue from where execution was interr
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                effort_kwargs = await self._route_call_effort(
+                    execution_id=None,
+                    session_id=session_id,
+                )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=resume_prompt,
                         tools=merged_tools,
                         system_prompt=system_prompt,
                         resume_handle=runtime_handle,
+                        **effort_kwargs,
                     )
                 ) as message_stream:
                     async for message in message_stream:

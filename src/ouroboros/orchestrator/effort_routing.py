@@ -104,3 +104,37 @@ def decide_effort(
         else EFFORT_MODE_ADVISED
     )
     return EffortDecision(level=level, mode=mode)
+
+
+def resolve_execute_effort(
+    adapter: object,
+    *,
+    base_effort: str | None,
+    is_decomposed_child: bool,
+    floor: str = DEFAULT_EFFORT_FLOOR,
+) -> tuple[EffortDecision, dict[str, str]]:
+    """Decide effort for one ``execute_task`` call and build its kwargs.
+
+    The single place every live execute_task call site lays itself on the
+    capability contract. Reads ``adapter.capabilities.reasoning_effort_support``
+    (defaulting to IGNORED when an adapter declares no capabilities), decides the
+    level, and returns the ``execute_task`` kwargs — which are **empty unless the
+    runtime enforces effort**, so a runtime that does not accept the parameter is
+    never handed it.
+
+    Returns:
+        ``(decision, execute_kwargs)``. ``execute_kwargs`` is ``{"reasoning_effort":
+        <level>}`` only when the chosen runtime declared NATIVE support, else ``{}``.
+    """
+    capabilities = getattr(adapter, "capabilities", None)
+    support = (
+        capabilities.reasoning_effort_support if capabilities is not None else ParamSupport.IGNORED
+    )
+    decision = decide_effort(
+        support,
+        base_effort=base_effort,
+        is_decomposed_child=is_decomposed_child,
+        floor=floor,
+    )
+    kwargs = {"reasoning_effort": decision.level} if decision.is_enforced else {}
+    return decision, kwargs

@@ -62,3 +62,54 @@ class TestDecideEffort:
     def test_child_respects_floor(self) -> None:
         child = decide_effort(ParamSupport.NATIVE, base_effort="low", is_decomposed_child=True)
         assert child.level == "low"  # floor=low, cannot drop further
+
+
+class _Caps:
+    def __init__(self, support: ParamSupport) -> None:
+        self.reasoning_effort_support = support
+
+
+class _Adapter:
+    def __init__(self, support: ParamSupport | None) -> None:
+        if support is not None:
+            self.capabilities = _Caps(support)
+
+
+class TestResolveExecuteEffort:
+    """The shared helper every live execute_task call site uses."""
+
+    def test_enforced_runtime_yields_kwarg(self) -> None:
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            _Adapter(ParamSupport.NATIVE), base_effort="high", is_decomposed_child=False
+        )
+        assert decision.mode == "enforced"
+        assert kwargs == {"reasoning_effort": "high"}
+
+    def test_advised_runtime_yields_no_kwarg(self) -> None:
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            _Adapter(ParamSupport.IGNORED), base_effort="high", is_decomposed_child=False
+        )
+        assert decision.mode == "advised"
+        assert kwargs == {}  # never hand the kwarg to a runtime that ignores it
+
+    def test_adapter_without_capabilities_is_treated_as_advised(self) -> None:
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            _Adapter(None), base_effort="high", is_decomposed_child=False
+        )
+        assert decision.mode == "advised"
+        assert kwargs == {}
+
+    def test_dormant_yields_no_kwarg(self) -> None:
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            _Adapter(ParamSupport.NATIVE), base_effort=None, is_decomposed_child=False
+        )
+        assert decision.mode == "none"
+        assert kwargs == {}
