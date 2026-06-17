@@ -112,6 +112,10 @@ class GooseCliRuntime(CodexCliRuntime):
             # guidance rather than enforcing a Goose-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            # Reasoning effort is advised, not enforced: `goose run` exposes no
+            # per-invocation effort flag (verified via --help). Declared IGNORED
+            # explicitly (also the default) to document the verified decision.
+            reasoning_effort_support=ParamSupport.IGNORED,
         )
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
@@ -163,6 +167,10 @@ class GooseCliRuntime(CodexCliRuntime):
         resume_session_id: str | None = None,
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
+        # Accepted to honor the shared CodexCliRuntime contract, but ignored:
+        # `goose run` exposes no per-invocation effort flag (capabilities declares
+        # reasoning_effort_support=IGNORED, so it is surfaced as advised).
+        reasoning_effort: str | None = None,
     ) -> list[str]:
         """Build ``goose run`` args. Prompt is fed through stdin.
 
