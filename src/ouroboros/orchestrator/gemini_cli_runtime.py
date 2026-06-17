@@ -215,6 +215,10 @@ class GeminiCLIRuntime(CodexCliRuntime):
         resume_session_id: str | None = None,
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
+        # Accepted to honor the shared CodexCliRuntime contract, but ignored:
+        # the Gemini CLI exposes no per-invocation effort flag (capabilities
+        # declares reasoning_effort_support=IGNORED, so it is surfaced as advised).
+        reasoning_effort: str | None = None,
     ) -> list[str]:
         """Build the Gemini CLI command arguments for non-interactive execution.
 
@@ -277,6 +281,11 @@ class GeminiCLIRuntime(CodexCliRuntime):
             # guidance rather than enforcing a Gemini-native allow-list.
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
+            # Reasoning effort is advised, not enforced: the Gemini API has a
+            # thinkingBudget, but no per-invocation effort flag on the Gemini CLI
+            # has been verified. Declared IGNORED (also the default) until a real
+            # per-call mechanism is confirmed — revisit if the CLI exposes one.
+            reasoning_effort_support=ParamSupport.IGNORED,
         )
 
     # -- Event parsing and normalization -----------------------------------

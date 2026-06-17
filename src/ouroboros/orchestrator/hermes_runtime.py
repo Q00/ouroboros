@@ -238,11 +238,17 @@ class HermesCliRuntime(AgentRuntime):
         # message rather than passing native runtime parameters, and hermes chat
         # has no permission-mode flag. Surface both truthfully for degradation
         # notices.
+        # Reasoning effort is advised, not enforced: `hermes chat` exposes only
+        # -q/--image/-m/-t — no per-invocation effort flag and no `-c` config
+        # override (its config.yaml reasoning_effort is global, not per-call), so
+        # the level cannot be routed deterministically per AC. Declared IGNORED
+        # explicitly (it is also the default) to document the verified decision.
         return replace(
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.IGNORED,
+            reasoning_effort_support=ParamSupport.IGNORED,
         )
 
     @property

@@ -53,6 +53,9 @@ log = structlog.get_logger(__name__)
 # uses everywhere; permission mode is mapped through ``copilot_permissions``.
 _COPILOT_PERMISSION_MODES = frozenset({"default", "acceptEdits", "bypassPermissions"})
 _COPILOT_DEFAULT_PERMISSION_MODE = "default"
+# Levels Copilot CLI's --reasoning-effort flag accepts (verified via --help).
+# Allow-listed so an unexpected effort string is never forwarded to the flag.
+_COPILOT_REASONING_EFFORT_LEVELS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 
 #: Maximum Ouroboros nesting depth to prevent fork bombs when Copilot
 #: spawns Ouroboros which spawns Copilot.
@@ -101,6 +104,9 @@ class CopilotCliRuntime(CodexCliRuntime):
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.NATIVE,
+            # Copilot CLI enforces effort via a per-invocation --reasoning-effort
+            # flag (verified via --help: none/low/medium/high/xhigh/max).
+            reasoning_effort_support=ParamSupport.NATIVE,
         )
 
     def __init__(
@@ -179,6 +185,7 @@ class CopilotCliRuntime(CodexCliRuntime):
         resume_session_id: str | None = None,
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
+        reasoning_effort: str | None = None,
     ) -> list[str]:
         """Build the Copilot CLI command for non-interactive execution.
 
@@ -224,6 +231,13 @@ class CopilotCliRuntime(CodexCliRuntime):
                     if normalized_runtime_model:
                         mapped = map_to_copilot_model(normalized_runtime_model)
                         command.extend(["--model", mapped])
+
+        # Effort-first investment dial (RFC #1405). Copilot CLI honors a
+        # per-invocation --reasoning-effort flag (verified via --help), so the
+        # orchestrator's chosen level is ENFORCED. Allow-listed so an unexpected
+        # value can never be forwarded.
+        if reasoning_effort and reasoning_effort in _COPILOT_REASONING_EFFORT_LEVELS:
+            command.extend(["--reasoning-effort", reasoning_effort])
 
         command.extend(["-p", prompt or ""])
         return command
