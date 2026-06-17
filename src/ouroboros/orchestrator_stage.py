@@ -64,8 +64,13 @@ INTERVIEW_LLM_ROLES: Final[frozenset[str]] = frozenset(
         "clarification",
         "seed_generation",
         "pm_interview",
+        "pm_document",
         "brownfield",
+        "brownfield_explore",
         "question_classification",
+        "ambiguity",
+        "double_diamond",
+        "agent_runtime_interview",
     }
 )
 EVALUATE_LLM_ROLES: Final[frozenset[str]] = frozenset(
@@ -74,9 +79,14 @@ EVALUATE_LLM_ROLES: Final[frozenset[str]] = frozenset(
         "assertion_extraction",
         "mechanical_detection",
         "consensus",
+        "consensus_advocate",
+        "consensus_perspective",
+        "consensus_vote",
+        "consensus_judge",
         "qa",
         "dependency_analysis",
         "ontology_analysis",
+        "agent_runtime_evaluation",
     }
 )
 REFLECT_LLM_ROLES: Final[frozenset[str]] = frozenset(
@@ -87,11 +97,22 @@ REFLECT_LLM_ROLES: Final[frozenset[str]] = frozenset(
         "context_compression",
     }
 )
+# Execution-phase planning roles. They have an EXECUTE-stage backend but no
+# dedicated stage *model* field, so model resolution falls through to the
+# evaluate model (or an explicit legacy override).
+EXECUTE_LLM_ROLES: Final[frozenset[str]] = frozenset(
+    {
+        "atomicity",
+        "decomposition",
+        "agent_runtime_implementation",
+    }
+)
 
 LLM_ROLE_STAGE_MAP: Final[dict[str, Stage]] = {
     **dict.fromkeys(INTERVIEW_LLM_ROLES, Stage.INTERVIEW),
     **dict.fromkeys(EVALUATE_LLM_ROLES, Stage.EVALUATE),
     **dict.fromkeys(REFLECT_LLM_ROLES, Stage.REFLECT),
+    **dict.fromkeys(EXECUTE_LLM_ROLES, Stage.EXECUTE),
 }
 
 
@@ -195,8 +216,17 @@ def resolve_runtime_for_llm_role(
     stage-level runtime profile. It deliberately delegates final resolution
     to :func:`resolve_runtime_for_stage` so the UI's "runs on X" label and
     the actual internal call backend share one rule.
+
+    Fail-open by design: a role with no stage binding resolves to ``fallback``
+    (the orchestrator runtime backend) rather than raising, so an out-of-tree
+    or newly-introduced role degrades to a safe default instead of crashing a
+    live request. Use :func:`stage_for_llm_role` directly when strict
+    validation is wanted.
     """
-    stage = stage_for_llm_role(role)
+    try:
+        stage = stage_for_llm_role(role)
+    except UnknownLLMRoleError:
+        return fallback
     return resolve_runtime_for_stage(
         stage,
         stages=dict(stages) if stages is not None else None,

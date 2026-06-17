@@ -146,7 +146,9 @@ class TestConsensusConfig:
     def test_default_values(self) -> None:
         """Verify default configuration."""
         config = ConsensusConfig()
-        assert len(config.models) == 1
+        # Consensus needs a multi-model roster (>=2) so voting can reach a
+        # majority; collapsing to a single model breaks len(votes) >= 2.
+        assert len(config.models) >= 2
         assert config.models_are_explicit is False
         assert config.majority_threshold == 0.66
         assert config.diversity_required is True

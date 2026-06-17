@@ -34,6 +34,7 @@ Functions:
 """
 
 import ast
+from collections.abc import Callable
 import math
 import os
 from pathlib import Path
@@ -62,6 +63,8 @@ from ouroboros.config.models import (  # noqa: E402
 from ouroboros.core.errors import ConfigError  # noqa: E402
 from ouroboros.orchestrator_stage import (  # noqa: E402
     Stage,
+    UnknownLLMRoleError,
+    normalize_llm_role,
     parse_stage,
     resolve_runtime_for_llm_role,
     resolve_runtime_for_stage,
@@ -1337,6 +1340,84 @@ def get_llm_backend_for_role(
         return get_llm_backend()
 
 
+# Legacy per-role model fields kept for backward compatibility. The stage
+# model is the default, but a user who explicitly pinned one of these (env var,
+# or a config field set away from its shipped default) still has it honored
+# instead of silently dropped. Maps role -> (env var, field accessor, shipped
+# default, dedicated getter name). The getter — resolved lazily because it is
+# defined later in this module — applies the role's own backend normalization
+# (e.g. snapping an opus pin to the "default" sentinel on codex backends).
+# ``mechanical_detection`` reuses the assertion-extraction getter (its historical
+# model source) to avoid recursing through ``get_mechanical_detector_model``.
+_LEGACY_ROLE_MODEL_FIELDS: dict[
+    str, tuple[str, Callable[["OuroborosConfig"], str], str, str]
+] = {
+    "qa": ("OUROBOROS_QA_MODEL", lambda c: c.llm.qa_model, DEFAULT_SONNET_MODEL, "get_qa_model"),
+    "assertion_extraction": (
+        "OUROBOROS_ASSERTION_EXTRACTION_MODEL",
+        lambda c: c.evaluation.assertion_extraction_model,
+        DEFAULT_SONNET_MODEL,
+        "get_assertion_extraction_model",
+    ),
+    "mechanical_detection": (
+        "OUROBOROS_DETECTOR_MODEL",
+        lambda c: c.evaluation.assertion_extraction_model,
+        DEFAULT_SONNET_MODEL,
+        "get_assertion_extraction_model",
+    ),
+    "dependency_analysis": (
+        "OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",
+        lambda c: c.llm.dependency_analysis_model,
+        DEFAULT_SONNET_MODEL,
+        "get_dependency_analysis_model",
+    ),
+    "ontology_analysis": (
+        "OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",
+        lambda c: c.llm.ontology_analysis_model,
+        DEFAULT_SONNET_MODEL,
+        "get_ontology_analysis_model",
+    ),
+    "context_compression": (
+        "OUROBOROS_CONTEXT_COMPRESSION_MODEL",
+        lambda c: c.llm.context_compression_model,
+        "gpt-4",
+        "get_context_compression_model",
+    ),
+    "wonder": (
+        "OUROBOROS_WONDER_MODEL",
+        lambda c: c.resilience.wonder_model,
+        DEFAULT_OPUS_MODEL,
+        "get_wonder_model",
+    ),
+}
+
+
+def _explicit_legacy_role_model(role: str, backend: str | None) -> str | None:
+    """Return an explicitly-set legacy per-role model override, or ``None``.
+
+    "Explicit" means the role's env var is set, or its dedicated config field
+    differs from the shipped default. This preserves pre-existing configs that
+    pinned a per-role model before the stage-model consolidation. Resolution is
+    delegated to the role's dedicated getter so backend normalization stays
+    identical to the legacy path.
+    """
+    entry = _LEGACY_ROLE_MODEL_FIELDS.get(normalize_llm_role(role))
+    if entry is None:
+        return None
+    env_var, field_getter, shipped_default, getter_name = entry
+    # Env var wins and is returned raw, matching the legacy getters.
+    if os.environ.get(env_var, "").strip():
+        return os.environ[env_var].strip()
+    try:
+        config = load_config()
+    except ConfigError:
+        return None
+    if field_getter(config) != shipped_default:
+        getter: Callable[[str | None], str] = globals()[getter_name]
+        return getter(backend)
+    return None
+
+
 def get_llm_model_for_role(
     role: str,
     *,
@@ -1345,20 +1426,28 @@ def get_llm_model_for_role(
 ) -> str:
     """Resolve the configured model for a logical internal-LLM role.
 
-    Stage model fields are the single source of truth:
-    interview roles use ``clarification.default_model``, evaluate roles use
+    Stage model fields are the default source of truth: interview roles use
+    ``clarification.default_model``, evaluate/execute roles use
     ``evaluation.semantic_model``, and reflect roles use
-    ``resilience.reflect_model``.
+    ``resilience.reflect_model``. An explicitly-pinned legacy per-role field
+    (e.g. ``llm.qa_model``) still takes precedence for backward compatibility,
+    and an unmapped role degrades to the evaluate model rather than raising.
     """
     if explicit_model:
         return explicit_model
 
     resolved_backend = backend or get_llm_backend_for_role(role)
-    stage = stage_for_llm_role(role)
+
+    legacy_override = _explicit_legacy_role_model(role, resolved_backend)
+    if legacy_override is not None:
+        return legacy_override
+
+    try:
+        stage = stage_for_llm_role(role)
+    except UnknownLLMRoleError:
+        return get_semantic_model(resolved_backend)
     if stage == Stage.INTERVIEW:
         return get_clarification_model(resolved_backend)
-    if stage == Stage.EVALUATE:
-        return get_semantic_model(resolved_backend)
     if stage == Stage.REFLECT:
         return get_reflect_model(resolved_backend)
     return get_semantic_model(resolved_backend)

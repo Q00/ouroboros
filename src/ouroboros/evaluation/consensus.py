@@ -23,8 +23,11 @@ import json
 import os
 
 from ouroboros.config import (
+    get_consensus_advocate_model,
+    get_consensus_devil_model,
+    get_consensus_judge_model,
+    get_consensus_models,
     get_llm_backend_for_role,
-    get_llm_model_for_role,
 )
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
@@ -49,8 +52,8 @@ from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateS
 
 # Default models for consensus voting (Frontier tier)
 # Can be overridden via ConsensusConfig.models
-DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = (
-    get_llm_model_for_role("consensus", backend=get_llm_backend_for_role("consensus")),
+DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = get_consensus_models(
+    get_llm_backend_for_role("consensus")
 )
 
 
@@ -141,12 +144,11 @@ class ConsensusConfig:
         """Resolve implicit default models while preserving explicit caller pins."""
         object.__setattr__(self, "models_are_explicit", self.models is not None)
         if self.models is None:
+            # Restore the multi-model roster (config.consensus.models): consensus
+            # needs >=2 distinct voters, so collapsing to one model breaks voting
+            # (len(votes) < 2) and defeats cross-model diversity.
             backend = get_llm_backend_for_role("consensus")
-            object.__setattr__(
-                self,
-                "models",
-                (get_llm_model_for_role("consensus", backend=backend),),
-            )
+            object.__setattr__(self, "models", get_consensus_models(backend))
 
 
 def _get_consensus_system_prompt() -> str:
@@ -568,25 +570,15 @@ class DeliberativeConfig:
         object.__setattr__(self, "advocate_model_is_explicit", self.advocate_model is not None)
         object.__setattr__(self, "devil_model_is_explicit", self.devil_model is not None)
         object.__setattr__(self, "judge_model_is_explicit", self.judge_model is not None)
+        # Distinct advocate/devil/judge models: deliberation depends on
+        # cross-model disagreement, so all three must not collapse to one model.
         backend = get_llm_backend_for_role("consensus")
         if self.advocate_model is None:
-            object.__setattr__(
-                self,
-                "advocate_model",
-                get_llm_model_for_role("consensus", backend=backend),
-            )
+            object.__setattr__(self, "advocate_model", get_consensus_advocate_model(backend))
         if self.devil_model is None:
-            object.__setattr__(
-                self,
-                "devil_model",
-                get_llm_model_for_role("consensus", backend=backend),
-            )
+            object.__setattr__(self, "devil_model", get_consensus_devil_model(backend))
         if self.judge_model is None:
-            object.__setattr__(
-                self,
-                "judge_model",
-                get_llm_model_for_role("consensus", backend=backend),
-            )
+            object.__setattr__(self, "judge_model", get_consensus_judge_model(backend))
 
 
 def _parse_judgment_response(

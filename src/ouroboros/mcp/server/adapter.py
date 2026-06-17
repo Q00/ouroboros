@@ -1272,13 +1272,16 @@ def create_ouroboros_server(
         )
 
     def role_llm_backend(role: str) -> str:
-        if llm_backend:
-            return llm_backend
+        # Per-stage routing is authoritative: the config TUI's per-stage Agent
+        # is the single source of truth for internal LLM backends. An explicit
+        # global override (e.g. ``mcp serve --llm-backend X``) is demoted to the
+        # fallback default — it serves only roles whose stage has no configured
+        # backend, instead of silently overriding every per-stage choice.
         return resolve_runtime_for_llm_role(
             role,
             stages=profile_stages,
             default=profile_default,
-            fallback=resolved_runtime_backend,
+            fallback=llm_backend or resolved_runtime_backend,
         )
 
     interview_runtime_backend = stage_runtime_backend(Stage.INTERVIEW)
@@ -1454,7 +1457,8 @@ def create_ouroboros_server(
             backend=execute_runtime_backend,
             model=execution_model,
             cwd=task_cwd or effective_cwd,
-            llm_backend=role_llm_backend("dependency_analysis"),
+            # Executor's internal LLM follows its own EXECUTE stage, not EVALUATE.
+            llm_backend=execute_runtime_backend,
         )
         _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
         _evo_mcp_prefix = (
@@ -1678,7 +1682,8 @@ def create_ouroboros_server(
             backend=execute_runtime_backend,
             model=validation_model,
             cwd=project_dir,
-            llm_backend=role_llm_backend("dependency_analysis"),
+            # Validation runs on the EXECUTE stage; align its internal LLM too.
+            llm_backend=execute_runtime_backend,
         )
 
         for attempt in range(1, max_attempts + 1):

@@ -615,8 +615,20 @@ class TestCreateOuroborosServer:
         assert mock_create_runtime.call_args.kwargs["model"] is None
 
     def test_codex_llm_backend_is_forwarded_to_adapter_factory(self) -> None:
-        """LLM-only backend selection is routed through the shared adapter factory."""
+        """LLM-only backend selection is routed through the shared adapter factory.
+
+        Config is isolated (no ``runtime_profile.stages``) so the explicit
+        global ``llm_backend`` is the source of truth for every stage and all
+        adapters collapse to one backend. Per-stage override precedence (which
+        would beat this global) is covered by
+        ``test_runtime_profile_stages_drive_internal_llm_backends``.
+        """
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="codex"),
+        )
         with (
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
             patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
             patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
         ):
@@ -707,7 +719,9 @@ class TestCreateOuroborosServer:
             reflect_factory = mock_reflect_engine.call_args.kwargs["adapter_factory"]
             reflect_factory()
 
-        adapter_backends = [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list]
+        adapter_backends = [
+            call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list
+        ]
         assert adapter_backends[:3] == ["claude", "gemini", "codex"]
         assert adapter_backends[-1] == "codex"
         assert mock_create_runtime.call_args_list[0].kwargs["backend"] == "opencode"

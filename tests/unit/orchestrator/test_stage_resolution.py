@@ -21,6 +21,7 @@ import pytest
 from ouroboros.config import OrchestratorConfig, RuntimeProfileConfig
 from ouroboros.orchestrator.stage import (
     EVALUATE_LLM_ROLES,
+    EXECUTE_LLM_ROLES,
     INTERVIEW_LLM_ROLES,
     LLM_ROLE_STAGE_MAP,
     REFLECT_LLM_ROLES,
@@ -117,15 +118,18 @@ class TestLLMRoleStageRouting:
 
         assert public.Stage is Stage
         assert public.stage_for_llm_role("qa") is Stage.EVALUATE
-        assert public.resolve_runtime_for_llm_role(
-            "reflect",
-            stages={Stage.REFLECT: "codex"},
-            default=None,
-            fallback="claude",
-        ) == "codex"
+        assert (
+            public.resolve_runtime_for_llm_role(
+                "reflect",
+                stages={Stage.REFLECT: "codex"},
+                default=None,
+                fallback="claude",
+            )
+            == "codex"
+        )
 
     def test_role_groups_cover_public_mapping(self) -> None:
-        expected = INTERVIEW_LLM_ROLES | EVALUATE_LLM_ROLES | REFLECT_LLM_ROLES
+        expected = INTERVIEW_LLM_ROLES | EVALUATE_LLM_ROLES | REFLECT_LLM_ROLES | EXECUTE_LLM_ROLES
         assert set(LLM_ROLE_STAGE_MAP) == expected
 
     def test_stage_for_llm_role_accepts_hyphenated_input(self) -> None:
