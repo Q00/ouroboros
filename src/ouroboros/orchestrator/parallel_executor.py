@@ -5530,6 +5530,32 @@ Files present:
                 effort_mode=effort_decision.mode,
                 backend=getattr(self._adapter, "runtime_backend", None),
             )
+            # Record the routing decision as a first-class, queryable event so the
+            # frugality proof can join per-AC (effort_level x effort_mode) against
+            # token attribution and the TraceGuard verdict. Only ``enforced`` rows
+            # count toward the deterministic proof; advised rows are recorded but
+            # excluded — which is exactly the distinction effort_mode carries here.
+            from ouroboros.events.base import BaseEvent
+
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.ac.effort_routed",
+                    aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                    aggregate_id=runtime_identity.session_scope_id,
+                    data={
+                        **runtime_identity.to_metadata(),
+                        "ac_id": runtime_identity.ac_id,
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "ac_index": ac_index,
+                        "is_decomposed_child": is_sub_ac,
+                        "effort_level": effort_decision.level,
+                        "effort_mode": effort_decision.mode,
+                        "base_reasoning_effort": self._reasoning_effort,
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                    },
+                )
+            )
         # Only forward the level to runtimes that ENFORCE it (declared NATIVE and
         # thus accept the kwarg — Claude SDK, Codex). Advised runtimes ignore it
         # anyway and do not accept the parameter, so passing it would break them;
