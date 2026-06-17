@@ -20,11 +20,19 @@ import pytest
 
 from ouroboros.config import OrchestratorConfig, RuntimeProfileConfig
 from ouroboros.orchestrator.stage import (
+    EVALUATE_LLM_ROLES,
+    INTERVIEW_LLM_ROLES,
+    LLM_ROLE_STAGE_MAP,
+    REFLECT_LLM_ROLES,
     VALID_STAGE_KEYS,
     Stage,
+    UnknownLLMRoleError,
     UnknownStageError,
+    normalize_llm_role,
     parse_stage,
+    resolve_runtime_for_llm_role,
     resolve_runtime_for_stage,
+    stage_for_llm_role,
 )
 
 
@@ -101,6 +109,58 @@ class TestResolveRuntimeForStage:
             fallback="claude",
         )
         assert runtime == "claude"
+
+
+class TestLLMRoleStageRouting:
+    def test_public_symbols_import_from_documented_module_path(self) -> None:
+        import ouroboros.orchestrator_stage as public
+
+        assert public.Stage is Stage
+        assert public.stage_for_llm_role("qa") is Stage.EVALUATE
+        assert public.resolve_runtime_for_llm_role(
+            "reflect",
+            stages={Stage.REFLECT: "codex"},
+            default=None,
+            fallback="claude",
+        ) == "codex"
+
+    def test_role_groups_cover_public_mapping(self) -> None:
+        expected = INTERVIEW_LLM_ROLES | EVALUATE_LLM_ROLES | REFLECT_LLM_ROLES
+        assert set(LLM_ROLE_STAGE_MAP) == expected
+
+    def test_stage_for_llm_role_accepts_hyphenated_input(self) -> None:
+        assert normalize_llm_role("question-classification") == "question_classification"
+        assert stage_for_llm_role("question-classification") is Stage.INTERVIEW
+
+    def test_stage_for_llm_role_maps_evaluate_roles(self) -> None:
+        for role in (
+            "semantic_evaluation",
+            "assertion_extraction",
+            "mechanical_detection",
+            "consensus",
+            "qa",
+            "dependency_analysis",
+            "ontology_analysis",
+        ):
+            assert stage_for_llm_role(role) is Stage.EVALUATE
+
+    def test_stage_for_llm_role_maps_reflect_roles(self) -> None:
+        for role in ("wonder", "reflect", "lateral", "context_compression"):
+            assert stage_for_llm_role(role) is Stage.REFLECT
+
+    def test_unknown_llm_role_raises_with_helpful_message(self) -> None:
+        with pytest.raises(UnknownLLMRoleError) as info:
+            stage_for_llm_role("unknown")
+        assert "Unknown internal LLM role" in str(info.value)
+
+    def test_resolve_runtime_for_llm_role_uses_stage_resolution(self) -> None:
+        runtime = resolve_runtime_for_llm_role(
+            "qa",
+            stages={Stage.EVALUATE: "gemini", Stage.REFLECT: "codex"},
+            default="opencode",
+            fallback="claude",
+        )
+        assert runtime == "gemini"
 
 
 class TestRuntimeProfileConfig:

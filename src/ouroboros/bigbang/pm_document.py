@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ouroboros.bigbang.pm_seed import PMSeed
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -257,7 +257,7 @@ class PMDocumentGenerator:
         """Resolve implicit default model while preserving explicit caller pins."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_clarification_model()
+            self.model = get_llm_model_for_role("pm_interview")
 
     async def generate(
         self,

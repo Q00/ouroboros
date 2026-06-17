@@ -16,7 +16,7 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
-from ouroboros.config import get_semantic_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
@@ -499,9 +499,13 @@ class EvaluateHandler:
             # Evaluation reads multiple spec files (one Read call per AC).
             # Use a dedicated adapter with a higher turn budget — the shared
             # MCP adapter is max_turns=1 (tuned for interview/seed single-shot).
+            backend = get_llm_backend_for_role(
+                "semantic_evaluation",
+                explicit_backend=self.llm_backend,
+            )
             llm_adapter = create_llm_adapter(
-                backend=self.llm_backend,
-                allowed_tools=_evaluation_allowed_tools(self.llm_backend),
+                backend=backend,
+                allowed_tools=_evaluation_allowed_tools(backend),
                 max_turns=20,
             )
             working_dir_str = arguments.get("working_dir")
@@ -511,7 +515,7 @@ class EvaluateHandler:
                 session_id=session_id,
                 artifact_type=artifact_type,
                 working_dir=str(working_dir),
-                llm_backend=self.llm_backend,
+                llm_backend=backend,
                 adapter_type=type(llm_adapter).__name__,
             )
 
@@ -550,7 +554,7 @@ class EvaluateHandler:
                     await ensure_mechanical_toml(
                         working_dir,
                         llm_adapter,
-                        backend=self.llm_backend,
+                        backend=backend,
                     )
                 except Exception as exc:  # noqa: BLE001 — detector must never break eval
                     log.warning(
@@ -561,7 +565,9 @@ class EvaluateHandler:
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
-                semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
+                semantic=SemanticConfig(
+                    model=get_llm_model_for_role("semantic_evaluation", backend=backend)
+                ),
             )
             pipeline = EvaluationPipeline(llm_adapter, config)
 
@@ -608,7 +614,7 @@ class EvaluateHandler:
                     "mcp.tool.evaluate.pipeline_failed",
                     session_id=session_id,
                     working_dir=str(working_dir),
-                    llm_backend=self.llm_backend,
+                    llm_backend=backend,
                     error=rendered_error,
                 )
                 return Result.err(

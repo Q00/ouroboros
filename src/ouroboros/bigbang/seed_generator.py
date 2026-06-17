@@ -26,7 +26,7 @@ from ouroboros.bigbang.interview import (
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
     BrownfieldContext,
@@ -84,7 +84,7 @@ class SeedGenerator:
         """Ensure output directory exists."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_clarification_model()
+            self.model = get_llm_model_for_role("seed_generation")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     async def generate(

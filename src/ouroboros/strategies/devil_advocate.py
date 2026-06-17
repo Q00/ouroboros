@@ -23,7 +23,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
-from ouroboros.config import get_ontology_analysis_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.ontology_aspect import (
     AnalysisResult,
     OntologicalJoinPoint,
@@ -84,7 +84,8 @@ class DevilAdvocateStrategy:
         if self.model_is_explicit is None:
             self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_ontology_analysis_model()
+            backend = get_llm_backend_for_role("ontology_analysis")
+            self.model = get_llm_model_for_role("ontology_analysis", backend=backend)
 
     @property
     def join_point(self) -> OntologicalJoinPoint:

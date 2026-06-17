@@ -37,7 +37,7 @@ from ouroboros.bigbang.pm_completion import (
 )
 from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE, PMInterviewEngine
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -365,15 +365,16 @@ class PMInterviewHandler:
         """Return the injected engine or create a new one using the server's configured backend."""
         if self.pm_engine is not None:
             return self.pm_engine
+        backend = get_llm_backend_for_role("pm_interview", explicit_backend=self.llm_backend)
         adapter = self.llm_adapter or create_llm_adapter(
-            backend=self.llm_backend,
+            backend=backend,
             max_turns=1,
             use_case="interview",
             allowed_tools=[]
-            if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+            if backend_supports_tool_envelope(resolve_llm_backend(backend))
             else None,
         )
-        model = get_clarification_model(self.llm_backend)
+        model = get_llm_model_for_role("pm_interview", backend=backend)
         return PMInterviewEngine.create(
             llm_adapter=adapter,
             state_dir=self.data_dir or _DATA_DIR,

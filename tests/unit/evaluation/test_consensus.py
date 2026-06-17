@@ -146,7 +146,8 @@ class TestConsensusConfig:
     def test_default_values(self) -> None:
         """Verify default configuration."""
         config = ConsensusConfig()
-        assert len(config.models) == 3
+        assert len(config.models) == 1
+        assert config.models_are_explicit is False
         assert config.majority_threshold == 0.66
         assert config.diversity_required is True
 

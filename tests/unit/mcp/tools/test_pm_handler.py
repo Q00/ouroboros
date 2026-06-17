@@ -550,7 +550,11 @@ class TestGetEngine:
         """When no engine is injected, creates one via create_llm_adapter factory."""
         with (
             patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
-            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model") as mock_model,
+            patch(
+                "ouroboros.mcp.tools.pm_handler.get_llm_backend_for_role",
+                return_value="claude",
+            ),
+            patch("ouroboros.mcp.tools.pm_handler.get_llm_model_for_role") as mock_model,
             patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
         ):
             mock_adapter = MagicMock()
@@ -562,7 +566,7 @@ class TestGetEngine:
             handler._get_engine()
 
             mock_create.assert_called_once_with(
-                backend=None,
+                backend="claude",
                 max_turns=1,
                 use_case="interview",
                 allowed_tools=[],
@@ -576,7 +580,7 @@ class TestGetEngine:
         """Hermes is interview-capable but does not expose auditable tool envelopes."""
         with (
             patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
-            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model") as mock_model,
+            patch("ouroboros.mcp.tools.pm_handler.get_llm_model_for_role") as mock_model,
             patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
         ):
             mock_create.return_value = MagicMock()
@@ -597,7 +601,11 @@ class TestGetEngine:
         """Default-configured Hermes also omits unsupported interview envelopes."""
         with (
             patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
-            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model") as mock_model,
+            patch(
+                "ouroboros.mcp.tools.pm_handler.get_llm_backend_for_role",
+                return_value="hermes",
+            ),
+            patch("ouroboros.mcp.tools.pm_handler.get_llm_model_for_role") as mock_model,
             patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
             patch("ouroboros.mcp.tools.pm_handler.resolve_llm_backend", return_value="hermes"),
         ):
@@ -609,7 +617,7 @@ class TestGetEngine:
             handler._get_engine()
 
             mock_create.assert_called_once_with(
-                backend=None,
+                backend="hermes",
                 max_turns=1,
                 use_case="interview",
                 allowed_tools=None,
@@ -619,7 +627,7 @@ class TestGetEngine:
         """When data_dir is set, passes it to PMInterviewEngine.create."""
         with (
             patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter"),
-            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model", return_value="m"),
+            patch("ouroboros.mcp.tools.pm_handler.get_llm_model_for_role", return_value="m"),
             patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
         ):
             mock_engine_cls.create.return_value = MagicMock()

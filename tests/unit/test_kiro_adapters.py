@@ -395,6 +395,7 @@ class TestKiroCodeAdapterComplete:
                 "OUROBOROS_RUNTIME": "kiro",
                 "CLAUDECODE": "1",
             },
+            clear=True,
         ):
             env = adapter._build_child_env()
 
@@ -865,6 +866,7 @@ class TestKiroPermissionModeContract:
                 "OUROBOROS_RUNTIME": "kiro",
                 "CLAUDECODE": "1",
             },
+            clear=True,
         ):
             env = adapter._build_child_env()
 

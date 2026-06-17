@@ -453,6 +453,7 @@ class TestOpenCodeLLMAdapter:
         with patch.dict(
             "os.environ",
             {"OUROBOROS_AGENT_RUNTIME": "opencode", "OUROBOROS_LLM_BACKEND": "opencode"},
+            clear=True,
         ):
             env = adapter._build_child_env()
         assert "OUROBOROS_AGENT_RUNTIME" not in env

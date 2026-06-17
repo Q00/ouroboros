@@ -9,6 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ouroboros.config.models import (
+    EvaluationConfig,
+    OrchestratorConfig,
+    OuroborosConfig,
+    ResilienceConfig,
+    RuntimeProfileConfig,
+)
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPToolError
 from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig
@@ -648,8 +655,8 @@ class TestCreateOuroborosServer:
         assert mock_create_llm_adapter.call_args.kwargs["cwd"] == initial_kwargs["cwd"]
         assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
 
-    def test_evolution_adapter_factory_uses_live_backend_without_explicit_override(self) -> None:
-        """Per-call evolution adapter factory resolves live config absent override."""
+    def test_evolution_adapter_factory_uses_stage_backend_without_explicit_override(self) -> None:
+        """Per-call evolution adapter factory resolves the Reflect stage backend."""
         with (
             patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
             patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
@@ -662,14 +669,83 @@ class TestCreateOuroborosServer:
             create_ouroboros_server(runtime_backend="codex")
 
             factory = mock_wonder_engine.call_args.kwargs["adapter_factory"]
-            assert mock_wonder_engine.call_args.kwargs["adapter_backend"] is None
+            assert mock_wonder_engine.call_args.kwargs["adapter_backend"] == "codex"
             factory()
 
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] is None
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
+
+    def test_runtime_profile_stages_drive_internal_llm_backends(self) -> None:
+        """Stage Agent selections are the backend source for internal LLM calls."""
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(
+                    stages={
+                        "execute": "opencode",
+                        "evaluate": "gemini",
+                        "reflect": "codex",
+                    }
+                ),
+            ),
+            evaluation=EvaluationConfig(semantic_model="gpt-5"),
+            resilience=ResilienceConfig(reflect_model="gpt-5"),
+        )
+
+        with (
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
+            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
+            patch("ouroboros.evolution.wonder.WonderEngine") as mock_wonder_engine,
+            patch("ouroboros.evolution.reflect.ReflectEngine") as mock_reflect_engine,
+        ):
+            mock_create_llm_adapter.return_value = MagicMock()
+            mock_create_runtime.return_value = MagicMock()
+
+            server = create_ouroboros_server(runtime_backend="claude", opencode_mode="subprocess")
+
+            reflect_factory = mock_reflect_engine.call_args.kwargs["adapter_factory"]
+            reflect_factory()
+
+        adapter_backends = [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list]
+        assert adapter_backends[:3] == ["claude", "gemini", "codex"]
+        assert adapter_backends[-1] == "codex"
+        assert mock_create_runtime.call_args_list[0].kwargs["backend"] == "opencode"
+
+        execute = server._tool_handlers["ouroboros_execute_seed"]
+        evaluate = server._tool_handlers["ouroboros_evaluate"]
+        qa = server._tool_handlers["ouroboros_qa"]
+        lateral = server._tool_handlers["ouroboros_lateral_think"]
+        interview = server._tool_handlers["ouroboros_interview"]
+
+        assert execute.agent_runtime_backend == "opencode"
+        assert execute.llm_backend == "gemini"
+        assert evaluate.agent_runtime_backend == "gemini"
+        assert evaluate.llm_backend == "gemini"
+        assert qa.agent_runtime_backend == "gemini"
+        assert qa.llm_backend == "gemini"
+        assert lateral.agent_runtime_backend == "codex"
+        assert interview.agent_runtime_backend == "claude"
+        assert interview.llm_backend == "claude"
+        assert mock_wonder_engine.call_args.kwargs["adapter_backend"] == "codex"
+        assert mock_reflect_engine.call_args.kwargs["adapter_backend"] == "codex"
 
     def test_opencode_backend_is_accepted_at_server_creation(self) -> None:
-        """OpenCode backend is forwarded through the shared adapter factory."""
+        """OpenCode backend is forwarded through the shared adapter factory.
+
+        Config is isolated (no ``runtime_profile.stages`` overrides) so the
+        explicit global ``runtime_backend`` is the source of truth. This makes
+        the test deterministic regardless of the developer's local
+        ``~/.ouroboros/config.yaml``; per-stage override precedence is covered
+        by ``test_runtime_profile_stages_drive_internal_llm_backends``.
+        """
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="opencode"),
+        )
+
         with (
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
             patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
             patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
         ):

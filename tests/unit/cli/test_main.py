@@ -177,8 +177,10 @@ class TestMCPCommands:
         assert "llm-backend" in result.output.lower()
         assert "pi" in result.output.lower()
 
-    def test_mcp_serve_accepts_pi_llm_backend(self) -> None:
+    def test_mcp_serve_accepts_pi_llm_backend(self, monkeypatch) -> None:
         """Pi supports structured LLM flows through adapter-side validation."""
+        monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
         with patch(
             "ouroboros.cli.commands.mcp._run_mcp_server",
             new=AsyncMock(),

@@ -36,7 +36,7 @@ from ouroboros.bigbang.interview import (
     InterviewState,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
@@ -193,6 +193,11 @@ def _interview_allowed_tools(runtime_backend: str | None) -> list[str] | None:
             execution_phase=PolicyExecutionPhase.INTERVIEW,
         )
     )
+
+
+def _handler_llm_backend(configured_backend: str | None, role: str) -> str:
+    """Resolve a handler's internal-LLM backend from its logical role."""
+    return get_llm_backend_for_role(role, explicit_backend=configured_backend)
 
 
 _INTERVIEW_COMPLETION_NEGATIONS = (
@@ -1277,21 +1282,22 @@ class GenerateSeedHandler:
         # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
         try:
+            backend = _handler_llm_backend(self.llm_backend, "seed_generation")
             # Use injected or create services.
             # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use
             # block emitted by the model would consume the only allowed turn
             # and the SDK then raises ``Reached maximum number of turns (1)``
             # before a final text response can stream. See issue #781.
             llm_adapter = self.llm_adapter or create_llm_adapter(
-                backend=self.llm_backend,
+                backend=backend,
                 max_turns=1,
                 allowed_tools=[]
-                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+                if backend_supports_tool_envelope(resolve_llm_backend(backend))
                 else None,
             )
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,
-                model=get_clarification_model(self.llm_backend),
+                model=get_llm_model_for_role("interview", backend=backend),
             )
 
             # Load interview state
@@ -1323,6 +1329,7 @@ class GenerateSeedHandler:
             if ambiguity_score is None:
                 scorer = AmbiguityScorer(
                     llm_adapter=llm_adapter,
+                    model=get_llm_model_for_role("clarification", backend=backend),
                 )
                 score_result = await scorer.score(state)
                 if score_result.is_err:
@@ -1349,7 +1356,7 @@ class GenerateSeedHandler:
             # Use injected or create seed generator
             generator = self.seed_generator or SeedGenerator(
                 llm_adapter=llm_adapter,
-                model=get_clarification_model(self.llm_backend),
+                model=get_llm_model_for_role("seed_generation", backend=backend),
             )
 
             # Generate seed; force bypasses the ambiguity threshold gate inside
@@ -1533,9 +1540,10 @@ class InterviewHandler:
                 transient scoring failure without losing it; in practice
                 no live caller does.
         """
+        backend = _handler_llm_backend(self.llm_backend, "clarification")
         scorer = AmbiguityScorer(
             llm_adapter=llm_adapter,
-            model=get_clarification_model(self.llm_backend),
+            model=get_llm_model_for_role("clarification", backend=backend),
             max_retries=_LIVE_AMBIGUITY_MAX_RETRIES,
         )
         score_result = await scorer.score(state)
@@ -2058,14 +2066,13 @@ class InterviewHandler:
         # recurses on ``ouroboros_interview`` and exits at ``--max-turns 1``.
         # CLI interview entrypoints (``ooo init`` / ``ooo pm``) do NOT pass
         # this flag, so they keep plugin/project ``.mcp.json`` servers.
+        backend = _handler_llm_backend(self.llm_backend, "interview")
         llm_adapter = self.llm_adapter or create_llm_adapter(
-            backend=self.llm_backend,
+            backend=backend,
             max_turns=1,
             use_case="interview",
             allowed_tools=(
-                []
-                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
-                else None
+                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
             ),
             strict_mcp_config=True,
         )
@@ -2104,7 +2111,7 @@ class InterviewHandler:
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
                 state_dir=template.state_dir,
-                model=template.model or get_clarification_model(self.llm_backend),
+                model=template.model or get_llm_model_for_role("interview", backend=backend),
                 suppress_tool_use_prompt_cues=self.suppress_tool_use_prompt_cues,
             )
             engine.temperature = template.temperature
@@ -2115,7 +2122,7 @@ class InterviewHandler:
             engine = InterviewEngine(
                 llm_adapter=llm_adapter,
                 state_dir=self.data_dir or _DATA_DIR,
-                model=get_clarification_model(self.llm_backend),
+                model=get_llm_model_for_role("interview", backend=backend),
                 suppress_tool_use_prompt_cues=self.suppress_tool_use_prompt_cues,
             )
 

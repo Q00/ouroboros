@@ -316,7 +316,7 @@ class TestQuestionClassifierModelRouting:
         )
 
         with patch(
-            "ouroboros.bigbang.question_classifier.get_clarification_model",
+            "ouroboros.bigbang.question_classifier.get_llm_model_for_role",
             return_value="default",
         ):
             classifier = QuestionClassifier(llm_adapter=adapter)

@@ -60,6 +60,13 @@ from ouroboros.config.models import (  # noqa: E402
     get_default_credentials,
 )
 from ouroboros.core.errors import ConfigError  # noqa: E402
+from ouroboros.orchestrator_stage import (  # noqa: E402
+    Stage,
+    parse_stage,
+    resolve_runtime_for_llm_role,
+    resolve_runtime_for_stage,
+    stage_for_llm_role,
+)
 
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
 _KIRO_LLM_BACKENDS = frozenset({"kiro", "kiro_cli"})
@@ -1265,6 +1272,98 @@ def get_llm_backend() -> str:
         return "claude_code"
 
 
+def _runtime_profile_stage_map(config: OuroborosConfig) -> dict[Stage, str] | None:
+    profile = config.orchestrator.runtime_profile
+    if profile is None:
+        return None
+    return {parse_stage(stage): backend for stage, backend in profile.stages.items()}
+
+
+def _runtime_profile_default(config: OuroborosConfig) -> str | None:
+    profile = config.orchestrator.runtime_profile
+    return profile.default if profile is not None else None
+
+
+def get_llm_backend_for_stage(
+    stage: Stage | str,
+    *,
+    explicit_backend: str | None = None,
+    fallback_runtime_backend: str | None = None,
+) -> str:
+    """Resolve the internal-LLM backend for a configured workflow stage.
+
+    ``explicit_backend`` preserves legacy direct API/CLI overrides. Without
+    one, stage routing uses ``orchestrator.runtime_profile`` and falls back to
+    the orchestrator runtime backend. The legacy ``llm.backend`` remains a
+    fallback only when config loading itself is unavailable.
+    """
+    if explicit_backend:
+        return explicit_backend
+
+    parsed_stage = stage if isinstance(stage, Stage) else parse_stage(stage)
+    try:
+        config = load_config()
+        fallback = fallback_runtime_backend or get_agent_runtime_backend()
+        return resolve_runtime_for_stage(
+            parsed_stage,
+            stages=_runtime_profile_stage_map(config),
+            default=_runtime_profile_default(config),
+            fallback=fallback,
+        )
+    except ConfigError:
+        return get_llm_backend()
+
+
+def get_llm_backend_for_role(
+    role: str,
+    *,
+    explicit_backend: str | None = None,
+    fallback_runtime_backend: str | None = None,
+) -> str:
+    """Resolve the internal-LLM backend for a logical task role."""
+    if explicit_backend:
+        return explicit_backend
+
+    try:
+        config = load_config()
+        fallback = fallback_runtime_backend or get_agent_runtime_backend()
+        return resolve_runtime_for_llm_role(
+            role,
+            stages=_runtime_profile_stage_map(config),
+            default=_runtime_profile_default(config),
+            fallback=fallback,
+        )
+    except ConfigError:
+        return get_llm_backend()
+
+
+def get_llm_model_for_role(
+    role: str,
+    *,
+    backend: str | None = None,
+    explicit_model: str | None = None,
+) -> str:
+    """Resolve the configured model for a logical internal-LLM role.
+
+    Stage model fields are the single source of truth:
+    interview roles use ``clarification.default_model``, evaluate roles use
+    ``evaluation.semantic_model``, and reflect roles use
+    ``resilience.reflect_model``.
+    """
+    if explicit_model:
+        return explicit_model
+
+    resolved_backend = backend or get_llm_backend_for_role(role)
+    stage = stage_for_llm_role(role)
+    if stage == Stage.INTERVIEW:
+        return get_clarification_model(resolved_backend)
+    if stage == Stage.EVALUATE:
+        return get_semantic_model(resolved_backend)
+    if stage == Stage.REFLECT:
+        return get_reflect_model(resolved_backend)
+    return get_semantic_model(resolved_backend)
+
+
 def get_llm_permission_mode(backend: str | None = None) -> str:
     """Get default LLM permission mode from environment variable or config.
 
@@ -1560,15 +1659,13 @@ def get_assertion_extraction_model(backend: str | None = None) -> str:
 def get_mechanical_detector_model(backend: str | None = None) -> str:
     """Resolve the model used by the mechanical.toml AI detector.
 
-    Mirrors the assertion-extraction model resolution: env var override,
-    then ``OuroborosConfig.evaluation.assertion_extraction_model`` with
-    backend-safe fallback to the Codex ``"default"`` sentinel for
-    Codex/OpenCode backends.
+    The public helper remains for legacy imports, but the configured model
+    source is now the Evaluate stage model (``evaluation.semantic_model``).
     """
     env_model = os.environ.get("OUROBOROS_DETECTOR_MODEL", "").strip()
     if env_model:
         return env_model
-    return get_assertion_extraction_model(backend=backend)
+    return get_llm_model_for_role("mechanical_detection", backend=backend)
 
 
 def get_consensus_models(backend: str | None = None) -> tuple[str, ...]:

@@ -19,7 +19,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from ouroboros.config import get_llm_backend, get_reflect_model
+from ouroboros.config import get_llm_backend, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed
@@ -35,6 +35,11 @@ from ouroboros.providers.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_reflect_model(backend: str | None = None) -> str:
+    """Compatibility wrapper for Reflect-stage model resolution."""
+    return get_llm_model_for_role("reflect", backend=backend)
 
 
 class OntologyMutation(BaseModel, frozen=True):
@@ -90,6 +95,7 @@ class ReflectEngine:
     model: str | None = None
     adapter_factory: Callable[[], LLMAdapter | None] | None = field(default=None)
     adapter_backend: str | None = None
+    adapter_backend_factory: Callable[[], str | None] | None = field(default=None, repr=False)
     _captured_backend: str | None = field(default=None, init=False, repr=False)
     _model_is_explicit: bool = field(default=False, init=False, repr=False)
 
@@ -164,6 +170,13 @@ class ReflectEngine:
         return self.llm_adapter
 
     def _selected_backend(self) -> str | None:
+        if self.adapter_backend_factory is not None:
+            try:
+                backend = self.adapter_backend_factory()
+                if backend:
+                    return backend
+            except Exception:  # noqa: BLE001
+                logger.exception("ReflectEngine adapter_backend_factory raised")
         if self.adapter_backend is not None:
             return self.adapter_backend
         try:

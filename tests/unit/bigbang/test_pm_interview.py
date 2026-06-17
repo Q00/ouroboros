@@ -131,7 +131,7 @@ class TestPMInterviewEngineComposition:
         """Explicit interview model must not pin classifier away from role profiles."""
         adapter = _make_adapter()
         with patch(
-            "ouroboros.bigbang.pm_interview.get_clarification_model",
+            "ouroboros.bigbang.pm_interview.get_llm_model_for_role",
             return_value="default",
         ):
             engine = PMInterviewEngine.create(

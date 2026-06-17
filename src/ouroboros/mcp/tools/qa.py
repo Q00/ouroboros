@@ -19,7 +19,7 @@ import uuid
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
-from ouroboros.config import get_qa_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -575,15 +575,16 @@ class QAHandler:
             # block emitted by the model would consume the only allowed turn
             # and the SDK then raises ``Reached maximum number of turns (1)``
             # before a final text response can stream. See issue #781.
+            backend = get_llm_backend_for_role("qa", explicit_backend=self.llm_backend)
             llm_adapter = self.llm_adapter or create_llm_adapter(
-                backend=self.llm_backend,
+                backend=backend,
                 max_turns=1,
                 allowed_tools=[]
-                if backend_supports_tool_envelope(resolve_llm_backend(self.llm_backend))
+                if backend_supports_tool_envelope(resolve_llm_backend(backend))
                 else None,
             )
             config = CompletionConfig(
-                model=get_qa_model(self.llm_backend),
+                model=get_llm_model_for_role("qa", backend=backend),
                 role="qa",
                 temperature=0.2,
                 max_tokens=2048,

@@ -541,7 +541,7 @@ class TestPMDocumentGeneratorMessages:
         seed = _make_seed()
 
         with patch(
-            "ouroboros.bigbang.pm_document.get_clarification_model",
+            "ouroboros.bigbang.pm_document.get_llm_model_for_role",
             return_value="default",
         ):
             generator = PMDocumentGenerator(llm_adapter=adapter)

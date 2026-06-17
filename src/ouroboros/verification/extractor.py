@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 
-from ouroboros.config import get_assertion_extraction_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -79,7 +79,8 @@ class AssertionExtractor:
         """Resolve implicit default model while preserving explicit caller pins."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_assertion_extraction_model()
+            backend = get_llm_backend_for_role("assertion_extraction")
+            self.model = get_llm_model_for_role("assertion_extraction", backend=backend)
 
     async def extract(
         self,

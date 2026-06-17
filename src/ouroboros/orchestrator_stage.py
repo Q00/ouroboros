@@ -37,6 +37,7 @@ backwards-compat commitment carried forward from PR #505.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Final
 
@@ -57,6 +58,42 @@ class Stage(StrEnum):
 
 VALID_STAGE_KEYS: Final[frozenset[str]] = frozenset(stage.value for stage in Stage)
 
+INTERVIEW_LLM_ROLES: Final[frozenset[str]] = frozenset(
+    {
+        "interview",
+        "clarification",
+        "seed_generation",
+        "pm_interview",
+        "brownfield",
+        "question_classification",
+    }
+)
+EVALUATE_LLM_ROLES: Final[frozenset[str]] = frozenset(
+    {
+        "semantic_evaluation",
+        "assertion_extraction",
+        "mechanical_detection",
+        "consensus",
+        "qa",
+        "dependency_analysis",
+        "ontology_analysis",
+    }
+)
+REFLECT_LLM_ROLES: Final[frozenset[str]] = frozenset(
+    {
+        "wonder",
+        "reflect",
+        "lateral",
+        "context_compression",
+    }
+)
+
+LLM_ROLE_STAGE_MAP: Final[dict[str, Stage]] = {
+    **dict.fromkeys(INTERVIEW_LLM_ROLES, Stage.INTERVIEW),
+    **dict.fromkeys(EVALUATE_LLM_ROLES, Stage.EVALUATE),
+    **dict.fromkeys(REFLECT_LLM_ROLES, Stage.REFLECT),
+}
+
 
 class UnknownStageError(ValueError):
     """Raised when a runtime_profile.stages key is not a valid stage.
@@ -64,6 +101,10 @@ class UnknownStageError(ValueError):
     The error message names the offending key and the valid set so
     operators see typos at startup rather than mid-workflow.
     """
+
+
+class UnknownLLMRoleError(ValueError):
+    """Raised when a logical internal-LLM role has no stage binding."""
 
 
 def parse_stage(value: str) -> Stage:
@@ -79,6 +120,28 @@ def parse_stage(value: str) -> Stage:
             f"Unknown runtime_profile stage key: {value!r}. Valid keys are: {valid_list}.",
         )
     return Stage(value)
+
+
+def normalize_llm_role(value: str) -> str:
+    """Normalize a logical internal-LLM role key for table lookup."""
+    return value.strip().lower().replace("-", "_")
+
+
+def stage_for_llm_role(role: str) -> Stage:
+    """Return the pipeline stage responsible for an internal-LLM role.
+
+    The table is intentionally role-sized, not handler-sized: callers label
+    a request as ``"qa"`` or ``"reflect"``, then stage routing decides which
+    configured Agent/backend serves it.
+    """
+    normalized = normalize_llm_role(role)
+    try:
+        return LLM_ROLE_STAGE_MAP[normalized]
+    except KeyError as exc:
+        valid_list = ", ".join(sorted(LLM_ROLE_STAGE_MAP))
+        raise UnknownLLMRoleError(
+            f"Unknown internal LLM role: {role!r}. Valid roles are: {valid_list}.",
+        ) from exc
 
 
 def resolve_runtime_for_stage(
@@ -117,3 +180,26 @@ def resolve_runtime_for_stage(
     if default:
         return default
     return fallback
+
+
+def resolve_runtime_for_llm_role(
+    role: str,
+    *,
+    stages: Mapping[Stage, str] | None,
+    default: str | None,
+    fallback: str,
+) -> str:
+    """Return the runtime/LLM backend that should serve ``role``.
+
+    This is the public bridge between internal LLM call roles and the
+    stage-level runtime profile. It deliberately delegates final resolution
+    to :func:`resolve_runtime_for_stage` so the UI's "runs on X" label and
+    the actual internal call backend share one rule.
+    """
+    stage = stage_for_llm_role(role)
+    return resolve_runtime_for_stage(
+        stage,
+        stages=dict(stages) if stages is not None else None,
+        default=default,
+        fallback=fallback,
+    )

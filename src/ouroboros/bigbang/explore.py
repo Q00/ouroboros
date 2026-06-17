@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_llm_model_for_role
 
 if TYPE_CHECKING:
     from ouroboros.providers.base import LLMAdapter
@@ -158,7 +158,7 @@ class CodebaseExplorer:
         """Resolve implicit default model while preserving explicit caller pins."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_clarification_model()
+            self.model = get_llm_model_for_role("brownfield")
 
     async def explore(
         self,

@@ -2696,7 +2696,7 @@ class TestOrchestratorRunner:
             max_turns=1,
             allowed_tools=[],
         )
-        dependency_analyzer_cls.assert_called_once_with(llm_adapter=llm_adapter)
+        dependency_analyzer_cls.assert_called_once_with(llm_adapter=llm_adapter, model="default")
 
     def test_build_dependency_analyzer_reuses_resolved_codex_cli_path(
         self,

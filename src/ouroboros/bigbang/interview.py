@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.security import InputValidator
@@ -337,7 +337,7 @@ class InterviewEngine:
         """Ensure state directory exists."""
         self.model_is_explicit = self.model is not None
         if self.model is None:
-            self.model = get_clarification_model()
+            self.model = get_llm_model_for_role("interview")
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def _state_file_path(self, interview_id: str) -> Path:

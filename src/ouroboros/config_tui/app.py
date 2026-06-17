@@ -28,7 +28,6 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from ouroboros.backends import resolve_backend_alias, runtime_backend_choices
-from ouroboros.backends.capabilities import llm_backend_choices
 from ouroboros.backends.model_catalog import (
     DEFAULT_MODEL_SENTINEL,
     configured_default_model,
@@ -241,6 +240,9 @@ class SettingsApp(App[None]):
         # What the "default" sentinel resolves to per backend (config-file
         # hint, e.g. hermes → gpt-5.5). Cached: file reads once per backend.
         self._default_hints: dict[str, str | None] = {}
+        # Hidden legacy fallback sync for llm.backend after its visible field
+        # was removed from the TUI. The most recent Agent selection wins.
+        self._last_agent_backend_selection: str | None = None
 
     def on_mount(self) -> None:
         # Config-derived (not widget-derived): widgets may still be mounting.
@@ -422,27 +424,17 @@ class SettingsApp(App[None]):
                 for stage in Stage:
                     yield from self._compose_stage_card(stage)
 
-            with Collapsible(title="Advanced", collapsed=True):
-                yield from self._compose_select_field(
-                    GLOBAL_LLM_BACKEND_FIELD,
-                    options=[(name, name) for name in llm_backend_choices()],
-                    value=_canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key)),
-                    select_id="global-llm-backend",
-                )
-                yield Static(
-                    "Engine for Ouroboros' own internal LLM calls (QA verdicts, "
-                    "semantic evaluation) — usually the same as the default agent.",
-                    classes="field-help",
-                )
-                for field in ADVANCED_MODEL_FIELDS:
-                    yield Static(field.label, classes="field-label")
-                    warning = _env_warning_text(field)
-                    if warning:
-                        yield Static(warning, classes="env-warning")
-                    yield Input(
-                        value=str(self._current(field.key) or ""),
-                        id=f"adv-{_slug(field.key)}",
-                    )
+            if ADVANCED_MODEL_FIELDS:
+                with Collapsible(title="Advanced", collapsed=True):
+                    for field in ADVANCED_MODEL_FIELDS:
+                        yield Static(field.label, classes="field-label")
+                        warning = _env_warning_text(field)
+                        if warning:
+                            yield Static(warning, classes="env-warning")
+                        yield Input(
+                            value=str(self._current(field.key) or ""),
+                            id=f"adv-{_slug(field.key)}",
+                        )
 
             with Container(id="action-bar"):
                 yield Button("Save", variant="primary", id="save-button")
@@ -531,10 +523,12 @@ class SettingsApp(App[None]):
         if select_id.startswith("stage-runtime-"):
             stage = Stage(select_id.removeprefix("stage-runtime-"))
             self._update_resolved_caption(stage)
+            self._remember_agent_selection(self._selected_runtime(stage))
             if stage in STAGE_MODEL_FIELDS:
                 self._refresh_stage_model_options(stage)
             self._refresh_install_warning(stage, event.value)
         elif select_id == "global-runtime":
+            self._remember_agent_selection(self._selected_default_runtime())
             # Cascade: every inheriting card re-resolves its agent and pulls
             # the matching model catalog. Guard per card so one failure
             # cannot skip the rest.
@@ -586,6 +580,9 @@ class SettingsApp(App[None]):
         caption = self.query_one(f"#stage-resolved-{stage.value}", Static)
         caption.update(f"→ runs on {self._selected_runtime(stage)}")
 
+    def _remember_agent_selection(self, backend: str) -> None:
+        self._last_agent_backend_selection = _canonical_backend(backend)
+
     def _selected_runtime(self, stage: Stage) -> str:
         runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
         value = runtime_select.value
@@ -598,13 +595,6 @@ class SettingsApp(App[None]):
                 default=default,
                 fallback=self._selected_default_runtime(),
             )
-        return _canonical_backend(value)
-
-    def _selected_llm_backend(self) -> str:
-        llm_select = self.query_one("#global-llm-backend", Select)
-        value = llm_select.value
-        if _is_blank(value):
-            return _canonical_backend(self._current(GLOBAL_LLM_BACKEND_FIELD.key))
         return _canonical_backend(value)
 
     def _refresh_stage_model_options(self, stage: Stage) -> None:
@@ -687,9 +677,9 @@ class SettingsApp(App[None]):
         global_runtime = self.query_one("#global-runtime", Select).value
         if not _is_blank(global_runtime):
             record_backend(GLOBAL_RUNTIME_FIELD.key, str(global_runtime))
-        llm_backend = self.query_one("#global-llm-backend", Select).value
-        if not _is_blank(llm_backend):
-            record_backend(GLOBAL_LLM_BACKEND_FIELD.key, str(llm_backend))
+        hidden_llm_fallback = self._last_agent_backend_selection or self._selected_default_runtime()
+        if hidden_llm_fallback:
+            record_backend(GLOBAL_LLM_BACKEND_FIELD.key, hidden_llm_fallback)
 
         for stage in Stage:
             runtime_field = stage_runtime_field(stage)
@@ -712,7 +702,7 @@ class SettingsApp(App[None]):
                 elif not _is_blank(model_value):
                     model_text = str(model_value)
                     if model_text == DEFAULT_MODEL_SENTINEL and not uses_default_model_sentinel(
-                        self._selected_llm_backend()
+                        self._selected_runtime(stage)
                     ):
                         if get_value(self._raw, model_field.key) == DEFAULT_MODEL_SENTINEL:
                             changes[model_field.key] = None

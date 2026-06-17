@@ -1184,11 +1184,11 @@ def create_ouroboros_server(
     from ouroboros.bigbang.interview import InterviewEngine
     from ouroboros.bigbang.seed_generator import SeedGenerator
     from ouroboros.config import (
-        get_assertion_extraction_model,
-        get_clarification_model,
+        get_llm_model_for_role,
         get_runtime_controls_config,
-        get_semantic_model,
+        load_config,
     )
+    from ouroboros.core.errors import ConfigError
     from ouroboros.evaluation import (
         EvaluationContext,
         EvaluationPipeline,
@@ -1237,9 +1237,57 @@ def create_ouroboros_server(
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
     )
+    from ouroboros.orchestrator_stage import (
+        Stage,
+        parse_stage,
+        resolve_runtime_for_llm_role,
+        resolve_runtime_for_stage,
+    )
     from ouroboros.providers import create_llm_adapter
 
     resolved_runtime_backend = resolve_agent_runtime_backend(runtime_backend)
+
+    profile_stages: dict[Stage, str] | None = None
+    profile_default: str | None = None
+    try:
+        config = load_config()
+        profile = config.orchestrator.runtime_profile
+        if profile is not None:
+            profile_stages = {
+                parse_stage(stage): resolve_agent_runtime_backend(backend)
+                for stage, backend in profile.stages.items()
+            }
+            if profile.default:
+                profile_default = resolve_agent_runtime_backend(profile.default)
+    except ConfigError:
+        profile_stages = None
+        profile_default = None
+
+    def stage_runtime_backend(stage: Stage) -> str:
+        return resolve_runtime_for_stage(
+            stage,
+            stages=profile_stages,
+            default=profile_default,
+            fallback=resolved_runtime_backend,
+        )
+
+    def role_llm_backend(role: str) -> str:
+        if llm_backend:
+            return llm_backend
+        return resolve_runtime_for_llm_role(
+            role,
+            stages=profile_stages,
+            default=profile_default,
+            fallback=resolved_runtime_backend,
+        )
+
+    interview_runtime_backend = stage_runtime_backend(Stage.INTERVIEW)
+    execute_runtime_backend = stage_runtime_backend(Stage.EXECUTE)
+    evaluate_runtime_backend = stage_runtime_backend(Stage.EVALUATE)
+    reflect_runtime_backend = stage_runtime_backend(Stage.REFLECT)
+    interview_llm_backend = role_llm_backend("interview")
+    evaluate_llm_backend = role_llm_backend("semantic_evaluation")
+    reflect_llm_backend = role_llm_backend("reflect")
 
     # Resolve opencode_mode from config file if caller did not pass one.
     # Controls _subagent envelope dispatch gate in every handler.
@@ -1257,10 +1305,10 @@ def create_ouroboros_server(
     # is validated up front and composition-root tests can assert the selected
     # runtime backend without waiting for a tool invocation.
     create_agent_runtime(
-        backend=resolved_runtime_backend,
+        backend=execute_runtime_backend,
         model=None,
         cwd=effective_cwd,
-        llm_backend=llm_backend,
+        llm_backend=evaluate_llm_backend,
     )
 
     # Create shared LLM adapter for interview/seed paths.
@@ -1273,18 +1321,27 @@ def create_ouroboros_server(
     from ouroboros.backends import backend_supports_tool_envelope
     from ouroboros.providers import resolve_llm_backend
 
-    # Inlined as a direct ``[] if cond else None`` literal (rather than a
-    # Name binding) so the static guard at scripts/check-max-turns-envelope.py
-    # can verify the envelope without resolving Name references — see PR
-    # #786 review-1: AST-walk Name resolution is order- and scope-unsafe.
-    llm_adapter = create_llm_adapter(
-        backend=llm_backend,
-        max_turns=1,
-        cwd=effective_cwd,
-        allowed_tools=(
-            [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
-        ),
-    )
+    llm_adapters: dict[str, Any] = {}
+
+    def create_stage_llm_adapter(backend: str) -> Any:
+        # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
+        return create_llm_adapter(
+            backend=backend,
+            max_turns=1,
+            cwd=effective_cwd,
+            allowed_tools=(
+                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
+            ),
+        )
+
+    def shared_stage_llm_adapter(backend: str) -> Any:
+        if backend not in llm_adapters:
+            llm_adapters[backend] = create_stage_llm_adapter(backend)
+        return llm_adapters[backend]
+
+    llm_adapter = shared_stage_llm_adapter(interview_llm_backend)
+    evaluation_llm_adapter = shared_stage_llm_adapter(evaluate_llm_backend)
+    reflect_llm_adapter = shared_stage_llm_adapter(reflect_llm_backend)
 
     # Create or use provided EventStore
     if event_store is None:
@@ -1302,12 +1359,12 @@ def create_ouroboros_server(
     interview_engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir_path,
-        model=get_clarification_model(llm_backend),
+        model=get_llm_model_for_role("interview", backend=interview_llm_backend),
     )
 
     seed_generator = SeedGenerator(
         llm_adapter=llm_adapter,
-        model=get_clarification_model(llm_backend),
+        model=get_llm_model_for_role("seed_generation", backend=interview_llm_backend),
     )
 
     # Create evolution engines for evolve_step
@@ -1319,33 +1376,39 @@ def create_ouroboros_server(
     from ouroboros.verification.extractor import AssertionExtractor
     from ouroboros.verification.verifier import SpecVerifier
 
-    def fresh_llm_adapter():
+    def fresh_llm_adapter(role: str = "reflect"):
+        backend = role_llm_backend(role)
         # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
         return create_llm_adapter(
-            backend=llm_backend if llm_backend is not None else None,
+            backend=backend,
             max_turns=1,
             cwd=effective_cwd,
             allowed_tools=(
-                [] if backend_supports_tool_envelope(resolve_llm_backend(llm_backend)) else None
+                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
             ),
         )
 
+    def fresh_reflect_stage_llm_adapter():
+        return fresh_llm_adapter("reflect")
+
     wonder_engine = WonderEngine(
-        llm_adapter=llm_adapter,
-        adapter_factory=fresh_llm_adapter,
-        adapter_backend=llm_backend,
+        llm_adapter=reflect_llm_adapter,
+        adapter_factory=fresh_reflect_stage_llm_adapter,
+        adapter_backend=reflect_llm_backend,
+        adapter_backend_factory=lambda: role_llm_backend("wonder"),
     )
     reflect_engine = ReflectEngine(
-        llm_adapter=llm_adapter,
-        adapter_factory=fresh_llm_adapter,
-        adapter_backend=llm_backend,
+        llm_adapter=reflect_llm_adapter,
+        adapter_factory=fresh_reflect_stage_llm_adapter,
+        adapter_backend=reflect_llm_backend,
+        adapter_backend_factory=lambda: role_llm_backend("reflect"),
     )
 
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
     # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
     execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-    if execution_model is None and resolved_runtime_backend == "claude":
+    if execution_model is None and execute_runtime_backend == "claude":
         execution_model = DEFAULT_SONNET_MODEL
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
@@ -1353,12 +1416,17 @@ def create_ouroboros_server(
     # Disabled by default to reduce latency per generation step.
     evolve_stage1 = os.environ.get("OUROBOROS_EVOLVE_STAGE1", "false").lower() == "true"
     evolution_eval_pipeline = EvaluationPipeline(
-        llm_adapter=llm_adapter,
+        llm_adapter=evaluation_llm_adapter,
         config=PipelineConfig(
             stage1_enabled=evolve_stage1,
             stage2_enabled=True,
             stage3_enabled=False,
-            semantic=SemanticConfig(model=get_semantic_model(llm_backend)),
+            semantic=SemanticConfig(
+                model=get_llm_model_for_role(
+                    "semantic_evaluation",
+                    backend=evaluate_llm_backend,
+                )
+            ),
         ),
     )
     evolution_store_initialized = False
@@ -1383,10 +1451,10 @@ def create_ouroboros_server(
         await _ensure_evolution_store_initialized()
         task_cwd = evolutionary_loop.get_project_dir()
         runner_adapter = create_agent_runtime(
-            backend=resolved_runtime_backend,
+            backend=execute_runtime_backend,
             model=execution_model,
             cwd=task_cwd or effective_cwd,
-            llm_backend=llm_backend,
+            llm_backend=role_llm_backend("dependency_analysis"),
         )
         _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
         _evo_mcp_prefix = (
@@ -1420,8 +1488,11 @@ def create_ouroboros_server(
         return _parse_legacy_execution_task_summary(artifact, seed)
 
     spec_extractor = AssertionExtractor(
-        llm_adapter=llm_adapter,
-        model=get_assertion_extraction_model(llm_backend),
+        llm_adapter=evaluation_llm_adapter,
+        model=get_llm_model_for_role(
+            "assertion_extraction",
+            backend=role_llm_backend("assertion_extraction"),
+        ),
     )
 
     def _extract_project_dir(artifact: str, seed: Any = None) -> str | None:
@@ -1601,13 +1672,13 @@ def create_ouroboros_server(
         max_attempts = 3
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL")
-        if validation_model is None and resolved_runtime_backend == "claude":
+        if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
         validation_adapter = create_agent_runtime(
-            backend=resolved_runtime_backend,
+            backend=execute_runtime_backend,
             model=validation_model,
             cwd=project_dir,
-            llm_backend=llm_backend,
+            llm_backend=role_llm_backend("dependency_analysis"),
         )
 
         for attempt in range(1, max_attempts + 1):
@@ -1687,15 +1758,15 @@ def create_ouroboros_server(
     # Create and register tool handlers with injected dependencies
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
-        llm_adapter=llm_adapter,
-        agent_runtime_backend=resolved_runtime_backend,
+        llm_adapter=evaluation_llm_adapter,
+        agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
-        llm_backend=llm_backend,
+        llm_backend=evaluate_llm_backend,
     )
     evolve_step = EvolveStepHandler(
         evolutionary_loop=evolutionary_loop,
         event_store=event_store,
-        agent_runtime_backend=resolved_runtime_backend,
+        agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
     auto_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
@@ -1708,7 +1779,7 @@ def create_ouroboros_server(
         execute_handler=execute_seed,
         event_store=event_store,
         job_manager=job_manager,
-        agent_runtime_backend=resolved_runtime_backend,
+        agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
 
@@ -1724,26 +1795,26 @@ def create_ouroboros_server(
             opencode_mode=ralph_opencode_mode,
         )
 
-    ralph_handler = build_ralph_handler(resolved_runtime_backend, opencode_mode)
+    ralph_handler = build_ralph_handler(execute_runtime_backend, opencode_mode)
     start_ralph_handler = StartRalphHandler(
         evolve_handler=evolve_step,
         event_store=event_store,
         job_manager=job_manager,
-        agent_runtime_backend=resolved_runtime_backend,
+        agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
     interview = InterviewHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
-        llm_backend=llm_backend,
-        agent_runtime_backend=resolved_runtime_backend,
+        llm_backend=interview_llm_backend,
+        agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
     )
     generate_seed = GenerateSeedHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
-        llm_backend=llm_backend,
-        agent_runtime_backend=resolved_runtime_backend,
+        llm_backend=interview_llm_backend,
+        agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
     )
 
@@ -1754,8 +1825,8 @@ def create_ouroboros_server(
             interview_handler=interview,
             generate_seed_handler=generate_seed,
             start_execute_seed_handler=start_execute_seed,
-            llm_backend=llm_backend,
-            agent_runtime_backend=resolved_runtime_backend,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
@@ -1768,8 +1839,8 @@ def create_ouroboros_server(
             start_execute_seed_handler=start_execute_seed,
             event_store=event_store,
             job_manager=job_manager,
-            llm_backend=llm_backend,
-            agent_runtime_backend=resolved_runtime_backend,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
@@ -1804,9 +1875,9 @@ def create_ouroboros_server(
             interview_engine=interview_engine,
             seed_generator=seed_generator,
             llm_adapter=llm_adapter,
-            llm_backend=llm_backend,
+            llm_backend=interview_llm_backend,
             event_store=event_store,
-            agent_runtime_backend=resolved_runtime_backend,
+            agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         MeasureDriftHandler(
@@ -1816,34 +1887,34 @@ def create_ouroboros_server(
             interview_engine=interview_engine,
             event_store=event_store,
             llm_adapter=llm_adapter,
-            llm_backend=llm_backend,
-            agent_runtime_backend=resolved_runtime_backend,
+            llm_backend=interview_llm_backend,
+            agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         PMInterviewHandler(
             data_dir=state_dir_path,
             llm_adapter=llm_adapter,
-            llm_backend=llm_backend,
+            llm_backend=interview_llm_backend,
             event_store=event_store,
-            agent_runtime_backend=resolved_runtime_backend,
+            agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         BrownfieldHandler(_store=brownfield_store),
         EvaluateHandler(
             event_store=event_store,
-            llm_backend=llm_backend,
-            agent_runtime_backend=resolved_runtime_backend,
+            llm_backend=evaluate_llm_backend,
+            agent_runtime_backend=evaluate_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         StartEvaluateHandler(
             event_store=event_store,
             job_manager=job_manager,
-            llm_backend=llm_backend,
-            agent_runtime_backend=resolved_runtime_backend,
+            llm_backend=evaluate_llm_backend,
+            agent_runtime_backend=evaluate_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         LateralThinkHandler(
-            agent_runtime_backend=resolved_runtime_backend,
+            agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         evolve_step,
@@ -1851,7 +1922,7 @@ def create_ouroboros_server(
             evolve_handler=evolve_step,
             event_store=event_store,
             job_manager=job_manager,
-            agent_runtime_backend=resolved_runtime_backend,
+            agent_runtime_backend=execute_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         ralph_handler,
@@ -1869,10 +1940,10 @@ def create_ouroboros_server(
             event_store=event_store,
         ),
         QAHandler(
-            llm_adapter=llm_adapter,
-            llm_backend=llm_backend,
+            llm_adapter=evaluation_llm_adapter,
+            llm_backend=evaluate_llm_backend,
             event_store=event_store,
-            agent_runtime_backend=resolved_runtime_backend,
+            agent_runtime_backend=evaluate_runtime_backend,
             opencode_mode=opencode_mode,
         ),
         CancelExecutionHandler(

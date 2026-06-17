@@ -27,6 +27,9 @@ from ouroboros.config.loader import (
     get_gjc_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
+    get_llm_backend_for_role,
+    get_llm_backend_for_stage,
+    get_llm_model_for_role,
     get_llm_permission_mode,
     get_max_parallel_workers,
     get_ontology_analysis_model,
@@ -1100,6 +1103,44 @@ class TestLLMHelperLookups:
             ),
         ):
             assert get_llm_backend() == "hermes"
+
+    def test_get_llm_backend_for_role_uses_runtime_profile_stage(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(
+                    stages={"evaluate": "codex", "reflect": "gemini"}
+                ),
+            )
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_backend_for_role("qa") == "codex"
+            assert get_llm_backend_for_role("context_compression") == "gemini"
+            assert get_llm_backend_for_stage("interview") == "claude"
+
+    def test_get_llm_backend_for_role_preserves_explicit_override(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            assert get_llm_backend_for_role("qa", explicit_backend="opencode") == "opencode"
+
+    def test_get_llm_model_for_role_uses_stage_model_fields(self) -> None:
+        config = OuroborosConfig(
+            clarification=ClarificationConfig(default_model="interview-model"),
+            evaluation=EvaluationConfig(semantic_model="evaluate-model"),
+            resilience=ResilienceConfig(reflect_model="reflect-model"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_model_for_role("seed_generation") == "interview-model"
+            assert get_llm_model_for_role("qa") == "evaluate-model"
+            assert get_llm_model_for_role("dependency_analysis") == "evaluate-model"
+            assert get_llm_model_for_role("wonder") == "reflect-model"
 
     def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for llm permission mode."""

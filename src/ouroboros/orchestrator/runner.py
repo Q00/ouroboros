@@ -34,6 +34,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
@@ -829,7 +830,10 @@ class OrchestratorRunner:
             )
             return DependencyAnalyzer()
 
-        return DependencyAnalyzer(llm_adapter=llm_adapter)
+        return DependencyAnalyzer(
+            llm_adapter=llm_adapter,
+            model=get_llm_model_for_role("dependency_analysis", backend=backend),
+        )
 
     def _normalized_message_type(self, message: AgentMessage) -> str:
         """Collapse runtime-specific message details into shared progress categories."""

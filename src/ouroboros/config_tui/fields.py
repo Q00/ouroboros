@@ -86,30 +86,7 @@ STAGE_MODEL_FIELDS: dict[Stage, SettingField] = {
     ),
 }
 
-ADVANCED_MODEL_FIELDS: tuple[SettingField, ...] = (
-    SettingField("llm.qa_model", "QA model", ("OUROBOROS_QA_MODEL",)),
-    SettingField(
-        "llm.dependency_analysis_model",
-        "Dependency analysis model",
-        ("OUROBOROS_DEPENDENCY_ANALYSIS_MODEL",),
-    ),
-    SettingField(
-        "llm.ontology_analysis_model",
-        "Ontology analysis model",
-        ("OUROBOROS_ONTOLOGY_ANALYSIS_MODEL",),
-    ),
-    SettingField(
-        "llm.context_compression_model",
-        "Context compression model",
-        ("OUROBOROS_CONTEXT_COMPRESSION_MODEL",),
-    ),
-    SettingField("resilience.wonder_model", "Wonder model", ("OUROBOROS_WONDER_MODEL",)),
-    SettingField(
-        "evaluation.assertion_extraction_model",
-        "Assertion extraction model",
-        ("OUROBOROS_ASSERTION_EXTRACTION_MODEL",),
-    ),
-)
+ADVANCED_MODEL_FIELDS: tuple[SettingField, ...] = ()
 
 
 def active_env_overrides(field: SettingField) -> tuple[str, ...]:

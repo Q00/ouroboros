@@ -11,7 +11,7 @@ The SemanticEvaluator uses the LiteLLM adapter for LLM calls.
 from dataclasses import dataclass, field
 import json
 
-from ouroboros.config import get_semantic_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
@@ -25,7 +25,10 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 
 # Default model for semantic evaluation (Standard tier)
 # Can be overridden via SemanticConfig.model
-DEFAULT_SEMANTIC_MODEL = get_semantic_model()
+DEFAULT_SEMANTIC_MODEL = get_llm_model_for_role(
+    "semantic_evaluation",
+    backend=get_llm_backend_for_role("semantic_evaluation"),
+)
 
 # JSON schema for structured semantic evaluation output
 SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
@@ -84,7 +87,12 @@ class SemanticConfig:
         """Resolve implicit default model while preserving explicit caller pins."""
         object.__setattr__(self, "model_is_explicit", self.model is not None)
         if self.model is None:
-            object.__setattr__(self, "model", get_semantic_model())
+            backend = get_llm_backend_for_role("semantic_evaluation")
+            object.__setattr__(
+                self,
+                "model",
+                get_llm_model_for_role("semantic_evaluation", backend=backend),
+            )
 
 
 def _get_evaluation_system_prompt() -> str:

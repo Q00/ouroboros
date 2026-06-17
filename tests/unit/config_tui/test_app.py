@@ -69,7 +69,7 @@ async def test_stage_cards_render_for_all_stages(app_env) -> None:
             else:
                 assert not list(pilot.app.query(f"#stage-model-{stage.value}").results(Select))
         assert pilot.app.query_one("#global-runtime", Select)
-        assert pilot.app.query_one("#global-llm-backend", Select)
+        assert not list(pilot.app.query("#global-llm-backend").results(Select))
 
 
 @pytest.mark.asyncio
@@ -93,6 +93,23 @@ async def test_runtime_change_repopulates_model_options(app_env) -> None:
         values = {value for _, value in model_select._options}
         assert "default" in values  # codex catalog sentinel
         assert CUSTOM_SENTINEL in values
+
+
+@pytest.mark.asyncio
+async def test_agent_change_resets_incompatible_stage_model(app_env) -> None:
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        stage = Stage.INTERVIEW.value
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        assert model_select.value == "claude-opus-4-8"
+
+        pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
+        await pilot.pause()
+
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        assert model_select.value == "default"
+        values = {value for _, value in model_select._options}
+        assert "claude-opus-4-8" not in values
 
 
 @pytest.mark.asyncio
@@ -122,11 +139,11 @@ async def test_custom_model_choice_reveals_input(app_env) -> None:
 
 @pytest.mark.asyncio
 async def test_env_override_badge_rendered(app_env, monkeypatch) -> None:
-    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "codex")
+    monkeypatch.setenv("OUROBOROS_CLARIFICATION_MODEL", "gpt-test")
     app = SettingsApp()
     async with app.run_test() as pilot:
         warnings = [str(w.render()) for w in pilot.app.query(".env-warning").results(Static)]
-        assert any("OUROBOROS_LLM_BACKEND" in text for text in warnings)
+        assert any("OUROBOROS_CLARIFICATION_MODEL" in text for text in warnings)
 
 
 @pytest.mark.asyncio
@@ -169,7 +186,25 @@ async def test_save_routes_changes_through_validated_persistence(app_env, monkey
         await pilot.click("#save-button")
         await pilot.pause()
     assert applied["orchestrator.runtime_backend"] == "codex"
+    assert applied["llm.backend"] == "codex"
     assert applied["orchestrator.runtime_profile.stages.execute"] is None
+
+
+@pytest.mark.asyncio
+async def test_hidden_llm_backend_syncs_to_latest_stage_agent(app_env, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        assert not list(pilot.app.query("#global-llm-backend").results(Select))
+        pilot.app.query_one(f"#stage-runtime-{Stage.REFLECT.value}", Select).value = "codex"
+        await pilot.pause()
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert captured["orchestrator.runtime_profile.stages.reflect"] == "codex"
+    assert captured["llm.backend"] == "codex"
 
 
 @pytest.mark.asyncio
@@ -396,7 +431,7 @@ async def test_save_summary_shows_diff_and_reconnect_hint(app_env, monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_save_skips_default_sentinel_when_llm_backend_is_claude(monkeypatch) -> None:
+async def test_save_uses_stage_agent_for_default_sentinel_validation(monkeypatch) -> None:
     raw = {
         "orchestrator": {"runtime_backend": "claude"},
         "llm": {"backend": "claude_code"},
@@ -422,7 +457,8 @@ async def test_save_skips_default_sentinel_when_llm_backend_is_claude(monkeypatc
         await pilot.pause()
 
     assert captured["orchestrator.runtime_profile.stages.interview"] == "codex"
-    assert "clarification.default_model" not in captured
+    assert captured["llm.backend"] == "codex"
+    assert captured["clarification.default_model"] == "default"
 
 
 @pytest.mark.asyncio
@@ -434,8 +470,6 @@ async def test_save_keeps_default_sentinel_when_llm_backend_supports_it(
 
     app = SettingsApp()
     async with app.run_test() as pilot:
-        pilot.app.query_one("#global-llm-backend", Select).value = "codex"
-        await pilot.pause()
         stage = Stage.INTERVIEW.value
         pilot.app.query_one(f"#stage-runtime-{stage}", Select).value = "codex"
         await pilot.pause()

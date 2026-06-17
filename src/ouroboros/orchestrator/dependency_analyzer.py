@@ -9,7 +9,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from ouroboros.config import get_dependency_analysis_model
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
@@ -376,7 +376,12 @@ class DependencyAnalyzer:
     ) -> None:
         self._llm = llm_adapter
         self._model_is_explicit = model is not None
-        self._model = model or get_dependency_analysis_model()
+        backend = get_llm_backend_for_role("dependency_analysis")
+        self._model = get_llm_model_for_role(
+            "dependency_analysis",
+            backend=backend,
+            explicit_model=model,
+        )
 
     async def analyze(
         self,
