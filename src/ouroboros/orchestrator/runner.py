@@ -2827,6 +2827,8 @@ class OrchestratorRunner:
             )
 
         # Execute in parallel
+        from ouroboros.config import get_agent_reasoning_effort
+
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
@@ -2839,6 +2841,7 @@ class OrchestratorRunner:
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
+            reasoning_effort=get_agent_reasoning_effort(),
         )
 
         # Check for cancellation before starting parallel execution

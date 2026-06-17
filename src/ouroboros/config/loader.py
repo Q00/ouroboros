@@ -755,6 +755,23 @@ def get_agent_permission_mode(backend: str | None = None) -> str:
         return "bypassPermissions" if _uses_opencode_backend(backend) else "acceptEdits"
 
 
+def get_agent_reasoning_effort() -> str | None:
+    """Get the base reasoning-effort level for AC execution (RFC #1405).
+
+    Priority:
+        1. OUROBOROS_AGENT_REASONING_EFFORT environment variable
+        2. config.yaml orchestrator.reasoning_effort
+        3. None (effort routing stays dormant — no behavior change)
+    """
+    env_effort = os.environ.get("OUROBOROS_AGENT_REASONING_EFFORT", "").strip()
+    if env_effort:
+        return env_effort
+    try:
+        return load_config().orchestrator.reasoning_effort
+    except ConfigError:
+        return None
+
+
 def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
     """Parse a worker-cap setting without validating unrelated config keys."""
     if isinstance(value, bool):

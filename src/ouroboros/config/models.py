@@ -511,6 +511,11 @@ class OrchestratorConfig(BaseModel, frozen=True):
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"
     )
+    # Effort-first investment dial (RFC #1405): base reasoning-effort level for
+    # full-strength AC execution. Decomposed children run one notch lower. The
+    # level is ENFORCED on runtimes with a native per-call knob (Claude Agent SDK,
+    # Codex) and advised elsewhere. ``None`` leaves effort routing dormant.
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
     # OpenCode integration mode. Written by `ouroboros setup --opencode-mode`.
     # None = unset (legacy installs); gate treats None as NOT plugin (safe
     # default — require explicit opt-in via setup --opencode-mode=plugin).
