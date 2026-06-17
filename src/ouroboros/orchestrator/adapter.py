@@ -752,6 +752,14 @@ class RuntimeCapabilities:
     system_prompt_support: ParamSupport = ParamSupport.NATIVE
     tool_restriction_support: ParamSupport = ParamSupport.NATIVE
     permission_mode_support: ParamSupport = ParamSupport.NATIVE
+    # The effort-first investment lever (RFC #1405): how the runtime honors the
+    # ``reasoning_effort`` execution parameter. Unlike the three fields above it
+    # defaults to IGNORED, because most agent runtimes have no per-call effort
+    # knob — a runtime must opt in to NATIVE (or TRANSLATED) only when it can
+    # actually route the level to its backend (e.g. Claude Agent SDK ``effort``,
+    # Codex ``-c model_reasoning_effort``). This lets the orchestrator tell
+    # enforced rows apart from advised ones instead of assuming uniform support.
+    reasoning_effort_support: ParamSupport = ParamSupport.IGNORED
 
 
 # Default capability profile for first-class backends (Claude, Codex).
@@ -957,7 +965,14 @@ class ClaudeAgentAdapter:
 
     @property
     def capabilities(self) -> RuntimeCapabilities:
-        return FULL_CAPABILITIES
+        # The Claude runtime drives the Claude Agent SDK, which honors the
+        # per-call ``effort`` option natively (see execute_task), so it opts in
+        # to NATIVE reasoning-effort support. Other capabilities match the
+        # first-class default.
+        return replace(
+            FULL_CAPABILITIES,
+            reasoning_effort_support=ParamSupport.NATIVE,
+        )
 
     def _is_transient_error(self, error: Exception) -> bool:
         """Check if an error is transient and worth retrying.
@@ -1229,6 +1244,7 @@ class ClaudeAgentAdapter:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task and yield progress messages.
 
@@ -1330,6 +1346,15 @@ class ClaudeAgentAdapter:
 
                 if self._model:
                     options_kwargs["model"] = self._model
+
+                if reasoning_effort:
+                    # Effort-first investment dial (RFC #1405). The Claude Agent
+                    # SDK honors ``effort`` natively per call (low/medium/high/
+                    # xhigh/max), so the level the orchestrator chose is ENFORCED
+                    # here rather than merely advised in the prompt. This is what
+                    # makes ``reasoning_effort_support = NATIVE`` truthful for the
+                    # Claude runtime.
+                    options_kwargs["effort"] = reasoning_effort
 
                 if self._cli_path:
                     options_kwargs["cli_path"] = self._cli_path

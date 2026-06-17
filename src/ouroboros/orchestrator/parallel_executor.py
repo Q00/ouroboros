@@ -47,6 +47,7 @@ from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    ParamSupport,
     RuntimeHandle,
     runtime_handle_tool_catalog,
 )
@@ -66,6 +67,7 @@ from ouroboros.orchestrator.decomposition_params import (
     build_decomposition_user_prompt,
     params_from_profile,
 )
+from ouroboros.orchestrator.effort_routing import decide_effort
 from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
     create_heartbeat_event,
@@ -2431,6 +2433,7 @@ class ParallelACExecutor:
         execution_profile: ExecutionProfile | None = None,
         fat_harness_mode: bool = False,
         atomic_verifier: Verifier | None = None,
+        reasoning_effort: str | None = None,
     ):
         """Initialize executor.
 
@@ -2462,6 +2465,11 @@ class ParallelACExecutor:
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        # Effort-first investment dial (RFC #1405). Base level for full-strength
+        # units; decomposed children run one notch lower. ``None`` leaves effort
+        # routing dormant (execute_task receives no level → no behavior change),
+        # so laying the executor on the capability contract is safe by default.
+        self._reasoning_effort = reasoning_effort
         self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
@@ -5497,6 +5505,39 @@ Files present:
         # an RPM/TPM is configured for this backend) before the stall-scoped run.
         await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
 
+        # Lay the executor on the capability contract: decide the effort level for
+        # this unit (a decomposed child runs one notch lower) and classify how the
+        # chosen runtime will honor it from its declared capability — enforced via a
+        # native knob, or advised. The level is passed to execute_task; an advised
+        # runtime ignores it. Dormant by default (base effort None → level None).
+        effort_capabilities = getattr(self._adapter, "capabilities", None)
+        effort_support = (
+            effort_capabilities.reasoning_effort_support
+            if effort_capabilities is not None
+            else ParamSupport.IGNORED
+        )
+        effort_decision = decide_effort(
+            effort_support,
+            base_effort=self._reasoning_effort,
+            is_decomposed_child=is_sub_ac,
+        )
+        if effort_decision.level is not None:
+            log.debug(
+                "orchestrator.executor.effort_routed",
+                ac_index=ac_index,
+                is_sub_ac=is_sub_ac,
+                effort_level=effort_decision.level,
+                effort_mode=effort_decision.mode,
+                backend=getattr(self._adapter, "runtime_backend", None),
+            )
+        # Only forward the level to runtimes that ENFORCE it (declared NATIVE and
+        # thus accept the kwarg — Claude SDK, Codex). Advised runtimes ignore it
+        # anyway and do not accept the parameter, so passing it would break them;
+        # the chosen level still lives in effort_decision for honest recording.
+        execute_effort_kwargs: dict[str, Any] = (
+            {"reasoning_effort": effort_decision.level} if effort_decision.is_enforced else {}
+        )
+
         try:
             with anyio.CancelScope(
                 deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
@@ -5506,6 +5547,7 @@ Files present:
                     tools=tools,
                     system_prompt=system_prompt,
                     resume_handle=runtime_handle,
+                    **execute_effort_kwargs,
                 ):
                     # Reset stall deadline on every message (RC6 core)
                     stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
