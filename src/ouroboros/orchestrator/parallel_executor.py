@@ -47,7 +47,6 @@ from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
-    ParamSupport,
     RuntimeHandle,
     runtime_handle_tool_catalog,
 )
@@ -67,7 +66,7 @@ from ouroboros.orchestrator.decomposition_params import (
     build_decomposition_user_prompt,
     params_from_profile,
 )
-from ouroboros.orchestrator.effort_routing import decide_effort
+from ouroboros.orchestrator.effort_routing import resolve_execute_effort
 from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
     create_heartbeat_event,
@@ -5510,21 +5509,10 @@ Files present:
         # chosen runtime will honor it from its declared capability — enforced via a
         # native knob, or advised. The level is passed to execute_task; an advised
         # runtime ignores it. Dormant by default (base effort None → level None).
-        effort_capabilities = getattr(self._adapter, "capabilities", None)
-        effort_support = (
-            effort_capabilities.reasoning_effort_support
-            if effort_capabilities is not None
-            else ParamSupport.IGNORED
-        )
-        effort_decision = decide_effort(
-            effort_support,
+        effort_decision, execute_effort_kwargs = resolve_execute_effort(
+            self._adapter,
             base_effort=self._reasoning_effort,
             is_decomposed_child=is_sub_ac,
-            enforceable_levels=(
-                effort_capabilities.enforceable_reasoning_efforts
-                if effort_capabilities is not None
-                else None
-            ),
         )
         if effort_decision.level is not None:
             log.debug(
@@ -5568,13 +5556,9 @@ Files present:
                     },
                 )
             )
-        # Only forward the level to runtimes that ENFORCE it (declared NATIVE and
-        # thus accept the kwarg — Claude SDK, Codex). Advised runtimes ignore it
-        # anyway and do not accept the parameter, so passing it would break them;
-        # the chosen level still lives in effort_decision for honest recording.
-        execute_effort_kwargs: dict[str, Any] = (
-            {"reasoning_effort": effort_decision.level} if effort_decision.is_enforced else {}
-        )
+        # execute_effort_kwargs (from resolve_execute_effort) carries
+        # reasoning_effort ONLY for runtimes that enforce it; advised runtimes that
+        # do not accept the parameter are never handed it.
 
         try:
             with anyio.CancelScope(
