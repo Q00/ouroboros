@@ -556,23 +556,36 @@ class OrchestratorRunner:
         if decision.level is not None:
             from ouroboros.events.base import BaseEvent
 
-            await self._event_store.append(
-                BaseEvent(
-                    type="execution.ac.effort_routed",
-                    aggregate_type="execution",
-                    aggregate_id=execution_id or session_id or "",
-                    data={
-                        "execution_id": execution_id,
-                        "session_id": session_id,
-                        "is_decomposed_child": False,
-                        "effort_level": decision.level,
-                        "effort_mode": decision.mode,
-                        "base_reasoning_effort": self._reasoning_effort,
-                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-                        "call_site": "runner",
-                    },
+            # Observability-only: this event must never make runtime dispatch/resume
+            # depend on event-store health. _route_call_effort runs BEFORE
+            # execute_task on the direct and resume paths, so a raw append would turn
+            # a degraded/locked store into a dispatch failure. Degrade to a warning
+            # instead — matching how the parallel executor treats the same telemetry.
+            try:
+                await self._event_store.append(
+                    BaseEvent(
+                        type="execution.ac.effort_routed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id or "",
+                        data={
+                            "execution_id": execution_id,
+                            "session_id": session_id,
+                            "is_decomposed_child": False,
+                            "effort_level": decision.level,
+                            "effort_mode": decision.mode,
+                            "base_reasoning_effort": self._reasoning_effort,
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "call_site": "runner",
+                        },
+                    )
                 )
-            )
+            except Exception as exc:
+                log.warning(
+                    "orchestrator.runner.effort_routed.persist_failed",
+                    error=str(exc),
+                    effort_level=decision.level,
+                    effort_mode=decision.mode,
+                )
         return kwargs
 
     def _plan_parallel_workers(self) -> int:

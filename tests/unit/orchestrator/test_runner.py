@@ -382,6 +382,35 @@ class TestOrchestratorRunner:
         assert data["effort_mode"] == "enforced"
 
     @pytest.mark.asyncio
+    async def test_route_call_effort_persist_failure_does_not_abort(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """A degraded event store must not abort dispatch/resume.
+
+        _route_call_effort runs before execute_task on the direct and resume paths,
+        and the effort event is observability-only — so a failing append degrades to
+        a warning and still returns the execute_task kwargs, never propagating.
+        """
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+        )
+        mock_event_store.append.side_effect = RuntimeError("event store unavailable")
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner._reasoning_effort = "high"
+
+        # Must not raise even though append fails; kwargs still come back for dispatch.
+        kwargs = await runner._route_call_effort(execution_id="exec_1", session_id="sess_1")
+
+        assert kwargs == {"reasoning_effort": "high"}
+        assert mock_event_store.append.await_count >= 1
+
+    @pytest.mark.asyncio
     async def test_route_call_effort_advised_runtime_emits_no_kwarg(
         self,
         mock_adapter: MagicMock,
