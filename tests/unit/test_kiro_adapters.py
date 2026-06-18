@@ -1008,13 +1008,20 @@ class TestKiroCapabilities:
         assert caps.structured_output is False
 
     def test_claude_declares_full_capabilities(self) -> None:
+        from dataclasses import replace
+
         from ouroboros.orchestrator.adapter import (
             FULL_CAPABILITIES,
             ClaudeAgentAdapter,
+            ParamSupport,
         )
 
         caps = ClaudeAgentAdapter().capabilities
-        assert caps == FULL_CAPABILITIES
+        # Claude matches the first-class default in every dimension except that it
+        # opts into NATIVE reasoning-effort support (the Agent SDK honors the
+        # per-call effort knob), so it is FULL_CAPABILITIES with that one override.
+        assert caps == replace(FULL_CAPABILITIES, reasoning_effort_support=ParamSupport.NATIVE)
+        assert caps.reasoning_effort_support is ParamSupport.NATIVE
         assert caps.skill_dispatch is True
         assert caps.targeted_resume is True
         assert caps.structured_output is True
