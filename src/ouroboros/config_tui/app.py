@@ -677,9 +677,6 @@ class SettingsApp(App[None]):
         global_runtime = self.query_one("#global-runtime", Select).value
         if not _is_blank(global_runtime):
             record_backend(GLOBAL_RUNTIME_FIELD.key, str(global_runtime))
-        hidden_llm_fallback = self._last_agent_backend_selection or self._selected_default_runtime()
-        if hidden_llm_fallback:
-            record_backend(GLOBAL_LLM_BACKEND_FIELD.key, hidden_llm_fallback)
 
         for stage in Stage:
             runtime_field = stage_runtime_field(stage)
@@ -713,6 +710,18 @@ class SettingsApp(App[None]):
             raw_value = self.query_one(f"#adv-{_slug(field.key)}", Input).value.strip()
             if raw_value:
                 record(field.key, raw_value)
+
+        # Sync the hidden legacy llm.backend fallback ONLY when this save already
+        # changes backend routing (the default Agent or any stage Agent). On
+        # unrelated saves (e.g. editing only a model field) leave it untouched so
+        # an existing user-managed llm.backend is preserved, not clobbered.
+        routing_changed = GLOBAL_RUNTIME_FIELD.key in changes or any(
+            key.startswith("orchestrator.runtime_profile.stages.") for key in changes
+        )
+        if routing_changed:
+            new_backend = self._last_agent_backend_selection or self._selected_default_runtime()
+            if new_backend:
+                record_backend(GLOBAL_LLM_BACKEND_FIELD.key, new_backend)
 
         return changes
 

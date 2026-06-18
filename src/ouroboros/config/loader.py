@@ -1349,9 +1349,7 @@ def get_llm_backend_for_role(
 # (e.g. snapping an opus pin to the "default" sentinel on codex backends).
 # ``mechanical_detection`` reuses the assertion-extraction getter (its historical
 # model source) to avoid recursing through ``get_mechanical_detector_model``.
-_LEGACY_ROLE_MODEL_FIELDS: dict[
-    str, tuple[str, Callable[["OuroborosConfig"], str], str, str]
-] = {
+_LEGACY_ROLE_MODEL_FIELDS: dict[str, tuple[str, Callable[["OuroborosConfig"], str], str, str]] = {
     "qa": ("OUROBOROS_QA_MODEL", lambda c: c.llm.qa_model, DEFAULT_SONNET_MODEL, "get_qa_model"),
     "assertion_extraction": (
         "OUROBOROS_ASSERTION_EXTRACTION_MODEL",

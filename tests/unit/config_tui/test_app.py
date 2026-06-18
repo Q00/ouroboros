@@ -208,6 +208,25 @@ async def test_hidden_llm_backend_syncs_to_latest_stage_agent(app_env, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_hidden_llm_backend_preserved_without_agent_change(app_env) -> None:
+    """An unrelated save must not clobber a user-managed llm.backend.
+
+    Regression: the hidden llm.backend fallback was written on every save, so
+    saving without touching any Agent selector silently overwrote an explicit
+    user value with the default runtime. It must only sync after an intentional
+    backend-routing change.
+    """
+    # Explicit llm.backend that differs (canonically) from the default runtime.
+    app_env["llm"]["backend"] = "codex"  # default runtime stays "claude"
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # No stage/default Agent selection happened this session.
+        changes = pilot.app._collect_changes()
+    assert "llm.backend" not in changes
+
+
+@pytest.mark.asyncio
 async def test_save_failure_is_surfaced_inline(app_env, monkeypatch) -> None:
     def _reject(values):
         raise persistence.ConfigWriteError("Unknown config key 'x'")
