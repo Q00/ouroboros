@@ -1126,6 +1126,48 @@ class TestLLMHelperLookups:
         with patch.dict(os.environ, {}, clear=True):
             assert get_llm_backend_for_role("qa", explicit_backend="opencode") == "opencode"
 
+    def test_get_llm_backend_for_role_honors_legacy_llm_backend_config(self) -> None:
+        # No per-stage routing: the documented llm.backend override must win over
+        # the default agent runtime instead of being silently ignored.
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="claude"),
+            llm=LLMConfig(backend="codex"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_backend_for_role("qa") == "codex"
+            assert get_llm_backend_for_stage("interview") == "codex"
+
+    def test_get_llm_backend_for_role_honors_env_override(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="claude"),
+            llm=LLMConfig(backend="claude_code"),
+        )
+        with (
+            patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": "codex"}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_backend_for_role("qa") == "codex"
+
+    def test_runtime_profile_stage_beats_legacy_llm_backend(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(stages={"evaluate": "gemini"}),
+            ),
+            llm=LLMConfig(backend="codex"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            # Per-stage Agent (evaluate=gemini) wins over the global llm.backend...
+            assert get_llm_backend_for_role("qa") == "gemini"
+            # ...while un-mapped stages still honor the llm.backend override.
+            assert get_llm_backend_for_role("interview") == "codex"
+
     def test_get_llm_model_for_role_uses_stage_model_fields(self) -> None:
         config = OuroborosConfig(
             clarification=ClarificationConfig(default_model="interview-model"),

@@ -1287,6 +1287,46 @@ def _runtime_profile_default(config: OuroborosConfig) -> str | None:
     return profile.default if profile is not None else None
 
 
+def _explicit_llm_backend_override() -> str | None:
+    """Return an explicitly-configured LLM-only backend override, or ``None``.
+
+    Preserves the documented LLM-only contract — ``OUROBOROS_LLM_BACKEND``, an
+    LLM-capable ``OUROBOROS_RUNTIME``, or ``config.llm.backend`` set away from the
+    shipped ``"claude_code"`` default — so existing operator overrides keep
+    steering internal-LLM roles. Returns ``None`` when nothing is explicitly set,
+    letting per-stage routing fall through to the default agent runtime.
+    """
+    env_backend = os.environ.get("OUROBOROS_LLM_BACKEND", "").strip().lower()
+    if env_backend:
+        return env_backend
+
+    env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
+    runtime_capability = get_backend_capability(env_runtime)
+    if runtime_capability is not None and runtime_capability.supports_llm:
+        return "claude_code" if env_runtime == "claude_code" else runtime_capability.name
+
+    try:
+        configured = load_config().llm.backend
+    except ConfigError:
+        return None
+    if configured and configured != "claude_code":
+        return configured
+    return None
+
+
+def _internal_llm_fallback_backend(fallback_runtime_backend: str | None) -> str:
+    """Fallback backend for stages/roles with no per-stage routing.
+
+    Precedence: explicit caller arg → explicit legacy ``llm.backend`` /
+    ``OUROBOROS_LLM_BACKEND`` override (the documented LLM-only contract) → the
+    orchestrator's default agent runtime (the TUI "Default agent" inherited by
+    every un-overridden stage).
+    """
+    return (
+        fallback_runtime_backend or _explicit_llm_backend_override() or get_agent_runtime_backend()
+    )
+
+
 def get_llm_backend_for_stage(
     stage: Stage | str,
     *,
@@ -1295,10 +1335,11 @@ def get_llm_backend_for_stage(
 ) -> str:
     """Resolve the internal-LLM backend for a configured workflow stage.
 
-    ``explicit_backend`` preserves legacy direct API/CLI overrides. Without
-    one, stage routing uses ``orchestrator.runtime_profile`` and falls back to
-    the orchestrator runtime backend. The legacy ``llm.backend`` remains a
-    fallback only when config loading itself is unavailable.
+    Precedence: ``explicit_backend`` (direct API/CLI) → ``runtime_profile.stages``
+    (per-stage Agent) → ``runtime_profile.default`` → explicit legacy
+    ``llm.backend`` / ``OUROBOROS_LLM_BACKEND`` override → orchestrator default
+    agent runtime. Per-stage routing stays authoritative while existing LLM-only
+    overrides remain honored for un-mapped stages.
     """
     if explicit_backend:
         return explicit_backend
@@ -1306,12 +1347,11 @@ def get_llm_backend_for_stage(
     parsed_stage = stage if isinstance(stage, Stage) else parse_stage(stage)
     try:
         config = load_config()
-        fallback = fallback_runtime_backend or get_agent_runtime_backend()
         return resolve_runtime_for_stage(
             parsed_stage,
             stages=_runtime_profile_stage_map(config),
             default=_runtime_profile_default(config),
-            fallback=fallback,
+            fallback=_internal_llm_fallback_backend(fallback_runtime_backend),
         )
     except ConfigError:
         return get_llm_backend()
@@ -1323,18 +1363,22 @@ def get_llm_backend_for_role(
     explicit_backend: str | None = None,
     fallback_runtime_backend: str | None = None,
 ) -> str:
-    """Resolve the internal-LLM backend for a logical task role."""
+    """Resolve the internal-LLM backend for a logical task role.
+
+    Same precedence as :func:`get_llm_backend_for_stage`: per-stage routing wins,
+    then the explicit legacy ``llm.backend`` / ``OUROBOROS_LLM_BACKEND`` override,
+    then the default agent runtime.
+    """
     if explicit_backend:
         return explicit_backend
 
     try:
         config = load_config()
-        fallback = fallback_runtime_backend or get_agent_runtime_backend()
         return resolve_runtime_for_llm_role(
             role,
             stages=_runtime_profile_stage_map(config),
             default=_runtime_profile_default(config),
-            fallback=fallback,
+            fallback=_internal_llm_fallback_backend(fallback_runtime_backend),
         )
     except ConfigError:
         return get_llm_backend()
