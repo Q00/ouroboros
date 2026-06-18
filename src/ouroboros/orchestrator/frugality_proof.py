@@ -97,7 +97,7 @@ class FrugalityTriadRow:
 
     @property
     def has_all_axes(self) -> bool:
-        # Every measured axis must be a usable number, not merely present:
+        # Every measured axis must be a usable measurement, not merely present:
         # * token_spend must be finite and NON-NEGATIVE. A negative (or NaN/inf)
         #   spend is malformed telemetry — counting it lets _reduction_pct produce a
         #   >100% "reduction" and a false PASS (e.g. token_spend=-1 → 101%). Zero is
@@ -106,13 +106,23 @@ class FrugalityTriadRow:
         #   denominator of the token-reduction ratio, so a zero/negative/non-finite
         #   shadow-replay baseline is not a usable measurement and the row is excluded
         #   rather than counted (which would make the aggregate reduction undefined).
+        # * The grounding axis must carry the ACTUAL TraceGuard output the contract
+        #   defines (deliver_verdict → traceguard_verdict + unsupported_claim_rate),
+        #   not just a defaulted grounding_regression flag. Otherwise a malformed or
+        #   defaulted future producer could assert "no grounding loss" (regression
+        #   False) without ever measuring grounding, and the gate would PASS on it.
+        #   Require a verdict string and a finite unsupported-claim rate in [0, 1].
         token = _finite_number(self.token_spend)
         baseline = _finite_number(self.baseline_token_spend)
+        claim_rate = _finite_number(self.unsupported_claim_rate)
         return (
             token is not None
             and token >= 0
             and baseline is not None
             and baseline > 0
+            and bool(self.traceguard_verdict)
+            and claim_rate is not None
+            and 0.0 <= claim_rate <= 1.0
             and self.grounding_regression is not None
         )
 

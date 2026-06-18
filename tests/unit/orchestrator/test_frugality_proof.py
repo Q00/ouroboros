@@ -324,3 +324,42 @@ class TestEvaluateProof:
         assert v.status is ProofStatus.INSUFFICIENT_DATA
         assert v.counted_rows == 0
         assert not v.passed
+
+    def test_missing_grounding_measurement_does_not_count(self) -> None:
+        # grounding_regression=False alone is not a grounding measurement. The axis
+        # contract (deliver_verdict) requires an actual traceguard_verdict and a
+        # finite unsupported_claim_rate; a defaulted flag without them is excluded.
+        r = _full_row("ac1", run="r1", token=80, baseline=100)
+        unmeasured = FrugalityTriadRow(
+            **{**r.__dict__, "traceguard_verdict": None, "unsupported_claim_rate": None}
+        )
+        assert unmeasured.grounding_regression is False  # flag is set...
+        assert unmeasured.has_all_axes is False  # ...but the measurement is absent
+        assert unmeasured.counts_in_proof is False
+
+    def test_out_of_range_claim_rate_does_not_count(self) -> None:
+        # A rate outside [0, 1] is malformed telemetry, not a usable measurement.
+        r = _full_row("ac1", run="r1", token=80, baseline=100)
+        for bad in (-0.1, 1.5, float("nan"), float("inf")):
+            row = FrugalityTriadRow(**{**r.__dict__, "unsupported_claim_rate": bad})
+            assert row.has_all_axes is False
+            assert row.counts_in_proof is False
+
+    def test_grounding_flag_without_measurement_never_passes(self) -> None:
+        # Reviewer repro: 21 enforced decomposed rows whose deliver-verdict omitted
+        # traceguard_verdict and unsupported_claim_rate but set grounding_regression
+        # False returned PASS. They must now be excluded → INSUFFICIENT_DATA.
+        rows = [
+            FrugalityTriadRow(
+                **{
+                    **_full_row(f"ac{i}", run=f"r{i % 3}", token=80, baseline=100).__dict__,
+                    "traceguard_verdict": None,
+                    "unsupported_claim_rate": None,
+                }
+            )
+            for i in range(21)
+        ]
+        v = evaluate_proof(rows)
+        assert v.status is ProofStatus.INSUFFICIENT_DATA
+        assert v.counted_rows == 0
+        assert not v.passed
