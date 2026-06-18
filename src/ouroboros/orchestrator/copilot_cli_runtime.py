@@ -107,6 +107,13 @@ class CopilotCliRuntime(CodexCliRuntime):
             # Copilot CLI enforces effort via a per-invocation --reasoning-effort
             # flag (verified via --help: none/low/medium/high/xhigh/max).
             reasoning_effort_support=ParamSupport.NATIVE,
+            # Declare the exact vocabulary the flag accepts. Without this, the
+            # shared contract treats an omitted set as "every level is enforced",
+            # so a caller using a level outside _COPILOT_REASONING_EFFORT_LEVELS
+            # would record an "enforced" proof row while _build_command silently
+            # drops the flag. Pinning the vocabulary downgrades such a level to
+            # "advised" in decide_effort, keeping the proof rows honest.
+            enforceable_reasoning_efforts=_COPILOT_REASONING_EFFORT_LEVELS,
         )
 
     def __init__(

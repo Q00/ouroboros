@@ -44,10 +44,19 @@ class TestCapabilityDeclarations:
         assert runtime.capabilities.reasoning_effort_support is ParamSupport.NATIVE
 
     def test_copilot_runtime_declares_native_effort(self) -> None:
-        from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+        from ouroboros.orchestrator.copilot_cli_runtime import (
+            _COPILOT_REASONING_EFFORT_LEVELS,
+            CopilotCliRuntime,
+        )
 
         runtime = CopilotCliRuntime(cli_path="copilot", cwd="/tmp")
         assert runtime.capabilities.reasoning_effort_support is ParamSupport.NATIVE
+        # The enforceable vocabulary must be declared so a level the flag does not
+        # accept is downgraded to advised instead of recorded as a false "enforced"
+        # row. It must match exactly the allow-list _build_command applies.
+        assert (
+            runtime.capabilities.enforceable_reasoning_efforts == _COPILOT_REASONING_EFFORT_LEVELS
+        )
 
     def test_gemini_and_goose_declare_advised_effort(self) -> None:
         from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
@@ -94,6 +103,38 @@ class TestCopilotEffortEnforcement:
         ):
             # Must not raise; gemini/goose accept-and-ignore (no per-call flag).
             runtime._build_command("out.txt", prompt="hi", reasoning_effort="high")
+
+    def test_supported_level_is_enforced_unsupported_is_advised(self) -> None:
+        """The capability vocabulary keeps proof rows honest end to end.
+
+        decide_effort must mark a level inside Copilot's enforceable set as
+        ``enforced`` and a level outside it (e.g. Codex-only ``minimal``) as
+        ``advised`` even though Copilot declares NATIVE — because _build_command
+        silently drops a flag value it does not accept.
+        """
+        from ouroboros.orchestrator.copilot_cli_runtime import (
+            _COPILOT_REASONING_EFFORT_LEVELS,
+        )
+        from ouroboros.orchestrator.effort_routing import decide_effort
+
+        enforced = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="high",
+            is_decomposed_child=False,
+            enforceable_levels=_COPILOT_REASONING_EFFORT_LEVELS,
+        )
+        assert enforced.is_enforced
+        assert enforced.mode == "enforced"
+
+        advised = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="minimal",  # in EFFORT_LADDER, not in Copilot's flag vocab
+            is_decomposed_child=False,
+            enforceable_levels=_COPILOT_REASONING_EFFORT_LEVELS,
+        )
+        assert not advised.is_enforced
+        assert advised.mode == "advised"
+        assert advised.level == "minimal"  # still recorded, just not guaranteed
 
 
 class TestCodexEffortEnforcement:
