@@ -176,6 +176,10 @@ class CodexCliRuntime:
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             reasoning_effort_support=ParamSupport.NATIVE,
+            # Codex enforces only the allow-listed levels (see _build_command); a
+            # level outside this set is silently dropped, so declare the vocabulary
+            # to keep enforced/advised classification truthful.
+            enforceable_reasoning_efforts=_CODEX_REASONING_EFFORT_LEVELS,
         )
 
     @property

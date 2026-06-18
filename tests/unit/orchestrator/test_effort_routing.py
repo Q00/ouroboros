@@ -62,3 +62,49 @@ class TestDecideEffort:
     def test_child_respects_floor(self) -> None:
         child = decide_effort(ParamSupport.NATIVE, base_effort="low", is_decomposed_child=True)
         assert child.level == "low"  # floor=low, cannot drop further
+
+
+class TestDecideEffortEnforceableLevels:
+    """A NATIVE runtime only enforces the levels its backend actually accepts."""
+
+    def test_level_outside_vocabulary_is_advised_not_enforced(self) -> None:
+        # Codex drops 'max' silently — declaring it enforced would be untruthful.
+        codex_levels = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+        d = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="max",
+            is_decomposed_child=False,
+            enforceable_levels=codex_levels,
+        )
+        assert d.level == "max"
+        assert d.mode == "advised"
+        assert not d.is_enforced
+
+    def test_level_inside_vocabulary_is_enforced(self) -> None:
+        codex_levels = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+        d = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="high",
+            is_decomposed_child=False,
+            enforceable_levels=codex_levels,
+        )
+        assert d.mode == "enforced"
+
+    def test_claude_only_minimal_is_advised(self) -> None:
+        claude_levels = frozenset({"low", "medium", "high", "xhigh", "max"})
+        d = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="minimal",
+            is_decomposed_child=False,
+            enforceable_levels=claude_levels,
+        )
+        assert d.mode == "advised"
+
+    def test_none_vocabulary_imposes_no_restriction(self) -> None:
+        d = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="max",
+            is_decomposed_child=False,
+            enforceable_levels=None,
+        )
+        assert d.mode == "enforced"

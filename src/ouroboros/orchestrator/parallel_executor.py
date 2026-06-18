@@ -5520,6 +5520,11 @@ Files present:
             effort_support,
             base_effort=self._reasoning_effort,
             is_decomposed_child=is_sub_ac,
+            enforceable_levels=(
+                effort_capabilities.enforceable_reasoning_efforts
+                if effort_capabilities is not None
+                else None
+            ),
         )
         if effort_decision.level is not None:
             log.debug(

@@ -77,6 +77,7 @@ def decide_effort(
     base_effort: str | None,
     is_decomposed_child: bool,
     floor: str = DEFAULT_EFFORT_FLOOR,
+    enforceable_levels: frozenset[str] | None = None,
 ) -> EffortDecision:
     """Decide the per-unit effort level and whether the runtime will enforce it.
 
@@ -88,19 +89,26 @@ def decide_effort(
         is_decomposed_child: Whether this unit is a verified-MECE child, which is
             run one notch lower than its parent (the frugality hypothesis).
         floor: The lowest level a child may be dropped to.
+        enforceable_levels: The runtime's enforceable vocabulary
+            (``capabilities.enforceable_reasoning_efforts``). When provided, a level
+            outside it is recorded as *advised* even on a NATIVE runtime, because the
+            backend silently drops a level it does not accept (Codex ignores ``max``,
+            Claude has no ``minimal``). ``None`` imposes no per-level restriction.
 
     Returns:
         An :class:`EffortDecision`. ``mode`` is ``"enforced"`` only when the runtime
-        declared ``NATIVE`` support, so an advised runtime can never be mistaken for
-        an enforced one — exactly the property the proof's enforced rows rely on.
+        declared ``NATIVE`` support **and** the chosen level is one it actually
+        enforces, so a silently-dropped or advised level can never be mistaken for an
+        enforced one — exactly the property the proof's enforced rows rely on.
     """
     if not base_effort:
         return EffortDecision(level=None, mode=EFFORT_MODE_NONE)
 
     level = lower_one_notch(base_effort, floor=floor) if is_decomposed_child else base_effort
+    enforces_level = enforceable_levels is None or level in enforceable_levels
     mode = (
         EFFORT_MODE_ENFORCED
-        if reasoning_effort_support is ParamSupport.NATIVE
+        if reasoning_effort_support is ParamSupport.NATIVE and enforces_level
         else EFFORT_MODE_ADVISED
     )
     return EffortDecision(level=level, mode=mode)

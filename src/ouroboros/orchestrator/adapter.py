@@ -760,6 +760,13 @@ class RuntimeCapabilities:
     # Codex ``-c model_reasoning_effort``). This lets the orchestrator tell
     # enforced rows apart from advised ones instead of assuming uniform support.
     reasoning_effort_support: ParamSupport = ParamSupport.IGNORED
+    # The reasoning-effort vocabulary this runtime actually enforces. A NATIVE
+    # runtime still only honors the levels its backend accepts (Codex drops
+    # anything outside ``model_reasoning_effort``'s allow-list; Claude has no
+    # ``minimal``), so a level outside this set is recorded as *advised*, not
+    # enforced — keeping the proof's enforced rows truthful. ``None`` means "no
+    # per-level restriction" (any level is enforced when support is NATIVE).
+    enforceable_reasoning_efforts: frozenset[str] | None = None
 
 
 # Default capability profile for first-class backends (Claude, Codex).
@@ -770,6 +777,11 @@ FULL_CAPABILITIES = RuntimeCapabilities(
     targeted_resume=True,
     structured_output=True,
 )
+
+# Reasoning-effort levels the Claude Agent SDK ``effort`` option accepts. Used to
+# declare Claude's enforceable vocabulary so a level it cannot honor (e.g. the
+# Codex-only ``minimal``) is recorded as advised rather than falsely enforced.
+CLAUDE_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 class AgentRuntime(Protocol):
@@ -972,6 +984,7 @@ class ClaudeAgentAdapter:
         return replace(
             FULL_CAPABILITIES,
             reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
         )
 
     def _is_transient_error(self, error: Exception) -> bool:

@@ -1011,17 +1011,24 @@ class TestKiroCapabilities:
         from dataclasses import replace
 
         from ouroboros.orchestrator.adapter import (
+            CLAUDE_REASONING_EFFORT_LEVELS,
             FULL_CAPABILITIES,
             ClaudeAgentAdapter,
             ParamSupport,
         )
 
         caps = ClaudeAgentAdapter().capabilities
-        # Claude matches the first-class default in every dimension except that it
-        # opts into NATIVE reasoning-effort support (the Agent SDK honors the
-        # per-call effort knob), so it is FULL_CAPABILITIES with that one override.
-        assert caps == replace(FULL_CAPABILITIES, reasoning_effort_support=ParamSupport.NATIVE)
+        # Claude matches the first-class default except that it opts into NATIVE
+        # reasoning-effort support (the Agent SDK honors the per-call effort knob)
+        # and declares the effort vocabulary it can actually enforce.
+        assert caps == replace(
+            FULL_CAPABILITIES,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
+        )
         assert caps.reasoning_effort_support is ParamSupport.NATIVE
+        assert "minimal" not in caps.enforceable_reasoning_efforts
+        assert "max" in caps.enforceable_reasoning_efforts
         assert caps.skill_dispatch is True
         assert caps.targeted_resume is True
         assert caps.structured_output is True
