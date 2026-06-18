@@ -31,6 +31,22 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+import math
+
+
+def _finite_number(value: object) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` if it is not a usable number.
+
+    Rejects ``None``, booleans (``True``/``False`` are ints in Python but are never
+    a valid token measurement), non-numeric types, and non-finite floats (NaN/inf).
+    The deterministic proof is fed by event payloads from not-yet-wired producers, so
+    a malformed measurement must be treated as *missing*, never silently trusted.
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if math.isfinite(f) else None
+
 
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
@@ -81,14 +97,22 @@ class FrugalityTriadRow:
 
     @property
     def has_all_axes(self) -> bool:
-        # The baseline must be strictly positive: it is the denominator of the
-        # token-reduction ratio, so a zero/negative shadow-replay baseline is not a
-        # usable measurement and the row is excluded rather than counted (which would
-        # otherwise make the aggregate reduction undefined).
+        # Every measured axis must be a usable number, not merely present:
+        # * token_spend must be finite and NON-NEGATIVE. A negative (or NaN/inf)
+        #   spend is malformed telemetry — counting it lets _reduction_pct produce a
+        #   >100% "reduction" and a false PASS (e.g. token_spend=-1 → 101%). Zero is
+        #   valid (a child that spent nothing is maximally frugal).
+        # * baseline_token_spend must be finite and STRICTLY POSITIVE: it is the
+        #   denominator of the token-reduction ratio, so a zero/negative/non-finite
+        #   shadow-replay baseline is not a usable measurement and the row is excluded
+        #   rather than counted (which would make the aggregate reduction undefined).
+        token = _finite_number(self.token_spend)
+        baseline = _finite_number(self.baseline_token_spend)
         return (
-            self.token_spend is not None
-            and self.baseline_token_spend is not None
-            and self.baseline_token_spend > 0
+            token is not None
+            and token >= 0
+            and baseline is not None
+            and baseline > 0
             and self.grounding_regression is not None
         )
 

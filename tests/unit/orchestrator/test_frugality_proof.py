@@ -294,3 +294,33 @@ class TestEvaluateProof:
         assert v.status is ProofStatus.INSUFFICIENT_DATA
         assert v.token_reduction_pct is None
         assert not v.passed
+
+    def test_negative_token_spend_row_does_not_count(self) -> None:
+        # Malformed telemetry: a negative token spend is not a usable measurement.
+        # Counting it would let _reduction_pct report a >100% "reduction" and PASS.
+        row = _full_row("ac1", run="r1", token=-1.0, baseline=100)
+        assert row.has_all_axes is False
+        assert row.counts_in_proof is False
+
+    def test_non_finite_token_spend_row_does_not_count(self) -> None:
+        # NaN/inf token spend (e.g. a divide-by-zero producer bug) is excluded.
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            row = _full_row("ac1", run="r1", token=bad, baseline=100)
+            assert row.has_all_axes is False
+            assert row.counts_in_proof is False
+
+    def test_zero_token_spend_is_valid(self) -> None:
+        # Zero spend is legitimate — a child that cost nothing is maximally frugal.
+        row = _full_row("ac1", run="r1", token=0.0, baseline=100)
+        assert row.has_all_axes is True
+        assert row.counts_in_proof is True
+
+    def test_negative_token_spend_never_passes(self) -> None:
+        # Reproduces the reviewer's repro: 21 decomposed enforced rows over 3 runs
+        # each with token_spend=-1.0 returned PASS at 101% reduction. They must now
+        # be excluded, so the gate honestly returns INSUFFICIENT_DATA.
+        rows = [_full_row(f"ac{i}", run=f"r{i % 3}", token=-1.0, baseline=100) for i in range(21)]
+        v = evaluate_proof(rows)
+        assert v.status is ProofStatus.INSUFFICIENT_DATA
+        assert v.counted_rows == 0
+        assert not v.passed
