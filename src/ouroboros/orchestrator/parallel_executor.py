@@ -5540,9 +5540,16 @@ Files present:
             # token attribution and the TraceGuard verdict. Only ``enforced`` rows
             # count toward the deterministic proof; advised rows are recorded but
             # excluded — which is exactly the distinction effort_mode carries here.
+            #
+            # This is auxiliary proof telemetry, not a runtime dependency: route it
+            # through ``_safe_emit_event`` so a degraded event store degrades to a
+            # warning (matching the adjacent observe-only executor events) instead of
+            # aborting the AC before runtime dispatch. ``execution_context_id``
+            # (execution_id or session_id) keeps the payload scope aligned with the
+            # aggregate id even on direct/fallback callers that pass no execution_id.
             from ouroboros.events.base import BaseEvent
 
-            await self._event_store.append(
+            await self._safe_emit_event(
                 BaseEvent(
                     type="execution.ac.effort_routed",
                     aggregate_type=runtime_identity.runtime_scope.aggregate_type,
@@ -5550,7 +5557,7 @@ Files present:
                     data={
                         **runtime_identity.to_metadata(),
                         "ac_id": runtime_identity.ac_id,
-                        "execution_id": execution_id,
+                        "execution_id": execution_context_id,
                         "session_id": session_id,
                         "ac_index": ac_index,
                         "is_decomposed_child": is_sub_ac,

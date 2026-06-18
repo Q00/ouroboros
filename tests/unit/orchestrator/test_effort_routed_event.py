@@ -194,6 +194,42 @@ async def test_advised_runtime_records_advised_and_does_not_pass_kwarg() -> None
 
 
 @pytest.mark.asyncio
+async def test_effort_event_store_failure_does_not_abort_ac() -> None:
+    """A degraded event store degrades the proof event to a warning, not an AC failure.
+
+    The routing event is auxiliary proof telemetry — it is emitted through
+    ``_safe_emit_event``, so a persistently failing ``event_store.append`` must NOT
+    propagate out of ``_execute_atomic_ac`` and abort the AC before runtime dispatch.
+    """
+    store = AsyncMock()
+    effort_append_attempts = 0
+
+    async def _append(event):
+        nonlocal effort_append_attempts
+        if getattr(event, "type", None) == "execution.ac.effort_routed":
+            effort_append_attempts += 1
+            raise RuntimeError("event store unavailable")
+
+    store.append.side_effect = _append
+    runtime = _EnforcedRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="high",
+    )
+
+    # Must not raise even though the proof-event append fails; the AC still dispatches.
+    await _run_one_ac(executor, is_sub_ac=False)
+
+    # The runtime was reached and received the enforced level despite telemetry loss.
+    assert runtime.received_effort == "high"
+    # The proof append was attempted (and retried) rather than silently skipped.
+    assert effort_append_attempts >= 1
+
+
+@pytest.mark.asyncio
 async def test_dormant_when_no_base_effort_emits_no_event() -> None:
     store, events = _capturing_event_store()
     executor = ParallelACExecutor(
