@@ -80,9 +80,14 @@ class FrugalityTriadRow:
 
     @property
     def has_all_axes(self) -> bool:
+        # The baseline must be strictly positive: it is the denominator of the
+        # token-reduction ratio, so a zero/negative shadow-replay baseline is not a
+        # usable measurement and the row is excluded rather than counted (which would
+        # otherwise make the aggregate reduction undefined).
         return (
             self.token_spend is not None
             and self.baseline_token_spend is not None
+            and self.baseline_token_spend > 0
             and self.grounding_regression is not None
         )
 
@@ -284,7 +289,25 @@ def evaluate_proof(
 
     # 3. Frugality.
     reduction = _reduction_pct(counted)
-    if reduction is None or reduction < min_reduction_pct:
+    if reduction is None:
+        # No positive aggregate baseline to measure against (every counted row's
+        # baseline was non-positive). has_all_axes already excludes such rows, so
+        # this is a defensive guard against malformed/degenerate shadow-replay
+        # events — report it as unmeasurable rather than crashing the gate.
+        return ProofVerdict(
+            status=ProofStatus.INSUFFICIENT_DATA,
+            counted_rows=len(counted),
+            runs=runs,
+            token_reduction_pct=None,
+            grounding_regressions=0,
+            reason=(
+                "Counted rows carry no positive shadow-replay baseline, so token "
+                "reduction is unmeasurable — the baseline producer emitted a "
+                "degenerate value."
+            ),
+            thresholds=thresholds,
+        )
+    if reduction < min_reduction_pct:
         return ProofVerdict(
             status=ProofStatus.FAIL_NO_FRUGALITY,
             counted_rows=len(counted),

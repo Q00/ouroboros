@@ -193,3 +193,19 @@ class TestEvaluateProof:
         rows = [_full_row("ac1", run="r1", token=80, baseline=100, regression=True)]
         v = evaluate_proof(rows)
         assert v.status is ProofStatus.FAIL_GROUNDING_REGRESSION
+
+    def test_zero_baseline_rows_do_not_count(self) -> None:
+        # A non-positive shadow-replay baseline is not a usable measurement; such
+        # rows are excluded (has_all_axes is False) rather than counted.
+        row = _full_row("ac1", run="r1", token=80, baseline=0.0)
+        assert row.has_all_axes is False
+        assert row.counts_in_proof is False
+
+    def test_zero_baseline_proof_does_not_crash(self) -> None:
+        # Regression: counted rows with a zero aggregate baseline must yield a
+        # deterministic verdict, not raise TypeError formatting a None reduction.
+        rows = [_full_row(f"ac{i}", run=f"r{i % 3}", token=80, baseline=0.0) for i in range(21)]
+        v = evaluate_proof(rows)
+        assert v.status is ProofStatus.INSUFFICIENT_DATA
+        assert v.token_reduction_pct is None
+        assert not v.passed
