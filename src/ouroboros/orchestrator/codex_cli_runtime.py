@@ -1623,13 +1623,21 @@ class CodexCliRuntime:
         composed_prompt = self._compose_prompt(prompt, system_prompt, tools)
         attempted_resume_session_id = self._resolve_resume_session_id(current_handle)
         try:
-            command = self._build_command(
-                output_last_message_path=str(output_path),
-                resume_session_id=attempted_resume_session_id,
-                prompt=composed_prompt,
-                runtime_handle=current_handle,
-                reasoning_effort=reasoning_effort,
-            )
+            build_kwargs: dict[str, Any] = {
+                "output_last_message_path": str(output_path),
+                "resume_session_id": attempted_resume_session_id,
+                "prompt": composed_prompt,
+                "runtime_handle": current_handle,
+            }
+            # Only hand the effort knob to a runtime whose ``_build_command``
+            # declares it. Codex (native) accepts it; advised CLI subclasses that
+            # share this base but expose no effort flag (e.g. Goose) do not override
+            # the signature, so forwarding ``None`` would raise an unexpected-kwarg
+            # TypeError. The orchestrator only sets a non-None level for runtimes
+            # that enforce it, so a None level is correctly dropped here.
+            if reasoning_effort is not None:
+                build_kwargs["reasoning_effort"] = reasoning_effort
+            command = self._build_command(**build_kwargs)
         except Exception as e:
             yield AgentMessage(
                 type="result",
