@@ -413,6 +413,16 @@ class TestEvaluateProof:
         assert unmeasured.has_all_axes is False  # ...but the measurement is absent
         assert unmeasured.counts_in_proof is False
 
+    def test_non_string_or_blank_verdict_does_not_count(self) -> None:
+        # The verdict must be a non-empty string, not merely truthy. A blank string
+        # or a non-string truthy payload (e.g. a dict) is not a real TraceGuard
+        # verdict and must not satisfy the grounding axis.
+        r = _full_row("ac1", run="r1", token=80, baseline=100)
+        for bad in ("", "   ", {"x": 1}, 1, True):
+            row = FrugalityTriadRow(**{**r.__dict__, "traceguard_verdict": bad})
+            assert row.has_all_axes is False
+            assert row.counts_in_proof is False
+
     def test_out_of_range_claim_rate_does_not_count(self) -> None:
         # A rate outside [0, 1] is malformed telemetry, not a usable measurement.
         r = _full_row("ac1", run="r1", token=80, baseline=100)

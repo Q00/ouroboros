@@ -128,12 +128,14 @@ class FrugalityTriadRow:
         token = _finite_number(self.token_spend)
         baseline = _finite_number(self.baseline_token_spend)
         claim_rate = _finite_number(self.unsupported_claim_rate)
+        verdict = self.traceguard_verdict
         return (
             token is not None
             and token >= 0
             and baseline is not None
             and baseline > 0
-            and bool(self.traceguard_verdict)
+            and isinstance(verdict, str)
+            and bool(verdict.strip())
             and claim_rate is not None
             and 0.0 <= claim_rate <= 1.0
             and self.grounding_regression is not None
