@@ -532,9 +532,19 @@ class OrchestratorRunner:
         These direct paths (single-AC execution, resume) do not go through
         ParallelACExecutor, so without this they would silently skip effort
         routing. Returns the execute_task kwargs (empty unless the runtime
-        enforces effort) and records an ``execution.ac.effort_routed`` event so the
-        proof sees the same data it gets from the parallel path. These are
-        top-level units, never decomposed children, so is_decomposed_child=False.
+        enforces effort).
+
+        It also records an ``execution.ac.effort_routed`` event for
+        OBSERVABILITY — so a direct run's effort routing is visible in the event
+        stream exactly like the parallel path's. This event is deliberately NOT a
+        frugality-proof contribution: a direct run is a single top-level unit
+        (``is_decomposed_child=False``) with no per-AC decomposition, so the
+        payload carries no ``ac_id``. The deterministic proof excludes it on both
+        counts — ``assemble_triads`` skips ``ac_id``-less events, and
+        ``counts_in_proof`` only admits decomposed children — because the
+        hypothesis is about children running at lower effort, which a top-level
+        direct call has nothing to say about. ``call_site="runner"`` marks the
+        origin so the two emission paths are distinguishable in the stream.
         """
         from ouroboros.orchestrator.effort_routing import resolve_execute_effort
 
@@ -2881,9 +2891,9 @@ class OrchestratorRunner:
                 effective_workers=effective_workers,
             )
 
-        # Execute in parallel
-        from ouroboros.config import get_agent_reasoning_effort
-
+        # Execute in parallel. Reuse the base effort resolved once in __init__
+        # (self._reasoning_effort) so a single runner instance has one consistent
+        # effort source across its direct paths and the parallel executor.
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
@@ -2896,7 +2906,7 @@ class OrchestratorRunner:
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
-            reasoning_effort=get_agent_reasoning_effort(),
+            reasoning_effort=self._reasoning_effort,
         )
 
         # Check for cancellation before starting parallel execution
