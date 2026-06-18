@@ -1184,6 +1184,7 @@ def create_ouroboros_server(
     from ouroboros.bigbang.interview import InterviewEngine
     from ouroboros.bigbang.seed_generator import SeedGenerator
     from ouroboros.config import (
+        get_llm_backend_for_role,
         get_llm_model_for_role,
         get_runtime_controls_config,
         load_config,
@@ -1240,7 +1241,6 @@ def create_ouroboros_server(
     from ouroboros.orchestrator_stage import (
         Stage,
         parse_stage,
-        resolve_runtime_for_llm_role,
         resolve_runtime_for_stage,
     )
     from ouroboros.providers import create_llm_adapter
@@ -1272,17 +1272,13 @@ def create_ouroboros_server(
         )
 
     def role_llm_backend(role: str) -> str:
-        # Per-stage routing is authoritative: the config TUI's per-stage Agent
-        # is the single source of truth for internal LLM backends. An explicit
-        # global override (e.g. ``mcp serve --llm-backend X``) is demoted to the
-        # fallback default — it serves only roles whose stage has no configured
-        # backend, instead of silently overriding every per-stage choice.
-        return resolve_runtime_for_llm_role(
-            role,
-            stages=profile_stages,
-            default=profile_default,
-            fallback=llm_backend or resolved_runtime_backend,
-        )
+        # Single source of truth: delegate to the loader's resolver so the MCP
+        # server honors the exact same precedence as every other call site —
+        # explicit --llm-backend > per-stage Agent > runtime_profile.default >
+        # legacy llm.backend / OUROBOROS_LLM_BACKEND override > default agent
+        # runtime. Re-implementing this inline previously dropped the legacy
+        # override on the main server path.
+        return get_llm_backend_for_role(role, explicit_backend=llm_backend)
 
     interview_runtime_backend = stage_runtime_backend(Stage.INTERVIEW)
     execute_runtime_backend = stage_runtime_backend(Stage.EXECUTE)

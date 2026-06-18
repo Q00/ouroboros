@@ -5,12 +5,14 @@ registration, resource handling, and the full server lifecycle.
 """
 
 import asyncio
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ouroboros.config.models import (
     EvaluationConfig,
+    LLMConfig,
     OrchestratorConfig,
     OuroborosConfig,
     ResilienceConfig,
@@ -743,6 +745,57 @@ class TestCreateOuroborosServer:
         assert interview.llm_backend == "claude"
         assert mock_wonder_engine.call_args.kwargs["adapter_backend"] == "codex"
         assert mock_reflect_engine.call_args.kwargs["adapter_backend"] == "codex"
+
+    def test_legacy_llm_backend_config_override_honored_at_composition_root(self) -> None:
+        """No per-stage profile: config.llm.backend drives internal LLM roles.
+
+        Regression: the composition root re-implemented role→backend resolution
+        and dropped the documented `llm.backend` override, so roles fell back to
+        orchestrator.runtime_backend instead. It must honor the same precedence
+        as get_llm_backend_for_role().
+        """
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="claude"),
+            llm=LLMConfig(backend="codex"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
+            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
+        ):
+            mock_create_llm_adapter.return_value = MagicMock()
+            mock_create_runtime.return_value = MagicMock()
+            server = create_ouroboros_server(runtime_backend="claude")
+
+        interview = server._tool_handlers["ouroboros_interview"]
+        qa = server._tool_handlers["ouroboros_qa"]
+        evaluate = server._tool_handlers["ouroboros_evaluate"]
+        # Internal LLM roles honor the legacy llm.backend override...
+        assert interview.llm_backend == "codex"
+        assert qa.llm_backend == "codex"
+        assert evaluate.llm_backend == "codex"
+        # ...while the agent runtime axis still follows orchestrator.runtime_backend.
+        assert interview.agent_runtime_backend == "claude"
+
+    def test_env_llm_backend_override_honored_at_composition_root(self) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="claude"),
+            llm=LLMConfig(backend="claude_code"),
+        )
+        with (
+            patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": "codex"}, clear=True),
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
+            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
+        ):
+            mock_create_llm_adapter.return_value = MagicMock()
+            mock_create_runtime.return_value = MagicMock()
+            server = create_ouroboros_server(runtime_backend="claude")
+
+        assert server._tool_handlers["ouroboros_qa"].llm_backend == "codex"
 
     def test_opencode_backend_is_accepted_at_server_creation(self) -> None:
         """OpenCode backend is forwarded through the shared adapter factory.
