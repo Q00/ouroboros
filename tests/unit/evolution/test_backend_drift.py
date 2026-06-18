@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from unittest.mock import Mock
+import os
+from unittest.mock import Mock, patch
 
+from ouroboros.config.models import (
+    LLMConfig,
+    OrchestratorConfig,
+    OuroborosConfig,
+    RuntimeProfileConfig,
+)
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
@@ -74,7 +81,7 @@ class TestEvolutionBackendDrift:
             return _Adapter("rebuilt", _cwd=str(kwargs.get("cwd")), _max_turns=kwargs["max_turns"])
 
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="claude")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_reflect_model",
@@ -90,7 +97,7 @@ class TestEvolutionBackendDrift:
             ),
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="gemini")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="gemini")
         )
         # model selection is already patched above and should now refresh to gemini.
         monkeypatch.setattr(
@@ -121,7 +128,7 @@ class TestEvolutionBackendDrift:
             return _Adapter("rebuilt", _cwd=str(kwargs.get("cwd")), _max_turns=kwargs["max_turns"])
 
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="claude")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.wonder.get_wonder_model",
@@ -137,7 +144,7 @@ class TestEvolutionBackendDrift:
             ),
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="gemini")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="gemini")
         )
         # model selection is already patched above and should now refresh to gemini.
         monkeypatch.setattr(
@@ -160,7 +167,7 @@ class TestEvolutionBackendDrift:
 
     def test_factory_fresh_adapter_refreshes_model_on_backend_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="claude")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_reflect_model",
@@ -172,7 +179,7 @@ class TestEvolutionBackendDrift:
             adapter_factory=lambda: fresh,
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="codex")
         )
 
         assert engine._resolve_adapter() is fresh
@@ -183,7 +190,7 @@ class TestEvolutionBackendDrift:
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="codex")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_reflect_model", Mock(return_value="new-reflect")
@@ -218,7 +225,7 @@ class TestEvolutionBackendDrift:
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="codex")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.wonder.get_wonder_model", Mock(return_value="new-wonder")
@@ -247,7 +254,7 @@ class TestEvolutionBackendDrift:
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="claude")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.reflect.get_reflect_model",
@@ -269,7 +276,7 @@ class TestEvolutionBackendDrift:
             adapter_factory=flaky_factory,
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="codex")
         )
 
         assert engine._resolve_adapter() is fresh
@@ -283,7 +290,7 @@ class TestEvolutionBackendDrift:
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="claude")
         )
         monkeypatch.setattr(
             "ouroboros.evolution.wonder.get_wonder_model",
@@ -305,7 +312,7 @@ class TestEvolutionBackendDrift:
             adapter_factory=flaky_factory,
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="codex")
         )
 
         assert engine._resolve_adapter() is fresh
@@ -317,7 +324,7 @@ class TestEvolutionBackendDrift:
 
     def test_factory_pinned_backend_keeps_model_on_config_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="codex")
         )
         get_model = Mock(return_value="codex-reflect-updated")
         monkeypatch.setattr("ouroboros.evolution.reflect.get_reflect_model", get_model)
@@ -328,7 +335,7 @@ class TestEvolutionBackendDrift:
             adapter_backend="codex",
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="gemini")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="gemini")
         )
 
         assert engine._resolve_adapter() is fresh
@@ -337,7 +344,7 @@ class TestEvolutionBackendDrift:
 
     def test_wonder_factory_pinned_backend_keeps_model_on_config_drift(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="codex")
         )
         get_model = Mock(return_value="codex-wonder-updated")
         monkeypatch.setattr("ouroboros.evolution.wonder.get_wonder_model", get_model)
@@ -348,7 +355,7 @@ class TestEvolutionBackendDrift:
             adapter_backend="codex",
         )
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="gemini")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="gemini")
         )
 
         assert engine._resolve_adapter() is fresh
@@ -359,7 +366,7 @@ class TestEvolutionBackendDrift:
 class TestEvolutionExplicitModelOverride:
     def test_reflect_explicit_model_survives_factory_refresh(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="codex")
         )
         get_model = Mock(return_value="config-reflect")
         monkeypatch.setattr("ouroboros.evolution.reflect.get_reflect_model", get_model)
@@ -393,7 +400,7 @@ class TestEvolutionExplicitModelOverride:
 
     def test_wonder_explicit_model_survives_factory_refresh(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="codex")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="codex")
         )
         get_model = Mock(return_value="config-wonder")
         monkeypatch.setattr("ouroboros.evolution.wonder.get_wonder_model", get_model)
@@ -421,7 +428,7 @@ class TestEvolutionExplicitModelOverride:
 
     def test_reflect_explicit_model_survives_backend_rebuild(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="claude")
         )
         get_model = Mock(return_value="config-reflect")
         monkeypatch.setattr("ouroboros.evolution.reflect.get_reflect_model", get_model)
@@ -434,7 +441,7 @@ class TestEvolutionExplicitModelOverride:
         )
         engine = ReflectEngine(llm_adapter=_Adapter("initial"), model="explicit-reflect")
         monkeypatch.setattr(
-            "ouroboros.evolution.reflect.get_llm_backend", Mock(return_value="gemini")
+            "ouroboros.evolution.reflect.get_llm_backend_for_role", Mock(return_value="gemini")
         )
 
         assert engine._resolve_adapter().name == "rebuilt"
@@ -443,7 +450,7 @@ class TestEvolutionExplicitModelOverride:
 
     def test_wonder_explicit_model_survives_backend_rebuild(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="claude")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="claude")
         )
         get_model = Mock(return_value="config-wonder")
         monkeypatch.setattr("ouroboros.evolution.wonder.get_wonder_model", get_model)
@@ -456,9 +463,47 @@ class TestEvolutionExplicitModelOverride:
         )
         engine = WonderEngine(llm_adapter=_Adapter("initial"), model="explicit-wonder")
         monkeypatch.setattr(
-            "ouroboros.evolution.wonder.get_llm_backend", Mock(return_value="gemini")
+            "ouroboros.evolution.wonder.get_llm_backend_for_role", Mock(return_value="gemini")
         )
 
         assert engine._resolve_adapter().name == "rebuilt"
         assert engine.model == "explicit-wonder"
         get_model.assert_not_called()
+
+    def test_reflect_direct_construction_honors_reflect_stage_profile(self) -> None:
+        """Direct ReflectEngine (no injected backend) follows runtime_profile.stages.reflect."""
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(stages={"reflect": "codex"}),
+            ),
+            llm=LLMConfig(backend="claude_code"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            engine = ReflectEngine(llm_adapter=_Adapter("initial"))
+            # Stage profile wins over the legacy claude_code default for both the
+            # captured backend (model source) and the live _selected_backend().
+            assert engine._captured_backend == "codex"
+            assert engine._selected_backend() == "codex"
+
+    def test_wonder_direct_construction_honors_reflect_stage_profile(self) -> None:
+        """Direct WonderEngine (no injected backend) follows runtime_profile.stages.reflect."""
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(stages={"reflect": "codex"}),
+            ),
+            llm=LLMConfig(backend="claude_code"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.load_config", return_value=config),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            engine = WonderEngine(llm_adapter=_Adapter("initial"))
+            assert engine._captured_backend == "codex"
+            assert engine._selected_backend() == "codex"

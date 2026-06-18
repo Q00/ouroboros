@@ -19,7 +19,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from ouroboros.config import get_llm_backend, get_llm_model_for_role
+from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed
@@ -103,7 +103,7 @@ class ReflectEngine:
         """Track explicit model pins while allowing backend-aware implicit defaults."""
         self._model_is_explicit = self.model is not None
         try:
-            self._captured_backend = self.adapter_backend or get_llm_backend()
+            self._captured_backend = self.adapter_backend or get_llm_backend_for_role("reflect")
         except Exception:  # noqa: BLE001 — never fail engine init on config read
             self._captured_backend = None
         if self.model is None:
@@ -180,7 +180,7 @@ class ReflectEngine:
         if self.adapter_backend is not None:
             return self.adapter_backend
         try:
-            return get_llm_backend()
+            return get_llm_backend_for_role("reflect")
         except Exception:  # noqa: BLE001
             return None
 
