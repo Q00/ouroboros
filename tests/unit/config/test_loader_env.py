@@ -118,6 +118,8 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_RUNTIME_PROFILE",
         "OUROBOROS_AGENT_PERMISSION_MODE",
         "OUROBOROS_TOOL_CAPABILITIES",
+        # Execution-cost/behavior dial — must not be forced from an untrusted repo.
+        "OUROBOROS_AGENT_REASONING_EFFORT",
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"

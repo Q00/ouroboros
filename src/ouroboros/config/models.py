@@ -515,7 +515,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
     # full-strength AC execution. Decomposed children run one notch lower. The
     # level is ENFORCED on runtimes with a native per-call knob (Claude Agent SDK,
     # Codex) and advised elsewhere. ``None`` leaves effort routing dormant.
-    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
+    # Restricted to the vocabulary every native runtime accepts: Codex-only
+    # ``minimal`` and Claude-only ``max`` are excluded so a single global value is
+    # never forwarded as an invalid level to whichever runtime executes the AC.
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
     # OpenCode integration mode. Written by `ouroboros setup --opencode-mode`.
     # None = unset (legacy installs); gate treats None as NOT plugin (safe
     # default — require explicit opt-in via setup --opencode-mode=plugin).

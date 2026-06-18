@@ -248,8 +248,19 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # is therefore an approval-gate-bypass sink — same class as the
         # permission-mode overrides above.
         "OUROBOROS_TOOL_CAPABILITIES",
+        # Execution-cost/behavior dial — an untrusted repo .env must not be able
+        # to force a higher (or invalid) reasoning-effort level for every AC,
+        # which changes runtime cost and behavior. Follows the same trusted-source
+        # policy as the runtime/permission overrides above (RFC #1405).
+        "OUROBOROS_AGENT_REASONING_EFFORT",
     }
 )
+
+# The reasoning-effort vocabulary every native runtime accepts (mirrors
+# OrchestratorConfig.reasoning_effort). A value outside this set — Codex-only
+# ``minimal``, Claude-only ``max``, or a typo — must never reach a runtime, so the
+# env override is validated against it before use.
+_VALID_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
 
 
 def _is_untrusted_env_denied_key(key: str) -> bool:
@@ -762,10 +773,18 @@ def get_agent_reasoning_effort() -> str | None:
         1. OUROBOROS_AGENT_REASONING_EFFORT environment variable
         2. config.yaml orchestrator.reasoning_effort
         3. None (effort routing stays dormant — no behavior change)
+
+    The env override is validated against the native-shared vocabulary; an invalid
+    value is ignored (falls through to config) rather than forwarded to a runtime
+    that would reject it. From an untrusted project ``.env`` the key is denylisted
+    entirely, so it is only honored from a trusted source.
     """
     env_effort = os.environ.get("OUROBOROS_AGENT_REASONING_EFFORT", "").strip()
-    if env_effort:
+    if env_effort in _VALID_REASONING_EFFORT_LEVELS:
         return env_effort
+    # A set but invalid env value (Codex-only ``minimal``, Claude-only ``max``, or a
+    # typo) is dropped rather than forwarded to a runtime that would reject it; fall
+    # through to the schema-validated config value.
     try:
         return load_config().orchestrator.reasoning_effort
     except ConfigError:

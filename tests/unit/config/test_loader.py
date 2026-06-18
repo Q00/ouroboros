@@ -1845,3 +1845,70 @@ def test_get_goose_cli_path_ignores_stale_env_and_config(
         patch("ouroboros.config.loader.shutil.which", return_value=None),
     ):
         assert get_goose_cli_path() is None
+
+
+class TestGetAgentReasoningEffort:
+    """Env/config resolution + validation for the RFC #1405 effort dial."""
+
+    def test_valid_env_overrides_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.config.loader import get_agent_reasoning_effort
+
+        monkeypatch.setenv("OUROBOROS_AGENT_REASONING_EFFORT", "high")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig(reasoning_effort="low")),
+        ):
+            assert get_agent_reasoning_effort() == "high"
+
+    def test_invalid_env_is_ignored_and_falls_back_to_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Codex-only ``minimal`` is invalid for the native-shared global dial and
+        # must never be forwarded to a runtime; fall through to the config value.
+        from ouroboros.config.loader import get_agent_reasoning_effort
+
+        monkeypatch.setenv("OUROBOROS_AGENT_REASONING_EFFORT", "minimal")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(
+                orchestrator=OrchestratorConfig(reasoning_effort="medium")
+            ),
+        ):
+            assert get_agent_reasoning_effort() == "medium"
+
+    def test_garbage_env_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.config.loader import get_agent_reasoning_effort
+
+        monkeypatch.setenv("OUROBOROS_AGENT_REASONING_EFFORT", "turbo")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_agent_reasoning_effort() is None
+
+    def test_config_value_used_when_no_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.config.loader import get_agent_reasoning_effort
+
+        monkeypatch.delenv("OUROBOROS_AGENT_REASONING_EFFORT", raising=False)
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig(reasoning_effort="xhigh")),
+        ):
+            assert get_agent_reasoning_effort() == "xhigh"
+
+    def test_dormant_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.config.loader import get_agent_reasoning_effort
+
+        monkeypatch.delenv("OUROBOROS_AGENT_REASONING_EFFORT", raising=False)
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_agent_reasoning_effort() is None
+
+    def test_minimal_rejected_by_config_schema(self) -> None:
+        # The global dial is restricted to the native-shared vocabulary.
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            OrchestratorConfig(reasoning_effort="minimal")
