@@ -137,6 +137,15 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     ``data``/``payload``. Unknown event types are ignored. An event without an
     ``ac_id`` cannot be correlated and is skipped.
 
+    Skipping the ``ac_id``-less event is **by design, not a gap**: the proof is a
+    per-decomposed-AC measurement, and the whole-seed direct-runner effort event
+    (``OrchestratorRunner._route_call_effort``) is emitted without a per-AC id
+    because a non-decomposed single-call run has no child to lower effort on and no
+    shadow-replay baseline — there is nothing for the frugality triad to prove. Such
+    runs are intentionally out of the proof's scope rather than counted as
+    missing-axis rows; only the parallel executor's per-AC events (which carry
+    ``ac_id``) contribute.
+
     Rows are keyed by ``(run, ac_id)`` — **not** ``ac_id`` alone — because the proof
     spans runs (``min_runs``) and the same logical AC id recurs every run. Keying by
     ``ac_id`` only would let a later run's events overwrite an earlier run's in the

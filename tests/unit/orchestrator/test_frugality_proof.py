@@ -95,6 +95,54 @@ class TestAssembleTriads:
     def test_event_without_ac_id_is_skipped(self) -> None:
         assert assemble_triads([_evt(EVENT_EFFORT_ROUTED, effort_level="high")]) == []
 
+    def test_whole_seed_runner_effort_event_is_excluded_by_design(self) -> None:
+        # The direct-runner effort event (OrchestratorRunner._route_call_effort) is
+        # whole-seed: it carries execution_id/session_id but no per-AC ac_id, because
+        # a non-decomposed single-call run has no child to lower effort on and no
+        # shadow-replay baseline. It is intentionally excluded from the per-AC proof
+        # rather than counted as a missing-axis row.
+        runner_effort = _evt(
+            EVENT_EFFORT_ROUTED,
+            execution_id="exec_direct",
+            session_id="sess_direct",
+            effort_level="high",
+            effort_mode="enforced",
+            is_decomposed_child=False,
+        )
+        # Even joined with a real per-AC triad, the whole-seed event contributes no row.
+        rows = assemble_triads(
+            [
+                runner_effort,
+                _evt(
+                    EVENT_EFFORT_ROUTED,
+                    ac_id="ac1",
+                    seed_run_id="r1",
+                    effort_level="low",
+                    effort_mode="enforced",
+                    is_decomposed_child=True,
+                ),
+                _evt(EVENT_TOKEN_ATTRIBUTION, ac_id="ac1", seed_run_id="r1", token_spend=80.0),
+                _evt(
+                    EVENT_SHADOW_REPLAY,
+                    ac_id="ac1",
+                    seed_run_id="r1",
+                    baseline_token_spend=100.0,
+                    baseline_mode="shadow_replay",
+                    decomposition_trustworthy=True,
+                ),
+                _evt(
+                    EVENT_DELIVER_VERDICT,
+                    ac_id="ac1",
+                    seed_run_id="r1",
+                    traceguard_verdict="accepted",
+                    unsupported_claim_rate=0.0,
+                    grounding_regression=False,
+                ),
+            ]
+        )
+        assert len(rows) == 1  # only the per-AC row; the whole-seed event added none
+        assert rows[0].ac_id == "ac1"
+
     def test_same_ac_id_across_runs_stays_distinct(self) -> None:
         # Regression: the proof spans runs, and the same logical AC id recurs every
         # run. Keying by ac_id alone collapsed all runs into the last; keying by
