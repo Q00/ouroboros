@@ -1275,10 +1275,15 @@ def create_ouroboros_server(
         # Single source of truth: delegate to the loader's resolver so the MCP
         # server honors the exact same precedence as every other call site —
         # explicit --llm-backend > per-stage Agent > runtime_profile.default >
-        # legacy llm.backend / OUROBOROS_LLM_BACKEND override > default agent
-        # runtime. Re-implementing this inline previously dropped the legacy
-        # override on the main server path.
-        return get_llm_backend_for_role(role, explicit_backend=llm_backend)
+        # legacy llm.backend / OUROBOROS_LLM_BACKEND override > this server's
+        # runtime_backend arg > configured default agent runtime. Passing
+        # resolved_runtime_backend keeps an explicit create_ouroboros_server
+        # runtime_backend honored as the default-agent fallback.
+        return get_llm_backend_for_role(
+            role,
+            explicit_backend=llm_backend,
+            fallback_runtime_backend=resolved_runtime_backend,
+        )
 
     interview_runtime_backend = stage_runtime_backend(Stage.INTERVIEW)
     execute_runtime_backend = stage_runtime_backend(Stage.EXECUTE)

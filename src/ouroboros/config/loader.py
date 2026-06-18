@@ -1317,13 +1317,15 @@ def _explicit_llm_backend_override() -> str | None:
 def _internal_llm_fallback_backend(fallback_runtime_backend: str | None) -> str:
     """Fallback backend for stages/roles with no per-stage routing.
 
-    Precedence: explicit caller arg → explicit legacy ``llm.backend`` /
-    ``OUROBOROS_LLM_BACKEND`` override (the documented LLM-only contract) → the
-    orchestrator's default agent runtime (the TUI "Default agent" inherited by
-    every un-overridden stage).
+    Precedence: explicit legacy ``llm.backend`` / ``OUROBOROS_LLM_BACKEND``
+    override (the documented LLM-only contract) → the caller-provided default
+    agent runtime (e.g. ``create_ouroboros_server(runtime_backend=...)``) → the
+    orchestrator's configured default agent runtime. The LLM-only override wins
+    over the default agent so an explicit ``llm.backend`` is honored, while an
+    un-configured override still inherits the caller/config default agent.
     """
     return (
-        fallback_runtime_backend or _explicit_llm_backend_override() or get_agent_runtime_backend()
+        _explicit_llm_backend_override() or fallback_runtime_backend or get_agent_runtime_backend()
     )
 
 
@@ -1354,7 +1356,9 @@ def get_llm_backend_for_stage(
             fallback=_internal_llm_fallback_backend(fallback_runtime_backend),
         )
     except ConfigError:
-        return get_llm_backend()
+        # Config unreadable: still honor an env-level LLM override and the
+        # caller's default agent before the documented get_llm_backend() default.
+        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
 
 
 def get_llm_backend_for_role(
@@ -1381,7 +1385,9 @@ def get_llm_backend_for_role(
             fallback=_internal_llm_fallback_backend(fallback_runtime_backend),
         )
     except ConfigError:
-        return get_llm_backend()
+        # Config unreadable: still honor an env-level LLM override and the
+        # caller's default agent before the documented get_llm_backend() default.
+        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
 
 
 # Legacy per-role model fields kept for backward compatibility. The stage
