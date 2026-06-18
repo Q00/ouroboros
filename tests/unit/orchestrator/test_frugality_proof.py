@@ -18,6 +18,38 @@ def _evt(etype: str, **data) -> dict:
     return {"type": etype, "data": data}
 
 
+def _triad_events(ac: str, run: str, **effort_overrides) -> list[dict]:
+    """A full, valid 4-axis triad for one (ac, run) — overridable on the effort event."""
+    effort = {
+        "ac_id": ac,
+        "seed_run_id": run,
+        "effort_level": "low",
+        "effort_mode": "enforced",
+        "is_decomposed_child": True,
+    }
+    effort.update(effort_overrides)
+    return [
+        _evt(EVENT_EFFORT_ROUTED, **effort),
+        _evt(EVENT_TOKEN_ATTRIBUTION, ac_id=ac, seed_run_id=run, token_spend=80.0),
+        _evt(
+            EVENT_SHADOW_REPLAY,
+            ac_id=ac,
+            seed_run_id=run,
+            baseline_token_spend=100.0,
+            baseline_mode="shadow_replay",
+            decomposition_trustworthy=True,
+        ),
+        _evt(
+            EVENT_DELIVER_VERDICT,
+            ac_id=ac,
+            seed_run_id=run,
+            traceguard_verdict="accepted",
+            unsupported_claim_rate=0.0,
+            grounding_regression=False,
+        ),
+    ]
+
+
 def _full_row(ac_id: str, *, run: str, token: float, baseline: float, regression: bool = False):
     return FrugalityTriadRow(
         ac_id=ac_id,
@@ -156,6 +188,50 @@ class TestAssembleTriads:
         )
         assert len(rows) == 1  # only the per-AC row; the whole-seed event added none
         assert rows[0].ac_id == "ac1"
+
+    def test_string_is_decomposed_child_does_not_truthy_admit(self) -> None:
+        # A malformed payload is_decomposed_child="false" must NOT become True via
+        # bool("false"). The flag fails safe to False, excluding the (now top-level)
+        # row from the proof.
+        events = _triad_events("ac1", "r1", is_decomposed_child="false")
+        rows = assemble_triads(events)
+        assert len(rows) == 1
+        assert rows[0].is_decomposed_child is False
+        assert rows[0].counts_in_proof is False
+
+    def test_string_decomposition_trustworthy_does_not_truthy_admit(self) -> None:
+        # A malformed shadow-replay decomposition_trustworthy="false" must not coerce
+        # to True; it fails safe to False, excluding the untrustworthy row.
+        events = _triad_events("ac1", "r1")
+        for e in events:
+            if e["type"] == EVENT_SHADOW_REPLAY:
+                e["data"]["decomposition_trustworthy"] = "false"
+        rows = assemble_triads(events)
+        assert rows[0].decomposition_trustworthy is False
+        assert rows[0].counts_in_proof is False
+
+    def test_string_grounding_regression_stays_unmeasured(self) -> None:
+        # A malformed grounding_regression="false" must not coerce to a boolean; it
+        # stays unset (None) so has_all_axes excludes the unmeasured row.
+        events = _triad_events("ac1", "r1")
+        for e in events:
+            if e["type"] == EVENT_DELIVER_VERDICT:
+                e["data"]["grounding_regression"] = "false"
+        rows = assemble_triads(events)
+        assert rows[0].grounding_regression is None
+        assert rows[0].has_all_axes is False
+        assert rows[0].counts_in_proof is False
+
+    def test_string_boolean_payloads_never_pass(self) -> None:
+        # Reviewer repro: 21 rows whose admission booleans are truthy strings must not
+        # PASS. With strict parsing they are excluded → INSUFFICIENT_DATA.
+        events: list[dict] = []
+        for i in range(21):
+            events += _triad_events(f"ac{i}", f"r{i % 3}", is_decomposed_child="false")
+        v = evaluate_proof(assemble_triads(events))
+        assert v.status is ProofStatus.INSUFFICIENT_DATA
+        assert v.counted_rows == 0
+        assert not v.passed
 
     def test_same_ac_id_across_runs_stays_distinct(self) -> None:
         # Regression: the proof spans runs, and the same logical AC id recurs every

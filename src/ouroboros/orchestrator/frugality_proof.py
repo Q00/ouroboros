@@ -48,6 +48,19 @@ def _finite_number(value: object) -> float | None:
     return f if math.isfinite(f) else None
 
 
+def _strict_bool(value: object) -> bool | None:
+    """Return ``value`` only if it is a real boolean, else ``None``.
+
+    Proof-admission flags (``is_decomposed_child``, ``decomposition_trustworthy``,
+    ``grounding_regression``) must never be derived via Python truthiness: a JSON
+    boolean deserializes to ``bool``, but a malformed string payload like
+    ``"false"`` would coerce to ``True`` under ``bool("false")`` and flip an
+    admission flag the wrong way. Anything that is not already a ``bool`` is treated
+    as unknown so the caller can fail safe (exclude the row) rather than admit it.
+    """
+    return value if isinstance(value, bool) else None
+
+
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
 EVENT_TOKEN_ATTRIBUTION = "execution.ac.token_attribution.reported"
@@ -220,7 +233,10 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             row["effort_level"] = data.get("effort_level")
             row["effort_mode"] = data.get("effort_mode")
-            row["is_decomposed_child"] = bool(data.get("is_decomposed_child", False))
+            # Strict boolean: a malformed/missing value fails safe to False, which
+            # excludes the row (counts_in_proof requires a decomposed child) rather
+            # than admitting a top-level row whose flag was a truthy string.
+            row["is_decomposed_child"] = _strict_bool(data.get("is_decomposed_child")) or False
             if data.get("parent_effort") is not None:
                 row["parent_effort"] = data.get("parent_effort")
             # seed_run_id is established as part of the row key (see ``slot``), so it
@@ -236,16 +252,24 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             row["traceguard_verdict"] = data.get("traceguard_verdict")
             row["unsupported_claim_rate"] = data.get("unsupported_claim_rate")
-            if data.get("grounding_regression") is not None:
-                row["grounding_regression"] = bool(data.get("grounding_regression"))
+            # Strict boolean: a malformed grounding flag stays None (unset) so
+            # has_all_axes excludes the row, rather than a truthy string defaulting
+            # the veto to a value the producer did not actually measure.
+            grounding = _strict_bool(data.get("grounding_regression"))
+            if grounding is not None:
+                row["grounding_regression"] = grounding
         elif etype == EVENT_SHADOW_REPLAY:
             row = slot(data)
             if row is None:
                 continue
             row["baseline_token_spend"] = data.get("baseline_token_spend")
             row["baseline_mode"] = data.get("baseline_mode")
+            # Strict boolean: a present-but-malformed trustworthiness flag fails safe
+            # to False (excludes the row) instead of a truthy string admitting an
+            # untrustworthy decomposition into the proof.
             if data.get("decomposition_trustworthy") is not None:
-                row["decomposition_trustworthy"] = bool(data.get("decomposition_trustworthy"))
+                trustworthy = _strict_bool(data.get("decomposition_trustworthy"))
+                row["decomposition_trustworthy"] = trustworthy if trustworthy is not None else False
 
     return [
         FrugalityTriadRow(
