@@ -18,7 +18,8 @@ A triad row joins three measured axes by ``ac_id``:
 * **baseline** — ``execution.ac.shadow_replay`` (baseline_token_spend at parent
   effort). Production side not wired yet (seed AC5).
 
-A row only ``counts_in_proof`` when effort was ENFORCED, the decomposition was
+A row only ``counts_in_proof`` when effort was ENFORCED, the unit is a decomposed
+child (the hypothesis is about children, not top-level ACs), the decomposition was
 trustworthy, and all axes are present. The gate therefore returns
 ``INSUFFICIENT_DATA`` honestly until the token / grounding / baseline producers are
 wired — and the *same* gate yields PASS/FAIL once they are. The contract (event
@@ -93,12 +94,24 @@ class FrugalityTriadRow:
 
     @property
     def counts_in_proof(self) -> bool:
-        """Only enforced + trustworthy + fully-measured rows count.
+        """Only enforced + decomposed-child + trustworthy + fully-measured rows count.
 
-        Advised effort, untrustworthy (forced-atomic) decomposition, or a missing
-        axis all exclude the row — the exact honesty the deterministic proof needs.
+        The hypothesis is specifically about *decomposed children* running at a
+        lower effort than their parent (see module docstring), so a top-level AC
+        (``is_decomposed_child=False``) is excluded even when fully measured —
+        otherwise a sample of ordinary top-level executions could PASS the gate and
+        "prove" a frugality claim the run never tested. A top-level unit also has no
+        parent effort to lower from and no shadow-replay baseline that means
+        anything. Advised effort, untrustworthy (forced-atomic) decomposition, or a
+        missing axis likewise exclude the row — the exact honesty the deterministic
+        proof needs.
         """
-        return self.is_enforced and self.decomposition_trustworthy and self.has_all_axes
+        return (
+            self.is_enforced
+            and self.is_decomposed_child
+            and self.decomposition_trustworthy
+            and self.has_all_axes
+        )
 
 
 @dataclass(frozen=True)

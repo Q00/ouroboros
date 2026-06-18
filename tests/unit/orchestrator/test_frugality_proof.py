@@ -92,6 +92,20 @@ class TestAssembleTriads:
         quarantined = FrugalityTriadRow(**{**r.__dict__, "decomposition_trustworthy": False})
         assert not quarantined.counts_in_proof
 
+    def test_top_level_non_decomposed_row_never_counts(self) -> None:
+        """A fully-measured, enforced, trustworthy TOP-LEVEL AC must not count.
+
+        The hypothesis is about decomposed children running at lower effort, so a
+        top-level unit (is_decomposed_child=False) — including every per-AC event
+        the parallel executor emits for non-decomposed work and the whole-seed
+        direct-runner path — is excluded even when all axes are present. Otherwise
+        a sample of ordinary top-level executions could falsely PASS the gate.
+        """
+        r = _full_row("ac1", run="r1", token=80, baseline=100)
+        top_level = FrugalityTriadRow(**{**r.__dict__, "is_decomposed_child": False})
+        assert top_level.has_all_axes  # measurement is complete...
+        assert not top_level.counts_in_proof  # ...but it is the wrong unit class
+
     def test_event_without_ac_id_is_skipped(self) -> None:
         assert assemble_triads([_evt(EVENT_EFFORT_ROUTED, effort_level="high")]) == []
 
@@ -217,6 +231,29 @@ class TestEvaluateProof:
         assert v.status is ProofStatus.PASS
         assert v.token_reduction_pct == 20.0
         assert v.runs == 3 and v.counted_rows == 21
+
+    def test_top_level_rows_alone_never_pass(self) -> None:
+        """21 fully-measured TOP-LEVEL rows must NOT PASS — they are the wrong unit.
+
+        Reproduces the reviewer's case directly: a sample built entirely from
+        enforced, fully-measured non-decomposed AC rows would otherwise satisfy the
+        gate and falsely prove frugality for ordinary top-level execution. With
+        counts_in_proof requiring a decomposed child, none of them count, so the
+        gate honestly returns INSUFFICIENT_DATA.
+        """
+        rows = [
+            FrugalityTriadRow(
+                **{
+                    **_full_row(f"ac{i}", run=f"r{i % 3}", token=80, baseline=100).__dict__,
+                    "is_decomposed_child": False,
+                }
+            )
+            for i in range(21)
+        ]
+        v = evaluate_proof(rows)
+        assert v.status is ProofStatus.INSUFFICIENT_DATA
+        assert not v.passed
+        assert v.counted_rows == 0
 
     def test_grounding_regression_is_a_veto(self) -> None:
         rows = [_full_row(f"ac{i}", run=f"r{i % 3}", token=80, baseline=100) for i in range(21)]
