@@ -6,30 +6,35 @@
 
 ## Why
 
-The deterministic frugality-proof machine (`orchestrator/frugality_proof.py`) is in
-place: `assemble_triads()` joins per-AC events into a `FrugalityTriadRow`, and
-`evaluate_proof()` computes the seed's PASS/FAIL gate — **grounding regression is a
-per-AC veto**, then sample sufficiency (≥20 triads / ≥3 runs), then aggregate token
-reduction (≥10%). The **effort axis** is produced today
-(`execution.ac.effort_routed`, `mode=enforced` on Claude/Codex/Copilot).
+The deterministic frugality-proof machine (`orchestrator/frugality_proof.py`) is
+delivered by the proof-gate PR (#1478) this RFC depends on — it is **not yet on
+`main`**; it lands with the #1473–#1478 stack below. There, `assemble_triads()` joins
+per-AC events into a `FrugalityTriadRow`, and `evaluate_proof()` computes the seed's
+PASS/FAIL gate — **grounding regression is a per-AC veto**, then sample sufficiency
+(≥20 triads / ≥3 runs), then aggregate token reduction (≥10%). The **effort axis** is
+produced by the same stack (`execution.ac.effort_routed`, `mode=enforced` on
+Claude/Codex/Copilot).
 
 But a row only `counts_in_proof` when it carries **all** axes, and three are not yet
 emitted. Until they are, the gate honestly returns `INSUFFICIENT_DATA`. This RFC
-specifies the three remaining producers against the event-type contract the gate
-already reads — so they have a precise, testable target and the gate stays
-unchanged.
+specifies the three remaining producers against the event-type contract that gate
+reads — so they have a precise, testable target and the gate stays unchanged.
 
-## The fixed event contract (already consumed by the gate)
+## The fixed event contract (consumed by the #1478 gate)
 
-`frugality_proof.py` reads these event types and fields. Producers must emit them
-keyed by the same `ac_id` the effort event uses.
+The gate (`frugality_proof.py`, shipped in #1478) reads these event types and fields.
+Producers must emit them keyed by the same `ac_id` the effort event uses, and must
+carry the **run anchor** (`seed_run_id`, or `execution_id`) on every event: the proof
+spans runs and the same logical `ac_id` recurs each run, so `assemble_triads()` keys
+rows by `(run, ac_id)`. An axis event without the run anchor cannot be attributed to
+the right run's row.
 
 | Event type | Producer | Required fields | Seed AC |
 |---|---|---|---|
 | `execution.ac.effort_routed` | **done** | `effort_level`, `effort_mode`, `is_decomposed_child`, `ac_id`, `seed_run_id` | (effort contract) |
-| `execution.ac.token_attribution.reported` | **#1 below** | `ac_id`, `token_spend` | AC2 |
-| `execution.ac.deliver_verdict` | **#2 below** | `ac_id`, `traceguard_verdict`, `unsupported_claim_rate`, `grounding_regression` | AC4 |
-| `execution.ac.shadow_replay` | **#3 below** | `ac_id`, `baseline_token_spend`, `baseline_mode`, `decomposition_trustworthy` | AC5 |
+| `execution.ac.token_attribution.reported` | **#1 below** | `ac_id`, `seed_run_id`, `token_spend` | AC2 |
+| `execution.ac.deliver_verdict` | **#2 below** | `ac_id`, `seed_run_id`, `traceguard_verdict`, `unsupported_claim_rate`, `grounding_regression` | AC4 |
+| `execution.ac.shadow_replay` | **#3 below** | `ac_id`, `seed_run_id`, `baseline_token_spend`, `baseline_mode`, `decomposition_trustworthy` | AC5 |
 
 ## Producer #1 — Per-AC token attribution (AC2)
 
