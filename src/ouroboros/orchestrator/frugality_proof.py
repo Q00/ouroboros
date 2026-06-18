@@ -126,19 +126,29 @@ def _event_data(event: object) -> Mapping:
 
 
 def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
-    """Join the per-axis events into one triad row per ``ac_id``.
+    """Join the per-axis events into one triad row per ``(run, ac_id)``.
 
     Accepts events as mappings or objects exposing ``type``/``event_type`` and
-    ``data``/``payload``. Unknown event types are ignored. Rows are keyed by
-    ``ac_id``; an event without an ``ac_id`` cannot be correlated and is skipped.
+    ``data``/``payload``. Unknown event types are ignored. An event without an
+    ``ac_id`` cannot be correlated and is skipped.
+
+    Rows are keyed by ``(run, ac_id)`` — **not** ``ac_id`` alone — because the proof
+    spans runs (``min_runs``) and the same logical AC id recurs every run. Keying by
+    ``ac_id`` only would let a later run's events overwrite an earlier run's in the
+    same slot, collapsing valid cross-run evidence to the last run. The run anchor is
+    each event's ``seed_run_id`` (falling back to ``execution_id``); a logical AC
+    therefore yields one row per run it ran in. Events carrying no run anchor share a
+    single implicit run — the original single-run behavior, preserved.
     """
-    acc: dict[str, dict] = {}
+    acc: dict[tuple[str | None, str], dict] = {}
 
     def slot(data: Mapping) -> dict | None:
         ac_id = data.get("ac_id")
         if not ac_id:
             return None
-        return acc.setdefault(str(ac_id), {"ac_id": str(ac_id)})
+        run = data.get("seed_run_id") or data.get("execution_id")
+        run_key = str(run) if run is not None else None
+        return acc.setdefault((run_key, str(ac_id)), {"ac_id": str(ac_id), "seed_run_id": run_key})
 
     for event in events:
         etype = _event_type(event)
@@ -152,8 +162,8 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             row["is_decomposed_child"] = bool(data.get("is_decomposed_child", False))
             if data.get("parent_effort") is not None:
                 row["parent_effort"] = data.get("parent_effort")
-            if data.get("seed_run_id") is not None:
-                row["seed_run_id"] = data.get("seed_run_id")
+            # seed_run_id is established as part of the row key (see ``slot``), so it
+            # is not re-read here.
         elif etype == EVENT_TOKEN_ATTRIBUTION:
             row = slot(data)
             if row is None:

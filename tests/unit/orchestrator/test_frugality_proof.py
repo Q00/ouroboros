@@ -46,10 +46,11 @@ class TestAssembleTriads:
                 is_decomposed_child=True,
                 seed_run_id="r1",
             ),
-            _evt(EVENT_TOKEN_ATTRIBUTION, ac_id="ac1", token_spend=80.0),
+            _evt(EVENT_TOKEN_ATTRIBUTION, ac_id="ac1", seed_run_id="r1", token_spend=80.0),
             _evt(
                 EVENT_SHADOW_REPLAY,
                 ac_id="ac1",
+                seed_run_id="r1",
                 baseline_token_spend=100.0,
                 baseline_mode="shadow_replay",
                 decomposition_trustworthy=True,
@@ -57,6 +58,7 @@ class TestAssembleTriads:
             _evt(
                 EVENT_DELIVER_VERDICT,
                 ac_id="ac1",
+                seed_run_id="r1",
                 traceguard_verdict="accepted",
                 unsupported_claim_rate=0.0,
                 grounding_regression=False,
@@ -92,6 +94,59 @@ class TestAssembleTriads:
 
     def test_event_without_ac_id_is_skipped(self) -> None:
         assert assemble_triads([_evt(EVENT_EFFORT_ROUTED, effort_level="high")]) == []
+
+    def test_same_ac_id_across_runs_stays_distinct(self) -> None:
+        # Regression: the proof spans runs, and the same logical AC id recurs every
+        # run. Keying by ac_id alone collapsed all runs into the last; keying by
+        # (run, ac_id) keeps one row per run so min_runs can be satisfied.
+        events: list[dict] = []
+        for run in ("r1", "r2", "r3"):
+            for ac in ("ac1", "ac2"):
+                events += [
+                    _evt(
+                        EVENT_EFFORT_ROUTED,
+                        ac_id=ac,
+                        seed_run_id=run,
+                        effort_level="low",
+                        effort_mode="enforced",
+                        is_decomposed_child=True,
+                    ),
+                    _evt(EVENT_TOKEN_ATTRIBUTION, ac_id=ac, seed_run_id=run, token_spend=80.0),
+                    _evt(
+                        EVENT_SHADOW_REPLAY,
+                        ac_id=ac,
+                        seed_run_id=run,
+                        baseline_token_spend=100.0,
+                        baseline_mode="shadow_replay",
+                        decomposition_trustworthy=True,
+                    ),
+                    _evt(
+                        EVENT_DELIVER_VERDICT,
+                        ac_id=ac,
+                        seed_run_id=run,
+                        traceguard_verdict="accepted",
+                        unsupported_claim_rate=0.0,
+                        grounding_regression=False,
+                    ),
+                ]
+        rows = assemble_triads(events)
+        assert len(rows) == 6  # 2 ACs x 3 runs, not collapsed to 2
+        assert {r.seed_run_id for r in rows} == {"r1", "r2", "r3"}
+        assert all(r.counts_in_proof for r in rows)
+        v = evaluate_proof(rows, min_triads=6, min_runs=3)
+        assert v.status is ProofStatus.PASS
+        assert v.runs == 3 and v.counted_rows == 6
+
+    def test_execution_id_used_as_run_anchor_when_no_seed_run_id(self) -> None:
+        # The effort event carries execution_id even before seed_run_id is wired;
+        # it serves as the run anchor so two executions of the same AC stay distinct.
+        events = [
+            _evt(EVENT_EFFORT_ROUTED, ac_id="ac1", execution_id="exec_a", effort_level="high"),
+            _evt(EVENT_EFFORT_ROUTED, ac_id="ac1", execution_id="exec_b", effort_level="high"),
+        ]
+        rows = assemble_triads(events)
+        assert len(rows) == 2
+        assert {r.seed_run_id for r in rows} == {"exec_a", "exec_b"}
 
 
 class TestEvaluateProof:
