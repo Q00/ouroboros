@@ -454,7 +454,7 @@ class AutoPipelineState:
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     skip_run: bool = False
-    max_interview_rounds: int = 12
+    max_interview_rounds: int = 50
     max_repair_rounds: int = 5
     interview_session_id: str | None = None
     interview_completed: bool = False
@@ -959,7 +959,7 @@ class AutoPipelineState:
         # Older auto sessions predate durable loop-bound policy. Preserve
         # resume compatibility by assigning the historical defaults once, then
         # persisting them with subsequent saves.
-        payload.setdefault("max_interview_rounds", 12)
+        payload.setdefault("max_interview_rounds", 50)
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)

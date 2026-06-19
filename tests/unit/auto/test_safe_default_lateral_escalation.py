@@ -47,6 +47,11 @@ from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedD
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.resilience.lateral import ThinkingPersona
 
+# The lateral escalation only triggers when the unsafe-context matcher fires,
+# which is disabled by default under the freedom policy (empty production
+# bank); re-inject the historical bank. See tests/unit/auto/conftest.py.
+pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

@@ -127,53 +127,29 @@ _PROMPT_SECTION_HEADER = re.compile(
 _PROMPT_LIST_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
 
-_UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
-    (
-        "credentials/secrets",
-        r"\b(credential|credentials|secret|secrets|access token|auth token|private key|api key|password|"
-        r"passphrase)\b",
-    ),
-    (
-        "destructive production action",
-        r"\b(delete|drop|erase|wipe|destroy|remove|truncate)\b.+\b(production|prod|live|database|db|"
-        r"branch|bucket|account)\b|\b(production|prod|live)\b.+\b(delete|drop|erase|wipe|destroy|"
-        r"remove|truncate)\b",
-    ),
-    (
-        "payment/billing",
-        r"\b(payment|billing|paid service|credit card|bank account|invoice|charge|purchase|subscribe|"
-        r"subscription)\b",
-    ),
-    (
-        "legal/medical judgment",
-        r"\b(legal|compliance|license|contract|liability|medical|clinical|diagnosis|treatment|"
-        r"healthcare|patient)\b",
-    ),
-    (
-        "security-sensitive choice",
-        r"\b(security|encryption|authentication|authorization|authz|oauth|sso|access control|"
-        r"permissions|vulnerability|exploit|threat model)\b",
-    ),
-    (
-        "ambiguous external side effect",
-        # Concrete external side effects only: deploy/release/publish flows,
-        # explicit messaging or account/branch mutations, database
-        # migrations, and "go live"/"push live"/"going live" phrasings.
-        # Earlier revisions matched bare ``external``, which flagged benign
-        # phrases such as "no external dependencies"; this revision drops
-        # bare ``production``/``prod``/``live`` for the same reason —
-        # phrases like "reproduce a production bug locally" or "use the
-        # production schema snapshot already in the repo" describe
-        # read-only context, not a side effect. ``deploy``, ``release``,
-        # ``publish`` still catch the production-deploy class of phrasing
-        # ("deploy to production", "production deploy", "release to
-        # production"), and the explicit ``go live``/``push live`` phrases
-        # cover the few remaining production-cutover idioms.
-        r"\b(deploy|release|publish|send email|webhook|notify users|"
-        r"create account|delete branch|database migration|"
-        r"go live|going live|push live)\b",
-    ),
-)
+# Freedom policy (operator decision): the unsafe-context veto on
+# safe-default closure is intentionally disabled — this bank is empty so
+# ``_unsafe_context_reason`` always returns ``None`` and autonomous
+# gap-defaulting is never blocked on a keyword match.
+#
+# Rationale: the previous bank vetoed safe-default closure whenever the
+# interview context mentioned credential, payment, legal/medical,
+# security, or external-side-effect keywords. But those single words
+# (``contract``, ``license``, ``security``, ``authentication``,
+# ``permissions`` …) appear constantly in ordinary software work, so the
+# gate over-blocked benign ``ooo auto`` runs — e.g. a CSV→JSON tool was
+# classified as "legal/medical judgment" solely because an interview
+# answer used the word "contract" (a data contract). The conservative
+# ``non_goals`` safe-default (see ``_SAFE_DEFAULTS["non_goals"]``) still
+# assumes credential/billing/production/legal/medical work is OUT of
+# scope, so emptying this matcher means auto-closure assumes those
+# domains away rather than autonomously acting inside them — it does not
+# grant the pipeline new authority to perform sensitive actions.
+#
+# To restore a veto for a stricter deployment, add ``(reason, pattern)``
+# tuples here; the matcher/lateral-escalation machinery downstream is
+# unchanged and will pick them up automatically.
+_UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = ()
 
 
 # Prefix matching :pyattr:`AutoAnswer.prefixed_text` and tagging this module's

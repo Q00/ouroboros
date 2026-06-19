@@ -20,6 +20,12 @@ from ouroboros.auto.interview_driver import (
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
+# test_interview_max_rounds_exhausted_sets_stop_reason_code relies on the
+# unsafe-context matcher firing (an unsafe goal blocks safe-default closure),
+# which is disabled by default under the freedom policy (empty production
+# bank); re-inject the historical bank. See tests/unit/auto/conftest.py.
+pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
+
 # ---------------------------------------------------------------------------
 # Shared stubs
 # ---------------------------------------------------------------------------

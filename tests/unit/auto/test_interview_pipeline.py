@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from ouroboros.auto.adapters import EvaluateResult, PartialInterviewStartError
+from ouroboros.auto.adapters import EvaluateResult, LateralResult, PartialInterviewStartError
 from ouroboros.auto.grading import GradeFinding, GradeGate, GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
@@ -26,6 +26,12 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+
+# The unsafe-context matcher / safe-default blocking machinery exercised here
+# is disabled by default under the freedom policy (empty production bank);
+# re-inject the historical bank so the mechanism stays covered.
+# See tests/unit/auto/conftest.py.
+pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
 
 
 def _fill_ready(ledger: SeedDraftLedger) -> None:
@@ -1650,6 +1656,180 @@ async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
     assert qa_calls == 2
     assert captured_run_seed is not None
     assert any("missing explicit no-op scope" in item for item in captured_run_seed.constraints)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_qa_lateral_repair_folds_concrete_decision(tmp_path) -> None:
+    """A wired ``lateral_thinker`` repairs a failed Seed QA attempt by folding the
+    persona's concrete decision into the Seed before re-judging (vs the
+    mechanical echo of QA differences)."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_lateral",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    lateral_calls: list[dict] = []
+
+    async def lateral_thinker(
+        *, persona, qa_differences, qa_suggestions, run_artifact
+    ) -> LateralResult:
+        lateral_calls.append(
+            {
+                "persona": persona,
+                "differences": qa_differences,
+                "suggestions": qa_suggestions,
+                "artifact": run_artifact,
+            }
+        )
+        return LateralResult(
+            persona=persona.value,
+            approach_summary="pick one binding parsing contract",
+            text="Treat every CSV cell as a string and error on column-count mismatch.",
+        )
+
+    qa_calls = 0
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        if qa_calls == 1:
+            return EvaluateResult(
+                passed=False,
+                score=0.46,
+                verdict="revise",
+                differences=("no binding CSV contract chosen",),
+                suggestions=("choose one parsing contract",),
+            )
+        # The lateral decision (not just the echoed QA diff) must be in the Seed.
+        assert any("Treat every CSV cell as a string" in item for item in seed.constraints)
+        return EvaluateResult(passed=True, score=0.9, verdict="pass")
+
+    captured_run_seed: Seed | None = None
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        nonlocal captured_run_seed
+        captured_run_seed = seed
+        return {"job_id": "job_lateral_repaired"}
+
+    state = AutoPipelineState(goal="Build a CSV to JSON CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert qa_calls == 2
+    # lateral was invoked exactly once for the failed attempt, with the QA shape
+    # and the current Seed YAML as the run artifact.
+    assert len(lateral_calls) == 1
+    assert lateral_calls[0]["differences"] == ("no binding CSV contract chosen",)
+    assert lateral_calls[0]["artifact"].strip()
+    # the persona was recorded for chain progression / resume
+    assert state.personas_invoked
+    # the concrete decision was folded into the Seed that ran
+    assert captured_run_seed is not None
+    assert any("Treat every CSV cell as a string" in item for item in captured_run_seed.constraints)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_seed_qa_lateral_repair_falls_back_when_lateral_errors(tmp_path) -> None:
+    """A transient lateral failure degrades gracefully to the mechanical feedback
+    repair so the QA gate still makes progress."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_fallback",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done", session_id, seed_ready=True, completed=True, ambiguity_score=0.12
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def lateral_thinker(
+        *, persona, qa_differences, qa_suggestions, run_artifact
+    ) -> LateralResult:  # noqa: ARG001
+        return LateralResult(
+            persona=persona.value,
+            approach_summary="",
+            text="",
+            error="upstream lateral unavailable",
+        )
+
+    qa_calls = 0
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        if qa_calls == 1:
+            return EvaluateResult(
+                passed=False,
+                score=0.5,
+                verdict="revise",
+                differences=("missing explicit no-op scope",),
+                suggestions=("add no-op scope constraint",),
+            )
+        # Fallback mechanical repair echoes the QA difference as a constraint.
+        assert any("missing explicit no-op scope" in item for item in seed.constraints)
+        return EvaluateResult(passed=True, score=0.9, verdict="pass")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        return {"job_id": "job_fallback_repaired"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 2
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+        lateral_thinker=lateral_thinker,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert qa_calls == 2
 
 
 @pytest.mark.asyncio

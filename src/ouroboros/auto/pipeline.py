@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import structlog
+import yaml
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
@@ -2640,7 +2641,9 @@ class AutoPipeline:
 
             if attempt < max_attempts:
                 current_seed = normalize_execution_acceptance(
-                    _seed_with_seed_qa_feedback(current_seed, qa_result, attempt=attempt)
+                    await self._repair_seed_after_qa(
+                        state, current_seed, qa_result, attempt=attempt
+                    )
                 )
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
@@ -2689,6 +2692,70 @@ class AutoPipeline:
             )
 
         return None, current_seed, current_review
+
+    async def _repair_seed_after_qa(
+        self,
+        state: AutoPipelineState,
+        seed: Seed,
+        qa_result: EvaluateResult,
+        *,
+        attempt: int,
+    ) -> Seed:
+        """Repair a Seed that failed the QA gate before the next re-judge.
+
+        When a ``lateral_thinker`` is wired, ask a lateral persona to turn the
+        QA differences/suggestions into one *concrete decision* and fold that
+        decision into the Seed — this resolves substance blockers (e.g. "no
+        binding contract chosen; a section is missing") that the mechanical
+        feedback echo cannot, because the echo only restates the gap. Falls
+        back to the deterministic :func:`_seed_with_seed_qa_feedback` when no
+        lateral handle is wired, the persona chain is exhausted, or the lateral
+        attempt fails (timeout / transient / plugin-delegation), so prior
+        behaviour and the ``seed_qa`` → REVIEW resume contract are preserved.
+        """
+        if self.lateral_thinker is None:
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+
+        already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
+        persona = select_persona_for_qa_failure(
+            qa_result.differences,
+            qa_result.suggestions,
+            already_tried_personas=already_tried,
+        )
+        if persona is None:
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+
+        seed_yaml = yaml.dump(
+            seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
+        try:
+            lateral_result = await asyncio.wait_for(
+                self.lateral_thinker(
+                    persona=persona,
+                    qa_differences=qa_result.differences,
+                    qa_suggestions=qa_result.suggestions,
+                    run_artifact=seed_yaml,
+                ),
+                timeout=self._deadline_capped_timeout(
+                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
+                ),
+            )
+        except Exception:  # noqa: BLE001 — lateral is best-effort; degrade gracefully
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+
+        if lateral_result.error or not lateral_result.text.strip():
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+
+        state.last_lateral_persona = lateral_result.persona or persona.value
+        state.last_lateral_approach_summary = lateral_result.approach_summary
+        state.last_lateral_text = lateral_result.text
+        if persona.value not in state.personas_invoked:
+            state.personas_invoked.append(persona.value)
+        state.mark_progress(
+            f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
+            tool_name="seed_qa",
+        )
+        return _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=attempt)
 
     def _seed_review_gate_blocker(
         self, state: AutoPipelineState, review: SeedReview | None
@@ -4464,6 +4531,39 @@ def _seed_with_recovery_constraint(seed: Seed, plan: AutoRecoveryPlan) -> Seed:
         f"relaxing the goal or acceptance criteria: {instruction}"
     )
     return seed.model_copy(update={"constraints": (*seed.constraints, constraint)})
+
+
+def _seed_with_seed_qa_lateral_feedback(
+    seed: Seed,
+    lateral_result: LateralResult,
+    *,
+    attempt: int,
+) -> Seed:
+    """Return a Seed revised with a lateral persona's concrete QA resolution.
+
+    Unlike :func:`_seed_with_seed_qa_feedback` (which echoes the QA differences
+    back verbatim), this folds the lateral persona's *decision* into the Seed so
+    the re-judged Seed carries an actionable resolution of the gap (e.g. a
+    chosen binding contract) rather than a restatement of the gap. The text is
+    length-bounded so an overlong persona dump cannot bloat the Seed.
+    """
+    decision = lateral_result.text.strip()
+    summary = (lateral_result.approach_summary or "").strip()
+    prefix = f"[seed qa lateral repair attempt {attempt}] "
+    body = f"{summary}: {decision}" if summary else decision
+    constraint = (prefix + body)[:2000]
+    return seed.model_copy(
+        update={
+            "constraints": tuple(dict.fromkeys((*seed.constraints, constraint))),
+            "metadata": seed.metadata.model_copy(
+                update={
+                    "seed_id": f"seed_{uuid4().hex[:12]}",
+                    "created_at": datetime.now(UTC),
+                    "parent_seed_id": seed.metadata.seed_id,
+                }
+            ),
+        }
+    )
 
 
 def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attempt: int) -> Seed:

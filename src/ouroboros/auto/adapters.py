@@ -32,6 +32,7 @@ from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.runtime_evidence import HeadlessRunProbe, RuntimeEvidence
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.resilience.lateral import ThinkingPersona
 
 _SAFE_SEED_ID_FILENAME_CHARS = frozenset(
@@ -804,6 +805,13 @@ class HandlerSeedQAEvaluator:
             allow_unicode=True,
             sort_keys=False,
         )
+        # The Seed QA gate honestly evaluates ambiguity — it must NOT be hidden
+        # from the judge. The correct fix for a high-ambiguity Seed is to drive
+        # the interview's ambiguity DOWN to the threshold (concrete answers via
+        # the stagnation→lateral convergence path), not to tell the judge to
+        # ignore the metric. A Seed that still reports a high
+        # ``metadata.ambiguity_score`` is genuinely under-specified, so blocking
+        # here is the honest outcome.
         quality_bar = (
             "The Seed must be ready for autonomous execution before run starts. "
             "It must preserve the interview/ledger intent, have ambiguity_score <= 0.20, "
@@ -1266,3 +1274,77 @@ def _artifact_text(value: object) -> str | None:
     false-pass — the bug fixed by RFC #809 Phase 2.1.
     """
     return value if isinstance(value, str) else None
+
+
+class LLMAnswerRefiner:
+    """Turn a generic deterministic auto-answer into a concrete, AI-written one.
+
+    Wraps an :class:`LLMAdapter` (created from the configured internal-LLM
+    backend — the same backend that scores interview ambiguity, so the answer
+    and the scorer are coherent). Given the goal, the interview question, the
+    target Seed section, and the deterministic answerer's generic placeholder, it
+    asks the model for ONE concrete, committed, testable answer for that section.
+
+    The deterministic ``AutoAnswerer`` still owns all routing and safety; this
+    only upgrades the *text* of already-safe generic answers, which is what
+    drives interview ambiguity down round-over-round. Returns ``None`` on any
+    provider failure so the driver keeps the deterministic answer.
+    """
+
+    _SYSTEM = (
+        "You answer Socratic interview questions on the user's behalf to specify "
+        "a software task precisely enough for autonomous execution. Reply with ONE "
+        "concrete, committed, testable decision for the named section: specific "
+        "values, exact commands/flags, a small sample input and its exact expected "
+        "output, and explicit error/stderr/exit-code behavior where relevant. No "
+        "options, no clarifying questions, no hedging, no preamble. 1-4 sentences."
+    )
+
+    def __init__(self, llm_adapter: LLMAdapter, *, model: str | None = None) -> None:
+        self.llm_adapter = llm_adapter
+        self.model = model
+
+    async def __call__(
+        self, goal: str, question: str, section: str, generic_text: str
+    ) -> str | None:
+        prompt = (
+            f"Goal: {goal}\n\n"
+            f"Seed section to specify: {section}\n\n"
+            f"Interview question: {question}\n\n"
+            f"A generic placeholder answer was: {generic_text}\n\n"
+            f"Replace it with one concrete, committed answer for the '{section}' "
+            "section that a developer or test could execute against verbatim."
+        )
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=self._SYSTEM),
+            Message(role=MessageRole.USER, content=prompt),
+        ]
+        config = CompletionConfig(
+            model=self.model or "",
+            role="clarification",
+            temperature=0.2,
+            max_tokens=400,
+        )
+        try:
+            result = await self.llm_adapter.complete(messages, config)
+        except Exception:  # noqa: BLE001 - defensive; complete() should return a Result
+            return None
+        if result.is_err:
+            return None
+        content = (result.value.content or "").strip()
+        return content or None
+
+
+def build_answer_refiner() -> LLMAnswerRefiner | None:
+    """Best-effort AI answer refiner from the configured interview LLM backend.
+
+    Returns ``None`` (deterministic-only answering) if the provider/config is
+    unavailable so auto never fails to start just because the refiner could not
+    be constructed.
+    """
+    try:
+        from ouroboros.providers import create_llm_adapter
+
+        return LLMAnswerRefiner(create_llm_adapter(use_case="interview"))
+    except Exception:  # noqa: BLE001 - refiner is optional; never block auto on it
+        return None
