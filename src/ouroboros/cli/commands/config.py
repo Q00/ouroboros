@@ -466,6 +466,10 @@ def backend(
         from ouroboros.config import get_antigravity_cli_path
 
         cli_path = get_antigravity_cli_path()
+    elif new_backend == "grok":
+        from ouroboros.config import get_grok_cli_path
+
+        cli_path = get_grok_cli_path()
     if not cli_path:
         cli_path = shutil.which(cli_name)
     if not cli_path:
@@ -510,6 +514,7 @@ def backend(
         _setup_gemini,
         _setup_gjc,
         _setup_goose,
+        _setup_grok,
         _setup_hermes,
         _setup_pi,
     )
@@ -543,6 +548,8 @@ def backend(
             _setup_pi(cli_path)
         elif new_backend == "antigravity":
             _setup_antigravity(cli_path)
+        elif new_backend == "grok":
+            _setup_grok(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet

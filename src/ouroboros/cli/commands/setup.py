@@ -255,6 +255,15 @@ def _detect_runtimes() -> dict[str, str | None]:
         antigravity_path = None
     runtimes["antigravity"] = antigravity_path or shutil.which("agy")
 
+    # Grok Build (grok): explicit-path config first, then PATH.
+    try:
+        from ouroboros.config import get_grok_cli_path
+
+        grok_path = get_grok_cli_path()
+    except Exception:
+        grok_path = None
+    runtimes["grok"] = grok_path or shutil.which("grok")
+
     return runtimes
 
 
@@ -2167,6 +2176,11 @@ def _setup_antigravity(antigravity_path: str) -> None:
     _setup_runtime_only_backend("antigravity", antigravity_path, "antigravity_cli_path")
 
 
+def _setup_grok(grok_path: str) -> None:
+    """Configure Ouroboros for the Grok Build CLI (``grok``) runtime."""
+    _setup_runtime_only_backend("grok", grok_path, "grok_cli_path")
+
+
 def _setup_pi(pi_path: str) -> None:
     """Configure Ouroboros for the Pi CLI runtime.
 
@@ -3236,6 +3250,16 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_antigravity(antigravity_path)
+    elif selected in ("grok", "grok_cli", "grok_build"):
+        grok_path = available.get("grok")
+        if not grok_path:
+            print_error(
+                "Grok Build CLI (grok) not found.\n"
+                "Install it (curl -fsSL https://x.ai/cli/install.sh | bash), set "
+                "OUROBOROS_GROK_CLI_PATH, or configure orchestrator.grok_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_grok(grok_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

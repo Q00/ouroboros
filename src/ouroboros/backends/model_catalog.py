@@ -21,6 +21,7 @@ because ``opencode models`` has been verified; other backends degrade to
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
@@ -36,7 +37,7 @@ from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_
 # than a Claude model id. Mirrors the loader's sentinel frozensets
 # (_CODEX_LLM_BACKENDS et al.); the mirror is locked by a unit test.
 _SENTINEL_MODEL_BACKENDS = frozenset(
-    {"codex", "opencode", "kiro", "copilot", "hermes", "pi", "gjc", "antigravity"}
+    {"codex", "opencode", "kiro", "copilot", "hermes", "pi", "gjc", "antigravity", "grok"}
 )
 
 # The sentinel the loader maps Claude-incapable backends to.
@@ -78,11 +79,63 @@ class BackendModelCatalog:
 _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
     "claude": ("claude-haiku-4-5-20251001",),
     "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    # Grok Build model slugs, after the CLI-owned "default" sentinel. Verified
+    # against a live `grok models` listing (grok-build, grok-composer-2.5-fast).
+    "grok": ("grok-build", "grok-composer-2.5-fast"),
 }
 
-# Verified model-listing subcommands (one model id per line on stdout).
+# Verified model-listing subcommands. The resolved backend binary is invoked
+# with these args and the stdout is parsed by the backend's entry in
+# `_LIST_PARSERS` (default: one model id per line).
 _LIST_ARGS: dict[str, tuple[str, ...]] = {
     "opencode": ("models",),
+    "grok": ("models",),
+}
+
+
+def _parse_models_one_per_line(stdout: str) -> tuple[str, ...]:
+    """Default listing parser: one model id per non-blank line."""
+    return tuple(line.strip() for line in stdout.splitlines() if line.strip())
+
+
+def _parse_grok_models(stdout: str) -> tuple[str, ...]:
+    """Parse ``grok models`` output into callable model ids.
+
+    Grok prints auth / default-model headers and a bulleted "Available models"
+    list rather than one id per line, e.g.::
+
+        You are logged in with grok.com.
+
+        Default model: grok-composer-2.5-fast
+
+        Available models:
+          - grok-build
+          * grok-composer-2.5-fast (default)
+
+    Extract the bulleted ids (dropping the ``-``/``*`` bullet and any trailing
+    ``(default)`` marker), preserving order and de-duplicating, so the catalog
+    reflects exactly what the user's Grok CLI can call.
+    """
+    models: list[str] = []
+    in_list = False
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith("available models"):
+            in_list = True
+            continue
+        if in_list and stripped[0] in "-*":
+            parts = stripped[1:].strip().split()
+            if parts:
+                models.append(parts[0])
+    return tuple(dict.fromkeys(models))
+
+
+# Backend-specific stdout parsers for `refresh_models`. Backends absent here use
+# `_parse_models_one_per_line`.
+_LIST_PARSERS: dict[str, Callable[[str], tuple[str, ...]]] = {
+    "grok": _parse_grok_models,
 }
 
 
@@ -166,7 +219,8 @@ def refresh_models(
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    models = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+    parser = _LIST_PARSERS.get(catalog.backend, _parse_models_one_per_line)
+    models = parser(result.stdout)
     return models or None
 
 
@@ -184,6 +238,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     "pi": "get_pi_cli_path",
     "gjc": "get_gjc_cli_path",
     "antigravity": "get_antigravity_cli_path",
+    "grok": "get_grok_cli_path",
     "ourocode": "get_ourocode_cli_path",
 }
 

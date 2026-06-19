@@ -3073,6 +3073,63 @@ class TestAntigravitySetup:
         assert data["orchestrator"]["runtime_backend"] == "antigravity"
 
 
+class TestGrokSetup:
+    """Tests for the runtime-only Grok Build (grok) setup path."""
+
+    def test_setup_grok_writes_runtime_only_config(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_grok("/opt/bin/grok")
+
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "grok"
+        assert data["orchestrator"]["grok_cli_path"] == "/opt/bin/grok"
+        assert data.get("llm", {}).get("backend") != "grok"
+        from ouroboros.config.models import OuroborosConfig
+
+        OuroborosConfig.model_validate(data)
+
+    def test_detect_runtimes_includes_grok(self) -> None:
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda name: "/usr/bin/grok" if name == "grok" else None,
+            ),
+            patch("ouroboros.config.get_grok_cli_path", return_value=None),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["grok"] == "/usr/bin/grok"
+
+    def test_setup_runtime_grok_dispatches_not_unsupported(self, tmp_path: Path) -> None:
+        """`setup --runtime grok --non-interactive` configures the backend rather
+        than failing with 'Unsupported runtime' (the prior contract gap)."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={"grok": "/opt/bin/grok"},
+            ),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "grok", "--non-interactive"])
+
+        assert "Unsupported runtime" not in result.output
+        assert result.exit_code == 0, result.output
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "grok"
+
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 

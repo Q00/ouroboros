@@ -78,6 +78,42 @@ def test_opencode_ships_verified_list_args() -> None:
     assert mc.get_model_catalog("opencode").list_args == ("models",)
 
 
+def test_grok_ships_verified_list_args() -> None:
+    assert mc.get_model_catalog("grok").list_args == ("models",)
+
+
+def test_grok_static_catalog_lists_known_models_after_sentinel() -> None:
+    choices = mc.model_choices("grok")
+    assert choices[0] == mc.DEFAULT_MODEL_SENTINEL
+    assert "grok-build" in choices
+    assert "grok-composer-2.5-fast" in choices
+
+
+def test_grok_models_parser_extracts_bulleted_ids() -> None:
+    raw = (
+        "You are logged in with grok.com.\n\n"
+        "Default model: grok-composer-2.5-fast\n\n"
+        "Available models:\n"
+        "  - grok-build\n"
+        "  * grok-composer-2.5-fast (default)\n"
+    )
+    assert mc._parse_grok_models(raw) == ("grok-build", "grok-composer-2.5-fast")
+
+
+def test_grok_models_parser_ignores_headers_and_blanks() -> None:
+    assert mc._parse_grok_models("You are logged in.\nDefault model: x\n") == ()
+
+
+def test_refresh_models_grok_uses_custom_parser(monkeypatch) -> None:
+    monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: "/bin/grok")
+
+    class _Result:
+        stdout = "Available models:\n  - grok-build\n  * grok-composer-2.5-fast (default)\n"
+
+    monkeypatch.setattr(mc.subprocess, "run", lambda *_a, **_k: _Result())
+    assert mc.refresh_models("grok") == ("grok-build", "grok-composer-2.5-fast")
+
+
 def test_refresh_models_uninstalled_cli_degrades_to_none(monkeypatch) -> None:
     monkeypatch.setattr(mc, "detect_backend_cli", lambda _name: None)
     assert mc.refresh_models("opencode") is None

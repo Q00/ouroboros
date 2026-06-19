@@ -105,6 +105,7 @@ _BACKEND_ALIASES = {
     "copilot_cli": "copilot",
     "opencode_cli": "opencode",
     "antigravity_cli": "antigravity",
+    "grok_cli": "grok",
 }
 
 # Backends with Ouroboros-known governance. Only the native Claude adapter is

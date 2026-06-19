@@ -44,6 +44,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "pi",
         "gjc",
         "antigravity",
+        "grok",
     }
 
 

@@ -346,6 +346,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # Grok Build (xAI) — the ``grok`` binary. Runtime-only: ``grok -p
+        # --output-format streaming-json`` drives the agentic orchestrator
+        # runtime. Auth is subscription OAuth (``grok login`` with SuperGrok /
+        # X Premium+) or ``XAI_API_KEY``. Grok owns its own model catalog
+        # (``grok models``), so it is a sentinel-model backend.
+        name="grok",
+        aliases=("grok_cli", "grok_build"),
+        supports_runtime=True,
+        supports_llm=False,
+        supports_interview_driver=False,
+        switchable_runtime=True,
+        cli_name="grok",
+        cli_config_key="grok_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         # ourocode is an LLM-completion backend only: it streams a single Claude
         # turn over ACP (`ourocode --acp`, its OAuth `:claude_api`) with no tool
         # use, so it backs completions (interview/seed/qa/evaluate) but NOT the
