@@ -215,6 +215,13 @@ class LevelCoordinator:
         self._task_cwd = task_cwd
         self._level_runtime_handles: dict[tuple[str, int], RuntimeHandle] = {}
         self._announced_param_degradations: set[tuple[str, str]] = set()
+        # Effort-first investment dial (RFC #1405): the coordinator's review pass
+        # is a top-level unit (never a decomposed child), so it runs at the base
+        # level on runtimes that enforce it. None ⇒ dormant. No effort_routed
+        # event is emitted here because a review is not an acceptance criterion.
+        from ouroboros.config import get_agent_reasoning_effort
+
+        self._reasoning_effort = get_agent_reasoning_effort()
 
     def _build_level_runtime_handle(
         self,
@@ -392,11 +399,19 @@ class LevelCoordinator:
                 announced=self._announced_param_degradations,
                 log_event="coordinator.param_degraded",
             )
+            from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+            _, effort_kwargs = resolve_execute_effort(
+                self._adapter,
+                base_effort=self._reasoning_effort,
+                is_decomposed_child=False,
+            )
             async for message in self._adapter.execute_task(
                 prompt=prompt,
                 tools=tools,
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
                 resume_handle=runtime_handle,
+                **effort_kwargs,
             ):
                 messages.append(message)
                 if message.resume_handle is not None:

@@ -495,6 +495,12 @@ class OrchestratorRunner:
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        # Effort-first investment dial (RFC #1405): base level for the runner's own
+        # direct execution paths (single-AC / resume), which call execute_task
+        # without going through ParallelACExecutor. Resolved once; None ⇒ dormant.
+        from ouroboros.config import get_agent_reasoning_effort
+
+        self._reasoning_effort = get_agent_reasoning_effort()
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
@@ -514,6 +520,73 @@ class OrchestratorRunner:
             console=self._console,
             log_event="orchestrator.runner.param_degraded",
         )
+
+    async def _route_call_effort(
+        self,
+        *,
+        execution_id: str | None,
+        session_id: str | None,
+    ) -> dict[str, str]:
+        """Lay the runner's own execute_task paths on the effort contract.
+
+        These direct paths (single-AC execution, resume) do not go through
+        ParallelACExecutor, so without this they would silently skip effort
+        routing. Returns the execute_task kwargs (empty unless the runtime
+        enforces effort).
+
+        It also records an ``execution.ac.effort_routed`` event for
+        OBSERVABILITY — so a direct run's effort routing is visible in the event
+        stream exactly like the parallel path's. This event is deliberately NOT a
+        frugality-proof contribution: a direct run is a single top-level unit
+        (``is_decomposed_child=False``) with no per-AC decomposition, so the
+        payload carries no ``ac_id``. The deterministic proof excludes it on both
+        counts — ``assemble_triads`` skips ``ac_id``-less events, and
+        ``counts_in_proof`` only admits decomposed children — because the
+        hypothesis is about children running at lower effort, which a top-level
+        direct call has nothing to say about. ``call_site="runner"`` marks the
+        origin so the two emission paths are distinguishable in the stream.
+        """
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            self._adapter,
+            base_effort=self._reasoning_effort,
+            is_decomposed_child=False,
+        )
+        if decision.level is not None:
+            from ouroboros.events.base import BaseEvent
+
+            # Observability-only: this event must never make runtime dispatch/resume
+            # depend on event-store health. _route_call_effort runs BEFORE
+            # execute_task on the direct and resume paths, so a raw append would turn
+            # a degraded/locked store into a dispatch failure. Degrade to a warning
+            # instead — matching how the parallel executor treats the same telemetry.
+            try:
+                await self._event_store.append(
+                    BaseEvent(
+                        type="execution.ac.effort_routed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id or "",
+                        data={
+                            "execution_id": execution_id,
+                            "session_id": session_id,
+                            "is_decomposed_child": False,
+                            "effort_level": decision.level,
+                            "effort_mode": decision.mode,
+                            "base_reasoning_effort": self._reasoning_effort,
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "call_site": "runner",
+                        },
+                    )
+                )
+            except Exception as exc:
+                log.warning(
+                    "orchestrator.runner.effort_routed.persist_failed",
+                    error=str(exc),
+                    effort_level=decision.level,
+                    effort_mode=decision.mode,
+                )
+        return kwargs
 
     def _plan_parallel_workers(self) -> int:
         """Return the effective fan-out worker count for the connected backend.
@@ -2283,12 +2356,17 @@ class OrchestratorRunner:
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                effort_kwargs = await self._route_call_effort(
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=prompt,
                         tools=merged_tools,
                         system_prompt=system_prompt,
                         resume_handle=active_runtime_handle,
+                        **effort_kwargs,
                     )
                 ) as message_stream:
                     async for message in message_stream:
@@ -2826,9 +2904,9 @@ class OrchestratorRunner:
                 effective_workers=effective_workers,
             )
 
-        # Execute in parallel
-        from ouroboros.config import get_agent_reasoning_effort
-
+        # Execute in parallel. Reuse the base effort resolved once in __init__
+        # (self._reasoning_effort) so a single runner instance has one consistent
+        # effort source across its direct paths and the parallel executor.
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
@@ -2841,7 +2919,7 @@ class OrchestratorRunner:
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
-            reasoning_effort=get_agent_reasoning_effort(),
+            reasoning_effort=self._reasoning_effort,
         )
 
         # Check for cancellation before starting parallel execution
@@ -3210,12 +3288,17 @@ Note: This is a resumed session. Please continue from where execution was interr
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                effort_kwargs = await self._route_call_effort(
+                    execution_id=None,
+                    session_id=session_id,
+                )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=resume_prompt,
                         tools=merged_tools,
                         system_prompt=system_prompt,
                         resume_handle=runtime_handle,
+                        **effort_kwargs,
                     )
                 ) as message_stream:
                     async for message in message_stream:

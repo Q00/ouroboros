@@ -343,6 +343,99 @@ class TestOrchestratorRunner:
         assert "opencode" in notice
 
     @pytest.mark.asyncio
+    async def test_route_call_effort_emits_observability_only_event(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """The runner's direct-path effort event is observability, not proof input.
+
+        It must carry NO ``ac_id`` (a direct run is a single top-level unit with no
+        per-AC decomposition) and be marked ``is_decomposed_child=False`` with
+        ``call_site="runner"`` — so the deterministic frugality proof excludes it by
+        design (both ``assemble_triads`` ac_id-skip and ``counts_in_proof`` only
+        admitting decomposed children) rather than mis-joining a whole-seed run.
+        """
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner._reasoning_effort = "high"  # NATIVE runtime enforces it
+
+        kwargs = await runner._route_call_effort(execution_id="exec_1", session_id="sess_1")
+
+        # Enforcing runtime is handed the level for execute_task.
+        assert kwargs == {"reasoning_effort": "high"}
+        # Exactly one effort_routed event was emitted, with the proof-excluded shape.
+        appended = [c.args[0] for c in mock_event_store.append.call_args_list]
+        routed = [e for e in appended if e.type == "execution.ac.effort_routed"]
+        assert len(routed) == 1
+        data = routed[0].data
+        assert "ac_id" not in data  # no per-AC identity → proof skips it
+        assert data["is_decomposed_child"] is False
+        assert data["call_site"] == "runner"
+        assert data["effort_level"] == "high"
+        assert data["effort_mode"] == "enforced"
+
+    @pytest.mark.asyncio
+    async def test_route_call_effort_persist_failure_does_not_abort(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """A degraded event store must not abort dispatch/resume.
+
+        _route_call_effort runs before execute_task on the direct and resume paths,
+        and the effort event is observability-only — so a failing append degrades to
+        a warning and still returns the execute_task kwargs, never propagating.
+        """
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+        )
+        mock_event_store.append.side_effect = RuntimeError("event store unavailable")
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner._reasoning_effort = "high"
+
+        # Must not raise even though append fails; kwargs still come back for dispatch.
+        kwargs = await runner._route_call_effort(execution_id="exec_1", session_id="sess_1")
+
+        assert kwargs == {"reasoning_effort": "high"}
+        assert mock_event_store.append.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_route_call_effort_advised_runtime_emits_no_kwarg(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """An advised (non-enforcing) runtime records the event but gets no kwarg."""
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            # reasoning_effort_support defaults to IGNORED → advised
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner._reasoning_effort = "high"
+
+        kwargs = await runner._route_call_effort(execution_id="exec_1", session_id="sess_1")
+
+        assert kwargs == {}  # never hand the kwarg to a runtime that ignores it
+        appended = [c.args[0] for c in mock_event_store.append.call_args_list]
+        routed = [e for e in appended if e.type == "execution.ac.effort_routed"]
+        assert len(routed) == 1
+        assert routed[0].data["effort_mode"] == "advised"
+
+    @pytest.mark.asyncio
     async def test_execute_seed_success(
         self,
         runner: OrchestratorRunner,
