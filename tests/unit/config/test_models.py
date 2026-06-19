@@ -601,6 +601,22 @@ class TestOrchestratorConfig:
         assert config.gjc_cli_path is not None
         assert "~" not in config.gjc_cli_path
 
+    def test_orchestrator_config_accepts_antigravity_backend(self) -> None:
+        """Antigravity is a valid runtime-only backend."""
+        config = OrchestratorConfig(runtime_backend="antigravity")
+        assert config.runtime_backend == "antigravity"
+        assert config.antigravity_cli_path is None
+
+    def test_orchestrator_config_expands_antigravity_cli_path(self) -> None:
+        """Expands ~ in antigravity_cli_path."""
+        config = OrchestratorConfig(
+            runtime_backend="antigravity",
+            antigravity_cli_path="~/bin/agy",
+        )
+        assert config.runtime_backend == "antigravity"
+        assert config.antigravity_cli_path is not None
+        assert "~" not in config.antigravity_cli_path
+
 
 class TestGetDefaultConfig:
     """Test get_default_config helper function."""

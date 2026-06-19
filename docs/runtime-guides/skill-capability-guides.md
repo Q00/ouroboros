@@ -40,6 +40,7 @@ its rendered guide or a documented fallback.
 | Kiro | `~/.kiro/steering/ouroboros-skill-capability-guide.md` | Installed by Kiro setup as a global steering file. |
 | Copilot | `~/.copilot/ouroboros-instructions/AGENTS.md` | Installed by Copilot setup; Ouroboros Copilot runtime also injects that directory through `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. |
 | GJC | `<agent-dir>/rules/ouroboros-skill-capability-guide.md` | Installed by GJC setup as a setup-owned, renderer-generated capability artifact. |
+| Antigravity | No setup-owned capability artifact yet | Known gap: Antigravity (the `agy` binary, Google's Gemini CLI successor) can be selected as a runtime, but setup does not yet install a durable agy-owned instruction artifact. Use `render_backend_skill_capability_guide("antigravity")` when building Antigravity prompts until a stable artifact surface exists. |
 | Goose | No setup-owned capability artifact yet | Known gap: setup can select Goose as a runtime, but no durable Goose instruction surface or Goose-specific `SkillExecutionCapability` entries are registered yet. Keep skill requirements runtime-neutral and rely on runtime-local operator guidance until a Goose artifact installer exists. |
 | Pi | No setup-owned capability artifact yet | Known gap: Pi has generic rendered capability guidance in the registry, but setup does not yet install it into a durable Pi-owned instruction artifact. Use `render_backend_skill_capability_guide("pi")` when building Pi prompts until a stable artifact surface exists. |
 

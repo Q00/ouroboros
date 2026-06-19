@@ -462,6 +462,10 @@ def backend(
         from ouroboros.config import get_pi_cli_path
 
         cli_path = get_pi_cli_path()
+    elif new_backend == "antigravity":
+        from ouroboros.config import get_antigravity_cli_path
+
+        cli_path = get_antigravity_cli_path()
     if not cli_path:
         cli_path = shutil.which(cli_name)
     if not cli_path:
@@ -500,6 +504,7 @@ def backend(
     # print_error to set a flag.
     from ouroboros.cli.commands import setup as setup_mod
     from ouroboros.cli.commands.setup import (
+        _setup_antigravity,
         _setup_claude,
         _setup_codex,
         _setup_gemini,
@@ -536,6 +541,8 @@ def backend(
             _setup_goose(cli_path)
         elif new_backend == "pi":
             _setup_pi(cli_path)
+        elif new_backend == "antigravity":
+            _setup_antigravity(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet

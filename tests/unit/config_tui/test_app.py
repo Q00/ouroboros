@@ -450,6 +450,34 @@ async def test_save_summary_shows_diff_and_reconnect_hint(app_env, monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_runtime_only_agent_is_not_synced_to_llm_backend(app_env, monkeypatch) -> None:
+    """Selecting a runtime-only backend (antigravity) must NOT write llm.backend.
+
+    LLMConfig.backend rejects antigravity/grok, so syncing the hidden legacy
+    llm.backend to a runtime-only agent would persist a config that fails
+    validation on next load.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.installed_backends",
+        lambda: {"claude": "/bin/claude", "codex": "/bin/codex", "antigravity": "/bin/agy"},
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#global-runtime", Select).value = "antigravity"
+        await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    # The runtime backend is persisted, but the runtime-only agent is never
+    # synced into the completion-only llm.backend field.
+    assert captured.get("orchestrator.runtime_backend") == "antigravity"
+    assert "llm.backend" not in captured
+
+
+@pytest.mark.asyncio
 async def test_save_uses_stage_agent_for_default_sentinel_validation(monkeypatch) -> None:
     raw = {
         "orchestrator": {"runtime_backend": "claude"},

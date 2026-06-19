@@ -118,6 +118,15 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
+    if resolved_backend == "antigravity":
+        from ouroboros.config import get_antigravity_cli_path
+        from ouroboros.orchestrator.antigravity_cli_runtime import AntigravityCLIRuntime
+
+        return AntigravityCLIRuntime(
+            cli_path=cli_path or get_antigravity_cli_path(),
+            **runtime_kwargs,
+        )
+
     if resolved_backend == "kiro":
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 

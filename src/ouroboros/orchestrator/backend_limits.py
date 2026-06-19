@@ -104,6 +104,7 @@ _BACKEND_ALIASES = {
     "gemini_cli": "gemini",
     "copilot_cli": "copilot",
     "opencode_cli": "opencode",
+    "antigravity_cli": "antigravity",
 }
 
 # Backends with Ouroboros-known governance. Only the native Claude adapter is

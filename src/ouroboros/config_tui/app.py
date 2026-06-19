@@ -27,7 +27,11 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from ouroboros.backends import resolve_backend_alias, runtime_backend_choices
+from ouroboros.backends import (
+    get_backend_capability,
+    resolve_backend_alias,
+    runtime_backend_choices,
+)
 from ouroboros.backends.model_catalog import (
     DEFAULT_MODEL_SENTINEL,
     configured_default_model,
@@ -720,7 +724,13 @@ class SettingsApp(App[None]):
         )
         if routing_changed:
             new_backend = self._last_agent_backend_selection or self._selected_default_runtime()
-            if new_backend:
+            # Only sync the legacy llm.backend (a completion backend) when the
+            # selected agent is itself completion-capable. Runtime-only backends
+            # (antigravity / grok, supports_llm=False) are not valid llm.backend
+            # values, so leave the existing completion backend untouched rather
+            # than persisting a config that fails validation on next load.
+            capability = get_backend_capability(new_backend) if new_backend else None
+            if new_backend and capability is not None and capability.supports_llm:
                 record_backend(GLOBAL_LLM_BACKEND_FIELD.key, new_backend)
 
         return changes

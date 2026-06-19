@@ -246,6 +246,15 @@ def _detect_runtimes() -> dict[str, str | None]:
         "gjc"
     )
 
+    # Antigravity (agy): explicit-path config first, then PATH.
+    try:
+        from ouroboros.config import get_antigravity_cli_path
+
+        antigravity_path = get_antigravity_cli_path()
+    except Exception:
+        antigravity_path = None
+    runtimes["antigravity"] = antigravity_path or shutil.which("agy")
+
     return runtimes
 
 
@@ -2112,6 +2121,52 @@ def _setup_gemini(gemini_path: str) -> None:
     _install_runtime_instruction_artifact("gemini")
 
 
+def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str) -> None:
+    """Configure a runtime-only backend (Antigravity / Grok).
+
+    These backends drive the agentic orchestrator runtime but have no
+    LLM-completion adapter (``supports_llm=False``), so this intentionally sets
+    ONLY ``orchestrator.runtime_backend`` + the CLI path and leaves
+    ``llm.backend`` untouched (it is a completion-only contract that rejects
+    these backends). No setup-owned instruction artifact is installed yet — a
+    documented gap in ``docs/runtime-guides/skill-capability-guides.md``.
+    """
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_error(
+            f"~/.ouroboros/config.yaml top-level is not a mapping — aborting {backend} setup."
+        )
+        return
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = backend
+    orch[cli_config_key] = cli_path
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured {backend} runtime (CLI: {cli_path})")
+    print_info(f"Config saved to: {config_path}")
+
+
+def _setup_antigravity(antigravity_path: str) -> None:
+    """Configure Ouroboros for the Antigravity CLI (``agy``) runtime."""
+    _setup_runtime_only_backend("antigravity", antigravity_path, "antigravity_cli_path")
+
+
 def _setup_pi(pi_path: str) -> None:
     """Configure Ouroboros for the Pi CLI runtime.
 
@@ -3171,6 +3226,16 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_goose(goose_path)
+    elif selected in ("antigravity", "agy"):
+        antigravity_path = available.get("antigravity")
+        if not antigravity_path:
+            print_error(
+                "Antigravity CLI (agy) not found.\n"
+                "Install it, set OUROBOROS_ANTIGRAVITY_CLI_PATH, or configure "
+                "orchestrator.antigravity_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_antigravity(antigravity_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

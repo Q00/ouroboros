@@ -3012,6 +3012,67 @@ class TestGeminiSetup:
         )
 
 
+class TestAntigravitySetup:
+    """Tests for the runtime-only Antigravity (agy) setup path."""
+
+    def test_setup_antigravity_writes_runtime_only_config(self, tmp_path: Path) -> None:
+        """Setup records the runtime + CLI path but leaves llm.backend alone
+        (antigravity is runtime-only), and the written config validates."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_antigravity("/opt/bin/agy")
+
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "antigravity"
+        assert data["orchestrator"]["antigravity_cli_path"] == "/opt/bin/agy"
+        # Runtime-only: the completion-only llm.backend is never set to it.
+        assert data.get("llm", {}).get("backend") != "antigravity"
+        # The persisted config must round-trip through schema validation.
+        from ouroboros.config.models import OuroborosConfig
+
+        OuroborosConfig.model_validate(data)
+
+    def test_detect_runtimes_includes_antigravity(self) -> None:
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda name: "/usr/bin/agy" if name == "agy" else None,
+            ),
+            patch("ouroboros.config.get_antigravity_cli_path", return_value=None),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["antigravity"] == "/usr/bin/agy"
+
+    def test_setup_runtime_antigravity_dispatches_not_unsupported(self, tmp_path: Path) -> None:
+        """`setup --runtime antigravity --non-interactive` configures the backend
+        rather than failing with 'Unsupported runtime' (the prior contract gap)."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={"antigravity": "/opt/bin/agy"},
+            ),
+        ):
+            result = runner.invoke(setup_cmd.app, ["--runtime", "antigravity", "--non-interactive"])
+
+        assert "Unsupported runtime" not in result.output
+        assert result.exit_code == 0, result.output
+        data = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert data["orchestrator"]["runtime_backend"] == "antigravity"
+
+
 class TestKiroSetup:
     """Tests for Kiro-specific setup behavior."""
 

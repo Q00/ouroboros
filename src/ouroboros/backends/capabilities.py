@@ -328,6 +328,24 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
+        # Antigravity is Google's successor to the Gemini CLI (the ``agy``
+        # binary). Gemini CLI stops serving the Pro/Ultra/free consumer tiers
+        # on 2026-06-18 and migrates those users to Antigravity. Runtime-only:
+        # ``agy -p`` prints a plain-text response (no ``--output-format``), so
+        # it drives the agentic orchestrator runtime but does not back
+        # structured LLM completions or auto-interview answering.
+        name="antigravity",
+        aliases=("agy",),
+        supports_runtime=True,
+        supports_llm=False,
+        supports_interview_driver=False,
+        switchable_runtime=True,
+        cli_name="agy",
+        cli_config_key="antigravity_cli_path",
+        supports_tool_envelope=False,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    BackendCapability(
         # ourocode is an LLM-completion backend only: it streams a single Claude
         # turn over ACP (`ourocode --acp`, its OAuth `:claude_api`) with no tool
         # use, so it backs completions (interview/seed/qa/evaluate) but NOT the
