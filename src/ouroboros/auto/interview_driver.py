@@ -1473,23 +1473,31 @@ class AutoInterviewDriver:
         )
 
         refined_updates: list[tuple[str, LedgerEntry]] = []
-        concrete_parts: list[str] = []
+        transcript_parts: list[str] = []
+        refined_count = 0
         for (section, entry), concrete in zip(answer.ledger_updates, results, strict=True):
+            # Rebuild the transcript from the FINAL value of every section —
+            # refined where the call succeeded, original otherwise — so the text
+            # the backend acknowledges always describes the same committed content
+            # as the persisted ledger entries. A partial failure must never leave
+            # a ledger entry that is absent from the acknowledged transcript.
             if concrete:
                 refined_updates.append((section, replace(entry, value=concrete)))
-                concrete_parts.append(concrete)
+                transcript_parts.append(concrete)
+                refined_count += 1
             else:
                 refined_updates.append((section, entry))
-        if not concrete_parts:
+                transcript_parts.append(entry.value)
+        if not refined_count:
             return answer
         log.info(
             "auto.interview.answer_refined",
             auto_session_id=state.auto_session_id,
             sections=[section for section, _ in answer.ledger_updates],
-            refined_count=len(concrete_parts),
+            refined_count=refined_count,
             source=answer.source.value,
         )
-        return replace(answer, text=" ".join(concrete_parts), ledger_updates=refined_updates)
+        return replace(answer, text=" ".join(transcript_parts), ledger_updates=refined_updates)
 
     async def _maybe_concretize_on_stagnation(
         self,
