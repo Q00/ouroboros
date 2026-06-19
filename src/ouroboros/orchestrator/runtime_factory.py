@@ -168,6 +168,17 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
+    if resolved_backend == "grok":
+        from ouroboros.config import get_grok_cli_path
+        from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
+
+        return GrokCliRuntime(
+            cli_path=cli_path or get_grok_cli_path(),
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
+            **runtime_kwargs,
+        )
+
     if resolved_backend == "kiro":
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 

@@ -26,6 +26,7 @@ from ouroboros.config.loader import (
     get_dependency_analysis_model,
     get_gemini_cli_path,
     get_gjc_cli_path,
+    get_grok_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
     get_llm_backend_for_role,
@@ -587,6 +588,58 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_antigravity_cli_path() is None
+
+    def test_get_grok_cli_path_returns_executable_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Env var path is returned when it points to an executable file."""
+        fake = tmp_path / "grok"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.setenv("OUROBOROS_GROK_CLI_PATH", str(fake))
+        assert get_grok_cli_path() == str(fake)
+
+    def test_get_grok_cli_path_rejects_stale_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Stale env var that doesn't point to an executable is treated as missing."""
+        stale = tmp_path / "missing-grok"
+        monkeypatch.setenv("OUROBOROS_GROK_CLI_PATH", str(stale))
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_grok_cli_path() is None
+
+    def test_get_grok_cli_path_falls_back_to_config(self, tmp_path: Path) -> None:
+        """Config path is honored when env is absent and the file is executable."""
+        fake = tmp_path / "grok"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(grok_cli_path=str(fake))
+                ),
+            ),
+        ):
+            assert get_grok_cli_path() == str(fake)
+
+    def test_get_grok_cli_path_rejects_stale_config(self, tmp_path: Path) -> None:
+        """Stale config value that no longer points to an executable returns None."""
+        stale = tmp_path / "ghost-grok"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(grok_cli_path=str(stale))
+                ),
+            ),
+        ):
+            assert get_grok_cli_path() is None
 
     def test_get_kiro_cli_path_returns_executable_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1215,6 +1268,22 @@ class TestLLMHelperLookups:
             assert get_llm_backend_for_role("qa") == "codex"
             assert get_llm_backend_for_role("reflect") == "codex"
             assert get_llm_backend_for_stage("evaluate") == "codex"
+
+    def test_get_llm_backend_for_role_falls_back_for_grok_stage(self) -> None:
+        """Same runtime-only guard, exercised for grok (reflect stage)."""
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(
+                runtime_backend="claude",
+                runtime_profile=RuntimeProfileConfig(stages={"reflect": "grok"}),
+            ),
+            llm=LLMConfig(backend="codex"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_llm_backend_for_role("reflect") == "codex"
+            assert get_llm_backend_for_role("context_compression") == "codex"
 
     def test_get_llm_backend_for_role_preserves_explicit_override(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

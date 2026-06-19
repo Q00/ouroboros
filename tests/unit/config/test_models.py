@@ -620,6 +620,22 @@ class TestOrchestratorConfig:
         assert config.antigravity_cli_path is not None
         assert "~" not in config.antigravity_cli_path
 
+    def test_orchestrator_config_accepts_grok_backend(self) -> None:
+        """Grok is a valid runtime-only backend."""
+        config = OrchestratorConfig(runtime_backend="grok")
+        assert config.runtime_backend == "grok"
+        assert config.grok_cli_path is None
+
+    def test_orchestrator_config_expands_grok_cli_path(self) -> None:
+        """Expands ~ in grok_cli_path."""
+        config = OrchestratorConfig(
+            runtime_backend="grok",
+            grok_cli_path="~/bin/grok",
+        )
+        assert config.runtime_backend == "grok"
+        assert config.grok_cli_path is not None
+        assert "~" not in config.grok_cli_path
+
 
 class TestGetDefaultConfig:
     """Test get_default_config helper function."""

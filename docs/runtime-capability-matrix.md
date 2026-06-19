@@ -13,7 +13,7 @@ The runtime backend is selected via the `orchestrator.runtime_backend` config ke
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | gemini | kiro | copilot | pi | gjc | antigravity
+  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | gemini | kiro | copilot | pi | gjc | antigravity | grok
                             # The runtime abstraction layer also accepts custom
                             # adapters registered in runtime_factory.py
 ```
@@ -26,14 +26,15 @@ ouroboros run workflow --runtime codex seed.yaml
 
 You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` environment variable.
 
-> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, Gemini CLI, Kiro CLI, GitHub Copilot CLI, Pi CLI, GJC, and the Antigravity CLI (`agy`, Google's Gemini-CLI successor — runtime-only) are the natively shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter). For the full Antigravity contract, see [runtime-guides/antigravity.md](runtime-guides/antigravity.md).
+> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, Gemini CLI, Kiro CLI, GitHub Copilot CLI, Pi CLI, GJC, the Antigravity CLI (`agy`, Google's Gemini-CLI successor — runtime-only), and the Grok Build CLI (`grok`, xAI — runtime-only) are the natively shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter). For the full contracts, see [runtime-guides/antigravity.md](runtime-guides/antigravity.md) and [runtime-guides/grok.md](runtime-guides/grok.md).
 
 ## Capability Matrix
 
 > **Note — runtime-only backends not yet threaded as columns:** The tables below
 > predate the runtime-only backends added more recently. Their per-capability
 > contract lives in the per-runtime guide rather than as a column here:
-> Antigravity (`agy`) → [runtime-guides/antigravity.md](runtime-guides/antigravity.md).
+> Antigravity (`agy`) → [runtime-guides/antigravity.md](runtime-guides/antigravity.md);
+> Grok (`grok`) → [runtime-guides/grok.md](runtime-guides/grok.md).
 
 ### Workflow Layer (identical across runtimes)
 

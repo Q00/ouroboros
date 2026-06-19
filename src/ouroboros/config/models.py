@@ -375,6 +375,9 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "gjc_cli",
         "antigravity",
         "agy",
+        "grok",
+        "grok_cli",
+        "grok_build",
     }
 )
 
@@ -494,6 +497,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - Absolute path: /path/to/agy
             - ~ expansion: ~/.local/bin/agy
             - None: Resolve from PATH at runtime (or OUROBOROS_ANTIGRAVITY_CLI_PATH)
+        grok_cli_path: Path to the Grok Build CLI binary (``grok``). Supports:
+            - Absolute path: /path/to/grok
+            - ~ expansion: ~/.local/bin/grok
+            - None: Resolve from PATH at runtime (or OUROBOROS_GROK_CLI_PATH)
         default_max_turns: Default max turns for agent execution
         max_parallel_workers: Default maximum concurrent AC workers
         usage_limit_pause_hours: Default pause window for provider usage/quota limits
@@ -515,6 +522,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "pi",
         "gjc",
         "antigravity",
+        "grok",
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
@@ -554,6 +562,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     pi_cli_path: str | None = None
     gjc_cli_path: str | None = None
     antigravity_cli_path: str | None = None
+    grok_cli_path: str | None = None
     ourocode_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
@@ -575,6 +584,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "pi_cli_path",
         "gjc_cli_path",
         "antigravity_cli_path",
+        "grok_cli_path",
         "ourocode_cli_path",
     )
     @classmethod
