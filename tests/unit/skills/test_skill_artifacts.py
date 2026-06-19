@@ -53,6 +53,23 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
             ('"+ouroboros interview"', "ouroboros_interview"),
             ('"+ouroboros lateral"', "ouroboros_lateral_think"),
         ],
+        "evaluate": [
+            ('"+ouroboros evaluate"', "ouroboros_evaluate"),
+        ],
+        "evolve": [
+            ('"+ouroboros evolve"', "ouroboros_evolve_step"),
+            ('"+ouroboros interview"', "ouroboros_interview"),
+            ('"+ouroboros seed"', "ouroboros_generate_seed"),
+            ('"+ouroboros lateral"', "ouroboros_lateral_think"),
+        ],
+        "pm": [
+            ('"+ouroboros pm_interview"', "ouroboros_pm_interview"),
+        ],
+        "run": [
+            ('"+ouroboros execute"', "ouroboros_start_execute_seed"),
+            ('"+ouroboros execute"', "ouroboros_job_wait"),
+            ('"+ouroboros execute"', "ouroboros_job_result"),
+        ],
     }
 
     for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
