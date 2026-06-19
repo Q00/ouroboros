@@ -407,6 +407,34 @@ class SeedDraftLedger:
             for name in REQUIRED_SECTIONS
         }
 
+    def committed_decisions(
+        self, *, exclude_sections: frozenset[str] = frozenset({"goal"})
+    ) -> list[tuple[str, str, str]]:
+        """Return already-decided, active contracts as ``(section, key, value)``.
+
+        These are the concrete decisions the interview has locked in so far —
+        every entry whose authority is *active* (``CONFIRMED`` / ``DEFAULTED`` /
+        ``INFERRED``), one per ``(section, key)`` keeping the latest active
+        value, with the goal echo excluded (the goal is surfaced to the refiner
+        separately). ``WEAK`` / ``CONFLICTING`` / ``BLOCKED`` / ``MISSING``
+        entries are omitted because they are superseded or unresolved.
+
+        The answer refiner consumes this snapshot to stay CONSISTENT with prior
+        rounds instead of re-deciding the same facet differently every round —
+        the root cause of interview oscillation (a non-deterministic refiner
+        reformatting an already-committed output contract into a contradictory
+        one, which never converges and trips ``interview_phase_deadline``).
+        """
+        active = {LedgerStatus.CONFIRMED, LedgerStatus.DEFAULTED, LedgerStatus.INFERRED}
+        decided: dict[tuple[str, str], str] = {}
+        for name, section in self.sections.items():
+            if name in exclude_sections:
+                continue
+            for entry in section.entries:
+                if entry.status in active and entry.value.strip():
+                    decided[(name, entry.key)] = entry.value
+        return [(section, key, value) for (section, key), value in decided.items()]
+
     def open_gaps(self) -> list[str]:
         """Return required sections that are not Seed-ready."""
         blocked = {

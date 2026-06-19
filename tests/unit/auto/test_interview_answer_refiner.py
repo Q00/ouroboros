@@ -56,7 +56,7 @@ def _answer(
 async def test_refines_generic_answer_into_ledger_and_transcript(tmp_path) -> None:
     calls: list[tuple] = []
 
-    async def refiner(goal: str, question: str, section: str, generic: str) -> str:
+    async def refiner(goal: str, question: str, section: str, generic: str, committed=()) -> str:  # noqa: ARG001
         calls.append((goal, question, section, generic))
         return _CONCRETE
 
@@ -102,7 +102,7 @@ async def test_multi_section_answer_is_refined_per_section(tmp_path) -> None:
 
     calls: list[str] = []
 
-    async def refiner(goal: str, question: str, section: str, generic: str) -> str:  # noqa: ARG001
+    async def refiner(goal: str, question: str, section: str, generic: str, committed=()) -> str:  # noqa: ARG001
         calls.append(section)
         return f"concrete::{section}"
 
@@ -144,7 +144,9 @@ async def test_partial_section_refine_keeps_transcript_and_ledger_in_sync(tmp_pa
     persisted ledger entry — a refined section must never leave its peer absent
     from the transcript (the desync invariant the refiner must preserve)."""
 
-    async def refiner(goal: str, question: str, section: str, generic: str) -> str | None:  # noqa: ARG001
+    async def refiner(  # noqa: ARG001
+        goal: str, question: str, section: str, generic: str, committed=()
+    ) -> str | None:
         return "concrete::constraints" if section == "constraints" else None
 
     def _entry(section: str, value: str) -> LedgerEntry:
@@ -188,7 +190,9 @@ async def test_refined_transcript_covers_every_applied_ledger_entry(tmp_path) ->
     where a partial-refinement desync would actually surface, not just the
     helper's return shape."""
 
-    async def refiner(goal: str, question: str, section: str, generic: str) -> str | None:  # noqa: ARG001
+    async def refiner(  # noqa: ARG001
+        goal: str, question: str, section: str, generic: str, committed=()
+    ) -> str | None:
         # Partial: refine constraints, fail acceptance_criteria.
         if section == "constraints":
             return "Store todos in ~/.todo-cli.json; ids are 1-based list positions."
@@ -288,3 +292,133 @@ async def test_empty_refiner_output_keeps_original(tmp_path) -> None:
         SeedDraftLedger.from_goal("g"),
     )
     assert out.text == "orig"
+
+
+def _update(section: str, key: str, value: str) -> AutoAnswer:
+    """An incoming generic answer that targets one explicit ``(section, key)``."""
+    entry = LedgerEntry(
+        key=key,
+        value=value,
+        source=LedgerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.8,
+        status=LedgerStatus.DEFAULTED,
+    )
+    return AutoAnswer(
+        text=value,
+        source=AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.8,
+        ledger_updates=[(section, entry)],
+    )
+
+
+@pytest.mark.asyncio
+async def test_committed_facet_is_frozen_and_skips_refiner(tmp_path) -> None:
+    """A facet already committed (active) earlier this interview is reused
+    VERBATIM and the refiner is never consulted for it. This is the
+    deterministic backstop that stops output-contract oscillation: a
+    non-deterministic refiner can no longer re-decide a settled facet."""
+    called: list = []
+
+    async def refiner(*a) -> str:
+        called.append(a)
+        return "a DIFFERENT, contradictory contract"
+
+    driver = _driver(tmp_path, refiner)
+    state = AutoPipelineState(goal="g", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal("g")
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.output_contract",
+            value='todo add "X" prints exactly "Added #1: X\\n"',
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    out = await driver._refine_answer(
+        _update("constraints", "constraints.output_contract", "generic placeholder"),
+        "a rephrased output-format question",
+        state,
+        ledger,
+    )
+
+    assert out.ledger_updates[0][1].value == 'todo add "X" prints exactly "Added #1: X\\n"'
+    assert called == []  # decided facet never reaches the model
+
+
+@pytest.mark.asyncio
+async def test_refiner_receives_committed_contract_anchor(tmp_path) -> None:
+    """A genuinely NEW facet (unseen key) still goes to the refiner, but the
+    refiner is handed the committed-contract snapshot so it can stay consistent
+    with prior rounds instead of contradicting them."""
+    seen: dict = {}
+
+    async def refiner(goal, question, section, generic, committed=()) -> str:  # noqa: ARG001
+        seen["committed"] = list(committed)
+        return "concrete new facet"
+
+    driver = _driver(tmp_path, refiner)
+    state = AutoPipelineState(goal="g", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal("g")
+    ledger.add_entry(
+        "outputs",
+        LedgerEntry(
+            key="outputs.add",
+            value="Added #1: X",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    out = await driver._refine_answer(
+        _update("constraints", "constraints.new_facet", "generic"),
+        "q",
+        state,
+        ledger,
+    )
+
+    assert out.ledger_updates[0][1].value == "concrete new facet"
+    assert ("outputs", "outputs.add", "Added #1: X") in seen["committed"]
+
+
+@pytest.mark.asyncio
+async def test_frozen_facet_prevents_conflict_under_nondeterministic_refiner(tmp_path) -> None:
+    """End-to-end convergence: a refiner that drifts to a different contract on
+    every call (modeling LLM non-determinism) cannot make the ledger CONFLICTING
+    for an already-decided facet, because round 2 freezes it to round 1's value
+    (matching-prior reconciliation clears any conflict)."""
+    drift = iter(["Added #1: X", "added 1", "Added 1: x"])
+
+    async def refiner(*_a) -> str:
+        return next(drift)
+
+    driver = _driver(tmp_path, refiner)
+    state = AutoPipelineState(goal="g", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal("g")
+    answerer = AutoAnswerer()
+
+    # Round 1: facet undecided -> refiner concretizes it; apply commits it.
+    r1 = await driver._refine_answer(
+        _update("constraints", "constraints.output_contract", "generic placeholder"),
+        "q1",
+        state,
+        ledger,
+    )
+    answerer.apply(r1, ledger, question="q1")
+    v1 = r1.ledger_updates[0][1].value
+    assert v1 == "Added #1: X"
+
+    # Round 2: same facet re-asked (rephrased) -> frozen to v1, NOT the drift.
+    r2 = await driver._refine_answer(
+        _update("constraints", "constraints.output_contract", "generic placeholder"),
+        "q2 rephrased differently",
+        state,
+        ledger,
+    )
+    answerer.apply(r2, ledger, question="q2 rephrased differently")
+
+    assert r2.ledger_updates[0][1].value == v1  # did not drift to "added 1"
+    assert ledger.sections["constraints"].status() != LedgerStatus.CONFLICTING

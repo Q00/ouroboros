@@ -96,13 +96,28 @@ When an auto start response includes `response.meta.job_id`:
    execution/session/lineage handles, progress counters, blocker/error text, or
    a terminal state. If `response.meta.changed is false`, continue silently
    unless the user asked for heartbeat updates.
-4. If the job status is non-terminal (`queued`, `running`, or another active
+4. **During the interview phase, surface the live Q&A — not just the round
+   counter.** Whenever the relayed phase is `interview` (e.g. progress reads
+   `interview round N/50`), call
+   `ouroboros_session_status(session_id=<auto_session_id>)` and relay to the
+   user: (a) the current `meta.pending_question` (the question the interview is
+   asking right now), and (b) the `meta.auto_answer_log` entries — each is
+   `{round, source, question, answer}`, i.e. what the auto-answerer answered and
+   why (`source`: `conservative_default` = safe-default policy,
+   `inference` = model reasoning, `assumption` = auto-answerer fallback). Show
+   this so the user sees what the interview is converging on, not a bare
+   counter. Note: this Q&A lives in the auto-session state, so
+   `session_status` surfaces it even though `ouroboros_query_events` returns
+   nothing for the auto session, and it shows only the last 3 answers (each
+   truncated). Keep it low-noise: relay the pending question and any newly
+   answered rounds, not the same 3 entries every poll.
+5. If the job status is non-terminal (`queued`, `running`, or another active
    status), keep waiting. Do not tell the user to call job tools themselves.
-5. When the job reaches a terminal status, call `ouroboros_job_result(job_id)`
+6. When the job reaches a terminal status, call `ouroboros_job_result(job_id)`
    and summarize the final auto-session outcome. If the final auto result is
    `detached`, keep tracking the surfaced downstream job/Ralph handles when
    available instead of presenting `detached` as completion.
-6. If `response.meta.status == "delegated_to_plugin"` and
+7. If `response.meta.status == "delegated_to_plugin"` and
    `response.meta.job_id is None`, report that OpenCode plugin mode delegated
    the work to the child Task/session. Do not call job wait/result without a
    real job id; follow the host Task widget/session lifecycle.

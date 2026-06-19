@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import contextlib
 from dataclasses import dataclass
 import hashlib
@@ -1297,7 +1297,11 @@ class LLMAnswerRefiner:
         "concrete, committed, testable decision for the named section: specific "
         "values, exact commands/flags, a small sample input and its exact expected "
         "output, and explicit error/stderr/exit-code behavior where relevant. No "
-        "options, no clarifying questions, no hedging, no preamble. 1-4 sentences."
+        "options, no clarifying questions, no hedging, no preamble. 1-4 sentences. "
+        "When contracts already committed earlier in this interview are listed, "
+        "keep their exact strings VERBATIM — never reformat, rename, or re-decide "
+        "them — and specify only the detail this question still leaves undecided, "
+        "fully consistent with those commitments."
     )
 
     def __init__(self, llm_adapter: LLMAdapter, *, model: str | None = None) -> None:
@@ -1305,15 +1309,31 @@ class LLMAnswerRefiner:
         self.model = model
 
     async def __call__(
-        self, goal: str, question: str, section: str, generic_text: str
+        self,
+        goal: str,
+        question: str,
+        section: str,
+        generic_text: str,
+        committed: Sequence[tuple[str, str, str]] = (),
     ) -> str | None:
+        committed_block = ""
+        if committed:
+            lines = "\n".join(f"- [{sect}] {value}" for sect, _key, value in committed)
+            committed_block = (
+                "\nContracts already committed earlier in THIS interview — preserve "
+                "them EXACTLY and stay consistent with them:\n"
+                f"{lines}\n"
+            )
         prompt = (
             f"Goal: {goal}\n\n"
             f"Seed section to specify: {section}\n\n"
             f"Interview question: {question}\n\n"
-            f"A generic placeholder answer was: {generic_text}\n\n"
+            f"A generic placeholder answer was: {generic_text}\n"
+            f"{committed_block}\n"
             f"Replace it with one concrete, committed answer for the '{section}' "
-            "section that a developer or test could execute against verbatim."
+            "section that a developer or test could execute against verbatim. Do "
+            "not contradict or reformat any already-committed contract above; "
+            "decide only what this question leaves open."
         )
         messages = [
             Message(role=MessageRole.SYSTEM, content=self._SYSTEM),
@@ -1322,7 +1342,10 @@ class LLMAnswerRefiner:
         config = CompletionConfig(
             model=self.model or "",
             role="clarification",
-            temperature=0.2,
+            # Deterministic: with a stable goal + committed-contract anchor, the
+            # same inputs must yield the same concrete answer round-over-round so
+            # the interview converges instead of oscillating on output formats.
+            temperature=0.0,
             max_tokens=400,
         )
         try:

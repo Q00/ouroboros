@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 import inspect
 import re
@@ -311,8 +311,17 @@ class AutoInterviewDriver:
     # goal-specific answer produced by the interview runtime LLM, applied
     # coherently to the same ledger entry + transcript so ambiguity converges
     # round-over-round. ``None`` preserves the deterministic-only behavior.
-    # Signature: ``(goal, question, section, generic_text) -> concrete | None``.
-    answer_refiner: Callable[[str, str, str, str], Awaitable[str | None]] | None = None
+    # Signature: ``(goal, question, section, generic_text, committed) -> concrete
+    # | None`` where ``committed`` is the ``(section, key, value)`` snapshot of
+    # contracts already decided this interview, so the refiner stays consistent
+    # with prior rounds instead of re-deciding the same facet differently.
+    answer_refiner: (
+        Callable[
+            [str, str, str, str, Sequence[tuple[str, str, str]]],
+            Awaitable[str | None],
+        ]
+        | None
+    ) = None
     # RFC #1256 §I4 — Unified observability for ooo auto interview.
     # When set, the driver emits typed ``auto.interview.*`` events to the
     # EventStore alongside the existing structlog ``log.info(...)`` calls,
@@ -1452,10 +1461,27 @@ class AutoInterviewDriver:
         ):
             return answer
 
-        async def _refine_section(section: str, generic: str) -> str | None:
+        # Anchor refinement to the contracts already committed this interview.
+        # ``committed`` is passed to the refiner so a (non-deterministic) model
+        # stays consistent with prior rounds; ``frozen`` lets an already-decided
+        # ``(section, key)`` facet be reused VERBATIM without any model call, so
+        # convergence does not depend on model determinism. This is the fix for
+        # the oscillation that tripped ``interview_phase_deadline``: without an
+        # anchor the refiner reformatted committed output contracts into
+        # contradictory ones every round and the interview never converged.
+        committed = ledger.committed_decisions()
+        frozen = {(section, key): value for section, key, value in committed}
+
+        async def _refine_section(section: str, entry: LedgerEntry) -> str | None:
+            prior = frozen.get((section, entry.key))
+            if prior is not None:
+                # Facet already decided earlier this interview — freeze it so the
+                # ledger's matching-prior reconciliation clears any conflict and
+                # ambiguity converges instead of thrashing on re-decided formats.
+                return prior
             try:
                 concrete = await asyncio.wait_for(
-                    self.answer_refiner(state.goal, question, section, generic),
+                    self.answer_refiner(state.goal, question, section, entry.value, committed),
                     timeout=self.timeout_seconds,
                 )
             except Exception as exc:  # noqa: BLE001 - refiner is best-effort
@@ -1469,7 +1495,7 @@ class AutoInterviewDriver:
             return concrete.strip() if concrete and concrete.strip() else None
 
         results = await asyncio.gather(
-            *(_refine_section(section, entry.value) for section, entry in answer.ledger_updates)
+            *(_refine_section(section, entry) for section, entry in answer.ledger_updates)
         )
 
         refined_updates: list[tuple[str, LedgerEntry]] = []
