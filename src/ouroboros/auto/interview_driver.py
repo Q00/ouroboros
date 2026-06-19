@@ -1423,14 +1423,25 @@ class AutoInterviewDriver:
         no blocker — is upgraded, so every safety guard is preserved. The
         concrete text is written into both ``answer.text`` (→ transcript, which
         the backend re-scores) and the single ledger-update entry value (→ Seed
-        content), keeping them in sync. Best-effort: on no refiner, a non-generic
-        answer, or any failure, the original answer is returned unchanged.
+        content), keeping them in sync.
+
+        Only answers with **at most one** ledger update are refined. A
+        multi-section answer (e.g. the verification route updates both
+        ``verification_plan`` and ``acceptance_criteria``; the actor/IO route
+        updates three sections) carries distinct per-section ledger values that a
+        single refined string cannot coherently replace — refining only
+        ``answer.text`` while leaving those entries generic would desync the
+        transcript from the persisted ledger for an acknowledged round, breaking
+        resume/review/safe-default/Seed-generation. Such answers are returned
+        unchanged. Best-effort otherwise: on no refiner, a non-generic answer, or
+        any failure, the original answer is returned unchanged.
         """
         refinable = {AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION}
         if (
             self.answer_refiner is None
             or answer.blocker is not None
             or answer.source not in refinable
+            or len(answer.ledger_updates) > 1
         ):
             return answer
         section = answer.ledger_updates[0][0] if answer.ledger_updates else "constraints"
@@ -1499,9 +1510,12 @@ class AutoInterviewDriver:
             return current, stagnant_rounds, turn
 
         # Bound total interventions to avoid accumulating contradictory
-        # concretizations (see ``_STAGNATION_MAX_INTERVENTIONS``). During the
-        # interview phase ``personas_invoked`` only grows from this path, so its
-        # length is the intervention count.
+        # concretizations (see ``_STAGNATION_MAX_INTERVENTIONS``).
+        # ``personas_invoked`` is shared across phases (safe-default unsafe-context
+        # escalation, and later the EVALUATE/Seed-QA lateral paths), but those run
+        # strictly AFTER the interview loop, so during this loop its length equals
+        # the number of stagnation interventions so far. If that ordering ever
+        # changes, this would under-count — track a dedicated counter instead.
         if len(state.personas_invoked) >= _STAGNATION_MAX_INTERVENTIONS:
             return current, stagnant_rounds, turn
 

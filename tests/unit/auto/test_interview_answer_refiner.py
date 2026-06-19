@@ -93,6 +93,44 @@ async def test_assumption_source_is_also_refined(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_multi_section_answer_is_not_refined(tmp_path) -> None:
+    """A multi-ledger-update answer is left untouched to preserve transcript/ledger
+    sync — a single refined string cannot coherently replace distinct per-section
+    values (e.g. the verification route updates verification_plan + acceptance_criteria)."""
+
+    async def refiner(*_a) -> str:
+        raise AssertionError("must not refine a multi-section answer (would desync)")
+
+    def _entry(section: str, value: str) -> LedgerEntry:
+        return LedgerEntry(
+            key=f"{section}.x",
+            value=value,
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        )
+
+    multi = AutoAnswer(
+        text="generic verification text",
+        source=AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.8,
+        ledger_updates=[
+            ("verification_plan", _entry("verification_plan", "run tests")),
+            ("acceptance_criteria", _entry("acceptance_criteria", "command prints output")),
+        ],
+    )
+
+    driver = _driver(tmp_path, refiner)
+    state = AutoPipelineState(goal="g", cwd=str(tmp_path))
+    out = await driver._refine_answer(multi, "q", state, SeedDraftLedger.from_goal("g"))
+
+    # Untouched: text + both ledger entries keep their original (in-sync) values.
+    assert out.text == "generic verification text"
+    assert out.ledger_updates[0][1].value == "run tests"
+    assert out.ledger_updates[1][1].value == "command prints output"
+
+
+@pytest.mark.asyncio
 async def test_non_generic_answer_is_not_refined(tmp_path) -> None:
     async def refiner(*_a) -> str:
         raise AssertionError("must not refine a grounded answer")

@@ -240,11 +240,21 @@ def finalize_safe_defaultable_gaps(
 ) -> SafeDefaultFinalization:
     """Fill safe-defaultable required gaps with auditable assumptions.
 
-    The policy is intentionally general: only missing or weak required Seed
-    sections may be defaulted, and only when the unresolved context does not
-    include unsafe authority, irreversible production actions, payment/billing,
-    legal/medical/security-sensitive decisions, or ambiguous external effects.
-    Conflicting, blocked, or missing-goal gaps remain hard blockers.
+    Only missing or weak required Seed sections may be defaulted; conflicting,
+    blocked, and missing-goal gaps remain hard blockers regardless of policy.
+
+    Unsafe-context veto (DISABLED BY DEFAULT — freedom policy): historically a
+    section was also refused when ``_unsafe_context_reason`` detected unsafe
+    authority, irreversible production actions, payment/billing,
+    legal/medical/security-sensitive decisions, or ambiguous external effects in
+    the unresolved context. That keyword veto is intentionally disabled —
+    ``_UNSAFE_CONTEXT_PATTERNS`` ships empty (see its docstring) because the
+    single common words it matched (``contract``, ``license``, ``security`` …)
+    over-blocked ordinary software goals. The conservative ``non_goals``
+    safe-default still assumes credential/billing/production/legal/medical work
+    is OUT of scope, so closure assumes those domains *away* rather than acting
+    inside them; the veto is not removed for safety but for usability, and is
+    re-enabled by re-populating ``_UNSAFE_CONTEXT_PATTERNS``.
 
     When *active_profile* is supplied its ``safe_defaults`` dict is consulted
     first for each section; missing keys fall through to the hardcoded
