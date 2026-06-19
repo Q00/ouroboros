@@ -93,13 +93,18 @@ async def test_assumption_source_is_also_refined(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_multi_section_answer_is_not_refined(tmp_path) -> None:
-    """A multi-ledger-update answer is left untouched to preserve transcript/ledger
-    sync — a single refined string cannot coherently replace distinct per-section
-    values (e.g. the verification route updates verification_plan + acceptance_criteria)."""
+async def test_multi_section_answer_is_refined_per_section(tmp_path) -> None:
+    """A multi-ledger-update answer is refined PER SECTION. The refiner is
+    section-aware, so each entry gets its own concrete value and the transcript
+    stays in sync with the ledger. This is the common case (every real
+    ``AutoAnswerer`` route emits >=2 updates); skipping it left the refiner inert
+    and interview ambiguity unconverged."""
 
-    async def refiner(*_a) -> str:
-        raise AssertionError("must not refine a multi-section answer (would desync)")
+    calls: list[str] = []
+
+    async def refiner(goal: str, question: str, section: str, generic: str) -> str:  # noqa: ARG001
+        calls.append(section)
+        return f"concrete::{section}"
 
     def _entry(section: str, value: str) -> LedgerEntry:
         return LedgerEntry(
@@ -124,10 +129,47 @@ async def test_multi_section_answer_is_not_refined(tmp_path) -> None:
     state = AutoPipelineState(goal="g", cwd=str(tmp_path))
     out = await driver._refine_answer(multi, "q", state, SeedDraftLedger.from_goal("g"))
 
-    # Untouched: text + both ledger entries keep their original (in-sync) values.
-    assert out.text == "generic verification text"
-    assert out.ledger_updates[0][1].value == "run tests"
-    assert out.ledger_updates[1][1].value == "command prints output"
+    # Each section refined with its own concrete value; transcript rebuilt from them.
+    assert calls == ["verification_plan", "acceptance_criteria"]
+    assert out.ledger_updates[0][1].value == "concrete::verification_plan"
+    assert out.ledger_updates[1][1].value == "concrete::acceptance_criteria"
+    assert out.text == "concrete::verification_plan concrete::acceptance_criteria"
+
+
+@pytest.mark.asyncio
+async def test_partial_section_refine_keeps_failed_section_in_sync(tmp_path) -> None:
+    """If one section's refiner call fails/blanks, that entry keeps its original
+    value while the others are upgraded — never a desync."""
+
+    async def refiner(goal: str, question: str, section: str, generic: str) -> str | None:  # noqa: ARG001
+        return "concrete::constraints" if section == "constraints" else None
+
+    def _entry(section: str, value: str) -> LedgerEntry:
+        return LedgerEntry(
+            key=f"{section}.x",
+            value=value,
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        )
+
+    multi = AutoAnswer(
+        text="generic",
+        source=AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        confidence=0.8,
+        ledger_updates=[
+            ("constraints", _entry("constraints", "orig constraints")),
+            ("acceptance_criteria", _entry("acceptance_criteria", "orig acceptance")),
+        ],
+    )
+
+    driver = _driver(tmp_path, refiner)
+    state = AutoPipelineState(goal="g", cwd=str(tmp_path))
+    out = await driver._refine_answer(multi, "q", state, SeedDraftLedger.from_goal("g"))
+
+    assert out.ledger_updates[0][1].value == "concrete::constraints"
+    assert out.ledger_updates[1][1].value == "orig acceptance"  # untouched, still in sync
+    assert out.text == "concrete::constraints"
 
 
 @pytest.mark.asyncio

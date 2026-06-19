@@ -31,7 +31,7 @@ from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
     select_persona_for_safe_default_block,
 )
-from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.safe_defaults import (
@@ -1417,60 +1417,79 @@ class AutoInterviewDriver:
     ) -> AutoAnswer:
         """Replace a *generic* auto-answer with a concrete, AI-generated one.
 
-        The deterministic answerer has already chosen the section and enforced
+        The deterministic answerer has already chosen the sections and enforced
         safety (blocker detection, intent routing, source tagging). Only a
         refinable generic answer — ``CONSERVATIVE_DEFAULT`` / ``ASSUMPTION`` with
-        no blocker — is upgraded, so every safety guard is preserved. The
-        concrete text is written into both ``answer.text`` (→ transcript, which
-        the backend re-scores) and the single ledger-update entry value (→ Seed
-        content), keeping them in sync.
+        no blocker — is upgraded, so every safety guard is preserved.
 
-        Only answers with **at most one** ledger update are refined. A
-        multi-section answer (e.g. the verification route updates both
-        ``verification_plan`` and ``acceptance_criteria``; the actor/IO route
-        updates three sections) carries distinct per-section ledger values that a
-        single refined string cannot coherently replace — refining only
-        ``answer.text`` while leaving those entries generic would desync the
-        transcript from the persisted ledger for an acknowledged round, breaking
-        resume/review/safe-default/Seed-generation. Such answers are returned
-        unchanged. Best-effort otherwise: on no refiner, a non-generic answer, or
-        any failure, the original answer is returned unchanged.
+        **Every** ledger-update section is refined, not just single-update
+        answers. The refiner is per-section by construction (it takes the target
+        section plus that section's generic value and returns one concrete value
+        *for that section*), so multi-section answers — the common case, e.g. the
+        product-behavior route updates ``constraints`` + ``acceptance_criteria``,
+        the actor/IO route updates three sections — get a distinct concrete value
+        per entry. Transcript and ledger stay in sync because each entry is
+        replaced with its own refined value (not one shared string), and
+        ``answer.text`` (→ transcript, which the backend re-scores) is rebuilt
+        from those same concrete values. The per-section calls run concurrently,
+        so wall-clock stays ~one refiner call and the interview phase deadline is
+        respected.
+
+        Restricting refinement to single-update answers (the prior behavior) made
+        the refiner inert: every real ``AutoAnswerer`` route emits ≥2 updates, so
+        the generic placeholder — including the raw interview question echoed into
+        ``constraints``/``acceptance_criteria`` — was never upgraded and ambiguity
+        never converged. Best-effort throughout: on no refiner, a non-generic
+        answer, or a section whose refiner call fails or returns blank, that part
+        is left unchanged; if nothing is refined, the original answer is returned.
         """
         refinable = {AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION}
         if (
             self.answer_refiner is None
             or answer.blocker is not None
             or answer.source not in refinable
-            or len(answer.ledger_updates) > 1
+            or not answer.ledger_updates
         ):
             return answer
-        section = answer.ledger_updates[0][0] if answer.ledger_updates else "constraints"
-        try:
-            concrete = await asyncio.wait_for(
-                self.answer_refiner(state.goal, question, section, answer.text),
-                timeout=self.timeout_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001 - refiner is best-effort
-            log.warning(
-                "auto.interview.answer_refine_failed",
-                auto_session_id=state.auto_session_id,
-                error=str(exc),
-            )
+
+        async def _refine_section(section: str, generic: str) -> str | None:
+            try:
+                concrete = await asyncio.wait_for(
+                    self.answer_refiner(state.goal, question, section, generic),
+                    timeout=self.timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001 - refiner is best-effort
+                log.warning(
+                    "auto.interview.answer_refine_failed",
+                    auto_session_id=state.auto_session_id,
+                    section=section,
+                    error=str(exc),
+                )
+                return None
+            return concrete.strip() if concrete and concrete.strip() else None
+
+        results = await asyncio.gather(
+            *(_refine_section(section, entry.value) for section, entry in answer.ledger_updates)
+        )
+
+        refined_updates: list[tuple[str, LedgerEntry]] = []
+        concrete_parts: list[str] = []
+        for (section, entry), concrete in zip(answer.ledger_updates, results, strict=True):
+            if concrete:
+                refined_updates.append((section, replace(entry, value=concrete)))
+                concrete_parts.append(concrete)
+            else:
+                refined_updates.append((section, entry))
+        if not concrete_parts:
             return answer
-        if not concrete or not concrete.strip():
-            return answer
-        concrete = concrete.strip()
-        refined_updates = answer.ledger_updates
-        if len(answer.ledger_updates) == 1:
-            sec, entry = answer.ledger_updates[0]
-            refined_updates = [(sec, replace(entry, value=concrete))]
         log.info(
             "auto.interview.answer_refined",
             auto_session_id=state.auto_session_id,
-            section=section,
+            sections=[section for section, _ in answer.ledger_updates],
+            refined_count=len(concrete_parts),
             source=answer.source.value,
         )
-        return replace(answer, text=concrete, ledger_updates=refined_updates)
+        return replace(answer, text=" ".join(concrete_parts), ledger_updates=refined_updates)
 
     async def _maybe_concretize_on_stagnation(
         self,
