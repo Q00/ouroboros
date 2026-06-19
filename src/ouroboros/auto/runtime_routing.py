@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ouroboros.config import get_opencode_mode, load_config
+from ouroboros.config import get_config_dir, get_opencode_mode, load_config
 from ouroboros.core.errors import ConfigError
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.orchestrator_stage import Stage, parse_stage, resolve_runtime_for_stage
@@ -54,6 +54,15 @@ def resolve_auto_stage_runtime_plan(
         try:
             profile = load_config().orchestrator.runtime_profile
         except ConfigError:
+            # Only a genuinely ABSENT config file is a legitimate "no profile" →
+            # fall back to the default runtime. A config that exists but fails to
+            # load (malformed YAML or failed validation — e.g. an unknown
+            # runtime_profile stage key or backend name, which RuntimeProfileConfig
+            # rejects) must FAIL FAST: swallowing it would let an operator routing
+            # mistake silently reroute ``ooo auto`` to the fallback runtime instead
+            # of surfacing the misconfiguration.
+            if (get_config_dir() / "config.yaml").exists():
+                raise
             profile = None
         if profile is not None:
             profile_stages = {parse_stage(key): value for key, value in profile.stages.items()}
