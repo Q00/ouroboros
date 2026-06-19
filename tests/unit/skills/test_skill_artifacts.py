@@ -69,6 +69,7 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
             ('"+ouroboros execute"', "ouroboros_start_execute_seed"),
             ('"+ouroboros execute"', "ouroboros_job_wait"),
             ('"+ouroboros execute"', "ouroboros_job_result"),
+            ('"+ouroboros execute"', "ouroboros_ac_tree_hud"),
         ],
     }
 
