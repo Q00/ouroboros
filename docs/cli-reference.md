@@ -522,6 +522,28 @@ ouroboros cancel execution orch_abc123 --reason "Stuck for 2 hours"
 
 Manage Ouroboros configuration.
 
+Running `ouroboros config` with no subcommand opens the settings GUI, which
+includes one-click **routing presets** — multi-LLM stage-routing recommendations
+that stage which agent runs each pipeline stage (interview → execute → evaluate
+→ reflect). Click a preset, review the per-stage Agent cards, then **Save** to
+persist into `orchestrator.runtime_profile.stages`. The shipped presets:
+
+| Preset          | interview   | execute | evaluate    | reflect | Rationale                                                        |
+|-----------------|-------------|---------|-------------|---------|------------------------------------------------------------------|
+| `All Claude`    | claude      | claude  | claude      | claude  | Single-vendor baseline — one subscription, predictable           |
+| `Claude+Verify` | claude      | claude  | antigravity | claude  | Cross-vendor verification — an independent vendor grades the work |
+| `Tri-Vendor`    | claude      | claude  | antigravity | grok    | Maximum diversity across generate / verify / diverge             |
+| `Codex Core`    | codex       | codex   | claude      | grok    | OpenAI-centric execution with a cross-vendor verify gate         |
+| `Frugal Mix`    | antigravity | grok    | antigravity | codex   | Cost/speed-leaning mix (Gemini Flash via `agy`, fast Grok)       |
+
+> The spine of these recommendations is **vendor diversity between the generate
+> stage (execute) and the verify stage (evaluate)** — the same principle Ouroboros
+> already encodes in `consensus.diversity_required`. A preset may reference a
+> backend whose CLI is not installed; staging still works and the per-card
+> warning flags it. Pick the preset closest to your subscriptions, then tune
+> individual cards. Model-tier presets (Frugal / Balanced / Frontier) sit in a
+> separate row and stage per-stage models rather than backends.
+
 ### `config show`
 
 Display current configuration summary, or a specific section.

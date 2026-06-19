@@ -434,6 +434,75 @@ async def test_preset_button_stages_models_for_every_card(app_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_routing_preset_stages_runtime_for_every_stage(app_env) -> None:
+    """One click stages a coherent multi-LLM routing across all four stages."""
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#route-tri-vendor").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#route-tri-vendor")
+        await pilot.pause()
+        expected = {
+            Stage.INTERVIEW: "claude",
+            Stage.EXECUTE: "claude",
+            Stage.EVALUATE: "antigravity",
+            Stage.REFLECT: "grok",
+        }
+        for stage, backend in expected.items():
+            runtime_select = pilot.app.query_one(f"#stage-runtime-{stage.value}", Select)
+            assert runtime_select.value == backend
+        status = pilot.app.query_one("#status-bar", Static)
+        assert "tri-vendor" in str(status.render())
+        assert "Save" in str(status.render())  # staged, not saved
+
+
+@pytest.mark.asyncio
+async def test_routing_preset_persists_stage_backends_on_save(app_env, monkeypatch) -> None:
+    """Saving after a routing preset records orchestrator.runtime_profile.stages."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#route-claude-verify").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#route-claude-verify")
+        await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    assert captured.get("orchestrator.runtime_profile.stages.evaluate") == "antigravity"
+
+
+@pytest.mark.asyncio
+async def test_routing_preset_with_runtime_only_final_stage_persists_safely(
+    app_env, monkeypatch
+) -> None:
+    """A routing preset whose LAST staged card is a runtime-only backend (the
+    tri-vendor preset ends with reflect=grok) must persist runtime_profile.stages
+    WITHOUT mirroring the runtime-only agent into the completion-only llm.backend
+    field — LLMConfig.backend rejects grok/antigravity and would roll the save
+    back."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one("#route-tri-vendor").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#route-tri-vendor")
+        await pilot.pause()
+        pilot.app.query_one("#save-button").scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click("#save-button")
+        await pilot.pause()
+    # The runtime-only reflect=grok / evaluate=antigravity stages are persisted...
+    assert captured.get("orchestrator.runtime_profile.stages.reflect") == "grok"
+    assert captured.get("orchestrator.runtime_profile.stages.evaluate") == "antigravity"
+    # ...but the legacy llm.backend is NEVER set to a runtime-only backend.
+    assert captured.get("llm.backend") not in ("grok", "antigravity")
+
+
+@pytest.mark.asyncio
 async def test_save_summary_shows_diff_and_reconnect_hint(app_env, monkeypatch) -> None:
     monkeypatch.setattr(persistence, "apply_config_values", lambda _values: None)
     app = SettingsApp()

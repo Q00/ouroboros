@@ -74,6 +74,54 @@ PRESET_MODELS: dict[str, dict[str, str]] = {
     "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": "gpt-5-codex"},
 }
 
+# One-click multi-LLM stage-routing presets: per-stage runtime backend picks
+# for the four pipeline stages (interview → execute → evaluate → reflect). Each
+# preset stages the four stage Agent selects; review and Save to persist into
+# orchestrator.runtime_profile.stages. The spine of these recommendations is
+# vendor diversity between the *generate* stage (execute) and the *verify*
+# stage (evaluate) — a different vendor grading the work reduces correlated
+# blind spots (the same principle ouroboros already encodes in
+# consensus.diversity_required). A preset may reference a backend whose CLI is
+# not installed; staging still works and the per-card install warning flags it.
+PRESET_ROUTES: dict[str, dict[str, str]] = {
+    # Single-vendor baseline — one subscription, predictable behavior.
+    "all-claude": {
+        "interview": "claude",
+        "execute": "claude",
+        "evaluate": "claude",
+        "reflect": "claude",
+    },
+    # Cross-vendor verification: Claude generates, Antigravity (Gemini) verifies.
+    # The highest-value diversity change — an independent vendor grades the work.
+    "claude-verify": {
+        "interview": "claude",
+        "execute": "claude",
+        "evaluate": "antigravity",
+        "reflect": "claude",
+    },
+    # Maximum diversity across generate / verify / diverge (three vendors).
+    "tri-vendor": {
+        "interview": "claude",
+        "execute": "claude",
+        "evaluate": "antigravity",
+        "reflect": "grok",
+    },
+    # OpenAI-centric execution with a cross-vendor verify gate.
+    "codex-core": {
+        "interview": "codex",
+        "execute": "codex",
+        "evaluate": "claude",
+        "reflect": "grok",
+    },
+    # Cost/speed-leaning mix (Gemini Flash via agy, fast Grok for execution).
+    "frugal-mix": {
+        "interview": "antigravity",
+        "execute": "grok",
+        "evaluate": "antigravity",
+        "reflect": "codex",
+    },
+}
+
 # Saving these keys only takes effect for a running MCP server after a
 # reconnect (#1376 friction log) — surface that instead of failing silently.
 _RECONNECT_KEY_PREFIXES = ("orchestrator.runtime", "llm.backend")
@@ -207,6 +255,9 @@ class SettingsApp(App[None]):
     #preset-row { layout: horizontal; height: auto; margin: 1 0 0 0; }
     #preset-row Button { margin: 0 1 0 0; min-width: 14; }
     #preset-help { margin: 1 0 0 1; width: 1fr; }
+    #routing-preset-row { layout: horizontal; height: auto; margin: 1 0 0 0; }
+    #routing-preset-row Button { margin: 0 1 0 0; min-width: 14; }
+    #routing-preset-help { margin: 1 0 0 1; width: 1fr; }
 
     #action-bar { layout: horizontal; height: auto; margin: 1 0 0 0; }
     #status-bar { width: 1fr; margin: 0 0 0 2; content-align: left middle; }
@@ -424,6 +475,17 @@ class SettingsApp(App[None]):
                     classes="field-help",
                     id="preset-help",
                 )
+            with Container(id="routing-preset-row"):
+                yield Button("All Claude", id="route-all-claude")
+                yield Button("Claude+Verify", id="route-claude-verify")
+                yield Button("Tri-Vendor", id="route-tri-vendor")
+                yield Button("Codex Core", id="route-codex-core")
+                yield Button("Frugal Mix", id="route-frugal-mix")
+                yield Static(
+                    "one-click multi-LLM routing (which agent runs each stage) — review, then Save",
+                    classes="field-help",
+                    id="routing-preset-help",
+                )
             with Container(id="stage-row"):
                 for stage in Stage:
                     yield from self._compose_stage_card(stage)
@@ -638,6 +700,8 @@ class SettingsApp(App[None]):
         button_id = event.button.id or ""
         if button_id == "save-button":
             self.action_save()
+        elif button_id.startswith("route-"):
+            self._apply_routing_preset(button_id.removeprefix("route-"))
         elif button_id.startswith("preset-"):
             self._apply_preset(button_id.removeprefix("preset-"))
 
@@ -659,6 +723,37 @@ class SettingsApp(App[None]):
                 continue
         status = self.query_one("#status-bar", Static)
         status.update(f"Preset [bold]{level}[/bold] staged — review the cards, then Save.")
+
+    def _set_stage_runtime(self, stage: Stage, backend: str) -> None:
+        """Stage a per-stage runtime backend selection and cascade its card.
+
+        Mirrors the `stage-runtime-*` Select.Changed handling so the resolved
+        caption, model options, and install warning stay consistent without
+        relying on event ordering during a preset apply.
+        """
+        runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
+        runtime_select.value = backend
+        self._update_resolved_caption(stage)
+        self._remember_agent_selection(self._selected_runtime(stage))
+        self._refresh_install_warning(stage, backend)
+        if stage in STAGE_MODEL_FIELDS:
+            self._refresh_stage_model_options(stage)
+
+    def _apply_routing_preset(self, name: str) -> None:
+        """Stage a one-click multi-LLM routing preset across all stage cards."""
+        routes = PRESET_ROUTES.get(name)
+        if routes is None:
+            return
+        for stage in Stage:
+            backend = routes.get(stage.value)
+            if backend is None:
+                continue
+            try:
+                self._set_stage_runtime(stage, backend)
+            except (NoMatches, ValueError):
+                continue
+        status = self.query_one("#status-bar", Static)
+        status.update(f"Routing preset [bold]{name}[/bold] staged — review the cards, then Save.")
 
     # ── save ─────────────────────────────────────────────────────────
 
