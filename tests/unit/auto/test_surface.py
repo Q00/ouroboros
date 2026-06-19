@@ -1510,7 +1510,7 @@ def test_auto_state_loads_legacy_sessions_with_default_loop_bounds() -> None:
 
     restored = AutoPipelineState.from_dict(payload)
 
-    assert restored.max_interview_rounds == 12
+    assert restored.max_interview_rounds == 50
     assert restored.max_repair_rounds == 5
 
 

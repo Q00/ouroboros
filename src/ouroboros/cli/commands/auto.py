@@ -14,12 +14,14 @@ import typer
 from ouroboros.auto.adapters import (
     EnvRuntimeProbeRunner,
     HandlerInterviewBackend,
+    HandlerLateralThinker,
     HandlerRalphPoller,
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
     HandlerSynchronousRunStarter,
+    build_answer_refiner,
     load_seed,
     save_seed,
 )
@@ -56,9 +58,11 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.runtime.controls import load_runtime_controls
@@ -138,9 +142,10 @@ def auto_command(
             "--max-interview-rounds",
             min=1,
             help=(
-                "Maximum auto interview rounds. Defaults to 12 for new sessions and "
+                "Maximum auto interview rounds. Defaults to 50 for new sessions and "
                 "to the persisted bound on resume; explicit values raise (never lower) "
-                "the bound."
+                "the bound. The interview closes early once ambiguity converges or "
+                "stagnation-driven lateral steps exhaust, so the cap is rarely reached."
             ),
         ),
     ] = None,
@@ -327,7 +332,7 @@ def _safe_default_cwd() -> Path:
     return cwd
 
 
-_DEFAULT_MAX_INTERVIEW_ROUNDS = 12
+_DEFAULT_MAX_INTERVIEW_ROUNDS = 50
 _DEFAULT_MAX_REPAIR_ROUNDS = 5
 
 
@@ -537,11 +542,36 @@ async def _run_auto(
         agent_runtime_backend=runtime_plan.interview.runtime_backend,
         opencode_mode=authoring_opencode_mode,
     )
+    # Parity with the MCP auto path (auto_handler.py): construct a
+    # ``lateral_thinker`` so the interview safe-default escalation (Issue
+    # #1248) and the EVALUATE → UNSTUCK_LATERAL path have the same lateral
+    # handle the MCP handler wires. Gate on the resolved REFLECT stage: a
+    # plugin-routed reflect backend cannot be consumed by the synchronous
+    # auto pipeline, so leave ``lateral_thinker=None`` in that case (the
+    # pre-existing BLOCKED branches still apply, preserving prior behaviour).
+    reflect_plugin_mode = should_dispatch_via_plugin(
+        runtime_plan.reflect.runtime_backend,
+        runtime_plan.reflect.opencode_mode,
+    )
+    lateral_thinker = None
+    if not reflect_plugin_mode:
+        lateral_thinker = HandlerLateralThinker(
+            LateralThinkHandler(
+                agent_runtime_backend=runtime_plan.reflect.runtime_backend,
+                opencode_mode=demote_plugin_opencode_mode(runtime_plan.reflect.opencode_mode),
+            )
+        )
+    # AI answer refiner: upgrades generic deterministic auto-answers to concrete,
+    # goal-specific ones so interview ambiguity actually converges. Best-effort —
+    # any construction failure leaves the deterministic answerer untouched.
+    answer_refiner = build_answer_refiner()
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
         max_rounds=max_interview_rounds,
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
+        lateral_thinker=lateral_thinker,
+        answer_refiner=answer_refiner,
     )
     ralph_handler = (
         # Q00/ouroboros#782 review-7/8/10: pass the un-demoted
@@ -607,6 +637,7 @@ async def _run_auto(
         ralph_resumer=ralph_resumer,
         complete_product=complete_product,
         seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
+        lateral_thinker=lateral_thinker,
         progress_callback=progress_callback,
         watchdog=watchdog,
         probe_runner=EnvRuntimeProbeRunner() if complete_product else None,

@@ -454,7 +454,15 @@ class AutoPipelineState:
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     skip_run: bool = False
-    max_interview_rounds: int = 12
+    # Default raised 12 → 50 so the AI answer refiner has room to converge
+    # ambiguity to the closure threshold. Operational impact: a goal that does
+    # NOT converge can now run up to 50 interview rounds (≈ one provider call per
+    # round for question-gen + ambiguity-score, plus one refiner call on generic
+    # rounds) before safe-default closure, materially more provider calls and
+    # wall-clock than the old cap. In practice convergence (or the bounded
+    # stagnation→lateral fallback) closes well before 50; the cap is the worst
+    # case. Lower it per-run with ``--max-interview-rounds`` when cost-bounding.
+    max_interview_rounds: int = 50
     max_repair_rounds: int = 5
     interview_session_id: str | None = None
     interview_completed: bool = False
@@ -959,7 +967,7 @@ class AutoPipelineState:
         # Older auto sessions predate durable loop-bound policy. Preserve
         # resume compatibility by assigning the historical defaults once, then
         # persisting them with subsequent saves.
-        payload.setdefault("max_interview_rounds", 12)
+        payload.setdefault("max_interview_rounds", 50)
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)

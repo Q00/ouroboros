@@ -21,6 +21,13 @@ from ouroboros.auto.safe_defaults import (
     _unsafe_context_reason,
 )
 
+# The unsafe-context matcher is disabled by default under the freedom policy
+# (empty production bank). The ``_strip_*`` helper tests are matcher-
+# independent, but the ``_unsafe_context_reason`` integration tests assert the
+# matcher fires (and that non-goal stripping suppresses it), so re-inject the
+# historical bank. See tests/unit/auto/conftest.py.
+pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
+
 
 @pytest.fixture
 def empty_ledger() -> SeedDraftLedger:

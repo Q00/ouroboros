@@ -24,6 +24,7 @@ from ouroboros.auto.adapters import (
     HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSeedQAEvaluator,
+    build_answer_refiner,
     load_seed,
     save_seed,
 )
@@ -143,7 +144,7 @@ class AutoHandler:
                     ToolInputType.INTEGER,
                     "Max interview rounds",
                     required=False,
-                    default=12,
+                    default=50,
                 ),
                 MCPToolParameter(
                     "max_repair_rounds",
@@ -402,7 +403,7 @@ class AutoHandler:
             cwd = str(_resolve_cwd(arguments.get("cwd")))
             runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
             opencode_mode = _resolved_opencode_mode(runtime_backend, self.opencode_mode)
-            max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 12)
+            max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
             max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
             skip_run = requested_skip_run
             goal_text = goal.strip()
@@ -486,6 +487,9 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
             lateral_thinker=lateral_thinker,
+            # AI answer refiner: concrete goal-specific answers so interview
+            # ambiguity converges. Best-effort; None falls back to deterministic.
+            answer_refiner=build_answer_refiner(),
         )
         # Complete-product Ralph follows the execute-stage runtime because it
         # continues product mutation/evaluation after the initial run handoff.
@@ -905,7 +909,7 @@ class StartAutoHandler:
         cwd = str(_resolve_cwd(arguments.get("cwd")))
         state = AutoPipelineState(goal=goal, cwd=cwd)
         _apply_requested_domain_and_policies(state, arguments)
-        state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 12)
+        state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
         state.complete_product = bool(arguments.get("complete_product", False))

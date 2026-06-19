@@ -20,6 +20,11 @@ from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedD
 from ouroboros.auto.safe_defaults import _unsafe_context_reason
 from ouroboros.auto.state import AutoPipelineState, AutoStore
 
+# The unsafe-context matcher is disabled by default under the freedom policy
+# (empty production bank); re-inject the historical bank so the matcher
+# observability + blocking paths stay covered. See tests/unit/auto/conftest.py.
+pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

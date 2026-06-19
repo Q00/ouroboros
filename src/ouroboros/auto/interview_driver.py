@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import inspect
 import re
 from typing import TYPE_CHECKING, Protocol
@@ -27,11 +27,15 @@ from ouroboros.auto.answerer import (
 )
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.gap_detector import GapDetector
-from ouroboros.auto.lateral_routing import select_persona_for_safe_default_block
+from ouroboros.auto.lateral_routing import (
+    select_persona_for_qa_failure,
+    select_persona_for_safe_default_block,
+)
 from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.safe_defaults import (
+    AUTO_ANSWER_PREFIX,
     SafeDefaultFinalization,
     build_safe_default_synthesis,
     finalize_safe_defaultable_gaps,
@@ -118,6 +122,38 @@ _EVENT_STORE_EMIT_TIMEOUT_SECONDS = 1.0
 
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
 BACKEND_READY_AMBIGUITY_THRESHOLD = 0.20
+
+# Stagnation-driven lateral concretization (interview convergence).
+# The auto-answerer fills gaps with generic conservative answers, so the
+# ambiguity scorer frequently oscillates around a plateau (~0.5) instead of
+# converging toward ``BACKEND_READY_AMBIGUITY_THRESHOLD``. When a lateral
+# thinker is wired and ambiguity stops improving for ``_STAGNATION_PATIENCE``
+# consecutive rounds while still above threshold, the driver invokes a lateral
+# persona to make ONE concrete decision and pushes it into the interview
+# transcript so the next round's scorer reflects the resolved gap. The persona
+# chain (``select_persona_for_qa_failure``) bounds the intervention so it can
+# never loop; on exhaustion or any failure the loop falls through to the
+# existing max_rounds safe-default closure.
+_STAGNATION_PATIENCE = 2  # consecutive non-improving rounds before intervening
+_STAGNATION_MIN_DELTA = 0.02  # minimum ambiguity drop that counts as progress
+# Cap total concretizations per interview. Each intervention commits an
+# INDEPENDENT concrete decision, so piling them up can introduce contradictions
+# — observed in e2e: four personas each picked a slightly different CSV
+# parsing/error contract, leaving ``acceptance_criteria`` CONFLICTING and
+# blocking the interview. Ambiguity reduction also has steep diminishing returns
+# (~0.04 per intervention). After the cap the loop falls through to the existing
+# max_rounds safe-default closure, and the substance is re-judged at the seed QA
+# gate (which has its own lateral self-repair).
+_STAGNATION_MAX_INTERVENTIONS = 2
+_STAGNATION_LATERAL_SUGGESTIONS = (
+    "Make ONE concrete, specific decision that most reduces ambiguity for the "
+    "least-resolved required Seed section (constraints, success/acceptance "
+    "criteria, inputs, or outputs). State the decision definitively as a single "
+    "committed answer — not a list of options or open questions — phrased so it "
+    "can be recorded verbatim as the interview answer for that section. Do NOT "
+    "contradict or re-decide any commitment already present in the ledger "
+    "snapshot below; only resolve what is still genuinely unspecified.",
+)
 
 # Issue #1248 — L5 ladder typed terminal for a safe-default lateral escalation
 # that exhausted every available persona without resolving the matcher fire.
@@ -267,6 +303,16 @@ class AutoInterviewDriver:
     # tests that construct the driver without this argument are unaffected.
     # The behavior change that consumes this field ships in a separate PR.
     lateral_thinker: LateralThinker | None = None
+    # Optional AI answer refiner. The deterministic ``AutoAnswerer`` still owns
+    # all routing + safety (blocker detection, intent classification, source
+    # tagging); when this is wired, a *generic* CONSERVATIVE_DEFAULT / ASSUMPTION
+    # answer (the source of the ambiguity plateau — generic templates score low
+    # constraint/success-criteria clarity) is replaced with a concrete,
+    # goal-specific answer produced by the interview runtime LLM, applied
+    # coherently to the same ledger entry + transcript so ambiguity converges
+    # round-over-round. ``None`` preserves the deterministic-only behavior.
+    # Signature: ``(goal, question, section, generic_text) -> concrete | None``.
+    answer_refiner: Callable[[str, str, str, str], Awaitable[str | None]] | None = None
     # RFC #1256 §I4 — Unified observability for ooo auto interview.
     # When set, the driver emits typed ``auto.interview.*`` events to the
     # EventStore alongside the existing structlog ``log.info(...)`` calls,
@@ -658,6 +704,13 @@ class AutoInterviewDriver:
         # reports ``seed_ready`` / ``completed`` but the ledger has open
         # required gaps, the loop refuses backend-only closure and steers
         # the next answer toward filling the next detected gap.
+        # Stagnation-driven lateral concretization baselines (see
+        # ``_maybe_concretize_on_stagnation``). Reset per ``_run_inner`` call;
+        # on resume the patience window simply restarts, which is harmless.
+        prev_ambiguity: float | None = (
+            turn.ambiguity_score if turn.ambiguity_score is not None else None
+        )
+        stagnant_rounds = 0
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
             backend_done = turn.seed_ready or turn.completed
             backend_confirmed = _backend_confirmed_seed_ready(turn)
@@ -735,6 +788,12 @@ class AutoInterviewDriver:
             else:
                 answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
                 question_for_record = turn.question
+
+            # Upgrade a generic template answer to a concrete, goal-specific one
+            # via the interview-runtime LLM (when wired). This is what actually
+            # drives ambiguity down round-over-round; the deterministic answerer
+            # above still owns all safety/routing.
+            answer = await self._refine_answer(answer, question_for_record, state, ledger)
 
             if answer.blocker is not None:
                 self.answerer.apply(answer, ledger, question=question_for_record)
@@ -835,6 +894,17 @@ class AutoInterviewDriver:
                 source=answer.source.value,
                 question=question_for_record,
                 answer=answer.text,
+            )
+            # When ambiguity plateaus above threshold, force one concrete
+            # decision via a lateral persona and push it into the transcript so
+            # the next round's scorer reflects the resolved gap. No-op when no
+            # lateral thinker is wired or ambiguity is already converging.
+            prev_ambiguity, stagnant_rounds, turn = await self._maybe_concretize_on_stagnation(
+                state,
+                ledger,
+                turn,
+                prev_ambiguity=prev_ambiguity,
+                stagnant_rounds=stagnant_rounds,
             )
             if turn.question and not turn.completed:
                 self._emit_interview_question(
@@ -1337,6 +1407,219 @@ class AutoInterviewDriver:
             _normalize_answer_text(item.get("answer", "")) == proposed
             for item in ledger.question_history
         )
+
+    async def _refine_answer(
+        self,
+        answer: AutoAnswer,
+        question: str,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+    ) -> AutoAnswer:
+        """Replace a *generic* auto-answer with a concrete, AI-generated one.
+
+        The deterministic answerer has already chosen the section and enforced
+        safety (blocker detection, intent routing, source tagging). Only a
+        refinable generic answer — ``CONSERVATIVE_DEFAULT`` / ``ASSUMPTION`` with
+        no blocker — is upgraded, so every safety guard is preserved. The
+        concrete text is written into both ``answer.text`` (→ transcript, which
+        the backend re-scores) and the single ledger-update entry value (→ Seed
+        content), keeping them in sync.
+
+        Only answers with **at most one** ledger update are refined. A
+        multi-section answer (e.g. the verification route updates both
+        ``verification_plan`` and ``acceptance_criteria``; the actor/IO route
+        updates three sections) carries distinct per-section ledger values that a
+        single refined string cannot coherently replace — refining only
+        ``answer.text`` while leaving those entries generic would desync the
+        transcript from the persisted ledger for an acknowledged round, breaking
+        resume/review/safe-default/Seed-generation. Such answers are returned
+        unchanged. Best-effort otherwise: on no refiner, a non-generic answer, or
+        any failure, the original answer is returned unchanged.
+        """
+        refinable = {AutoAnswerSource.CONSERVATIVE_DEFAULT, AutoAnswerSource.ASSUMPTION}
+        if (
+            self.answer_refiner is None
+            or answer.blocker is not None
+            or answer.source not in refinable
+            or len(answer.ledger_updates) > 1
+        ):
+            return answer
+        section = answer.ledger_updates[0][0] if answer.ledger_updates else "constraints"
+        try:
+            concrete = await asyncio.wait_for(
+                self.answer_refiner(state.goal, question, section, answer.text),
+                timeout=self.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - refiner is best-effort
+            log.warning(
+                "auto.interview.answer_refine_failed",
+                auto_session_id=state.auto_session_id,
+                error=str(exc),
+            )
+            return answer
+        if not concrete or not concrete.strip():
+            return answer
+        concrete = concrete.strip()
+        refined_updates = answer.ledger_updates
+        if len(answer.ledger_updates) == 1:
+            sec, entry = answer.ledger_updates[0]
+            refined_updates = [(sec, replace(entry, value=concrete))]
+        log.info(
+            "auto.interview.answer_refined",
+            auto_session_id=state.auto_session_id,
+            section=section,
+            source=answer.source.value,
+        )
+        return replace(answer, text=concrete, ledger_updates=refined_updates)
+
+    async def _maybe_concretize_on_stagnation(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        turn: InterviewTurn,
+        *,
+        prev_ambiguity: float | None,
+        stagnant_rounds: int,
+    ) -> tuple[float | None, int, InterviewTurn]:
+        """Force a concrete decision when interview ambiguity plateaus.
+
+        See ``_STAGNATION_PATIENCE`` / ``_STAGNATION_LATERAL_SUGGESTIONS`` for the
+        rationale. Returns the ``(prev_ambiguity, stagnant_rounds, turn)`` baseline
+        for the next round. It is a no-op (inputs returned, counter reset) when no
+        lateral thinker is wired, ambiguity is already at/under threshold,
+        ambiguity improved this round, the patience window has not elapsed, the
+        persona chain is exhausted, or any lateral / transcript-push step fails —
+        in every such case the bounded loop falls through to the existing
+        max_rounds safe-default closure unchanged.
+        """
+        current = turn.ambiguity_score
+        if (
+            self.lateral_thinker is None
+            or current is None
+            or current <= BACKEND_READY_AMBIGUITY_THRESHOLD
+            or not state.interview_session_id
+        ):
+            return current, 0, turn
+
+        improved = prev_ambiguity is not None and current <= prev_ambiguity - _STAGNATION_MIN_DELTA
+        if prev_ambiguity is None or improved:
+            return current, 0, turn
+
+        stagnant_rounds += 1
+        if stagnant_rounds < _STAGNATION_PATIENCE:
+            return current, stagnant_rounds, turn
+
+        # Bound total interventions to avoid accumulating contradictory
+        # concretizations (see ``_STAGNATION_MAX_INTERVENTIONS``).
+        # ``personas_invoked`` is shared across phases (safe-default unsafe-context
+        # escalation, and later the EVALUATE/Seed-QA lateral paths), but those run
+        # strictly AFTER the interview loop, so during this loop its length equals
+        # the number of stagnation interventions so far. If that ordering ever
+        # changes, this would under-count — track a dedicated counter instead.
+        if len(state.personas_invoked) >= _STAGNATION_MAX_INTERVENTIONS:
+            return current, stagnant_rounds, turn
+
+        already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
+        open_gaps = ledger.open_gaps()
+        qa_differences = (
+            f"Interview ambiguity has plateaued at {current:.2f} over "
+            f"{stagnant_rounds + 1} rounds (target <= "
+            f"{BACKEND_READY_AMBIGUITY_THRESHOLD:.2f}); generic answers are not "
+            "lowering it.",
+            *(f"unresolved or weak required section: {gap}" for gap in open_gaps),
+        )
+        persona = select_persona_for_qa_failure(
+            qa_differences,
+            _STAGNATION_LATERAL_SUGGESTIONS,
+            already_tried_personas=already_tried,
+        )
+        if persona is None:
+            return current, stagnant_rounds, turn
+
+        run_artifact = _build_stagnation_lateral_artifact(state.goal, ledger)
+        log.info(
+            "auto.interview.stagnation.lateral_invoked",
+            auto_session_id=state.auto_session_id,
+            persona=persona.value,
+            ambiguity=current,
+            open_gaps=tuple(open_gaps),
+        )
+        try:
+            lateral_result = await asyncio.wait_for(
+                self.lateral_thinker(
+                    persona=persona,
+                    qa_differences=qa_differences,
+                    qa_suggestions=_STAGNATION_LATERAL_SUGGESTIONS,
+                    run_artifact=run_artifact,
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - lateral is best-effort
+            log.warning(
+                "auto.interview.stagnation.lateral_failed",
+                auto_session_id=state.auto_session_id,
+                persona=persona.value,
+                error=str(exc),
+            )
+            if persona.value not in state.personas_invoked:
+                state.personas_invoked.append(persona.value)
+            self._save(state)
+            return current, 0, turn
+
+        if persona.value not in state.personas_invoked:
+            state.personas_invoked.append(persona.value)
+        if lateral_result.error or not lateral_result.text.strip():
+            self._save(state)
+            return current, 0, turn
+
+        decision = lateral_result.text.strip()
+        try:
+            new_turn = _validate_turn(
+                await self._with_timeout(
+                    self.backend.answer(
+                        state.interview_session_id,
+                        f"{AUTO_ANSWER_PREFIX}[stagnation-concretization via "
+                        f"{persona.value}] {decision}",
+                        last_question=(
+                            f"[driver stagnation lateral: ambiguity={current:.2f} "
+                            "plateaued; forcing a concrete decision]"
+                        ),
+                    ),
+                    state,
+                    tool_name="interview.stagnation_concretization",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - transcript push best-effort
+            log.warning(
+                "auto.interview.stagnation.push_failed",
+                auto_session_id=state.auto_session_id,
+                error=str(exc),
+            )
+            self._save(state)
+            return current, 0, turn
+
+        state.interview_session_id = new_turn.session_id
+        state.pending_question = new_turn.question
+        state.last_lateral_persona = lateral_result.persona or persona.value
+        state.last_lateral_approach_summary = lateral_result.approach_summary
+        state.last_lateral_text = decision
+        new_ambiguity = (
+            new_turn.ambiguity_score if new_turn.ambiguity_score is not None else current
+        )
+        log.info(
+            "auto.interview.stagnation.concretized",
+            auto_session_id=state.auto_session_id,
+            persona=persona.value,
+            ambiguity_before=current,
+            ambiguity_after=new_ambiguity,
+        )
+        state.mark_progress(
+            f"stagnation lateral concretization via {persona.value}: "
+            f"ambiguity {current:.2f} -> {new_ambiguity:.2f}",
+            tool_name="interview_driver",
+        )
+        self._save(state)
+        return new_turn.ambiguity_score, 0, new_turn
 
     async def _escalate_safe_default_unsafe_context(
         self,
@@ -1889,6 +2172,34 @@ def _build_safe_default_lateral_artifact(
                 continue
             truncated = entry.value if len(entry.value) <= 200 else f"{entry.value[:200]}…"
             lines.append(f"  - [{section_name}|{entry.source}] {truncated}")
+    return "\n".join(lines)
+
+
+def _build_stagnation_lateral_artifact(goal: str, ledger: SeedDraftLedger) -> str:
+    """Compact goal + ledger projection passed as ``run_artifact`` on stagnation.
+
+    Mirrors :func:`_build_safe_default_lateral_artifact` but frames the snapshot
+    as a still-converging interview rather than a matcher fire, so the lateral
+    persona can pick the least-resolved required section and commit a concrete
+    decision for it.
+    """
+    inactive_statuses: frozenset[LedgerStatus] = frozenset(
+        {LedgerStatus.WEAK, LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}
+    )
+    lines: list[str] = [
+        f"Goal: {goal}",
+        "",
+        "Interview ledger so far (required Seed sections and their entries):",
+    ]
+    for section_name, section in ledger.sections.items():
+        rendered: list[str] = []
+        for entry in section.entries:
+            if entry.status in inactive_statuses:
+                continue
+            value = entry.value if len(entry.value) <= 200 else f"{entry.value[:200]}…"
+            rendered.append(value)
+        body = "; ".join(rendered) if rendered else "(empty / unresolved)"
+        lines.append(f"  - {section_name}: {body}")
     return "\n".join(lines)
 
 
