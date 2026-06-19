@@ -115,7 +115,7 @@ def _serializable_tool_result(result: MCPToolResult) -> dict[str, object]:
     }
 
 
-def _assert_detached_start_text_has_guidance_without_handles(
+def _assert_detached_start_text_has_guidance_with_handles(
     result: MCPToolResult,
     *,
     job_id: str,
@@ -124,18 +124,19 @@ def _assert_detached_start_text_has_guidance_without_handles(
     text = result.text_content
     assert text == (
         "Started background auto session.\n\n"
-        "Status: queued\n\n"
+        "Status: queued\n"
+        f"job_id: {job_id}\n"
+        f"auto_session_id: {auto_session_id}\n\n"
         "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
-        "then fetch ouroboros_job_result. Use response metadata for job_id "
-        "and auto_session_id."
+        "then fetch ouroboros_job_result."
     )
     assert "ouroboros_job_wait" in text
     assert "ouroboros_job_status" in text
     assert "ouroboros_job_result" in text
-    assert job_id not in text
-    assert auto_session_id not in text
-    assert not _AUTO_ID_RE.search(text)
-    assert not _UUID_HEX_RE.search(text)
+    # Handles must be visible in the text body so MCP clients that surface
+    # only ``content`` (and not structured ``meta``) can still track the job.
+    assert job_id in text
+    assert auto_session_id in text
 
 
 @pytest.mark.asyncio
@@ -321,7 +322,7 @@ class TestBackgroundJobPath:
         auto_session_id = result.value.meta["auto_session_id"]
         assert isinstance(auto_session_id, str)
         assert auto_session_id.startswith("auto_")
-        _assert_detached_start_text_has_guidance_without_handles(
+        _assert_detached_start_text_has_guidance_with_handles(
             result.value,
             job_id="job_auto_001",
             auto_session_id=auto_session_id,
@@ -424,15 +425,20 @@ class TestBackgroundJobPath:
         first = await _invoke(tmp_path / "first", "job_auto_001")
         second = await _invoke(tmp_path / "second", "job_auto_002")
 
-        assert first.text_content == second.text_content
+        # The text now embeds the (volatile) job_id/auto_session_id handles, so
+        # determinism holds only after scrubbing them — identical inputs must
+        # still render a byte-identical response skeleton.
+        assert _normalize_detached_auto_response(
+            first.text_content
+        ) == _normalize_detached_auto_response(second.text_content)
         assert first.meta["job_id"] != second.meta["job_id"]
         assert first.meta["auto_session_id"] != second.meta["auto_session_id"]
-        _assert_detached_start_text_has_guidance_without_handles(
+        _assert_detached_start_text_has_guidance_with_handles(
             first,
             job_id=first.meta["job_id"],
             auto_session_id=first.meta["auto_session_id"],
         )
-        _assert_detached_start_text_has_guidance_without_handles(
+        _assert_detached_start_text_has_guidance_with_handles(
             second,
             job_id=second.meta["job_id"],
             auto_session_id=second.meta["auto_session_id"],

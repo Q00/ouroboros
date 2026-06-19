@@ -876,10 +876,11 @@ class StartAutoHandler:
 
         text = (
             "Started background auto session.\n\n"
-            "Status: queued\n\n"
+            "Status: queued\n"
+            f"job_id: {snapshot.job_id}\n"
+            f"auto_session_id: {auto_session_id}\n\n"
             "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
-            "then fetch ouroboros_job_result. Use response metadata for job_id "
-            "and auto_session_id."
+            "then fetch ouroboros_job_result."
         )
         return Result.ok(
             MCPToolResult(
