@@ -235,7 +235,7 @@ TOOL_CALL_HOOK_NAMES: Final[frozenset[str]] = frozenset(hook.value for hook in T
 #: scope MUST also hold the tool-specific permission declared in the
 #: manifest's ``commands[].permissions`` / ``tools.allowed`` surface;
 #: that enforcement remains the helper dispatcher's responsibility. The
-#: current production ``invoke_plugin`` path is not yet wired through that
+#: production ``invoke_plugin`` path is wired through that
 #: tool-call boundary.
 HOOK_TOOL_INTERCEPT_SCOPE: Final[str] = "plugin:tool:intercept"
 
@@ -340,8 +340,8 @@ def is_tool_call_hook_kind(value: str) -> bool:
     Use this in manifest validators and dispatcher helpers so the
     boundary between lifecycle and tool-call hooks stays explicit. The
     v0.4 schema accepts these names and the firewall exposes helper
-    dispatchers, but production command invocation remains inert unless
-    a tool-mediation caller explicitly invokes those helpers.
+    dispatchers, and production command invocation now invokes those helpers
+    around the mediated command subprocess.
     """
     return value in TOOL_CALL_HOOK_NAMES
 

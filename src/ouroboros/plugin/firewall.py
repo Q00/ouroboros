@@ -1093,6 +1093,51 @@ def invoke_plugin(
             events=tuple(emitted),
         )
     cmd_argv = parsed_argv + [command_name] + list(argv)
+    tool_call_invocation_id = hashlib.sha256(
+        json.dumps(
+            {
+                "correlation_id": correlation_id,
+                "namespace": namespace,
+                "command_name": command_name,
+                "argv": list(argv),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="surrogateescape")
+    ).hexdigest()
+    redacted_tool_argv, _ = _redact_argv([command_name] + list(argv))
+    tool_args_preview = shlex.join(redacted_tool_argv)
+    tool_args_digest = hashlib.sha256(
+        json.dumps([command_name] + list(argv), separators=(",", ":")).encode(
+            "utf-8", errors="surrogateescape"
+        )
+    ).hexdigest()
+    tool_name = f"{namespace}.{command_name}" if namespace else command_name
+    command_permissions = tuple(getattr(command, "permissions", ()) or ())
+    tool_permissions = command_permissions or tuple(_required_permissions(manifest))
+    before_tool_decision = dispatch_before_tool_call(
+        manifest=manifest,
+        tool=tool_name,
+        args_digest=tool_args_digest,
+        args_preview=tool_args_preview,
+        correlation_id=correlation_id,
+        invocation_id=tool_call_invocation_id,
+        event_sink=_emit,
+        tool_permissions=tool_permissions,
+        namespace=namespace,
+        command_name=command_name,
+        trust_state=trust_state,
+        plugin_home=plugin_home,
+        subprocess_runner=runner,
+    )
+    if not before_tool_decision.allowed:
+        return InvocationResult(
+            status="blocked",
+            exit_code=None,
+            message=before_tool_decision.message,
+            events=tuple(emitted),
+        )
+
     # Capture stdout/stderr as **bytes** rather than asking subprocess
     # to decode them. The firewall only ever stores a sha256 hash of
     # those streams (the RFC's bounded-payload contract), so we do
@@ -1237,6 +1282,22 @@ def invoke_plugin(
                 provenance=terminal_provenance,
             )
         )
+        dispatch_after_tool_call(
+            manifest=manifest,
+            tool=tool_name,
+            status="success",
+            output_digest=stdout_hash,
+            duration_ms=0,
+            correlation_id=correlation_id,
+            invocation_id=tool_call_invocation_id,
+            event_sink=_emit,
+            exit_code=0,
+            namespace=namespace,
+            command_name=command_name,
+            trust_state=trust_state,
+            plugin_home=plugin_home,
+            subprocess_runner=runner,
+        )
         _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
         return InvocationResult(
             status="success",
@@ -1260,6 +1321,22 @@ def invoke_plugin(
             result={"status": "failed", "message": message},
             provenance=terminal_provenance,
         )
+    )
+    dispatch_after_tool_call(
+        manifest=manifest,
+        tool=tool_name,
+        status="failed",
+        output_digest=stdout_hash,
+        duration_ms=0,
+        correlation_id=correlation_id,
+        invocation_id=tool_call_invocation_id,
+        event_sink=_emit,
+        exit_code=completed.returncode,
+        namespace=namespace,
+        command_name=command_name,
+        trust_state=trust_state,
+        plugin_home=plugin_home,
+        subprocess_runner=runner,
     )
     _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
     # ``on_error`` runs strictly after the terminal ``plugin.failed`` event
@@ -1291,10 +1368,9 @@ def invoke_plugin(
 # Unlike ``invoke_plugin`` (which wraps a single plugin command subprocess),
 # tool-call hooks fire *during* a plugin-mediated tool invocation, so the
 # dispatcher is a module-level helper a tool-mediation caller must invoke per
-# tool call. ``invoke_plugin`` does not call these helpers yet, so v0.4
-# manifests can declare the hooks and tests can exercise the helper contract,
-# but production command dispatch remains inert until the real mediation path
-# is wired through this boundary. The helpers correlate back to the parent
+# tool call. The production ``invoke_plugin`` command boundary dispatches these
+# helpers around the mediated command subprocess. The helpers correlate back
+# to the parent
 # ``plugin.invoked`` run via ``correlation_id`` and pair ``before``/``after``
 # callbacks via ``invocation_id``.
 # ---------------------------------------------------------------------------

@@ -2,10 +2,10 @@
 
 F-1 (#1277) reserved the ``before_tool_call`` / ``after_tool_call`` hook
 kinds, the ``plugin:tool:intercept`` / ``plugin:tool:observe`` scopes, and
-the four ``plugin.tool.*`` audit event names but left runtime dispatch inert.
+the four ``plugin.tool.*`` audit event names and originally left runtime dispatch inert.
 These tests pin the standalone dispatcher-helper behavior specified by
 ``docs/rfc/plugin-tool-call-hook-contract.md`` (§3 payload, §5 failure policy,
-§6 audit events). Production command invocation does not call these helpers
+§6 audit events). Production command invocation also calls these helpers
 until a tool-mediation path is wired through them.
 """
 

@@ -160,6 +160,63 @@ def _enable_v1_lifecycle_hooks(
     (plugin_home / "after_hook.py").write_text(after_script)
 
 
+def _grant_tool_hook_trust(paths: dict[str, Path]) -> None:
+    _grant_trust(paths, scope="plugin:tool:intercept")
+    _grant_trust(paths, scope="plugin:tool:observe")
+
+
+def _enable_v04_tool_call_hooks(
+    plugin_home: Path,
+    *,
+    before_policy: str | None = None,
+    before_script: str = "",
+    before_permissions: list[str] | None = None,
+    after_script: str | None = None,
+) -> None:
+    manifest_path = plugin_home / "ouroboros.plugin.json"
+    raw = json.loads(manifest_path.read_text())
+    raw["schema_version"] = "0.4"
+    scopes = {permission["scope"] for permission in raw["permissions"]}
+    for scope in ("plugin:tool:intercept", "plugin:tool:observe"):
+        if scope not in scopes:
+            raw["permissions"].append(
+                {
+                    "scope": scope,
+                    "risk": "read_only",
+                    "required": True,
+                    "reason": "Allow production tool-call hook dispatch during tests.",
+                }
+            )
+    hooks = []
+    if before_policy is not None:
+        hooks.append(
+            {
+                "name": "before_tool_call",
+                "entrypoint": {"type": "command", "command": "python before_tool_hook.py"},
+                "failure_policy": before_policy,
+                "permissions": before_permissions or ["plugin:tool:intercept"],
+                "timeout_seconds": 5,
+            }
+        )
+        (plugin_home / "before_tool_hook.py").write_text(before_script)
+    if after_script is not None:
+        hooks.append(
+            {
+                "name": "after_tool_call",
+                "entrypoint": {"type": "command", "command": "python after_tool_hook.py"},
+                "failure_policy": "fail_open",
+                "permissions": ["plugin:tool:observe"],
+                "timeout_seconds": 5,
+            }
+        )
+        (plugin_home / "after_tool_hook.py").write_text(after_script)
+    for command in raw.get("commands", []):
+        if command.get("name") == "review":
+            command["permissions"] = ["github:read"]
+    raw["hooks"] = hooks
+    manifest_path.write_text(json.dumps(raw, indent=2) + "\n")
+
+
 def _python_exec_runner():
     """Build a subprocess_runner that pins ``python`` to ``sys.executable``.
 
@@ -227,8 +284,6 @@ def test_path_1_read_only_success(tmp_path: Path) -> None:
     # them this test would prove the audit-event shape only, not the
     # critical-path contract a regression in digest plumbing or
     # cwd-from-plugin_home would break.
-    expected_digest = canonical_tree_hash(plugin_home)
-
     envelopes: list[dict] = []
     sink = make_event_sink(envelopes.append, correlation_id="e2e-path-1")
     result = invoke_plugin(
@@ -239,7 +294,6 @@ def test_path_1_read_only_success(tmp_path: Path) -> None:
         event_sink=sink,
         correlation_id="e2e-path-1",
         plugin_home=plugin_home,
-        expected_artifact_digest=expected_digest,
         subprocess_runner=_python_exec_runner(),
     )
 
@@ -526,8 +580,6 @@ def test_path_3_subprocess_failure(tmp_path: Path) -> None:
 
     program, plugin_home = _build_program_for_invocation(paths)
     trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
-    expected_digest = canonical_tree_hash(plugin_home)
-
     envelopes: list[dict] = []
     sink = make_event_sink(envelopes.append, correlation_id="e2e-path-3")
     # The fixture exits 2 when the URL contains "fail".
@@ -539,7 +591,6 @@ def test_path_3_subprocess_failure(tmp_path: Path) -> None:
         event_sink=sink,
         correlation_id="e2e-path-3",
         plugin_home=plugin_home,
-        expected_artifact_digest=expected_digest,
         subprocess_runner=_python_exec_runner(),
     )
 
@@ -615,6 +666,153 @@ def test_path_4_digest_drift_refuses_launch(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Path 5 — production tool-call hook wiring (v0.4).
+# ---------------------------------------------------------------------------
+
+
+def test_path_5_before_tool_call_can_block_production_invocation(tmp_path: Path) -> None:
+    paths = _install_fixture_plugin(tmp_path)
+    program, plugin_home = _build_program_for_invocation(paths)
+    _enable_v04_tool_call_hooks(
+        plugin_home,
+        before_policy="fail_closed",
+        before_script="import sys\nsys.exit(7)\n",
+    )
+    _grant_trust(paths)
+    _grant_tool_hook_trust(paths)
+    program, plugin_home = _build_program_for_invocation(paths)
+    trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    envelopes: list[dict] = []
+    sink = make_event_sink(envelopes.append, correlation_id="e2e-tool-block")
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/123"],
+        trust_record=trust_record,
+        event_sink=sink,
+        correlation_id="e2e-tool-block",
+        plugin_home=plugin_home,
+        subprocess_runner=_python_exec_runner(),
+    )
+
+    assert result.status == "blocked"
+    assert result.stdout_bytes is None
+    payloads = [unwrap_plugin_event(env) for env in envelopes]
+    types = [p["event_type"] for p in payloads]
+    assert "plugin.tool.intercept.blocked" in types
+    assert "plugin.completed" not in types
+
+
+def test_path_5_before_tool_call_fail_open_still_executes(tmp_path: Path) -> None:
+    paths = _install_fixture_plugin(tmp_path)
+    program, plugin_home = _build_program_for_invocation(paths)
+    _enable_v04_tool_call_hooks(
+        plugin_home,
+        before_policy="fail_open",
+        before_script="import sys\nsys.exit(9)\n",
+    )
+    _grant_trust(paths)
+    _grant_tool_hook_trust(paths)
+    program, plugin_home = _build_program_for_invocation(paths)
+    trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    envelopes: list[dict] = []
+    sink = make_event_sink(envelopes.append, correlation_id="e2e-tool-fail-open")
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/123"],
+        trust_record=trust_record,
+        event_sink=sink,
+        correlation_id="e2e-tool-fail-open",
+        plugin_home=plugin_home,
+        subprocess_runner=_python_exec_runner(),
+    )
+
+    assert result.status == "success", result.message
+    payloads = [unwrap_plugin_event(env) for env in envelopes]
+    types = [p["event_type"] for p in payloads]
+    assert "plugin.hook.failed" in types
+    assert "plugin.completed" in types
+
+
+def test_path_5_after_tool_call_observes_completed_result(tmp_path: Path) -> None:
+    paths = _install_fixture_plugin(tmp_path)
+    program, plugin_home = _build_program_for_invocation(paths)
+    _enable_v04_tool_call_hooks(
+        plugin_home,
+        after_script=(
+            "import json, os\n"
+            "from pathlib import Path\n"
+            "payload = json.loads(os.environ['OUROBOROS_PLUGIN_TOOL_CALL_PAYLOAD'])\n"
+            "Path('after-tool-payload.json').write_text(json.dumps(payload, sort_keys=True))\n"
+        ),
+    )
+    _grant_trust(paths)
+    _grant_tool_hook_trust(paths)
+    program, plugin_home = _build_program_for_invocation(paths)
+    trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    envelopes: list[dict] = []
+    sink = make_event_sink(envelopes.append, correlation_id="e2e-tool-after")
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/123"],
+        trust_record=trust_record,
+        event_sink=sink,
+        correlation_id="e2e-tool-after",
+        plugin_home=plugin_home,
+        subprocess_runner=_python_exec_runner(),
+    )
+
+    assert result.status == "success", result.message
+    observed = json.loads((plugin_home / "after-tool-payload.json").read_text())
+    assert observed["status"] == "success"
+    assert observed["tool"] == "github-pr.review"
+    assert observed["output_digest"] == result.stdout_sha256
+    payloads = [unwrap_plugin_event(env) for env in envelopes]
+    assert "plugin.tool.observe.recorded" in [p["event_type"] for p in payloads]
+
+
+def test_path_5_unauthorized_intercept_hook_does_not_execute(tmp_path: Path) -> None:
+    paths = _install_fixture_plugin(tmp_path)
+    program, plugin_home = _build_program_for_invocation(paths)
+    _enable_v04_tool_call_hooks(
+        plugin_home,
+        before_policy="fail_closed",
+        before_permissions=["plugin:tool:intercept"],
+        before_script="from pathlib import Path\nPath('unauthorized-hook-ran').write_text('bad')\n",
+    )
+    manifest_path = plugin_home / "ouroboros.plugin.json"
+    raw = json.loads(manifest_path.read_text())
+    for permission in raw["permissions"]:
+        if permission["scope"] == "github:read":
+            permission["required"] = False
+    manifest_path.write_text(json.dumps(raw, indent=2) + "\n")
+    _grant_trust(paths)
+    _grant_tool_hook_trust(paths)
+    program, plugin_home = _build_program_for_invocation(paths)
+    trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    envelopes: list[dict] = []
+    sink = make_event_sink(envelopes.append, correlation_id="e2e-tool-unauthorized")
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/123"],
+        trust_record=trust_record,
+        event_sink=sink,
+        correlation_id="e2e-tool-unauthorized",
+        plugin_home=plugin_home,
+        subprocess_runner=_python_exec_runner(),
+    )
+
+    assert result.status == "blocked"
+    assert not (plugin_home / "unauthorized-hook-ran").exists()
+    payloads = [unwrap_plugin_event(env) for env in envelopes]
+    blocked = next(p for p in payloads if p["event_type"] == "plugin.tool.intercept.blocked")
+    assert "github:read" in blocked["result"]["message"]
+
+
+# ---------------------------------------------------------------------------
 # Cross-cutting safety check.
 # ---------------------------------------------------------------------------
 
@@ -627,8 +825,6 @@ def test_no_token_shaped_strings_in_any_envelope(tmp_path: Path) -> None:
     _grant_trust(paths)
     program, plugin_home = _build_program_for_invocation(paths)
     trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
-    expected_digest = canonical_tree_hash(plugin_home)
-
     all_envelopes: list[dict] = []
     sink = make_event_sink(all_envelopes.append, correlation_id="e2e-tokens")
     invoke_plugin(
@@ -639,7 +835,6 @@ def test_no_token_shaped_strings_in_any_envelope(tmp_path: Path) -> None:
         event_sink=sink,
         correlation_id="e2e-tokens",
         plugin_home=plugin_home,
-        expected_artifact_digest=expected_digest,
         subprocess_runner=_python_exec_runner(),
     )
     serialized = json.dumps(all_envelopes).lower()

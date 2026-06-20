@@ -73,8 +73,8 @@ except ImportError as exc:  # pragma: no cover
 # tool-call hook family (``before_tool_call`` / ``after_tool_call``) into
 # the same JSON Schema enum and reserves the matching ``plugin.tool.*``
 # audit event names. Standalone dispatcher helpers exist in the firewall, but
-# production command invocation is still not wired through the tool-call
-# boundary; v0.4 manifests may declare these hooks, yet they remain inert until
+# production command invocation is wired through the tool-call
+# boundary; v0.4 manifests may declare these hooks, and they fire when
 # a tool-mediation caller invokes the helpers.
 SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3", "0.4")
 
@@ -212,9 +212,9 @@ class AuditSpec:
             # v0.4 keeps the v0.3 hook event family and additively
             # reserves the four ``plugin.tool.*`` event names locked
             # in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6.
-            # Firewall dispatcher helpers emit these events only when
-            # an explicit tool-mediation caller invokes them; production
-            # ``invoke_plugin`` command dispatch does not emit them yet.
+            # Firewall dispatcher helpers emit these events when an
+            # explicit tool-mediation caller invokes them; production
+            # ``invoke_plugin`` command dispatch now also emits them.
             return AuditSpec(
                 events=(
                     *AuditSpec.standard_four_events().events,
