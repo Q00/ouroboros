@@ -1131,6 +1131,25 @@ def invoke_plugin(
         subprocess_runner=runner,
     )
     if not before_tool_decision.allowed:
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={
+                    "status": "blocked",
+                    "message": before_tool_decision.message,
+                },
+                provenance={
+                    "correlation_id": correlation_id,
+                    "reason": "tool_call_blocked",
+                    "tool_invocation_id": tool_call_invocation_id,
+                },
+            )
+        )
         return InvocationResult(
             status="blocked",
             exit_code=None,
@@ -1259,6 +1278,7 @@ def invoke_plugin(
     stderr_bytes = _to_bytes(completed.stderr)
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
+    output_digest = hashlib.sha256(stdout_bytes + stderr_bytes).hexdigest()
 
     terminal_provenance = {
         "correlation_id": correlation_id,
@@ -1286,7 +1306,7 @@ def invoke_plugin(
             manifest=manifest,
             tool=tool_name,
             status="success",
-            output_digest=stdout_hash,
+            output_digest=output_digest,
             duration_ms=0,
             correlation_id=correlation_id,
             invocation_id=tool_call_invocation_id,
@@ -1326,7 +1346,7 @@ def invoke_plugin(
         manifest=manifest,
         tool=tool_name,
         status="failed",
-        output_digest=stdout_hash,
+        output_digest=output_digest,
         duration_ms=0,
         correlation_id=correlation_id,
         invocation_id=tool_call_invocation_id,
