@@ -11,7 +11,8 @@ background task, let callers poll ``job_status`` / ``job_wait`` / ``job_result``
 from __future__ import annotations
 
 import inspect
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -221,6 +222,23 @@ class TestPluginModeDispatch:
         )
         payload_context = result.value.meta["_subagent"]["context"]
         assert payload_context["acceptance_criterion"] == "Wins"
+
+    @pytest.mark.asyncio
+    async def test_plugin_payload_uses_brownfield_default_when_working_dir_omitted(
+        self, handler, tmp_path: Path
+    ) -> None:
+        default_project = tmp_path / "project"
+        default_project.mkdir()
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=default_project),
+        ):
+            result = await handler.handle({"session_id": "orch_xyz", "artifact": "code"})
+
+        assert result.is_ok
+        payload_context = result.value.meta["_subagent"]["context"]
+        assert payload_context["working_dir"] == str(default_project.resolve())
 
 
 class TestFactoryWiring:

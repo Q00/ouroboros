@@ -1862,13 +1862,27 @@ class StartEvaluateHandler:
             else:
                 ac_for_payload = None
 
+            seed: Seed | None = None
+            seed_content = arguments.get("seed_content")
+            if seed_content:
+                try:
+                    seed_dict = yaml.safe_load(seed_content)
+                    seed = Seed.from_dict(seed_dict)
+                except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
+                    log.warning("mcp.tool.start_evaluate.seed_parse_warning", error=str(e))
+
+            working_dir = await _resolve_evaluate_working_dir(
+                arguments.get("working_dir"),
+                seed,
+            )
+
             payload = build_evaluate_subagent(
                 session_id=session_id,
                 artifact=artifact,
                 artifact_type=arguments.get("artifact_type", "code"),
-                seed_content=arguments.get("seed_content"),
+                seed_content=seed_content,
                 acceptance_criterion=ac_for_payload,
-                working_dir=arguments.get("working_dir"),
+                working_dir=str(working_dir),
                 trigger_consensus=arguments.get("trigger_consensus", False),
             )
             return await dispatch_plugin_terminal(
