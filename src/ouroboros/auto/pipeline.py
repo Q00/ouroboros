@@ -4631,6 +4631,7 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
 def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
     text = _SEED_QA_DIAGNOSTIC_PREFIX_RE.sub("", text.strip())
     cleaned_lines: list[str] = []
+    skipping_diagnostic_block = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
         lowered = line.casefold()
@@ -4639,7 +4640,12 @@ def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
         if lowered.startswith("# lateral thinking:"):
             continue
         if lowered.startswith("qa differences:") or lowered.startswith("qa suggestions:"):
+            skipping_diagnostic_block = True
             continue
+        if skipping_diagnostic_block:
+            if line.startswith(("-", "*")) or re.match(r"^\d+[\.)]\s+", line):
+                continue
+            skipping_diagnostic_block = False
         cleaned_lines.append(line)
     cleaned = " ".join(cleaned_lines)
     cleaned = cleaned.replace("# Lateral Thinking:", "").replace("# lateral thinking:", "")

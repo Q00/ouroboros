@@ -2539,6 +2539,7 @@ class InterviewHandler:
                     )
 
                 lateral_review_meta: dict[str, Any] | None = None
+                intent_guard_report: IntentGuardReport | None = None
 
                 # If answer provided, record it first
                 if answer:
@@ -3039,8 +3040,9 @@ class InterviewHandler:
                         score=live_score,
                         question=question,
                     ),
-                    "intent_guard": intent_guard_report.to_dict(),
                 }
+                if intent_guard_report is not None:
+                    answer_meta["intent_guard"] = intent_guard_report.to_dict()
                 if answer_is_length_guard:
                     # Q00/ouroboros#831 (Direction A): structured signal when
                     # the next question after an answer is again the length-

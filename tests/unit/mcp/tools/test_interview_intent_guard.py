@@ -91,3 +91,34 @@ async def test_interview_handler_records_human_contract_change_with_intent_guard
         for check in result.value.meta["intent_guard"]["checks"]
     )
     mock_engine.record_response.assert_awaited_once()
+
+
+async def test_interview_handler_resume_without_answer_omits_intent_guard() -> None:
+    state = InterviewState(
+        interview_id="interview_resume_no_answer",
+        initial_context=VIDEO_GOAL,
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="What should be exported?",
+                user_response="MP4 shorts and transcript.",
+            )
+        ],
+    )
+    mock_engine = MagicMock()
+    mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+    mock_engine.ask_next_question = AsyncMock(return_value=Result.ok("What clip length?"))
+    mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    mock_engine.record_response = AsyncMock()
+
+    handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock())
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+
+    result = await handler.handle({"session_id": state.interview_id})
+
+    assert result.is_ok
+    assert result.value.meta["session_id"] == state.interview_id
+    assert "intent_guard" not in result.value.meta
+    assert result.value.content[0].text.endswith("What clip length?")
+    mock_engine.record_response.assert_not_called()
+    mock_engine.ask_next_question.assert_awaited_once()

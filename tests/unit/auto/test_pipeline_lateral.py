@@ -161,6 +161,7 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
     assert "[seed qa lateral repair attempt" not in constraints
     assert "# Lateral Thinking" not in constraints
     assert "QA differences:" not in constraints
+    assert "- stale diagnostic" not in constraints
     assert "treat every CSV cell as a string" in constraints
 
     report = diagnose_auto_state(
