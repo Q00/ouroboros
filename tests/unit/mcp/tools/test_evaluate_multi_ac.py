@@ -145,7 +145,6 @@ class TestEvaluateWorkingDirResolution:
 
         assert resolved == default.resolve()
 
-
     async def test_stale_brownfield_default_falls_back_to_seed(
         self, tmp_path: Path, monkeypatch
     ) -> None:
