@@ -174,6 +174,7 @@ def test_mcp_auto_status_surfaces_pending_question_and_recent_answers(tmp_path) 
     meta = result.value.meta
     assert meta["pending_question"] == "Which runtime should handle this?\nAny credentials?"
     assert meta["auto_answer_log"] == state.auto_answer_log
+    assert meta["intent_guard"]["status"] == "pass"
     text = result.value.content[0].text
     assert "Pending question:" in text
     assert "  Which runtime should handle this?" in text
@@ -181,6 +182,7 @@ def test_mcp_auto_status_surfaces_pending_question_and_recent_answers(tmp_path) 
     assert "Recent auto answers (last 2):" in text
     assert "  round 2 [auto] Q: Which runtime should handle this?" in text
     assert "    A: Codex runtime." in text
+    assert "IntentGuard: pass" in text
 
 
 def test_listener_prefers_terminal_generations_over_iterations(tmp_path) -> None:
@@ -637,5 +639,8 @@ def test_cli_status_auto_snapshot(tmp_path) -> None:
         "  status: running\n"
         "  current_generation: 3\n"
         "  stop_reason: qa passed\n"
+        "IntentGuard: pass\n"
+        "  PASS intent_contract_not_applicable: goal does not look like an artifact-output request\n"
+        "  PASS spec_pollution: Seed constraints do not contain known diagnostic markers\n"
     )
     assert rendered == expected

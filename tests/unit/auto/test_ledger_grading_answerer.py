@@ -471,6 +471,32 @@ def test_auto_answerer_preserves_product_behavior_phrasing_variants() -> None:
     assert all("product behavior" in answer.text.lower() for answer in answers)
 
 
+def test_product_behavior_question_prefers_user_output_contract_over_generated_option() -> None:
+    """Interview options must not outrank explicit output intent from the user goal."""
+    goal = (
+        "I want to make a video harness when I put a video to harness, "
+        "the harness will make some shorts and long form video with transcript"
+    )
+    context = AutoAnswerContext(
+        user_preferences={
+            "outputs": goal,
+            "acceptance_criteria": goal,
+        }
+    )
+    question = (
+        "Which one is the actual MVP behavior to lock: `--mode auto` creates MP4s "
+        "and transcripts, or `--mode review` creates only the review package and "
+        "rejects automated export?"
+    )
+
+    answer = AutoAnswerer().answer(question, SeedDraftLedger.from_goal(goal), context)
+
+    assert answer.source == AutoAnswerSource.USER_PREFERENCE
+    assert "shorts" in answer.text
+    assert "transcript" in answer.text
+    assert "review package" not in answer.text
+
+
 def test_auto_answerer_preserves_passive_product_behavior_variants() -> None:
     answerer = AutoAnswerer()
     ledger = SeedDraftLedger.from_goal("Build a source-control compliance tool")

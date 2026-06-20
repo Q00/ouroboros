@@ -24,7 +24,7 @@ from ouroboros.auto.lateral_routing import (
     classify_qa_failure_to_pattern,
     select_persona_for_qa_failure,
 )
-from ouroboros.auto.pipeline import AutoPipeline
+from ouroboros.auto.pipeline import AutoPipeline, _seed_with_seed_qa_feedback
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
@@ -72,6 +72,40 @@ def _build_seed(seed_id: str = "seed_lateral_001") -> Seed:
         ),
         metadata=SeedMetadata(seed_id=seed_id, ambiguity_score=0.12),
     )
+
+
+def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> None:
+    seed = _build_seed().model_copy(
+        update={
+            "constraints": (
+                "Use existing project patterns",
+                "[seed qa lateral repair attempt 1] Hacker: # Lateral Thinking: Hacker\n\nQA differences:\n- bad",
+            ),
+            "metadata": SeedMetadata(seed_id="seed_dirty", ambiguity_score=0.206),
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.52,
+        verdict="revise",
+        differences=(
+            "metadata.ambiguity_score is 0.206, exceeding the required readiness gate of <= 0.20.",
+            "The constraints section is polluted with pasted lateral repair and QA diagnostic text.",
+        ),
+        suggestions=(
+            "Remove all pasted lateral repair and QA diagnostic blocks from constraints.",
+        ),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    constraints = "\n".join(repaired.constraints)
+
+    assert "# Lateral Thinking" not in constraints
+    assert "QA differences:" not in constraints
+    assert "[seed qa lateral repair attempt" not in constraints
+    assert "omit QA or lateral diagnostic prose" in constraints
+    assert repaired.metadata.ambiguity_score == 0.206
+    assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
 class _StubInterviewDriver:

@@ -1765,7 +1765,7 @@ _INTENT_TO_SECTIONS: dict[QuestionIntent, tuple[str, ...]] = {
     QuestionIntent.ACCEPTANCE_CRITERIA: ("acceptance_criteria",),
     QuestionIntent.ACTOR_IO: ("actors", "inputs", "outputs"),
     QuestionIntent.RUNTIME_CONTEXT: ("runtime_context",),
-    QuestionIntent.PRODUCT_BEHAVIOR: ("constraints",),
+    QuestionIntent.PRODUCT_BEHAVIOR: ("acceptance_criteria", "outputs", "constraints"),
 }
 
 

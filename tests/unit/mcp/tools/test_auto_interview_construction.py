@@ -407,6 +407,32 @@ def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     assert "`hello_auto.py` exists" in preferences["acceptance_criteria"]
 
 
+def test_inline_artifact_goal_seeds_output_contract() -> None:
+    """Sentence-shaped artifact goals are intent evidence, not loose hints.
+
+    Regression coverage for a video-harness auto run where the initial goal
+    explicitly requested shorts, long-form videos, and transcripts but the
+    interview later introduced a review-only alternative.
+    """
+    goal = (
+        "I want to make a video harness when I put a video to harness, "
+        "the harness will make some shorts and long form video with transcript"
+    )
+
+    preferences = _derive_goal_user_preferences(goal)
+    ledger = _seed_initial_ledger_from_user_preferences(goal, preferences)
+
+    assert "outputs" in preferences
+    assert "acceptance_criteria" in preferences
+    assert "shorts" in preferences["outputs"]
+    assert "transcript" in preferences["outputs"]
+    assert any(
+        entry.source.value == "user_preference"
+        and "long form video" in entry.value
+        for entry in ledger.sections["outputs"].entries
+    )
+
+
 def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
     """Pre-seeding must not bypass the answerer's risky USER_PREFERENCE gate."""
     risky_goal = """
