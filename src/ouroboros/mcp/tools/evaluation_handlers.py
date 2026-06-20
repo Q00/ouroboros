@@ -18,7 +18,7 @@ import yaml
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
-from ouroboros.core.project_paths import resolve_path_against_base
+from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -77,43 +77,17 @@ async def _default_brownfield_project_dir() -> Path | None:
 
 
 def _seed_project_dir(seed: Seed | None, *, stable_base: Path) -> Path | None:
-    """Resolve a project directory encoded in seed metadata/brownfield context."""
-    if seed is None:
+    """Resolve a contained project directory encoded in seed metadata/context."""
+    resolution = resolve_seed_project_path(seed, stable_base=stable_base)
+    if resolution.path is None:
         return None
 
-    candidates: list[str] = []
-    seed_meta = getattr(seed, "metadata", None)
-    if seed_meta is not None:
-        project_dir = getattr(seed_meta, "project_dir", None) or getattr(
-            seed_meta,
-            "working_directory",
-            None,
-        )
-        if isinstance(project_dir, str) and project_dir:
-            candidates.append(project_dir)
-
-    brownfield_context = getattr(seed, "brownfield_context", None)
-    context_references = getattr(brownfield_context, "context_references", ()) or ()
-    for preferred_role in ("primary", None):
-        for reference in context_references:
-            path = getattr(reference, "path", None)
-            role = getattr(reference, "role", None)
-            if not isinstance(path, str) or not path or path in candidates:
-                continue
-            if preferred_role is None or role == preferred_role:
-                candidates.append(path)
-
-    for candidate in candidates:
-        resolved = resolve_path_against_base(candidate, stable_base=stable_base)
-        if resolved is None:
-            continue
-        if resolved.is_file():
-            return resolved.parent
-        if resolved.exists() and not resolved.is_dir():
-            continue
-        return resolved
-
-    return None
+    resolved = resolution.path
+    if resolved.is_file():
+        return resolved.parent
+    if resolved.exists() and not resolved.is_dir():
+        return None
+    return resolved
 
 
 async def _resolve_evaluate_working_dir(

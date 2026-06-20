@@ -106,12 +106,11 @@ class TestEvaluateWorkingDirResolution:
 
     async def test_seed_metadata_used_when_no_default(self, tmp_path: Path, monkeypatch) -> None:
         cwd = tmp_path / "hermes"
-        project = tmp_path / "project"
-        cwd.mkdir()
-        project.mkdir()
+        project = cwd / "project"
+        project.mkdir(parents=True)
         monkeypatch.chdir(cwd)
         seed = SimpleNamespace(
-            metadata=SimpleNamespace(project_dir=str(project), working_directory=None),
+            metadata=SimpleNamespace(project_dir="project", working_directory=None),
             brownfield_context=None,
         )
 
@@ -122,6 +121,50 @@ class TestEvaluateWorkingDirResolution:
             resolved = await _resolve_evaluate_working_dir(None, seed)
 
         assert resolved == project.resolve()
+
+    async def test_brownfield_default_wins_over_seed_metadata(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        cwd = tmp_path / "hermes"
+        default = tmp_path / "repo-default"
+        seed_project = cwd / "seed-project"
+        cwd.mkdir()
+        default.mkdir()
+        seed_project.mkdir()
+        monkeypatch.chdir(cwd)
+        seed = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir="seed-project", working_directory=None),
+            brownfield_context=None,
+        )
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=default),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, seed)
+
+        assert resolved == default.resolve()
+
+    async def test_seed_metadata_escape_falls_back_to_cwd(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        cwd = tmp_path / "hermes"
+        outside = tmp_path / "outside"
+        cwd.mkdir()
+        outside.mkdir()
+        monkeypatch.chdir(cwd)
+        seed = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir=str(outside), working_directory=None),
+            brownfield_context=None,
+        )
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=None),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, seed)
+
+        assert resolved == cwd.resolve()
 
     async def test_cwd_fallback_last(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
