@@ -113,6 +113,27 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
+def test_seed_qa_feedback_preserves_generic_actionable_feedback() -> None:
+    seed = _build_seed().model_copy(
+        update={"metadata": SeedMetadata(seed_id="seed_generic_feedback", ambiguity_score=0.12)}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("missing audit-log retention policy",),
+        suggestions=("add a 30-day retention constraint",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    constraints = "\n".join(repaired.constraints)
+
+    assert "missing audit-log retention policy" in constraints
+    assert "add a 30-day retention constraint" in constraints
+    assert "QA differences:" not in constraints
+    assert "[seed qa repair attempt" not in constraints
+
+
 def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None:
     seed = _build_seed().model_copy(
         update={

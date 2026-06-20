@@ -23,6 +23,7 @@ from ouroboros.auto.adapters import HandlerError, HandlerInterviewBackend
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
+from ouroboros.auto.runtime_routing import AutoStageRuntimePlan, StageRuntime
 from ouroboros.auto.state import AutoPipelineState, AutoResumeCapability, AutoStore
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
@@ -970,6 +971,16 @@ def test_auto_handler_run_constructs_and_invokes_authoring_interviewer_path(
         patch(
             "ouroboros.mcp.tools.authoring_handlers.resolve_llm_backend",
             side_effect=lambda backend: backend or "claude",
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.resolve_auto_stage_runtime_plan",
+            return_value=AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime("opencode", "plugin"),
+                execute=StageRuntime("opencode", "plugin"),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
         ),
         patch(
             "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",

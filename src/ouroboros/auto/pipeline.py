@@ -4616,8 +4616,8 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
     Seed must not persist the review transcript, attempt counters, or lateral
     diagnostic headings that status doctor classifies as spec pollution.
     """
-    summary = _clean_seed_qa_lateral_text(lateral_result.approach_summary or "", limit=320)
-    decision = _clean_seed_qa_lateral_text(lateral_result.text, limit=1600)
+    summary = _clean_seed_qa_repair_text(lateral_result.approach_summary or "", limit=320)
+    decision = _clean_seed_qa_repair_text(lateral_result.text, limit=1600)
     repairs: list[str] = []
     if summary:
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
@@ -4628,7 +4628,7 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
     return tuple(dict.fromkeys(repairs))
 
 
-def _clean_seed_qa_lateral_text(text: str, *, limit: int) -> str:
+def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
     text = _SEED_QA_DIAGNOSTIC_PREFIX_RE.sub("", text.strip())
     cleaned_lines: list[str] = []
     for raw_line in text.splitlines():
@@ -4682,7 +4682,18 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     ):
         repairs.append("Failure paths must leave no partial output artifacts.")
     if not repairs:
+        repairs.extend(_actionable_seed_qa_feedback_constraints(feedback))
+    if not repairs:
         repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
+    return tuple(dict.fromkeys(repairs))
+
+
+def _actionable_seed_qa_feedback_constraints(feedback: tuple[str, ...]) -> tuple[str, ...]:
+    repairs: list[str] = []
+    for item in feedback[:5]:
+        cleaned = _clean_seed_qa_repair_text(item, limit=420)
+        if cleaned and not _is_seed_qa_diagnostic_constraint(cleaned):
+            repairs.append(f"Address this Seed QA finding before execution: {cleaned}")
     return tuple(dict.fromkeys(repairs))
 
 

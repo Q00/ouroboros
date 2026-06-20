@@ -433,7 +433,7 @@ class AutoHandler:
         auto_workspace = ensure_auto_worktree(state)
 
         runtime_plan = resolve_auto_stage_runtime_plan(
-            runtime_override=runtime_backend if self.agent_runtime_backend is not None else None,
+            runtime_override=None,
             fallback_runtime_backend=runtime_backend,
             fallback_opencode_mode=opencode_mode,
         )
