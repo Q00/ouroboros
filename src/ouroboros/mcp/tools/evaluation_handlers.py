@@ -73,7 +73,15 @@ async def _default_brownfield_project_dir() -> Path | None:
 
     if default_repo is None or not default_repo.path:
         return None
-    return Path(default_repo.path).expanduser().resolve()
+
+    resolved = Path(default_repo.path).expanduser().resolve()
+    if not resolved.is_dir():
+        log.warning(
+            "mcp.tool.evaluate.brownfield_default_unusable",
+            path=str(resolved),
+        )
+        return None
+    return resolved
 
 
 def _seed_project_dir(seed: Seed | None, *, stable_base: Path) -> Path | None:
@@ -109,7 +117,12 @@ async def _resolve_evaluate_working_dir(
 
     brownfield_default = await _default_brownfield_project_dir()
     if brownfield_default is not None:
-        return brownfield_default
+        if brownfield_default.is_dir():
+            return brownfield_default.resolve()
+        log.warning(
+            "mcp.tool.evaluate.brownfield_default_unusable",
+            path=str(brownfield_default),
+        )
 
     seed_dir = _seed_project_dir(seed, stable_base=stable_base)
     if seed_dir is not None:

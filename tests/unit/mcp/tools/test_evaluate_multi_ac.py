@@ -145,6 +145,52 @@ class TestEvaluateWorkingDirResolution:
 
         assert resolved == default.resolve()
 
+
+    async def test_stale_brownfield_default_falls_back_to_seed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        cwd = tmp_path / "hermes"
+        stale_default = tmp_path / "missing-default"
+        seed_project = cwd / "seed-project"
+        cwd.mkdir()
+        seed_project.mkdir()
+        monkeypatch.chdir(cwd)
+        seed = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir="seed-project", working_directory=None),
+            brownfield_context=None,
+        )
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=stale_default),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, seed)
+
+        assert resolved == seed_project.resolve()
+
+    async def test_non_directory_brownfield_default_falls_back_to_seed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        cwd = tmp_path / "hermes"
+        file_default = tmp_path / "default-file"
+        seed_project = cwd / "seed-project"
+        cwd.mkdir()
+        file_default.write_text("not a directory")
+        seed_project.mkdir()
+        monkeypatch.chdir(cwd)
+        seed = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir="seed-project", working_directory=None),
+            brownfield_context=None,
+        )
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=file_default),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, seed)
+
+        assert resolved == seed_project.resolve()
+
     async def test_seed_metadata_escape_falls_back_to_cwd(
         self, tmp_path: Path, monkeypatch
     ) -> None:
