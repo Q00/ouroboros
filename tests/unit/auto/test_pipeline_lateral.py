@@ -19,12 +19,17 @@ from ouroboros.auto.adapters import (
     LateralResult,
 )
 from ouroboros.auto.grading import GradeResult, SeedGrade
+from ouroboros.auto.intent_guard import IntentGuardStatus, diagnose_auto_state
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.lateral_routing import (
     classify_qa_failure_to_pattern,
     select_persona_for_qa_failure,
 )
-from ouroboros.auto.pipeline import AutoPipeline, _seed_with_seed_qa_feedback
+from ouroboros.auto.pipeline import (
+    AutoPipeline,
+    _seed_with_seed_qa_feedback,
+    _seed_with_seed_qa_lateral_feedback,
+)
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
@@ -106,6 +111,48 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert "omit QA or lateral diagnostic prose" in constraints
     assert repaired.metadata.ambiguity_score == 0.206
     assert repaired.metadata.parent_seed_id == "seed_dirty"
+
+
+def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None:
+    seed = _build_seed().model_copy(
+        update={
+            "constraints": (
+                "Use existing project patterns",
+                "[seed qa repair attempt 1] QA differences: stale diagnostic",
+            ),
+            "metadata": SeedMetadata(seed_id="seed_dirty_lateral", ambiguity_score=0.12),
+        }
+    )
+    lateral_result = LateralResult(
+        persona="hacker",
+        approach_summary="# Lateral Thinking: Hacker",
+        text=(
+            "[seed qa lateral repair attempt 1] Decision: treat every CSV cell as a string.\n"
+            "QA differences:\n"
+            "- stale diagnostic"
+        ),
+    )
+
+    repaired = _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=1)
+    constraints = "\n".join(repaired.constraints)
+
+    assert "[seed qa repair attempt" not in constraints
+    assert "[seed qa lateral repair attempt" not in constraints
+    assert "# Lateral Thinking" not in constraints
+    assert "QA differences:" not in constraints
+    assert "treat every CSV cell as a string" in constraints
+
+    report = diagnose_auto_state(
+        goal="Build a CLI",
+        user_preferences={},
+        ledger=None,
+        pending_question=None,
+        auto_answer_log=(),
+        seed_artifact=repaired.to_dict(),
+    )
+    assert report.status is not IntentGuardStatus.FAIL
+    spec_pollution = next(check for check in report.checks if check.code == "spec_pollution")
+    assert spec_pollution.status is IntentGuardStatus.PASS
 
 
 class _StubInterviewDriver:

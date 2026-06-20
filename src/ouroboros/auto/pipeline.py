@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import inspect
+import re
 import threading
 import time
 from typing import Any, Protocol
@@ -4547,14 +4548,16 @@ def _seed_with_seed_qa_lateral_feedback(
     chosen binding contract) rather than a restatement of the gap. The text is
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
-    decision = lateral_result.text.strip()
-    summary = (lateral_result.approach_summary or "").strip()
-    prefix = f"[seed qa lateral repair attempt {attempt}] "
-    body = f"{summary}: {decision}" if summary else decision
-    constraint = (prefix + body)[:2000]
+    del attempt
+    normalized_feedback = _normalized_seed_qa_lateral_feedback(lateral_result)
+    existing_constraints = tuple(
+        constraint
+        for constraint in seed.constraints
+        if not _is_seed_qa_diagnostic_constraint(constraint)
+    )
     return seed.model_copy(
         update={
-            "constraints": tuple(dict.fromkeys((*seed.constraints, constraint))),
+            "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
             "metadata": seed.metadata.model_copy(
                 update={
                     "seed_id": f"seed_{uuid4().hex[:12]}",
@@ -4568,6 +4571,7 @@ def _seed_with_seed_qa_lateral_feedback(
 
 def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attempt: int) -> Seed:
     """Return a Seed revised with bounded pre-run Seed QA feedback."""
+    del attempt
     normalized_feedback = _normalized_seed_qa_feedback(qa_result)
     existing_constraints = tuple(
         constraint
@@ -4599,6 +4603,49 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
+_SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
+    r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
+    re.IGNORECASE,
+)
+
+
+def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple[str, ...]:
+    """Translate lateral Seed QA output into durable implementation constraints.
+
+    Persona output is useful evidence for choosing a repair direction, but the
+    Seed must not persist the review transcript, attempt counters, or lateral
+    diagnostic headings that status doctor classifies as spec pollution.
+    """
+    summary = _clean_seed_qa_lateral_text(lateral_result.approach_summary or "", limit=320)
+    decision = _clean_seed_qa_lateral_text(lateral_result.text, limit=1600)
+    repairs: list[str] = []
+    if summary:
+        repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
+    if decision:
+        repairs.append(f"Adopt this concrete implementation decision before execution: {decision}")
+    if not repairs:
+        repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
+    return tuple(dict.fromkeys(repairs))
+
+
+def _clean_seed_qa_lateral_text(text: str, *, limit: int) -> str:
+    text = _SEED_QA_DIAGNOSTIC_PREFIX_RE.sub("", text.strip())
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        lowered = line.casefold()
+        if not line:
+            continue
+        if lowered.startswith("# lateral thinking:"):
+            continue
+        if lowered.startswith("qa differences:") or lowered.startswith("qa suggestions:"):
+            continue
+        cleaned_lines.append(line)
+    cleaned = " ".join(cleaned_lines)
+    cleaned = cleaned.replace("# Lateral Thinking:", "").replace("# lateral thinking:", "")
+    return cleaned[:limit].strip()
+
+
 def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     """Translate QA diagnostics into short actionable Seed repair constraints.
 
@@ -4624,6 +4671,10 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
         )
     if "transcript schema" in lowered or "schema_version" in lowered:
         repairs.append("Use one transcript JSON schema consistently across acceptance criteria.")
+    if "no-op" in lowered or "noop" in lowered:
+        repairs.append("Define explicit no-op scope for supported command behavior.")
+    if "review-blocking" in lowered:
+        repairs.append("Introduce the review-blocking post-QA constraint before execution.")
     if "templated" in lowered or "indirect" in lowered:
         repairs.append("Acceptance criteria must be direct executable checks, not generic templates.")
     if "partial" in lowered and ("output" in lowered or "mp4" in lowered or "transcript" in lowered):

@@ -1623,7 +1623,7 @@ async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
                 differences=("missing explicit no-op scope",),
                 suggestions=("add no-op scope constraint",),
             )
-        assert any("missing explicit no-op scope" in item for item in seed.constraints)
+        assert any("Define explicit no-op scope" in item for item in seed.constraints)
         return EvaluateResult(passed=True, score=0.88, verdict="pass")
 
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
@@ -1655,7 +1655,7 @@ async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
     assert result.job_id == "job_seed_qa_repaired"
     assert qa_calls == 2
     assert captured_run_seed is not None
-    assert any("missing explicit no-op scope" in item for item in captured_run_seed.constraints)
+    assert any("Define explicit no-op scope" in item for item in captured_run_seed.constraints)
 
 
 @pytest.mark.asyncio
@@ -1802,8 +1802,7 @@ async def test_pipeline_seed_qa_lateral_repair_falls_back_when_lateral_errors(tm
                 differences=("missing explicit no-op scope",),
                 suggestions=("add no-op scope constraint",),
             )
-        # Fallback mechanical repair echoes the QA difference as a constraint.
-        assert any("missing explicit no-op scope" in item for item in seed.constraints)
+        assert any("Define explicit no-op scope" in item for item in seed.constraints)
         return EvaluateResult(passed=True, score=0.9, verdict="pass")
 
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
