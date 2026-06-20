@@ -5,8 +5,8 @@ Asserts:
   is populated when the ledger unambiguously matches a single class.
 - The Seed passed downstream has the catalog's ``default_ac_template``
   prepended to ``acceptance_criteria``.
-- An unmatched ledger applies the safe LIBRARY fallback; an ambiguous
-  ledger leaves ``active_task_class`` as None and AC untouched.
+- Unmatched and ambiguous ledgers leave ``active_task_class`` as None and AC
+  untouched.
 """
 
 from __future__ import annotations
@@ -214,11 +214,7 @@ async def test_envelope_carries_active_task_class_on_single_match(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_envelope_uses_library_fallback_when_unmatched(tmp_path) -> None:
-    """Unmatched inference applies the L1-b safe LIBRARY fallback instead
-    of silently skipping default AC injection."""
-    profile = TASK_CLASS_CATALOG[TaskClass.LIBRARY]
-
+async def test_envelope_leaves_active_task_class_none_when_unmatched(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_envelope_unmatched")
 
@@ -248,14 +244,13 @@ async def test_envelope_uses_library_fallback_when_unmatched(tmp_path) -> None:
 
     result = await pipeline.run(state)
 
-    assert result.active_task_class == TaskClass.LIBRARY.value
+    assert result.active_task_class is None
     ac = state.seed_artifact["acceptance_criteria"]
-    for index, expected in enumerate(profile.default_ac_template):
-        # The pipeline may wrap generic/library AC in execution-oriented
-        # phrasing, but it preserves the injected template text as the
-        # original requirement payload.
-        assert expected.removesuffix(".").replace(" are ", " ") in ac[index]
-    assert len(ac) >= len(profile.default_ac_template) + 1
+    library_template_entries = TASK_CLASS_CATALOG[TaskClass.LIBRARY].default_ac_template
+    for template_entry in library_template_entries:
+        assert template_entry not in ac, (
+            f"unmatched inference must not inject library template entry: {template_entry!r}"
+        )
     assert any("Changed behavior" in item and "tests" in item for item in ac)
 
 

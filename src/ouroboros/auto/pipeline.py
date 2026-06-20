@@ -4023,7 +4023,7 @@ class AutoPipeline:
         # L1-d / #1171: derive the task class from the standardized ledger
         # and prepend the catalog's default AC template to the Seed.
         inference = derive_domain_from_ledger(ledger)
-        task_class = inference.single
+        task_class = next(iter(inference.classes)) if inference.is_single else None
         if task_class is not None:
             applied = apply_default_ac_template(seed, task_class)
             if applied.injected_ac:
