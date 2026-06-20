@@ -41,6 +41,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import time
 from typing import Literal
 
 from ouroboros.plugin.digest import (
@@ -1107,11 +1108,14 @@ def invoke_plugin(
     ).hexdigest()
     redacted_tool_argv, _ = _redact_argv([command_name] + list(argv))
     tool_args_preview = shlex.join(redacted_tool_argv)
-    tool_args_digest = hashlib.sha256(
-        json.dumps([command_name] + list(argv), separators=(",", ":")).encode(
-            "utf-8", errors="surrogateescape"
-        )
-    ).hexdigest()
+    tool_args_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps([command_name] + list(argv), separators=(",", ":")).encode(
+                "utf-8", errors="surrogateescape"
+            )
+        ).hexdigest()
+    )
     tool_name = f"{namespace}.{command_name}" if namespace else command_name
     command_permissions = tuple(getattr(command, "permissions", ()) or ())
     tool_permissions = command_permissions or tuple(_required_permissions(manifest))
@@ -1173,6 +1177,37 @@ def invoke_plugin(
     if plugin_home is not None:
         run_kwargs["cwd"] = str(plugin_home)
 
+    tool_call_started_at = time.perf_counter()
+
+    def _tool_call_duration_ms() -> int:
+        return max(1, int(round((time.perf_counter() - tool_call_started_at) * 1000)))
+
+    def _output_digest(stdout_bytes: bytes, stderr_bytes: bytes) -> str:
+        return "sha256:" + hashlib.sha256(stdout_bytes + stderr_bytes).hexdigest()
+
+    def _dispatch_failed_after_tool_call(
+        *,
+        output_digest: str,
+        duration_ms: int,
+        exit_code: int | None,
+    ) -> None:
+        dispatch_after_tool_call(
+            manifest=manifest,
+            tool=tool_name,
+            status="failed",
+            output_digest=output_digest,
+            duration_ms=duration_ms,
+            correlation_id=correlation_id,
+            invocation_id=tool_call_invocation_id,
+            event_sink=_emit,
+            exit_code=exit_code,
+            namespace=namespace,
+            command_name=command_name,
+            trust_state=trust_state,
+            plugin_home=plugin_home,
+            subprocess_runner=runner,
+        )
+
     try:
         completed = runner(cmd_argv, **run_kwargs)
     except FileNotFoundError as exc:
@@ -1191,6 +1226,11 @@ def invoke_plugin(
                 provenance={"correlation_id": correlation_id},
             )
         )
+        _dispatch_failed_after_tool_call(
+            output_digest=_output_digest(b"", message.encode("utf-8", errors="surrogateescape")),
+            duration_ms=_tool_call_duration_ms(),
+            exit_code=127,
+        )
         _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
@@ -1208,6 +1248,7 @@ def invoke_plugin(
         stderr_bytes = _to_bytes(exc.stderr)
         stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
         stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
+        output_digest = _output_digest(stdout_bytes, stderr_bytes)
         message = (
             f"entrypoint timed out after "
             f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}s: {cmd_argv[0]!r}"
@@ -1230,6 +1271,11 @@ def invoke_plugin(
                     "stderr_sha256": stderr_hash,
                 },
             )
+        )
+        _dispatch_failed_after_tool_call(
+            output_digest=output_digest,
+            duration_ms=_tool_call_duration_ms(),
+            exit_code=124,
         )
         _run_failed_invocation_observability_hooks()
         return InvocationResult(
@@ -1266,6 +1312,11 @@ def invoke_plugin(
                 },
             )
         )
+        _dispatch_failed_after_tool_call(
+            output_digest=_output_digest(b"", message.encode("utf-8", errors="surrogateescape")),
+            duration_ms=_tool_call_duration_ms(),
+            exit_code=126,
+        )
         _run_failed_invocation_observability_hooks()
         return InvocationResult(
             status="failed",
@@ -1278,7 +1329,8 @@ def invoke_plugin(
     stderr_bytes = _to_bytes(completed.stderr)
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
-    output_digest = hashlib.sha256(stdout_bytes + stderr_bytes).hexdigest()
+    output_digest = _output_digest(stdout_bytes, stderr_bytes)
+    duration_ms = _tool_call_duration_ms()
 
     terminal_provenance = {
         "correlation_id": correlation_id,
@@ -1307,7 +1359,7 @@ def invoke_plugin(
             tool=tool_name,
             status="success",
             output_digest=output_digest,
-            duration_ms=0,
+            duration_ms=duration_ms,
             correlation_id=correlation_id,
             invocation_id=tool_call_invocation_id,
             event_sink=_emit,
@@ -1347,7 +1399,7 @@ def invoke_plugin(
         tool=tool_name,
         status="failed",
         output_digest=output_digest,
-        duration_ms=0,
+        duration_ms=duration_ms,
         correlation_id=correlation_id,
         invocation_id=tool_call_invocation_id,
         event_sink=_emit,

@@ -677,7 +677,13 @@ def test_path_5_before_tool_call_can_block_production_invocation(tmp_path: Path)
     _enable_v04_tool_call_hooks(
         plugin_home,
         before_policy="fail_closed",
-        before_script="import sys\nsys.exit(7)\n",
+        before_script=(
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "payload = json.loads(os.environ['OUROBOROS_PLUGIN_TOOL_CALL_PAYLOAD'])\n"
+            "Path('before-tool-payload.json').write_text(json.dumps(payload, sort_keys=True))\n"
+            "sys.exit(7)\n"
+        ),
     )
     _grant_trust(paths)
     _grant_tool_hook_trust(paths)
@@ -702,6 +708,8 @@ def test_path_5_before_tool_call_can_block_production_invocation(tmp_path: Path)
     types = [p["event_type"] for p in payloads]
     assert "plugin.tool.intercept.blocked" in types
     assert "plugin.completed" not in types
+    observed = json.loads((plugin_home / "before-tool-payload.json").read_text())
+    assert observed["args_digest"].startswith("sha256:")
     failed = next(p for p in payloads if p["event_type"] == "plugin.failed")
     assert failed["result"]["status"] == "blocked"
     assert failed["provenance"]["reason"] == "tool_call_blocked"
@@ -772,10 +780,12 @@ def test_path_5_after_tool_call_observes_completed_result(tmp_path: Path) -> Non
     observed = json.loads((plugin_home / "after-tool-payload.json").read_text())
     assert observed["status"] == "success"
     assert observed["tool"] == "github-pr.review"
-    expected_digest = hashlib.sha256(
-        (result.stdout_bytes or b"") + (result.stderr_bytes or b"")
-    ).hexdigest()
+    expected_digest = (
+        "sha256:"
+        + hashlib.sha256((result.stdout_bytes or b"") + (result.stderr_bytes or b"")).hexdigest()
+    )
     assert observed["output_digest"] == expected_digest
+    assert observed["duration_ms"] >= 1
     payloads = [unwrap_plugin_event(env) for env in envelopes]
     assert "plugin.tool.observe.recorded" in [p["event_type"] for p in payloads]
 
@@ -814,11 +824,13 @@ def test_path_5_after_tool_call_hashes_combined_failed_output(tmp_path: Path) ->
     assert result.stderr_bytes == b"synthetic failure\n"
     observed = json.loads((plugin_home / "after-tool-failed-payload.json").read_text())
     assert observed["status"] == "failed"
-    expected_digest = hashlib.sha256(
-        (result.stdout_bytes or b"") + (result.stderr_bytes or b"")
-    ).hexdigest()
+    expected_digest = (
+        "sha256:"
+        + hashlib.sha256((result.stdout_bytes or b"") + (result.stderr_bytes or b"")).hexdigest()
+    )
     assert observed["output_digest"] == expected_digest
     assert observed["output_digest"] != result.stdout_sha256
+    assert observed["duration_ms"] >= 1
     payloads = [unwrap_plugin_event(env) for env in envelopes]
     assert "plugin.tool.observe.recorded" in [p["event_type"] for p in payloads]
 
