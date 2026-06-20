@@ -427,8 +427,7 @@ def test_inline_artifact_goal_seeds_output_contract() -> None:
     assert "shorts" in preferences["outputs"]
     assert "transcript" in preferences["outputs"]
     assert any(
-        entry.source.value == "user_preference"
-        and "long form video" in entry.value
+        entry.source.value == "user_preference" and "long form video" in entry.value
         for entry in ledger.sections["outputs"].entries
     )
 

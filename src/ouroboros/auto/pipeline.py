@@ -4662,9 +4662,7 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     if "ambiguity_score" in lowered:
         repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
-        repairs.append(
-            "Preserve ledger non-goals and runtime context in executable Seed surfaces."
-        )
+        repairs.append("Preserve ledger non-goals and runtime context in executable Seed surfaces.")
     if "polluted" in lowered or "diagnostic" in lowered or "lateral repair" in lowered:
         repairs.append(
             "Constraints must contain only actionable product/runtime constraints; omit QA or lateral diagnostic prose."
@@ -4676,8 +4674,12 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     if "review-blocking" in lowered:
         repairs.append("Introduce the review-blocking post-QA constraint before execution.")
     if "templated" in lowered or "indirect" in lowered:
-        repairs.append("Acceptance criteria must be direct executable checks, not generic templates.")
-    if "partial" in lowered and ("output" in lowered or "mp4" in lowered or "transcript" in lowered):
+        repairs.append(
+            "Acceptance criteria must be direct executable checks, not generic templates."
+        )
+    if "partial" in lowered and (
+        "output" in lowered or "mp4" in lowered or "transcript" in lowered
+    ):
         repairs.append("Failure paths must leave no partial output artifacts.")
     if not repairs:
         repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")

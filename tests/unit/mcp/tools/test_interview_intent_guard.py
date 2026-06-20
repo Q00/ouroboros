@@ -12,8 +12,7 @@ VIDEO_GOAL = (
 )
 
 REVIEW_ONLY_QUESTION = (
-    "Should this be --mode auto exporting MP4s or --mode review with review-only "
-    "package output?"
+    "Should this be --mode auto exporting MP4s or --mode review with review-only package output?"
 )
 
 
