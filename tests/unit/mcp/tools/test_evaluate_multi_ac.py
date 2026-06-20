@@ -8,6 +8,8 @@ deliberately left untouched here.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,7 +22,7 @@ from ouroboros.evaluation.models import (
     MechanicalResult,
     SemanticResult,
 )
-from ouroboros.mcp.tools.evaluation_handlers import EvaluateHandler
+from ouroboros.mcp.tools.evaluation_handlers import EvaluateHandler, _resolve_evaluate_working_dir
 from ouroboros.mcp.types import ToolInputType
 
 
@@ -70,6 +72,67 @@ def _failing_eval(execution_id: str, *, reason: str) -> EvaluationResult:
         ),
         final_approved=False,
     )
+
+
+class TestEvaluateWorkingDirResolution:
+    """Working dir fallback keeps Stage 2 pointed at the project root."""
+
+    async def test_explicit_working_dir_wins(self, tmp_path: Path) -> None:
+        explicit = tmp_path / "project"
+        explicit.mkdir()
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=tmp_path / "default"),
+        ):
+            resolved = await _resolve_evaluate_working_dir(str(explicit), None)
+
+        assert resolved == explicit.resolve()
+
+    async def test_brownfield_default_used_before_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        cwd = tmp_path / "hermes"
+        default = tmp_path / "repo"
+        cwd.mkdir()
+        default.mkdir()
+        monkeypatch.chdir(cwd)
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=default),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, None)
+
+        assert resolved == default.resolve()
+
+    async def test_seed_metadata_used_when_no_default(self, tmp_path: Path, monkeypatch) -> None:
+        cwd = tmp_path / "hermes"
+        project = tmp_path / "project"
+        cwd.mkdir()
+        project.mkdir()
+        monkeypatch.chdir(cwd)
+        seed = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir=str(project), working_directory=None),
+            brownfield_context=None,
+        )
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=None),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, seed)
+
+        assert resolved == project.resolve()
+
+    async def test_cwd_fallback_last(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        with patch(
+            "ouroboros.mcp.tools.evaluation_handlers._default_brownfield_project_dir",
+            new=AsyncMock(return_value=None),
+        ):
+            resolved = await _resolve_evaluate_working_dir(None, None)
+
+        assert resolved == tmp_path.resolve()
 
 
 class TestDefinitionAcceptsMultiAC:

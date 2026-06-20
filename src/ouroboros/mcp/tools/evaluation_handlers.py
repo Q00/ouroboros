@@ -18,6 +18,7 @@ import yaml
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.project_paths import resolve_path_against_base
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -54,6 +55,93 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+
+async def _default_brownfield_project_dir() -> Path | None:
+    """Return the registered default brownfield project directory, if any."""
+    from ouroboros.persistence.brownfield import BrownfieldStore
+
+    store = BrownfieldStore()
+    try:
+        await store.initialize()
+        default_repo = await store.get_default()
+    except Exception as exc:  # noqa: BLE001 - fallback discovery must be best-effort
+        log.warning("mcp.tool.evaluate.brownfield_default_lookup_failed", error=str(exc))
+        return None
+    finally:
+        await store.close()
+
+    if default_repo is None or not default_repo.path:
+        return None
+    return Path(default_repo.path).expanduser().resolve()
+
+
+def _seed_project_dir(seed: Seed | None, *, stable_base: Path) -> Path | None:
+    """Resolve a project directory encoded in seed metadata/brownfield context."""
+    if seed is None:
+        return None
+
+    candidates: list[str] = []
+    seed_meta = getattr(seed, "metadata", None)
+    if seed_meta is not None:
+        project_dir = getattr(seed_meta, "project_dir", None) or getattr(
+            seed_meta,
+            "working_directory",
+            None,
+        )
+        if isinstance(project_dir, str) and project_dir:
+            candidates.append(project_dir)
+
+    brownfield_context = getattr(seed, "brownfield_context", None)
+    context_references = getattr(brownfield_context, "context_references", ()) or ()
+    for preferred_role in ("primary", None):
+        for reference in context_references:
+            path = getattr(reference, "path", None)
+            role = getattr(reference, "role", None)
+            if not isinstance(path, str) or not path or path in candidates:
+                continue
+            if preferred_role is None or role == preferred_role:
+                candidates.append(path)
+
+    for candidate in candidates:
+        resolved = resolve_path_against_base(candidate, stable_base=stable_base)
+        if resolved is None:
+            continue
+        if resolved.is_file():
+            return resolved.parent
+        if resolved.exists() and not resolved.is_dir():
+            continue
+        return resolved
+
+    return None
+
+
+async def _resolve_evaluate_working_dir(
+    explicit_working_dir: str | None,
+    seed: Seed | None,
+) -> Path:
+    """Resolve the project root that gates Stage 1 and Stage 2 evaluation.
+
+    Precedence is explicit tool argument, registered brownfield default,
+    seed-declared project directory, then the MCP server cwd. The last
+    fallback preserves the historical behavior, but only after project-aware
+    sources have been exhausted.
+    """
+    stable_base = Path.cwd().resolve()
+    if explicit_working_dir:
+        resolved = resolve_path_against_base(explicit_working_dir, stable_base=stable_base)
+        if resolved is not None:
+            return resolved
+
+    brownfield_default = await _default_brownfield_project_dir()
+    if brownfield_default is not None:
+        return brownfield_default
+
+    seed_dir = _seed_project_dir(seed, stable_base=stable_base)
+    if seed_dir is not None:
+        return seed_dir
+
+    return stable_base
 
 
 def _evaluation_allowed_tools(runtime_backend: str | None) -> list[str]:
@@ -340,7 +428,8 @@ class EvaluateHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "Project root used to resolve Stage 1 mechanical verification "
-                        "commands. Commands are read from .ouroboros/mechanical.toml; "
+                        "commands and Stage 2 source-file visibility. Commands are "
+                        "read from .ouroboros/mechanical.toml; "
                         "when the file is missing, the evaluator makes one AI detect "
                         "call that inspects manifests (package.json, pyproject.toml, "
                         "Cargo.toml, Makefile, ...) and authors the toml. Stage 1 "
@@ -363,8 +452,6 @@ class EvaluateHandler:
         Returns:
             Result containing evaluation results or error.
         """
-        from pathlib import Path
-
         from ouroboros.evaluation import (
             EvaluationContext,
             EvaluationPipeline,
@@ -424,6 +511,26 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
         )
 
+        # Parse seed before dispatch so working_dir fallback is available for
+        # both plugin/subagent and in-process evaluation paths.
+        goal = ""
+        constraints: tuple[str, ...] = ()
+        seed_id = session_id  # fallback
+        seed: Seed | None = None
+
+        if seed_content:
+            try:
+                seed_dict = yaml.safe_load(seed_content)
+                seed = Seed.from_dict(seed_dict)
+                goal = seed.goal
+                constraints = tuple(seed.constraints)
+                seed_id = seed.metadata.seed_id
+            except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
+                log.warning("mcp.tool.evaluate.seed_parse_warning", error=str(e))
+                # Continue without seed data - not fatal
+
+        working_dir = await _resolve_evaluate_working_dir(arguments.get("working_dir"), seed)
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_evaluate_subagent(
             session_id=session_id,
@@ -431,7 +538,7 @@ class EvaluateHandler:
             artifact_type=artifact_type,
             seed_content=seed_content,
             acceptance_criterion=acceptance_criterion,
-            working_dir=arguments.get("working_dir"),
+            working_dir=str(working_dir),
             trigger_consensus=trigger_consensus,
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -456,22 +563,6 @@ class EvaluateHandler:
         owns_event_store = False
 
         try:
-            # Extract goal/constraints from seed if provided
-            goal = ""
-            constraints: tuple[str, ...] = ()
-            seed_id = session_id  # fallback
-
-            if seed_content:
-                try:
-                    seed_dict = yaml.safe_load(seed_content)
-                    seed = Seed.from_dict(seed_dict)
-                    goal = seed.goal
-                    constraints = tuple(seed.constraints)
-                    seed_id = seed.metadata.seed_id
-                except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
-                    log.warning("mcp.tool.evaluate.seed_parse_warning", error=str(e))
-                    # Continue without seed data - not fatal
-
             # Try to enrich from session repository if event_store available
             if not goal:
                 if store is None:
@@ -508,8 +599,6 @@ class EvaluateHandler:
                 allowed_tools=_evaluation_allowed_tools(backend),
                 max_turns=20,
             )
-            working_dir_str = arguments.get("working_dir")
-            working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
             log.info(
                 "mcp.tool.evaluate.started",
                 session_id=session_id,

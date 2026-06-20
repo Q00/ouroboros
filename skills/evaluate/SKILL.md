@@ -82,8 +82,11 @@ fallback instead of retrying the failing call.
      seed_content: <original seed YAML, if available>
      acceptance_criterion: <specific AC to check, optional>
      artifact_type: "code"  (or "docs", "config")
+     working_dir: <absolute project root, recommended>
      trigger_consensus: false  (true if user requests Stage 3)
    ```
+
+   `working_dir` controls both Stage 1 command execution and Stage 2 source-file visibility. Pass the absolute project root whenever available; if omitted, the MCP handler falls back to the registered brownfield default, seed project metadata, then the MCP server cwd.
 
 4. Present results clearly:
    - Show each stage's pass/fail status
