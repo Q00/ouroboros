@@ -123,6 +123,7 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "artifact",
         "seed_content",
         "acceptance_criterion",
+        "working_dir",
     ),
     "ouroboros_evolve_rewind": ("lineage_id", "to_generation"),
     "ouroboros_evolve_step": ("lineage_id",),
