@@ -16,6 +16,7 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
+from ouroboros.auto.intent_guard import IntentGuardReport, IntentGuardStatus, guard_interview_turn
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
@@ -779,6 +780,41 @@ def _interview_reasoning_meta(
             "question_chars": len(question) if question else None,
         },
     }
+
+
+def _classify_interview_answer_source(answer: str) -> str:
+    """Return a coarse provenance class for an ``ooo interview`` answer."""
+    lowered = str(answer).lstrip().casefold()
+    if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
+        return "repo_fact"
+    if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
+        return "generated"
+    if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
+        return "generated"
+    return "human"
+
+
+def _guard_interview_answer(
+    *,
+    state: InterviewState,
+    question: str,
+    answer: str,
+) -> IntentGuardReport:
+    return guard_interview_turn(
+        goal=state.initial_context,
+        question=question,
+        answer_text=answer,
+        answer_source=_classify_interview_answer_source(answer),
+    )
+
+
+def _format_intent_guard_blocker(report: IntentGuardReport) -> str:
+    for check in report.checks:
+        if check.status is IntentGuardStatus.FAIL:
+            if check.action:
+                return f"IntentGuard blocked interview answer: {check.message} ({check.action})"
+            return f"IntentGuard blocked interview answer: {check.message}"
+    return "IntentGuard blocked interview answer"
 
 
 def _ambiguity_warning_for_failed_question(
@@ -1913,6 +1949,7 @@ class InterviewHandler:
             transcript = ""
             real_session_id = session_id
             plugin_state: InterviewState | None = None
+            plugin_intent_guard_report: IntentGuardReport | None = None
 
             if action == "start" and initial_context:
                 cwd = arguments.get("cwd") or os.getcwd()
@@ -1978,6 +2015,19 @@ class InterviewHandler:
                 # question text instead of a placeholder.
                 if answer:
                     if state.rounds and state.rounds[-1].user_response is None:
+                        question_text = last_question or state.rounds[-1].question
+                        plugin_intent_guard_report = _guard_interview_answer(
+                            state=state,
+                            question=question_text,
+                            answer=answer,
+                        )
+                        if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
+                            return Result.err(
+                                MCPToolError(
+                                    _format_intent_guard_blocker(plugin_intent_guard_report),
+                                    tool_name="ouroboros_interview",
+                                )
+                            )
                         # Round exists with question but no answer yet — fill it.
                         # If last_question was provided, update the question text
                         # in case the existing one is a stale placeholder from a
@@ -1995,6 +2045,18 @@ class InterviewHandler:
                         question_text = (
                             last_question if last_question else "(continued from subagent)"
                         )
+                        plugin_intent_guard_report = _guard_interview_answer(
+                            state=state,
+                            question=question_text,
+                            answer=answer,
+                        )
+                        if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
+                            return Result.err(
+                                MCPToolError(
+                                    _format_intent_guard_blocker(plugin_intent_guard_report),
+                                    tool_name="ouroboros_interview",
+                                )
+                            )
                         state.rounds.append(
                             InterviewRound(
                                 round_number=len(state.rounds) + 1,
@@ -2038,6 +2100,11 @@ class InterviewHandler:
                         "When the user answers, pass the child session's "
                         "question text as 'last_question' alongside 'answer' "
                         "to preserve interview transcript fidelity."
+                    ),
+                    **(
+                        {"intent_guard": plugin_intent_guard_report.to_dict()}
+                        if plugin_intent_guard_report is not None
+                        else {}
                     ),
                 },
             )
@@ -2472,6 +2539,7 @@ class InterviewHandler:
                     )
 
                 lateral_review_meta: dict[str, Any] | None = None
+                intent_guard_report: IntentGuardReport | None = None
 
                 # If answer provided, record it first
                 if answer:
@@ -2720,7 +2788,6 @@ class InterviewHandler:
                         pass
                     elif state.rounds[-1].user_response is None:
                         pending_question = last_question or state.rounds[-1].question
-                        state.rounds.pop()
                     else:
                         if not last_question:
                             return Result.err(
@@ -2734,6 +2801,21 @@ class InterviewHandler:
                                 )
                             )
                         pending_question = last_question
+
+                    intent_guard_report = _guard_interview_answer(
+                        state=state,
+                        question=pending_question,
+                        answer=answer,
+                    )
+                    if intent_guard_report.status is IntentGuardStatus.FAIL:
+                        return Result.err(
+                            MCPToolError(
+                                _format_intent_guard_blocker(intent_guard_report),
+                                tool_name="ouroboros_interview",
+                            )
+                        )
+                    if state.rounds and state.rounds[-1].user_response is None:
+                        state.rounds.pop()
 
                     record_result = await engine.record_response(state, answer, pending_question)
                     if record_result.is_err:
@@ -2959,6 +3041,8 @@ class InterviewHandler:
                         question=question,
                     ),
                 }
+                if intent_guard_report is not None:
+                    answer_meta["intent_guard"] = intent_guard_report.to_dict()
                 if answer_is_length_guard:
                     # Q00/ouroboros#831 (Direction A): structured signal when
                     # the next question after an answer is again the length-
