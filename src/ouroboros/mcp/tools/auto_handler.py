@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -103,6 +104,21 @@ from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
 
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
+
+
+async def _resolve_dashboard_base_url() -> str | None:
+    """Best-effort live-dashboard base URL for an auto session (off the event loop).
+
+    Auto's execution id only materializes after interview+seed, so we link the
+    daemon's base URL — the page auto-selects the latest active run. Strictly
+    best-effort: any failure yields ``None`` so auto is never blocked.
+    """
+    try:
+        from ouroboros.dashboard_web import dashboard_base_url
+
+        return await asyncio.to_thread(dashboard_base_url)
+    except Exception:  # noqa: BLE001 - observability must never break a run
+        return None
 
 
 @dataclass(slots=True)
@@ -884,11 +900,14 @@ class StartAutoHandler:
                 )
             )
 
+        dashboard_url = await _resolve_dashboard_base_url()
+        dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
             "Started background auto session.\n\n"
             "Status: queued\n"
             f"job_id: {snapshot.job_id}\n"
-            f"auto_session_id: {auto_session_id}\n\n"
+            f"auto_session_id: {auto_session_id}\n"
+            f"{dashboard_line}\n"
             "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
             "then fetch ouroboros_job_result."
         )
@@ -900,6 +919,7 @@ class StartAutoHandler:
                     "job_id": snapshot.job_id,
                     "auto_session_id": auto_session_id,
                     "session_id": auto_session_id,
+                    **({"dashboard_url": dashboard_url} if dashboard_url else {}),
                     "status": "queued",
                     "dispatch_mode": "job",
                     "status_tool": "ouroboros_job_status",
