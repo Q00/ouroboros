@@ -7,7 +7,7 @@ classes whose trigger matches the artifact and reports a finding per class —
 turning verification from a vibe into an auditable contract.
 
 This is ouroboros's adaptation of the "UltraQA" adversarial-class discipline from
-oh-my-openagent / lazycodex (https://github.com/lazyfish-ai/lazycodex), credited
+oh-my-openagent / lazycodex (https://github.com/code-yeongyu/lazycodex), credited
 with thanks. Their insight — independent verification probing explicit attack
 surfaces — fits ouroboros's "verify, don't bluff" ethos; here it is a typed,
 versioned registry the evaluator/qa-judge can render into a prompt.
