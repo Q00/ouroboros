@@ -13,6 +13,12 @@ import pytest_asyncio
 # that sets force_terminal=False, letting Rich detect non-TTY output correctly.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
+# The live web dashboard spawns a detached daemon process + binds a port the first
+# time a run is launched. Unit tests must never do that (process/port/FS side
+# effects, non-deterministic URL in responses). Force it OFF by default; tests that
+# exercise the wiring opt back in explicitly via monkeypatch + a mocked resolver.
+os.environ["OUROBOROS_DASHBOARD"] = "0"
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def close_test_owned_stores(monkeypatch):
