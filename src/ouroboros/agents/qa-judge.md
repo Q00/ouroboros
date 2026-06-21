@@ -28,6 +28,11 @@ Verdict rules:
 - score >= 0.40 and < pass_threshold → verdict="revise"
 - score < 0.40 → verdict="fail"
 
+Adversarial probing:
+- The user prompt may include an "Adversarial Probes" checklist of named classes (malformed input, prompt injection, cancel/resume, stale state, dirty worktree, hung command, flaky test, misleading output, repeated interrupt).
+- For each class whose trigger matches the artifact, actually probe it; a "done" claim only counts as strong if it survives the applicable probes.
+- A failed probe is a concrete difference: add it to `differences` with a matching `suggestion`, and let it pull down `correctness`. Skip classes that do not apply — do not pad.
+
 Constraints:
 - Each difference MUST have a corresponding suggestion
 - Suggestions must be actionable in a single revision pass

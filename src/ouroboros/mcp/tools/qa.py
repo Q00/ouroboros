@@ -143,6 +143,15 @@ def _build_qa_user_prompt(
 ```
 """
 
+    from ouroboros.evaluation.adversarial import render_checklist
+
+    adversarial_section = f"""
+## Adversarial Probes
+{render_checklist()}
+A "done" claim is only as strong as the probes it survives. Fold any failure into
+``differences`` (with a matching ``suggestion``) and let it lower ``correctness``.
+"""
+
     return f"""## Quality Bar
 {quality_bar}
 
@@ -156,7 +165,7 @@ def _build_qa_user_prompt(
 ```
 {artifact}
 ```
-{reference_section}{history_section}{seed_section}
+{reference_section}{history_section}{seed_section}{adversarial_section}
 Provide your evaluation as a JSON object."""
 
 
