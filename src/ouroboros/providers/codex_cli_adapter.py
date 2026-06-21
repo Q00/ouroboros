@@ -47,20 +47,18 @@ from ouroboros.providers.codex_cli_stream import (
     terminate_process,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.providers.retry import TRANSIENT_ERROR_PATTERNS
 
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 
 
-_RETRYABLE_ERROR_PATTERNS = (
-    "rate limit",
-    "temporarily unavailable",
-    "timeout",
-    "overloaded",
-    "try again",
-    "connection reset",
-)
+# Codex shares the canonical transient core verbatim — its previous local copy
+# (rate/temporarily/timeout/overloaded/try-again/connection) was a strict subset,
+# so adopting the shared tuple only *adds* the missing common signals
+# (concurrency, 429, 5xx, bare "connection") without dropping any prior match.
+_RETRYABLE_ERROR_PATTERNS = TRANSIENT_ERROR_PATTERNS
 
 _CODEX_AUTH_FAILURE_PATTERNS = (
     "missing bearer or basic authentication",

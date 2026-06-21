@@ -306,3 +306,21 @@ def test_load_env_file_defaults_to_untrusted_fail_closed(
     _load_env_file(env_file)  # no trusted kwarg → must be treated as untrusted
 
     assert "OUROBOROS_CLI_PATH" not in os.environ
+
+
+def test_native_session_index_default_off(monkeypatch) -> None:
+    from ouroboros.config import get_native_session_index_enabled
+
+    monkeypatch.delenv("OUROBOROS_NATIVE_SESSION_INDEX", raising=False)
+    assert get_native_session_index_enabled() is False
+
+
+def test_native_session_index_opt_in_values(monkeypatch) -> None:
+    from ouroboros.config import get_native_session_index_enabled
+
+    for truthy in ("1", "true", "on", "yes", "YES"):
+        monkeypatch.setenv("OUROBOROS_NATIVE_SESSION_INDEX", truthy)
+        assert get_native_session_index_enabled() is True
+    for falsy in ("0", "off", "false", "no", ""):
+        monkeypatch.setenv("OUROBOROS_NATIVE_SESSION_INDEX", falsy)
+        assert get_native_session_index_enabled() is False

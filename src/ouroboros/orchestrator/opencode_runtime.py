@@ -42,6 +42,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
+    SubagentOrchestration,
     TaskResult,
 )
 from ouroboros.orchestrator.opencode_event_normalizer import (
@@ -213,6 +214,12 @@ class OpenCodeRuntime:
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.IGNORED,
+            # OpenCode's host bridge spawns a native sub-agent out-of-band via the
+            # ``_subagent`` envelope (ouroboros does NOT drive the child directly) —
+            # the HOST_BRIDGE mode, eligible for plugin dispatch when the bridge is
+            # enabled (opencode_mode=plugin). Contrast EXTERNAL_LEADER_DRIVEN, where
+            # ouroboros itself drives the worker. See SubagentOrchestration.
+            subagent_orchestration=SubagentOrchestration.EXTERNAL_HOST_BRIDGE,
         )
 
     @property

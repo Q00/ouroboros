@@ -575,6 +575,9 @@ class TestOrchestratorRunner:
             seed_id=sample_seed.metadata.seed_id,
             session_id="orch_prepared",
             seed_goal=sample_seed.goal,
+            # Backend is forwarded so the live dashboard can provider-tag the run.
+            runtime_backend=runner._adapter.runtime_backend,
+            llm_backend=runner._adapter.llm_backend,
         )
 
     @pytest.mark.asyncio

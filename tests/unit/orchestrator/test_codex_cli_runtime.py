@@ -34,6 +34,43 @@ def test_capabilities_report_prompt_only_tool_restrictions_as_translated() -> No
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
 
+class TestComposePromptDirectiveFencing:
+    """System instructions and tooling must be fenced as binding directives."""
+
+    def _runtime(self) -> CodexCliRuntime:
+        return CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    def test_system_prompt_wrapped_in_authority_delimiter(self) -> None:
+        composed = self._runtime()._compose_prompt("Do the thing", "Be terse.", None)
+        assert "<system-directive>" in composed
+        assert "</system-directive>" in composed
+        # The binding preamble must precede the system text inside the fence.
+        assert "binding instructions" in composed
+        assert "Be terse." in composed
+        # The markdown heading the model used to read as content is gone.
+        assert "## System Instructions" not in composed
+
+    def test_tools_wrapped_in_tooling_guidance_delimiter(self) -> None:
+        composed = self._runtime()._compose_prompt("Do the thing", None, ["Read", "Edit"])
+        assert "<tooling-guidance>" in composed
+        assert "</tooling-guidance>" in composed
+        assert "- Read" in composed
+        assert "- Edit" in composed
+        assert "## Tooling Guidance" not in composed
+
+    def test_bare_prompt_passthrough_unchanged(self) -> None:
+        # No system instructions and no tools → the task text is returned as-is,
+        # with no delimiters added (preserves prior behavior).
+        composed = self._runtime()._compose_prompt("Do the thing", None, None)
+        assert composed == "Do the thing"
+
+    def test_task_text_is_not_wrapped(self) -> None:
+        composed = self._runtime()._compose_prompt("Do the thing", "Be terse.", None)
+        # Directive fences must not swallow the task text itself.
+        assert "Do the thing" in composed
+        assert composed.rstrip().endswith("Do the thing")
+
+
 class _FakeStream:
     def __init__(self, lines: list[str]) -> None:
         encoded = "".join(f"{line}\n" for line in lines).encode()

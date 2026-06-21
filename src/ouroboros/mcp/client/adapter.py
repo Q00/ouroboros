@@ -538,10 +538,12 @@ class MCPClientAdapter:
             elif hasattr(item, "uri"):
                 content_items.append(MCPContentItem(type=ContentType.RESOURCE, uri=item.uri))
 
+        structured = getattr(result, "structuredContent", None)
         return MCPToolResult(
             content=tuple(content_items),
             is_error=getattr(result, "isError", False),
             meta=getattr(result, "meta", {}) or {},
+            structured_content=structured if isinstance(structured, dict) else None,
         )
 
     async def list_resources(self) -> Result[Sequence[MCPResourceDefinition], MCPClientError]:

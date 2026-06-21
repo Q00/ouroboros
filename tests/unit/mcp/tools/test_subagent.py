@@ -832,6 +832,27 @@ class TestBuildExecuteSubagent:
         assert p.context["max_parallel_workers"] is None
         assert "Max Parallel Workers" not in p.prompt
 
+    def test_prompt_uses_typed_assignment_contract(self) -> None:
+        """Execution dispatch must frame the work as a TASK/DELIVERABLE/VERIFY order."""
+        p = build_execute_subagent(
+            seed_content="goal: build a CLI tool",
+            session_id="sess-123",
+        )
+        assert "<assignment>" in p.prompt
+        assert "## Deliverable" in p.prompt
+        assert "## Verify" in p.prompt
+        # QA gate surfaces as an explicit verification line by default.
+        assert "Run QA evaluation" in p.prompt
+
+    def test_skip_qa_changes_the_verify_line(self) -> None:
+        p = build_execute_subagent(
+            seed_content="goal: test",
+            session_id="sess-123",
+            skip_qa=True,
+        )
+        assert "QA is skipped" in p.prompt
+        assert "Run QA evaluation" not in p.prompt
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: PM Interview

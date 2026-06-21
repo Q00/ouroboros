@@ -335,11 +335,18 @@ class MCPToolResult:
         content: List of content items from the tool.
         is_error: Whether the tool execution resulted in an error.
         meta: Optional metadata from the tool.
+        structured_content: Optional machine-readable structured payload from the
+            tool's ``structuredContent`` field (MCP spec). Carries values that
+            do not fit the text/image/resource content items — e.g. a
+            ``codex mcp-server`` ``codex`` call returns ``{"threadId": ...}``
+            here, which a leader-driven worker runtime needs to address the
+            spawned session. ``None`` when the tool returned no structured payload.
     """
 
     content: tuple[MCPContentItem, ...] = field(default_factory=tuple)
     is_error: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
+    structured_content: dict[str, Any] | None = None
 
     @property
     def text_content(self) -> str:

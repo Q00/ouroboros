@@ -733,6 +733,23 @@ def get_runtime() -> str:
     return get_agent_runtime_backend()
 
 
+def get_native_session_index_enabled() -> bool:
+    """Whether to register worker sessions in the host tool's native session list.
+
+    OFF by default: the web dashboard is the primary, non-flooding worker view
+    (it groups every worker under one run). Opt in with
+    ``OUROBOROS_NATIVE_SESSION_INDEX=1|true|on|yes`` to ALSO dump each worker into
+    the Codex app's conversation list (one ``ooo:`` entry per worker) so you can
+    open it natively — at the cost of a busier app list.
+    """
+    return os.environ.get("OUROBOROS_NATIVE_SESSION_INDEX", "").strip().lower() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    )
+
+
 def _uses_opencode_backend(backend: str | None) -> bool:
     """Return True when a backend name resolves to an OpenCode runtime."""
     return (backend or "").strip().lower() in _OPENCODE_BACKENDS

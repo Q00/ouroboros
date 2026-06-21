@@ -50,6 +50,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.providers.retry import TRANSIENT_ERROR_PATTERNS
 from ouroboros.providers.tool_use_diagnostics import diagnose_tool_use_turn
 
 log = structlog.get_logger(__name__)
@@ -60,15 +61,18 @@ _MAX_JSON_RETRIES = 3  # Extra retries when response_format requires JSON but LL
 _INITIAL_BACKOFF_SECONDS = (
     0.5  # Keep low for interactive loops; exponential backoff handles sustained failures
 )
-_RETRYABLE_ERROR_PATTERNS = (
-    "concurrency",
-    "rate",
-    "timeout",
-    "overloaded",
-    "temporarily",
+# Shared transient core (rate/429/5xx/timeout/overloaded/connection/…) plus the
+# Claude-CLI-specific bootstrap signals that only this adapter can safely match.
+# Composed from the single source of truth in ``providers.retry`` so the common
+# terms can never drift from the Codex / execution adapters again.
+_CLAUDE_CLI_BOOTSTRAP_PATTERNS = (
     "empty response",  # custom CLI startup delay
     "need retry",  # explicit retry request
     "startup",
+)
+_RETRYABLE_ERROR_PATTERNS = (
+    *TRANSIENT_ERROR_PATTERNS,
+    *_CLAUDE_CLI_BOOTSTRAP_PATTERNS,
 )
 
 

@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+import inspect
 import math
 import re
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -2148,6 +2149,8 @@ class OrchestratorRunner:
             seed_id=seed.metadata.seed_id,
             session_id=session_id,
             seed_goal=seed.goal,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            llm_backend=getattr(self._adapter, "llm_backend", None),
         )
 
         if session_result.is_err:
@@ -2931,16 +2934,28 @@ class OrchestratorRunner:
                 start_time=start_time,
             )
 
-        parallel_result = await parallel_executor.execute_parallel(
-            seed=seed,
-            execution_plan=execution_plan,
-            session_id=tracker.session_id,
-            execution_id=exec_id,
-            tools=merged_tools,
-            tool_catalog=tool_catalog.tools,
-            system_prompt=system_prompt,
-            externally_satisfied_acs=externally_satisfied_acs,
-        )
+        try:
+            parallel_result = await parallel_executor.execute_parallel(
+                seed=seed,
+                execution_plan=execution_plan,
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                tools=merged_tools,
+                tool_catalog=tool_catalog.tools,
+                system_prompt=system_prompt,
+                externally_satisfied_acs=externally_satisfied_acs,
+            )
+        finally:
+            # Release any warm worker-pool sessions the runtime holds (e.g. the
+            # codex-mcp persistent connection pool). The non-parallel path closes
+            # per-turn handles, but the parallel path otherwise leaves the pool to
+            # its idle TTL — a process-leak window after every run. Guard on
+            # ``iscoroutinefunction`` so this is a no-op for runtimes without a
+            # real async ``aclose`` (and so MagicMock test adapters, whose
+            # attribute access auto-creates a non-awaitable child, are skipped).
+            adapter_aclose = getattr(self._adapter, "aclose", None)
+            if inspect.iscoroutinefunction(adapter_aclose):
+                await adapter_aclose()
 
         # Check for cancellation after parallel execution
         if await self._check_cancellation(tracker.session_id):

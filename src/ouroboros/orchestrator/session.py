@@ -576,6 +576,8 @@ class SessionRepository:
         seed_id: str,
         session_id: str | None = None,
         seed_goal: str | None = None,
+        runtime_backend: str | None = None,
+        llm_backend: str | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -584,6 +586,10 @@ class SessionRepository:
             seed_id: Seed ID being executed.
             session_id: Optional custom session ID.
             seed_goal: Optional goal text to persist with the start event.
+            runtime_backend: Agent runtime backend (claude/codex/hermes/…), persisted
+                so observers (the live dashboard) can tag the run's provider even for
+                simple, non-decomposed runs that emit no per-worker session events.
+            llm_backend: Resolved LLM backend, persisted alongside for the same reason.
 
         Returns:
             Result containing new SessionTracker.
@@ -597,6 +603,10 @@ class SessionRepository:
         }
         if seed_goal:
             event_data["seed_goal"] = seed_goal
+        if runtime_backend:
+            event_data["runtime_backend"] = runtime_backend
+        if llm_backend:
+            event_data["llm_backend"] = llm_backend
 
         event = BaseEvent(
             type="orchestrator.session.started",

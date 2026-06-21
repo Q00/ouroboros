@@ -236,6 +236,27 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_config_key="codex_cli_path",
         skill_execution_capabilities=_CODEX_SKILL_EXECUTION_CAPABILITIES,
     ),
+    # Leader-driven worker runtime over ``codex mcp-server`` (codex/codex-reply).
+    # Same codex binary, runtime-only (not an LLM/interview backend); declares
+    # EXTERNAL_LEADER_DRIVEN at the runtime layer. See orchestrator.codex_mcp_runtime.
+    BackendCapability(
+        name="codex_mcp",
+        aliases=("codex_mcp_server",),
+        supports_runtime=True,
+        cli_name="codex",
+        cli_config_key="codex_cli_path",
+        skill_execution_capabilities=_CODEX_SKILL_EXECUTION_CAPABILITIES,
+    ),
+    # Leader-driven worker runtime over ``claude -p --resume`` (stream-json).
+    # Same claude binary, runtime-only; declares EXTERNAL_LEADER_DRIVEN. Proves
+    # the worker pool is provider-neutral. See orchestrator.claude_worker_runtime.
+    BackendCapability(
+        name="claude_mcp",
+        aliases=("claude_worker",),
+        supports_runtime=True,
+        cli_name="claude",
+        cli_config_key="cli_path",
+    ),
     BackendCapability(
         name="copilot",
         aliases=("copilot_cli",),

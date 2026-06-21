@@ -84,6 +84,41 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
+    if resolved_backend == "codex_mcp":
+        # Leader-driven worker pool over `codex mcp-server` (codex/codex-reply).
+        # No skill_dispatcher / timeout knobs — the worker runtime is pure
+        # spawn/resume transport below the AgentRuntime seam.
+        from ouroboros.config import get_native_session_index_enabled
+        from ouroboros.orchestrator.codex_mcp_runtime import build_codex_mcp_worker_runtime
+
+        return build_codex_mcp_worker_runtime(
+            cli_path=cli_path or get_codex_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            model=model,
+            llm_backend=resolved_llm_backend,
+            # Dashboard is the default worker view; only dump workers into the
+            # Codex app's session list when the human explicitly opts in.
+            index_sessions=get_native_session_index_enabled(),
+        )
+
+    if resolved_backend == "claude_mcp":
+        # Same worker pool, Claude transport (`claude -p --resume` stream-json) —
+        # proves the leader-driven seam is provider-neutral.
+        from ouroboros.config import get_native_session_index_enabled
+        from ouroboros.orchestrator.claude_worker_runtime import build_claude_worker_runtime
+
+        return build_claude_worker_runtime(
+            cli_path=cli_path or get_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            model=model,
+            llm_backend=resolved_llm_backend,
+            # Dashboard is the default worker view; only persist (→ visible &
+            # resumable in /resume, with fork + --name) when the human opts in.
+            persist_sessions=get_native_session_index_enabled(),
+        )
+
     if resolved_backend == "opencode":
         from ouroboros.config import get_opencode_cli_path
 
