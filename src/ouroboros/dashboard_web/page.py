@@ -167,12 +167,12 @@ def static_html(board: dict, *, run_id: str | None = None) -> str:
 
     # Escape ``</`` so the inlined JSON can't terminate the <script> element.
     board_json = _json.dumps(board, default=str).replace("</", "<\\/")
-    label = (run_id or "").replace("</", "")
+    label_json = _json.dumps(run_id or "").replace("</", "<\\/")
     bootstrap = (
+        f"const snapshotLabel = {label_json};\n"
         'document.getElementById("m-status").innerHTML = '
-        '\'<span class=\\"dot\\" style=\\"background:var(--muted)\\"></span>snapshot'
-        + (f" · {label}" if label else "")
-        + "';\n"
+        '\'<span class=\\"dot\\" style=\\"background:var(--muted)\\"></span>snapshot\' + '
+        '(snapshotLabel ? " · " + esc(snapshotLabel) : "");\n'
         f"render({board_json});\n"
     )
     return _PAGE_TEMPLATE.replace("__BOOTSTRAP__", bootstrap)

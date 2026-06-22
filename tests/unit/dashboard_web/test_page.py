@@ -54,3 +54,12 @@ class TestStaticSnapshot:
         )
         assert "</script> b" not in html
         assert "<\\/script>" in html
+
+    def test_run_label_is_serialized_and_escaped_for_inline_script(self) -> None:
+        html = static_html(_BOARD, run_id="x';globalThis.__pwned=1;//</script>")
+
+        label_assignment = html.split("const snapshotLabel =", 1)[1].split(";\n", 1)[0]
+        assert label_assignment.startswith(" \"x';globalThis.__pwned=1;//")
+        assert "<\\/script>" in label_assignment
+        assert "</script>" not in label_assignment
+        assert "· " + '" + esc(snapshotLabel)' in html
