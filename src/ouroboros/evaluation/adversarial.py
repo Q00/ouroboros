@@ -86,8 +86,7 @@ ADVERSARIAL_CLASSES: tuple[AdversarialClass, ...] = (
         id="flaky_test",
         name="Flaky / timing-sensitive test",
         trigger="the artifact adds new or timing-sensitive tests",
-        probe="run repeatedly; confirm deterministic results (no order/timing/network "
-        "dependence)",
+        probe="run repeatedly; confirm deterministic results (no order/timing/network dependence)",
     ),
     AdversarialClass(
         id="misleading_output",
