@@ -78,6 +78,25 @@ class TestRuntimeWiring:
         caps = rt.capabilities
         assert caps.subagent_orchestration is SubagentOrchestration.EXTERNAL_LEADER_DRIVEN
         assert is_leader_driven_worker(caps) is True
+        assert caps.targeted_resume is False
+
+    def test_persisted_runtime_declares_targeted_resume(self) -> None:
+        rt = build_claude_worker_runtime(cwd="/tmp", persist_sessions=True)
+        assert rt.capabilities.targeted_resume is True
+
+    @pytest.mark.asyncio
+    async def test_default_runtime_does_not_emit_resumable_handle(self) -> None:
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return WorkerTurn(text="ok", session_id="nonpersisted-id")
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+        assert [message.type for message in messages] == ["result"]
+        assert messages[0].resume_handle is None
+        assert messages[0].data["session_id"] == "nonpersisted-id"
 
     def test_resume_is_cwd_pinned(self) -> None:
         # The transport must pin cwd so --resume targets the session's store.

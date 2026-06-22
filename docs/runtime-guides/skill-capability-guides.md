@@ -33,8 +33,10 @@ its rendered guide or a documented fallback.
 | Runtime | Generated artifact surface | Status |
 | --- | --- | --- |
 | Codex | Managed rule under `~/.codex/rules/ouroboros.md` | Installed during Codex setup/update via the generated guide renderer. |
+| Codex_MCP | Reuses the Codex CLI setup-owned rule surface | Leader-driven worker runtime over `codex mcp-server`; uses the Codex capability guide and is not a separate LLM/interview backend. |
 | Hermes | `~/.hermes/skills/autonomous-ai-agents/ouroboros/SKILL_CAPABILITY_GUIDE.md` | Installed with the Hermes skill bundle. |
 | Claude | `.claude-plugin/SKILL_CAPABILITY_GUIDE.md` | Shipped with the Claude plugin package and checked against the renderer. |
+| Claude_MCP | Reuses the Claude CLI/plugin instruction surface | Leader-driven worker runtime over `claude -p --resume`; runtime-only provider-neutral worker path, not a separate LLM/interview backend. |
 | OpenCode | Global `AGENTS.md` in the active OpenCode config directory | Installed by OpenCode setup for plugin and subprocess modes. |
 | Gemini | `~/.gemini/GEMINI.md` | Installed by Gemini setup as a managed section in the global Gemini memory file. |
 | Kiro | `~/.kiro/steering/ouroboros-skill-capability-guide.md` | Installed by Kiro setup as a global steering file. |

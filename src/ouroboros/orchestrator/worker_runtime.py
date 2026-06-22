@@ -120,6 +120,7 @@ class LeaderDrivenWorkerRuntime:
         model: str | None = None,
         reasoning_effort_support: ParamSupport = ParamSupport.IGNORED,
         enforceable_reasoning_efforts: frozenset[str] | None = None,
+        targeted_resume: bool = True,
     ) -> None:
         self._transport = transport
         self._runtime_backend = runtime_backend
@@ -129,6 +130,7 @@ class LeaderDrivenWorkerRuntime:
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support
         self._enforceable_reasoning_efforts = enforceable_reasoning_efforts
+        self._targeted_resume = targeted_resume
         self._provider_name = runtime_backend
 
     # -- AgentRuntime Protocol properties ---------------------------------
@@ -159,6 +161,7 @@ class LeaderDrivenWorkerRuntime:
         # EXTERNAL_LEADER_DRIVEN worker pool member.
         return replace(
             FULL_CAPABILITIES,
+            targeted_resume=self._targeted_resume,
             system_prompt_support=ParamSupport.NATIVE,
             tool_restriction_support=ParamSupport.IGNORED,
             reasoning_effort_support=self._reasoning_effort_support,
@@ -168,7 +171,9 @@ class LeaderDrivenWorkerRuntime:
 
     # -- Execution --------------------------------------------------------
 
-    def _build_handle(self, session_id: str | None) -> RuntimeHandle:
+    def _build_handle(self, session_id: str | None) -> RuntimeHandle | None:
+        if not self._targeted_resume or not session_id:
+            return None
         return RuntimeHandle(
             backend=self._runtime_backend,
             kind="agent_runtime",
@@ -234,8 +239,8 @@ class LeaderDrivenWorkerRuntime:
 
         handle = self._build_handle(turn.session_id or prior_session_id)
 
-        # Init message announces the addressable session (first turn only).
-        if not prior_session_id and turn.session_id:
+        # Init message announces an addressable, resumable session (first turn only).
+        if handle is not None and not prior_session_id and turn.session_id:
             yield AgentMessage(
                 type="system",
                 content=f"Session initialized: {turn.session_id}",

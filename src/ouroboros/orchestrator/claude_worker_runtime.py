@@ -7,8 +7,9 @@ also drives Claude — only this thin transport differs. That is the whole point
 Claude's headless surface (``claude -p <prompt> --output-format json``) returns a
 ``session_id`` and ``result``; ``claude -p --resume <session_id>`` continues it.
 Verified 2026-06-21: unlike ``codex mcp-server`` (process-bound sessions), Claude
-sessions are DISK-PERSISTED, so cross-process resume works — this worker supports
-real multi-turn execution out of the box.
+sessions can be disk-persisted and resumed across processes. Ouroboros keeps that
+persistence opt-in, because default ``--no-session-persistence`` workers return a
+JSON ``session_id`` that is only diagnostic, not a valid future resume target.
 """
 
 from __future__ import annotations
@@ -266,6 +267,7 @@ def build_claude_worker_runtime(
         model=model,
         reasoning_effort_support=ParamSupport.NATIVE,
         enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
+        targeted_resume=persist_sessions,
     )
 
 
