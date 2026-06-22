@@ -314,8 +314,11 @@ class ClaudeCodeAdapter:
             return result
         extracted = extract_json_payload(result.value.content)
         if extracted:
-            result.value.content = extracted
-            return result
+            # CompletionResponse is a frozen dataclass — build a new instance
+            # instead of mutating (mutation raises FrozenInstanceError).
+            from dataclasses import replace
+
+            return Result.ok(replace(result.value, content=extracted))
         return None
 
     async def _enforce_json(

@@ -11,12 +11,31 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
+    CompletionResponse,
     Message,
     MessageRole,
+    UsageInfo,
 )
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
+
+
+def _ok_response(content: str) -> Result[CompletionResponse, object]:
+    """A successful Result wrapping a real (frozen) CompletionResponse.
+
+    Use this instead of a MagicMock so tests exercise the real dataclass — a
+    MagicMock's attributes are freely assignable and would hide bugs like
+    mutating the frozen `content` field during JSON normalization.
+    """
+    return Result.ok(
+        CompletionResponse(
+            content=content,
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+    )
 
 
 class TestBuildPrompt:
@@ -243,9 +262,7 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        mock_response = MagicMock(is_ok=True, is_err=False)
-        mock_response.value.content = '{"score": 0.9}'
-        mock_execute = AsyncMock(return_value=mock_response)
+        mock_execute = AsyncMock(return_value=_ok_response('{"score": 0.9}'))
         adapter._execute_single_request = mock_execute
 
         with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
@@ -268,11 +285,8 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        prose_response = MagicMock(is_ok=True, is_err=False)
-        prose_response.value.content = "Let me verify the acceptance criteria..."
-
-        json_response = MagicMock(is_ok=True, is_err=False)
-        json_response.value.content = '{"score": 0.85}'
+        prose_response = _ok_response("Let me verify the acceptance criteria...")
+        json_response = _ok_response('{"score": 0.85}')
 
         mock_execute = AsyncMock(side_effect=[prose_response, json_response])
         adapter._execute_single_request = mock_execute
@@ -297,8 +311,7 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        prose_response = MagicMock(is_ok=True, is_err=False)
-        prose_response.value.content = "I cannot produce JSON right now"
+        prose_response = _ok_response("I cannot produce JSON right now")
 
         # 1 initial + 3 retries = 4 calls total
         mock_execute = AsyncMock(return_value=prose_response)
@@ -324,8 +337,7 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        mixed_response = MagicMock(is_ok=True, is_err=False)
-        mixed_response.value.content = 'Here is the result:\n{"score": 0.85}\nDone.'
+        mixed_response = _ok_response('Here is the result:\n{"score": 0.85}\nDone.')
 
         mock_execute = AsyncMock(return_value=mixed_response)
         adapter._execute_single_request = mock_execute
@@ -336,6 +348,41 @@ class TestExecuteSingleRequestSystemPrompt:
         assert result.is_ok
         assert result.value.content == '{"score": 0.85}'
         assert mock_execute.call_count == 1  # No retry needed
+
+    @pytest.mark.asyncio
+    async def test_json_normalization_on_real_frozen_response(self) -> None:
+        """JSON extraction must not mutate the frozen CompletionResponse.
+
+        Regression: _normalize_json_content used to assign result.value.content,
+        which raises FrozenInstanceError on the real (frozen) dataclass. The
+        MagicMock-based tests above didn't catch it because mock attributes are
+        freely assignable; this test uses a real CompletionResponse.
+        """
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        real_response = CompletionResponse(
+            content='Here is the result:\n{"score": 0.85}\nDone.',
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+        mock_execute = AsyncMock(return_value=Result.ok(real_response))
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        # original frozen instance is left untouched
+        assert real_response.content == 'Here is the result:\n{"score": 0.85}\nDone.'
 
     @pytest.mark.asyncio
     async def test_json_schema_array_gets_correct_prompt_steering(self) -> None:
@@ -353,9 +400,7 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        mock_response = MagicMock(is_ok=True, is_err=False)
-        mock_response.value.content = '[{"name": "a"}]'
-        mock_execute = AsyncMock(return_value=mock_response)
+        mock_execute = AsyncMock(return_value=_ok_response('[{"name": "a"}]'))
         adapter._execute_single_request = mock_execute
 
         with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
@@ -377,9 +422,7 @@ class TestExecuteSingleRequestSystemPrompt:
             response_format={"type": "json_object"},
         )
 
-        mock_response = MagicMock(is_ok=True, is_err=False)
-        mock_response.value.content = '{"data": "value"}'
-        mock_execute = AsyncMock(return_value=mock_response)
+        mock_execute = AsyncMock(return_value=_ok_response('{"data": "value"}'))
         adapter._execute_single_request = mock_execute
 
         with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
