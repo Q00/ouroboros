@@ -456,8 +456,8 @@ if [ "$HAS_UV" = true ]; then
     "[mcp,claude,tui]")
       UV_ARGS+=(
         --with "mcp==1.27.2"
-        --with "claude-agent-sdk==0.2.87"
-        --with "anthropic==0.105.2"
+        --with "claude-agent-sdk==0.2.101"
+        --with "anthropic==0.109.1"
       )
       ;;
     "[mcp,tui]")
@@ -466,9 +466,9 @@ if [ "$HAS_UV" = true ]; then
     "[all]")
       UV_ARGS+=(
         --with "mcp==1.27.2"
-        --with "claude-agent-sdk==0.2.87"
-        --with "anthropic==0.105.2"
-        --with "litellm==1.86.2"
+        --with "claude-agent-sdk==0.2.101"
+        --with "anthropic==0.109.1"
+        --with "litellm==1.89.0"
       )
       ;;
   esac
