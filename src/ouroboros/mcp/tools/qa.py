@@ -148,8 +148,11 @@ def _build_qa_user_prompt(
     adversarial_section = f"""
 ## Adversarial Probes
 {render_checklist()}
-A "done" claim is only as strong as the probes it survives. Fold any failure into
-``differences`` (with a matching ``suggestion``) and let it lower ``correctness``.
+A "done" claim is only as strong as the probes it survives. Use supplied
+artifact/reference/history/seed evidence only; if an applicable probe requires
+execution or observation that is not present, report that as an evidence gap in
+``differences`` (with a matching ``suggestion``) instead of implying you ran it.
+Let any real failure or unverified applicable probe lower ``correctness``.
 """
 
     return f"""## Quality Bar

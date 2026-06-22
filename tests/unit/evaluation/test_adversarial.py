@@ -66,3 +66,5 @@ class TestPromptWiring:
         assert "Adversarial Probes" in prompt
         assert "malformed_input" in prompt
         assert "prompt_injection" in prompt
+        assert "evidence gap" in prompt
+        assert "instead of implying you ran it" in prompt

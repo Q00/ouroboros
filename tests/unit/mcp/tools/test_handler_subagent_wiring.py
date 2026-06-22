@@ -71,6 +71,8 @@ class TestQAHandlerSubagentDispatch:
         assert "Adversarial Probes" in prompt
         assert "malformed_input" in prompt
         assert "prompt_injection" in prompt
+        assert "evidence gap" in prompt
+        assert "instead of implying you ran it" in prompt
 
     async def test_still_validates_missing_artifact(self, handler) -> None:
         result = await handler.handle({"quality_bar": "good"})
