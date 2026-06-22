@@ -84,12 +84,17 @@ def read_state() -> dict | None:
         return None
 
 
-def write_state(*, host: str, port: int, pid: int) -> None:
+def _normalize_db_path(db_path: str | os.PathLike[str] | None) -> str:
+    return str(Path(db_path or default_db_path()).expanduser().resolve())
+
+
+def write_state(*, host: str, port: int, pid: int, db_path: str) -> None:
     _HOME.mkdir(parents=True, exist_ok=True)
     payload = {
         "host": host,
         "port": port,
         "pid": pid,
+        "db_path": _normalize_db_path(db_path),
         "started_at": datetime.now(UTC).isoformat(),
     }
     tmp = _STATE_PATH.with_suffix(".json.tmp")
@@ -97,8 +102,10 @@ def write_state(*, host: str, port: int, pid: int) -> None:
     os.replace(tmp, _STATE_PATH)  # atomic publish
 
 
-def _state_alive(state: dict | None) -> bool:
+def _state_alive(state: dict | None, *, db_path: str | None = None) -> bool:
     if not state:
+        return False
+    if db_path is not None and state.get("db_path") != _normalize_db_path(db_path):
         return False
     port = state.get("port")
     host = state.get("host", "127.0.0.1")
@@ -170,10 +177,10 @@ def _spawn_detached(*, db_path: str, host: str) -> None:
     )
 
 
-def _wait_for_alive(deadline: float) -> DashboardInfo | None:
+def _wait_for_alive(deadline: float, *, db_path: str) -> DashboardInfo | None:
     while time.monotonic() < deadline:
         state = read_state()
-        if _state_alive(state):
+        if _state_alive(state, db_path=db_path):
             return _info_from_state(state, reused=True)
         time.sleep(0.15)
     return None
@@ -189,26 +196,27 @@ def ensure_dashboard(
     Returns ``None`` only if the daemon could not be brought up (the caller should
     degrade gracefully — observability must never block a run).
     """
-    resolved_db = db_path or str(default_db_path())
+    resolved_db = _normalize_db_path(db_path)
 
-    # Fast path: an existing daemon is already serving.
+    # Fast path: an existing daemon is already serving this EventStore.
     state = read_state()
-    if _state_alive(state):
+    if _state_alive(state, db_path=resolved_db):
         return _info_from_state(state, reused=True)
 
     # Elect a spawner. The lock serializes concurrent ensure() calls.
     fd = _try_acquire_lock()
     if fd is None:
-        # Someone else is spawning — wait for their daemon, then reuse.
-        return _wait_for_alive(time.monotonic() + _SPAWN_WAIT_SEC)
+        # Someone else is spawning — wait for their daemon, then reuse only if
+        # it serves the same EventStore path this caller is about to link to.
+        return _wait_for_alive(time.monotonic() + _SPAWN_WAIT_SEC, db_path=resolved_db)
 
     try:
         # Double-check inside the lock (a winner may have just published state).
         state = read_state()
-        if _state_alive(state):
+        if _state_alive(state, db_path=resolved_db):
             return _info_from_state(state, reused=True)
         _spawn_detached(db_path=resolved_db, host=host)
-        info = _wait_for_alive(time.monotonic() + _SPAWN_WAIT_SEC)
+        info = _wait_for_alive(time.monotonic() + _SPAWN_WAIT_SEC, db_path=resolved_db)
         if info is not None:
             return DashboardInfo(
                 url=info.url, host=info.host, port=info.port, pid=info.pid, reused=False
@@ -277,10 +285,10 @@ def run_daemon(*, db_path: str | None = None, host: str = "127.0.0.1") -> None:
     """
     from ouroboros.dashboard_web.server import serve_blocking
 
-    resolved_db = db_path or str(default_db_path())
+    resolved_db = _normalize_db_path(db_path)
     port = _free_port(host if host != "0.0.0.0" else "127.0.0.1")
     pid = os.getpid()
-    write_state(host=host, port=port, pid=pid)
+    write_state(host=host, port=port, pid=pid, db_path=resolved_db)
     try:
         serve_blocking(
             db_path=resolved_db,

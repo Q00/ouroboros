@@ -302,7 +302,25 @@ def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] |
     return inherited or None
 
 
-async def _resolve_dashboard_url(execution_id: str | None) -> str | None:
+def _event_store_db_path(event_store: EventStore | None) -> str | None:
+    """Return the concrete SQLite path for a handler's injected EventStore, if known."""
+    database_url = getattr(event_store, "_database_url", None)
+    if not isinstance(database_url, str):
+        return None
+    prefix = "sqlite+aiosqlite:///"
+    if not database_url.startswith(prefix):
+        return None
+    path = database_url[len(prefix) :]
+    if not path or path.startswith("file:"):
+        return None
+    return path
+
+
+async def _resolve_dashboard_url(
+    execution_id: str | None,
+    *,
+    event_store: EventStore | None = None,
+) -> str | None:
     """Best-effort live-dashboard URL for a run, off-loaded from the event loop.
 
     Spins up (or reuses) the singleton dashboard daemon and returns this run's
@@ -314,7 +332,8 @@ async def _resolve_dashboard_url(execution_id: str | None) -> str | None:
     try:
         from ouroboros.dashboard_web import dashboard_url_for_run
 
-        return await asyncio.to_thread(dashboard_url_for_run, execution_id)
+        db_path = _event_store_db_path(event_store)
+        return await asyncio.to_thread(dashboard_url_for_run, execution_id, db_path=db_path)
     except Exception:  # noqa: BLE001 - observability must never break a run
         return None
 
@@ -860,7 +879,10 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Best-effort live dashboard URL (singleton daemon, reused across
                 # runs; default on, opt out via OUROBOROS_DASHBOARD=0). Offloaded
                 # to a thread so the healthz/first-spawn wait never blocks the loop.
-                dashboard_url = await _resolve_dashboard_url(tracker.execution_id)
+                dashboard_url = await _resolve_dashboard_url(
+                    tracker.execution_id,
+                    event_store=event_store,
+                )
                 if dashboard_url:
                     message += f"Live Dashboard: {dashboard_url}\n"
                 if pause_metadata:

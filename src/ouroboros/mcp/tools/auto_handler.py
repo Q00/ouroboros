@@ -106,7 +106,23 @@ from ouroboros.runtime.watchdog import Watchdog
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
 
 
-async def _resolve_dashboard_base_url() -> str | None:
+def _event_store_db_path(event_store: EventStore | None) -> str | None:
+    database_url = getattr(event_store, "_database_url", None)
+    if not isinstance(database_url, str):
+        return None
+    prefix = "sqlite+aiosqlite:///"
+    if not database_url.startswith(prefix):
+        return None
+    path = database_url[len(prefix) :]
+    if not path or path.startswith("file:"):
+        return None
+    return path
+
+
+async def _resolve_dashboard_base_url(
+    *,
+    event_store: EventStore | None = None,
+) -> str | None:
     """Best-effort live-dashboard base URL for an auto session (off the event loop).
 
     Auto's execution id only materializes after interview+seed, so we link the
@@ -116,7 +132,8 @@ async def _resolve_dashboard_base_url() -> str | None:
     try:
         from ouroboros.dashboard_web import dashboard_base_url
 
-        return await asyncio.to_thread(dashboard_base_url)
+        db_path = _event_store_db_path(event_store)
+        return await asyncio.to_thread(dashboard_base_url, db_path=db_path)
     except Exception:  # noqa: BLE001 - observability must never break a run
         return None
 
@@ -890,7 +907,7 @@ class StartAutoHandler:
                 )
             )
 
-        dashboard_url = await _resolve_dashboard_base_url()
+        dashboard_url = await _resolve_dashboard_base_url(event_store=self.event_store)
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
             "Started background auto session.\n\n"

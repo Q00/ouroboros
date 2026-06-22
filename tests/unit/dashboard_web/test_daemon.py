@@ -21,12 +21,14 @@ def _isolated_paths(tmp_path, monkeypatch):
 
 class TestState:
     def test_write_then_read_roundtrip(self) -> None:
-        daemon.write_state(host="127.0.0.1", port=12345, pid=999)
+        db_path = "/tmp/custom-ouroboros.db"
+        daemon.write_state(host="127.0.0.1", port=12345, pid=999, db_path=db_path)
         state = daemon.read_state()
         assert state is not None
         assert state["port"] == 12345
         assert state["pid"] == 999
         assert state["host"] == "127.0.0.1"
+        assert state["db_path"] == daemon._normalize_db_path(db_path)
 
     def test_read_missing_state_is_none(self) -> None:
         assert daemon.read_state() is None
@@ -69,9 +71,7 @@ class TestEnablement:
     def test_url_for_run_none_when_disabled(self, monkeypatch) -> None:
         monkeypatch.setenv("OUROBOROS_DASHBOARD", "0")
         # Must NOT even attempt to ensure/spawn when disabled.
-        monkeypatch.setattr(
-            daemon, "ensure_dashboard", lambda **_: pytest.fail("should not spawn")
-        )
+        monkeypatch.setattr(daemon, "ensure_dashboard", lambda **_: pytest.fail("should not spawn"))
         assert daemon.dashboard_url_for_run("exec_x") is None
         assert daemon.dashboard_base_url() is None
 
@@ -100,5 +100,11 @@ class TestHealthz:
         assert daemon.healthz("127.0.0.1", 1, timeout=0.2) is False
 
     def test_state_alive_false_without_server(self) -> None:
-        daemon.write_state(host="127.0.0.1", port=9, pid=1)
-        assert daemon._state_alive(daemon.read_state()) is False
+        daemon.write_state(host="127.0.0.1", port=9, pid=1, db_path="/tmp/a.db")
+        assert daemon._state_alive(daemon.read_state(), db_path="/tmp/a.db") is False
+
+    def test_state_alive_false_for_different_db_path(self, monkeypatch) -> None:
+        daemon.write_state(host="127.0.0.1", port=12345, pid=1, db_path="/tmp/a.db")
+        monkeypatch.setattr(daemon, "healthz", lambda *_args, **_kwargs: True)
+        assert daemon._state_alive(daemon.read_state(), db_path="/tmp/b.db") is False
+        assert daemon._state_alive(daemon.read_state(), db_path="/tmp/a.db") is True
