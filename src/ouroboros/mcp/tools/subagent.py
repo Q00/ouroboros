@@ -1074,6 +1074,15 @@ def build_qa_subagent(
     if seed_content:
         seed_section = f"\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
+    from ouroboros.evaluation.adversarial import render_checklist
+
+    adversarial_section = f"""
+## Adversarial Probes
+{render_checklist()}
+A "done" claim is only as strong as the probes it survives. Fold any failure into
+``differences`` (with a matching ``suggestion``) and let it lower ``correctness``.
+"""
+
     prompt = f"""{system_prompt}
 
 ---
@@ -1102,7 +1111,7 @@ as a JSON object with these exact fields:
 ```
 {artifact}
 ```
-{reference_section}{history_section}{seed_section}
+{reference_section}{history_section}{seed_section}{adversarial_section}
 Return ONLY the JSON verdict object. No other text."""
 
     context: dict[str, Any] = {
