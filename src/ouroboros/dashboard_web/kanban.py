@@ -129,7 +129,9 @@ def _upsert_ac_card(
     title = item.get("content") or item.get("label")
     if title:
         card["title"] = title
-    _apply_status(card, terminal, node_id, _normalize_status(item.get("status")), authoritative=False)
+    _apply_status(
+        card, terminal, node_id, _normalize_status(item.get("status")), authoritative=False
+    )
     if item.get("depth") is not None:
         card["depth"] = item.get("depth")
     card["ac_index"] = (
@@ -181,15 +183,17 @@ def reduce_board(
             if title:
                 card["title"] = title
             _apply_status(
-                card, terminal, node_id, _normalize_status(payload.get("status")), authoritative=True
+                card,
+                terminal,
+                node_id,
+                _normalize_status(payload.get("status")),
+                authoritative=True,
             )
             if payload.get("depth") is not None:
                 card["depth"] = payload.get("depth")
             card["parent_id"] = payload.get("parent_node_id") or card.get("parent_id")
             card["ac_index"] = (
-                payload.get("root_ac_number")
-                or payload.get("ac_index")
-                or card.get("ac_index")
+                payload.get("root_ac_number") or payload.get("ac_index") or card.get("ac_index")
             )
 
         elif event_type == "execution.session.started":
@@ -275,7 +279,9 @@ def reduce_board(
 
     # Providers present in this run — lets the UI build a stable legend. Includes
     # the run-level backend so a simple run's single provider still shows.
-    providers = sorted({p for p in provider_by_node.values() if p} | ({run_backend} if run_backend else set()))
+    providers = sorted(
+        {p for p in provider_by_node.values() if p} | ({run_backend} if run_backend else set())
+    )
 
     return {"meta": meta, "columns": columns, "providers": providers}
 

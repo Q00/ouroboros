@@ -8,8 +8,12 @@ _BOARD = {
     "meta": {"provider": "hermes_cli", "completed": 1, "total": 4, "phase": "Deliver"},
     "columns": {
         "pending": [],
-        "executing": [{"id": "n2", "title": "green.txt", "status": "executing", "provider": "hermes_cli"}],
-        "completed": [{"id": "n1", "title": "red.txt", "status": "completed", "provider": "hermes_cli"}],
+        "executing": [
+            {"id": "n2", "title": "green.txt", "status": "executing", "provider": "hermes_cli"}
+        ],
+        "completed": [
+            {"id": "n1", "title": "red.txt", "status": "completed", "provider": "hermes_cli"}
+        ],
         "failed": [],
     },
     "providers": ["hermes_cli"],
@@ -38,8 +42,12 @@ class TestStaticSnapshot:
         html = static_html(
             {
                 "meta": {},
-                "columns": {"pending": [{"id": "x", "title": "a </script> b", "status": "pending"}],
-                            "executing": [], "completed": [], "failed": []},
+                "columns": {
+                    "pending": [{"id": "x", "title": "a </script> b", "status": "pending"}],
+                    "executing": [],
+                    "completed": [],
+                    "failed": [],
+                },
                 "providers": [],
             },
             run_id="exec_x",

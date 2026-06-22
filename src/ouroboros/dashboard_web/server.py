@@ -96,7 +96,9 @@ class _Handler(BaseHTTPRequestHandler):
         tail = EventTail(self.server.db_path, run_id)
         events = tail.fetch_new(limit=100000)
         board = reduce_board(events, execution_id=run_id)
-        self._send_bytes(static_html(board, run_id=run_id).encode("utf-8"), "text/html; charset=utf-8")
+        self._send_bytes(
+            static_html(board, run_id=run_id).encode("utf-8"), "text/html; charset=utf-8"
+        )
 
     def _send_bytes(self, body: bytes, content_type: str) -> None:
         self.send_response(200)
@@ -195,7 +197,9 @@ def serve_blocking(
         server.server_close()
 
 
-def serve_background(*, db_path: str, host: str, port: int) -> tuple[_DashboardServer, threading.Thread]:
+def serve_background(
+    *, db_path: str, host: str, port: int
+) -> tuple[_DashboardServer, threading.Thread]:
     """Start the server on a daemon thread; return (server, thread). Testing/dev."""
     server = make_server(db_path=db_path, host=host, port=port)
     thread = threading.Thread(target=server.serve_forever, name="ooo-dashboard", daemon=True)

@@ -170,7 +170,7 @@ def static_html(board: dict, *, run_id: str | None = None) -> str:
     label = (run_id or "").replace("</", "")
     bootstrap = (
         'document.getElementById("m-status").innerHTML = '
-        "'<span class=\\\"dot\\\" style=\\\"background:var(--muted)\\\"></span>snapshot"
+        '\'<span class=\\"dot\\" style=\\"background:var(--muted)\\"></span>snapshot'
         + (f" · {label}" if label else "")
         + "';\n"
         f"render({board_json});\n"

@@ -53,8 +53,8 @@ def serve_dashboard(
     Mainly for tests/dev. Production runs share one daemon via ``ensure_dashboard``.
     """
     resolved_db = db_path or str(default_db_path())
-    resolved_port = port if port not in (None, 0) else _free_port(
-        host if host != "0.0.0.0" else "127.0.0.1"
+    resolved_port = (
+        port if port not in (None, 0) else _free_port(host if host != "0.0.0.0" else "127.0.0.1")
     )
     server, thread = serve_background(db_path=resolved_db, host=host, port=resolved_port)
     display_host = "localhost" if host in ("127.0.0.1", "0.0.0.0", "localhost") else host

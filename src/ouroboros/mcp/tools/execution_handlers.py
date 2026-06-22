@@ -1483,7 +1483,10 @@ class StartExecuteSeedHandler:
         except (ValueError, Exception):
             llm_backend = "unknown"
 
-        dashboard_url = await _resolve_dashboard_url(snapshot.links.execution_id or execution_id)
+        dashboard_url = await _resolve_dashboard_url(
+            snapshot.links.execution_id or execution_id,
+            event_store=self._event_store,
+        )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
             f"Started background execution.\n\n"
