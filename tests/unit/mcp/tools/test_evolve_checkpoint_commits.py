@@ -116,6 +116,29 @@ def test_evolve_checkpoint_does_not_retry_attempted_pass_without_diff(tmp_path) 
     assert _git(repo, "rev-list", "--count", "HEAD") == "1"
 
 
+def test_evolve_checkpoint_accepts_plugin_null_checkpoint_arrays(tmp_path) -> None:
+    """Plugin MCP clients may send optional array parameters as explicit null."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    summary = EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=3,
+        ac_results=(ACResult(ac_index=0, ac_content="Command prints stable output", passed=True),),
+    )
+
+    commits, attempts = _checkpoint_passed_generation_acs(
+        {
+            "checkpoint_commits": None,
+            "checkpoint_attempted_ac_ids": None,
+        },
+        summary,
+        repo,
+    )
+
+    assert commits == []
+    assert attempts == []
+
+
 def test_resolve_checkpoint_working_dir_prefers_effective_worktree(tmp_path) -> None:
     """#1281 review blocker 1: when a managed lineage worktree is active, the
     checkpoint must target the worktree that execution mutated — not the

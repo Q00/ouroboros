@@ -773,7 +773,7 @@ class MCPServerAdapter:
                 )
             )
         except Exception as e:
-            log.error("mcp.server.tool_error", tool=name, error=str(e))
+            log.error("mcp.server.tool_error", tool=name, error=str(e), exc_info=True)
             return Result.err(
                 MCPToolError(
                     f"Tool execution failed: {e}",
