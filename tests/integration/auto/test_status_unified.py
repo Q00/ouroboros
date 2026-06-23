@@ -640,7 +640,7 @@ def test_cli_status_auto_snapshot(tmp_path) -> None:
         "  current_generation: 3\n"
         "  stop_reason: qa passed\n"
         "IntentGuard: pass\n"
-        "  PASS intent_contract_not_applicable: goal does not look like an artifact-output request\n"
+        "  PASS intent_lock_present: output contract is anchored in user/repo evidence\n"
         "  PASS spec_pollution: Seed constraints do not contain known diagnostic markers\n"
     )
     assert rendered == expected

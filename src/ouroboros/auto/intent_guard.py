@@ -153,7 +153,13 @@ _BROAD_ARTIFACT_OUTPUT_TERMS = (
     "tools",
 )
 
+_NARROWED_OUTPUT_COMPETING_ARTIFACT_TERMS = tuple(
+    term for term in _BROAD_ARTIFACT_OUTPUT_TERMS if term not in {"json", "csv", "pdf", "html"}
+)
+
 _ARTIFACT_GENERATION_TERMS = (
+    "build",
+    "builds",
     "make",
     "makes",
     "create",
@@ -196,6 +202,27 @@ _SCOPE_REDUCTION_TERMS = (
     "checklist-only",
     "checklist only",
     "checklist package",
+)
+
+_NARROWED_OUTPUT_EXCLUSION_TERMS = (
+    "not the final artifact",
+    "not final artifact",
+    "not the final output",
+    "not final output",
+    "not the final deliverable",
+    "not final deliverable",
+    "not the deliverable",
+    "not deliverable",
+    "not the artifact",
+    "not artifact",
+    "only generated output",
+    "only generated outputs",
+    "only supporting output",
+    "only supporting outputs",
+    "supporting output",
+    "supporting outputs",
+    "supporting artifact",
+    "supporting artifacts",
 )
 
 _DIAGNOSTIC_MARKERS = (
@@ -314,6 +341,8 @@ def guard_interview_turn(
     )
 
     if not question_has_generated_choice or not answer_has_review_only:
+        return IntentGuardReport(tuple(checks))
+    if _is_explicit_narrowed_output_contract(contract):
         return IntentGuardReport(tuple(checks))
 
     source = answer_source.strip().casefold()
@@ -501,11 +530,14 @@ def _is_explicit_narrowed_output_contract(text: str) -> bool:
     Scope-reduction phrases are only failures when a generated answer narrows a
     broader user artifact class. If the user's locked contract is already a
     docs-only/review-only/checklist-only handoff, a generated answer that
-    repeats that contract should pass instead of being treated as drift.
+    repeats that contract should pass instead of being treated as drift. Narrow
+    artifact terms that are explicitly excluded from the final deliverable do
+    not make the user contract a narrowed-output contract.
     """
-    return _contains_scope_reduction_option(text) and not _contains_any_phrase(
-        text,
-        _BROAD_ARTIFACT_OUTPUT_TERMS,
+    return (
+        _contains_scope_reduction_option(text)
+        and not _contains_any_phrase(text, _NARROWED_OUTPUT_COMPETING_ARTIFACT_TERMS)
+        and not _contains_any_phrase(text, _NARROWED_OUTPUT_EXCLUSION_TERMS)
     )
 
 
