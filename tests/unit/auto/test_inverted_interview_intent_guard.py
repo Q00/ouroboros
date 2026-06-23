@@ -63,3 +63,35 @@ def test_inverted_intent_guard_warns_when_human_changes_to_docs_only() -> None:
 
     assert report.status is IntentGuardStatus.WARN
     assert any(check.code == "user_contract_change" for check in report.checks)
+
+
+def test_inverted_intent_guard_preserves_goal_contract_when_checklist_is_supporting_output() -> (
+    None
+):
+    report = guard_auto_answer(
+        goal="Build a local CLI and web app that generate checklist packages.",
+        user_preferences={},
+        ledger=SeedDraftLedger.from_goal(
+            "Build a local CLI and web app that generate checklist packages."
+        ),
+        question="Should the MVP be a CLI/web implementation or a docs-only handoff package?",
+        answer_text="[from-auto][conservative_default] Use a docs-only handoff package.",
+        answer_source="conservative_default",
+    )
+
+    assert report.status is IntentGuardStatus.FAIL
+    assert any(check.code == "generated_option_conflict" for check in report.checks)
+
+
+def test_inverted_intent_guard_does_not_treat_app_substrings_as_artifact_contracts() -> None:
+    report = guard_auto_answer(
+        goal="Make the interview approach clearer for maintainers.",
+        user_preferences={},
+        ledger=SeedDraftLedger.from_goal("Make the interview approach clearer for maintainers."),
+        question="Should this be a normal improvement or review-only mode?",
+        answer_text="[from-auto][conservative_default] Use review-only mode.",
+        answer_source="conservative_default",
+    )
+
+    assert report.status is IntentGuardStatus.PASS
+    assert report.checks == ()

@@ -119,12 +119,17 @@ be blocked unless the user explicitly changes the contract.
 
 This PR adds a small IntentGuard extension for narrowed-output artifact drift:
 
-- output-contract detection recognizes CLI/web/tool/app artifacts;
+- output-contract detection recognizes CLI/web/tool/app artifacts with token-aware matching;
 - generated `docs-only` / `handoff-only` / `checkpack` / `checklist package`
-  answers are treated like existing review-only reductions;
+  answers are treated like existing review-only reductions when they are offered
+  as narrowed alternatives;
 - diagnostics warn when a pending question offers a docs-only narrowing next to a
   user-locked output contract;
-- tests cover CLI/web intent drifting toward docs-only handoff.
+- supporting artifacts such as checklist packages may remain in the user goal
+  without disabling the goal-derived contract;
+- tests cover CLI/web intent drifting toward docs-only handoff, supporting
+  checklist outputs, and short-term false positives such as `app` in
+  `approach`.
 
 ## Non-goals
 

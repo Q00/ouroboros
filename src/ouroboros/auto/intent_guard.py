@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import re
 from typing import Any
 
 from ouroboros.auto.ledger import (
@@ -353,7 +354,7 @@ def diagnose_auto_state(
                 IntentGuardCheck(
                     code="generated_option_present",
                     status=IntentGuardStatus.WARN,
-                    message="pending question contains a generated review-only option next to a user output contract",
+                    message="pending question contains a generated narrowed-output option next to a user output contract",
                     action="prefer USER_GOAL/USER_PREFERENCE when answering; do not let the generated option win",
                 )
             )
@@ -465,28 +466,43 @@ def _generated_review_option_conflicts(
 
 
 def _contains_review_only_option(text: str) -> bool:
-    lowered = text.casefold()
-    return any(term in lowered for term in _REVIEW_ONLY_TERMS)
+    return _contains_any_phrase(text, _REVIEW_ONLY_TERMS)
 
 
 def _contains_scope_reduction_option(text: str) -> bool:
-    lowered = text.casefold()
-    return any(term in lowered for term in (*_REVIEW_ONLY_TERMS, *_SCOPE_REDUCTION_TERMS))
+    return _contains_any_phrase(text, (*_REVIEW_ONLY_TERMS, *_SCOPE_REDUCTION_TERMS))
 
 
 def _looks_like_artifact_generation(text: str) -> bool:
-    lowered = text.casefold()
     return (
         bool(text.strip())
-        and any(term in lowered for term in _ARTIFACT_GENERATION_TERMS)
-        and _has_artifact_output_terms(lowered)
-        and not _contains_scope_reduction_option(lowered)
+        and _contains_any_phrase(text, _ARTIFACT_GENERATION_TERMS)
+        and _has_artifact_output_terms(text)
     )
 
 
 def _has_artifact_output_terms(text: str) -> bool:
+    return _contains_any_phrase(text, _ARTIFACT_OUTPUT_TERMS)
+
+
+def _contains_any_phrase(text: str, phrases: Sequence[str]) -> bool:
     lowered = text.casefold()
-    return any(term in lowered for term in _ARTIFACT_OUTPUT_TERMS)
+    return any(_contains_phrase(lowered, phrase.casefold()) for phrase in phrases)
+
+
+def _contains_phrase(lowered_text: str, phrase: str) -> bool:
+    """Return true when ``phrase`` appears as a token/phrase, not a substring.
+
+    IntentGuard uses short artifact terms such as ``app`` and ``web``. Raw
+    substring matching would treat prose like ``approach`` or ``webbing`` as an
+    artifact contract, so alphanumeric phrase edges must align to non-word
+    boundaries. Phrases that start or end with punctuation keep substring
+    semantics for CLI flags such as ``--mode review``.
+    """
+    escaped = re.escape(phrase)
+    prefix = r"(?<!\w)" if phrase[:1].isalnum() else ""
+    suffix = r"(?!\w)" if phrase[-1:].isalnum() else ""
+    return re.search(f"{prefix}{escaped}{suffix}", lowered_text) is not None
 
 
 def _seed_artifact_has_diagnostic_constraints(seed_artifact: Mapping[str, Any]) -> bool:
