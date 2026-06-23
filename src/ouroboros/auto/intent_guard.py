@@ -157,6 +157,17 @@ _NARROWED_OUTPUT_COMPETING_ARTIFACT_TERMS = tuple(
     term for term in _BROAD_ARTIFACT_OUTPUT_TERMS if term not in {"json", "csv", "pdf", "html"}
 )
 
+_NARROWED_OUTPUT_CONTEXT_FOLLOWERS = {
+    "audience",
+    "audiences",
+    "group",
+    "groups",
+    "stakeholder",
+    "stakeholders",
+    "team",
+    "teams",
+}
+
 _ARTIFACT_GENERATION_TERMS = (
     "build",
     "builds",
@@ -406,7 +417,11 @@ def diagnose_auto_state(
                 message="output contract is anchored in user/repo evidence",
             )
         )
-        if pending_question and _contains_scope_reduction_option(pending_question):
+        if (
+            pending_question
+            and _contains_scope_reduction_option(pending_question)
+            and not _is_explicit_narrowed_output_contract(contract)
+        ):
             checks.append(
                 IntentGuardCheck(
                     code="generated_option_present",
@@ -536,9 +551,31 @@ def _is_explicit_narrowed_output_contract(text: str) -> bool:
     """
     return (
         _contains_scope_reduction_option(text)
-        and not _contains_any_phrase(text, _NARROWED_OUTPUT_COMPETING_ARTIFACT_TERMS)
+        and not _contains_competing_artifact_contract(text)
         and not _contains_any_phrase(text, _NARROWED_OUTPUT_EXCLUSION_TERMS)
     )
+
+
+def _contains_competing_artifact_contract(text: str) -> bool:
+    """Return true when text names a competing final artifact class.
+
+    Broad tokens such as ``web`` and ``app`` are also used as audience/context
+    descriptors (``web team``, ``app team``). Those should not prevent an
+    explicitly narrowed user contract (for example, docs-only handoff files for
+    that team) from passing the guard.
+    """
+    lowered = text.casefold()
+    for term in _NARROWED_OUTPUT_COMPETING_ARTIFACT_TERMS:
+        escaped = re.escape(term.casefold())
+        prefix = r"(?<!\w)" if term[:1].isalnum() else ""
+        suffix = r"(?!\w)" if term[-1:].isalnum() else ""
+        for match in re.finditer(f"{prefix}{escaped}{suffix}", lowered):
+            after = lowered[match.end() :]
+            next_word = re.match(r"(?:\s+|-)+(\w+)", after)
+            if next_word and next_word.group(1) in _NARROWED_OUTPUT_CONTEXT_FOLLOWERS:
+                continue
+            return True
+    return False
 
 
 def _contains_review_only_option(text: str) -> bool:

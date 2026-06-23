@@ -149,6 +149,16 @@ def test_inverted_intent_guard_preserves_goal_contract_when_checklist_is_support
             "Should this produce docs-only handoff files?",
             "[from-auto][conservative_default] Use docs-only handoff files.",
         ),
+        (
+            "Create docs-only handoff files for the web team.",
+            "Should this produce docs-only handoff files?",
+            "[from-auto][conservative_default] Use docs-only handoff files.",
+        ),
+        (
+            "Create docs-only handoff files for the app team.",
+            "Should this produce docs-only handoff files?",
+            "[from-auto][conservative_default] Use docs-only handoff files.",
+        ),
     ],
 )
 def test_inverted_intent_guard_allows_explicit_narrowed_output_user_contracts(
@@ -167,6 +177,23 @@ def test_inverted_intent_guard_allows_explicit_narrowed_output_user_contracts(
 
     assert report.status is IntentGuardStatus.PASS
     assert not any(check.code == "generated_option_conflict" for check in report.checks)
+
+
+def test_inverted_intent_guard_does_not_warn_when_pending_question_matches_explicit_narrowed_contract() -> (
+    None
+):
+    goal = "Create docs-only handoff files for the web team."
+
+    report = diagnose_auto_state(
+        goal=goal,
+        user_preferences={},
+        ledger=SeedDraftLedger.from_goal(goal),
+        pending_question="Should this produce docs-only handoff files?",
+        auto_answer_log=(),
+    )
+
+    assert report.status is IntentGuardStatus.PASS
+    assert not any(check.code == "generated_option_present" for check in report.checks)
 
 
 def test_inverted_intent_guard_blocks_generated_docs_only_when_contract_excludes_it() -> None:
