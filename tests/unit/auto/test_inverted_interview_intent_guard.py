@@ -93,6 +93,44 @@ def test_inverted_intent_guard_preserves_goal_contract_when_checklist_is_support
     assert any(check.code == "generated_option_conflict" for check in report.checks)
 
 
+@pytest.mark.parametrize(
+    ("goal", "question", "answer"),
+    [
+        (
+            "Create docs-only handoff files for the team.",
+            "Should this produce docs-only handoff files?",
+            "[from-auto][conservative_default] Use docs-only handoff files.",
+        ),
+        (
+            "Write a review-only package for maintainers.",
+            "Should this stay review-only?",
+            "[from-auto][conservative_default] Use review-only mode.",
+        ),
+        (
+            "Generate checklist-only output for release triage.",
+            "Should this produce checklist-only output?",
+            "[from-auto][conservative_default] Use checklist-only output.",
+        ),
+    ],
+)
+def test_inverted_intent_guard_allows_explicit_narrowed_output_user_contracts(
+    goal: str,
+    question: str,
+    answer: str,
+) -> None:
+    report = guard_auto_answer(
+        goal=goal,
+        user_preferences={},
+        ledger=SeedDraftLedger.from_goal(goal),
+        question=question,
+        answer_text=answer,
+        answer_source="conservative_default",
+    )
+
+    assert report.status is IntentGuardStatus.PASS
+    assert not any(check.code == "generated_option_conflict" for check in report.checks)
+
+
 def test_inverted_intent_guard_does_not_treat_app_substrings_as_artifact_contracts() -> None:
     report = guard_auto_answer(
         goal="Make the interview approach clearer for maintainers.",

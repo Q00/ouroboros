@@ -127,6 +127,32 @@ _ARTIFACT_OUTPUT_TERMS = (
     "tools",
 )
 
+_BROAD_ARTIFACT_OUTPUT_TERMS = (
+    "video",
+    "videos",
+    "mp4",
+    "clip",
+    "clips",
+    "short",
+    "shorts",
+    "long-form",
+    "long form",
+    "json",
+    "csv",
+    "pdf",
+    "html",
+    "cli",
+    "command",
+    "commands",
+    "web",
+    "webapp",
+    "web app",
+    "app",
+    "application",
+    "tool",
+    "tools",
+)
+
 _ARTIFACT_GENERATION_TERMS = (
     "make",
     "makes",
@@ -374,7 +400,7 @@ def diagnose_auto_state(
                     IntentGuardCheck(
                         code="generated_option_conflict",
                         status=IntentGuardStatus.FAIL,
-                        message="recent auto answer appears to have accepted review-only framing over user output intent",
+                        message="recent auto answer appears to have accepted narrowed-output framing over user output intent",
                         action="discard that answer, reopen the round, and re-answer from USER_GOAL/USER_PREFERENCE",
                     )
                 )
@@ -461,10 +487,26 @@ def _generated_review_option_conflicts(
     )
     if not question_has_generated_choice:
         return False
+    if _is_explicit_narrowed_output_contract(contract_text):
+        return False
     answer_lower = answer_text.casefold()
     if _contains_scope_reduction_option(answer_lower):
         return True
     return "review" in answer_lower and not _has_artifact_output_terms(answer_lower)
+
+
+def _is_explicit_narrowed_output_contract(text: str) -> bool:
+    """Return true when the user contract itself is the narrowed output.
+
+    Scope-reduction phrases are only failures when a generated answer narrows a
+    broader user artifact class. If the user's locked contract is already a
+    docs-only/review-only/checklist-only handoff, a generated answer that
+    repeats that contract should pass instead of being treated as drift.
+    """
+    return _contains_scope_reduction_option(text) and not _contains_any_phrase(
+        text,
+        _BROAD_ARTIFACT_OUTPUT_TERMS,
+    )
 
 
 def _contains_review_only_option(text: str) -> bool:
