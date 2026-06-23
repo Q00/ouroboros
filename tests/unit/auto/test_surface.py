@@ -2637,6 +2637,25 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
     assert "Artifact state: complete_unverified" in text
 
 
+def test_auto_artifact_state_preserves_verified_ralph_completion_with_stale_handoff() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec_123",
+            job_id="job_123",
+            run_session_id=None,
+            run_handoff_status="started",
+            partial_product=False,
+            product_verified=True,
+        )
+        == "complete_verified"
+    )
+
+
 def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
     from ouroboros.auto.pipeline import _artifact_state_for_result
 

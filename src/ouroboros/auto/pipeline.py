@@ -4114,6 +4114,7 @@ class AutoPipeline:
             run_session_id=state.run_session_id,
             run_handoff_status=state.run_handoff_status,
             partial_product=partial_product,
+            product_verified=_has_verified_product_completion(state),
         )
         return AutoPipelineResult(
             status=result_status,
@@ -4366,6 +4367,7 @@ def _artifact_state_for_result(
     run_session_id: str | None,
     partial_product: bool,
     run_handoff_status: str | None = None,
+    product_verified: bool = False,
 ) -> str:
     """Classify the generated-artifact outcome separately from orchestration.
 
@@ -4378,12 +4380,36 @@ def _artifact_state_for_result(
     if status in {AutoPhase.BLOCKED.value, AutoPhase.FAILED.value}:
         return "partial_artifact_generated" if has_generated_artifact else status
     if status == AutoPhase.COMPLETE.value:
-        if partial_product or run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
+        if partial_product:
+            return "complete_unverified"
+        if product_verified:
+            return "complete_verified"
+        if run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
             return "complete_unverified"
         return "complete_verified"
     if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
         return "partial_artifact_generated" if has_generated_artifact else phase.value
     return "artifact_in_progress" if has_generated_artifact else "not_generated"
+
+
+def _has_verified_product_completion(state: AutoPipelineState) -> bool:
+    """Return True when COMPLETE represents a verified product terminal.
+
+    ``run_handoff_status=started`` can persist after a complete-product run moves
+    through Ralph/EVALUATE success. Treat those terminal success signals as
+    stronger evidence than the stale handoff marker so final surfaces do not
+    downgrade verified product completion to handoff-only completion.
+    """
+
+    if state.phase is not AutoPhase.COMPLETE:
+        return False
+    if state.ralph_job_status == "completed":
+        return True
+    if state.last_qa_passed is True:
+        return True
+    if state.complete_product and state.ralph_stop_reason is not None:
+        return True
+    return state.run_handoff_status == "completed"
 
 
 def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
