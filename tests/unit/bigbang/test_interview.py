@@ -17,6 +17,8 @@ from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
     InterviewStatus,
+    PreWorkLedgerEntry,
+    PreWorkLedgerSection,
     prompt_safe_initial_context,
 )
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -183,6 +185,57 @@ class TestInterviewState:
         assert restored.rounds[0].user_response == "Task management"
         assert restored.ambiguity_score == 0.18
         assert restored.ambiguity_breakdown == state.ambiguity_breakdown
+
+    def test_pre_work_ledger_serialization_and_numbered_render(self) -> None:
+        """Pre-work ledger is persisted and renders a numbered synthesis."""
+        state = InterviewState(interview_id="test_001")
+        state.pre_work_synthesis_ledger.add_entry(
+            PreWorkLedgerSection.CONFIRMED_FACTS,
+            PreWorkLedgerEntry(value="Use the existing interview state", source="code scan"),
+        )
+        state.pre_work_synthesis_ledger.add_entry(
+            PreWorkLedgerSection.INFERRED_ASSUMPTIONS,
+            PreWorkLedgerEntry(
+                value="Seed gate belongs in SeedGenerator",
+                source="inference",
+                confidence=0.8,
+            ),
+        )
+
+        restored = InterviewState.model_validate_json(state.model_dump_json())
+        synthesis = restored.render_pre_work_synthesis()
+
+        assert restored.pre_work_synthesis_ledger.confirmed_facts[0].value == (
+            "Use the existing interview state"
+        )
+        assert "1. Confirmed Facts: Use the existing interview state" in synthesis
+        assert "2. Inferred Assumptions: Seed gate belongs in SeedGenerator" in synthesis
+        assert "confidence: 0.80" in synthesis
+
+    def test_pre_work_correction_promotes_inferred_assumption_to_confirmed_fact(
+        self,
+    ) -> None:
+        """Human correction can convert an inferred assumption into a confirmed fact."""
+        state = InterviewState(interview_id="test_001")
+        state.pre_work_synthesis_ledger.add_entry(
+            PreWorkLedgerSection.INFERRED_ASSUMPTIONS,
+            PreWorkLedgerEntry(
+                value="Corrections should edit the transcript only",
+                source="model inference",
+                confidence=0.55,
+            ),
+        )
+
+        corrected = state.apply_pre_work_correction(
+            original_text="Corrections should edit the transcript only",
+            corrected_text="Corrections update the pre-work ledger",
+            source="human correction",
+        )
+
+        assert corrected.value == "Corrections update the pre-work ledger"
+        assert corrected.confidence == 1.0
+        assert state.pre_work_synthesis_ledger.inferred_assumptions == []
+        assert state.pre_work_synthesis_ledger.confirmed_facts == [corrected]
 
     def test_clear_stored_ambiguity(self) -> None:
         """Stored ambiguity snapshots can be invalidated after interview changes."""

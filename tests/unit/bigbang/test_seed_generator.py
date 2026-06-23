@@ -18,6 +18,8 @@ from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
     InterviewStatus,
+    PreWorkLedgerEntry,
+    PreWorkLedgerSection,
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
@@ -365,6 +367,64 @@ class TestSeedGeneratorAmbiguityGating:
             assert result.is_err
             assert isinstance(result.error, ValidationError)
             assert "exceeds threshold" in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_generate_blocks_unresolved_human_only_decisions(self) -> None:
+        """Human-only decisions block Seed generation until answered or deferred."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        state.pre_work_synthesis_ledger.add_entry(
+            PreWorkLedgerSection.HUMAN_ONLY_DECISIONS,
+            PreWorkLedgerEntry(
+                question="Should this block Seed generation?",
+                source="pre-work review",
+                blocks_seed_generation=True,
+            ),
+        )
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity, force=True)
+
+            assert result.is_err
+            assert isinstance(result.error, ValidationError)
+            assert result.error.field == "pre_work_synthesis_ledger.human_only_decisions"
+            assert mock_adapter.complete.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_generate_allows_deferred_human_only_decisions(self) -> None:
+        """Explicitly deferred human-only decisions no longer block extraction."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        state.pre_work_synthesis_ledger.add_entry(
+            PreWorkLedgerSection.HUMAN_ONLY_DECISIONS,
+            PreWorkLedgerEntry(
+                question="Should this block Seed generation?",
+                source="pre-work review",
+                blocks_seed_generation=True,
+                deferred=True,
+            ),
+        )
+        extraction_response = create_valid_extraction_response()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, create_low_ambiguity_score())
+
+            assert result.is_ok
+            assert mock_adapter.complete.await_count == 1
 
     @pytest.mark.asyncio
     async def test_generate_with_force_logs_bypass_warning(self) -> None:

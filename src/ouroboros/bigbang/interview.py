@@ -159,6 +159,131 @@ class InterviewRound(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class PreWorkLedgerSection(StrEnum):
+    """Buckets in the pre-work synthesis ledger."""
+
+    CONFIRMED_FACTS = "confirmed_facts"
+    INFERRED_ASSUMPTIONS = "inferred_assumptions"
+    UNRESOLVED_AMBIGUITIES = "unresolved_ambiguities"
+    HUMAN_ONLY_DECISIONS = "human_only_decisions"
+
+
+class PreWorkLedgerEntry(BaseModel):
+    """One auditable item in the pre-work synthesis ledger."""
+
+    value: str | None = None
+    question: str | None = None
+    source: str
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    blocks_seed_generation: bool = False
+    answered: bool = False
+    deferred: bool = False
+
+    @property
+    def text(self) -> str:
+        """Return the value or question used for matching and rendering."""
+        return self.value or self.question or ""
+
+    @property
+    def blocks_seed(self) -> bool:
+        """True when this entry currently blocks Seed generation."""
+        return self.blocks_seed_generation and not self.answered and not self.deferred
+
+    def render(self) -> str:
+        """Render a concise, source-aware ledger line."""
+        label = self.text or "(empty)"
+        details = [f"source: {self.source}"]
+        if self.confidence is not None:
+            details.append(f"confidence: {self.confidence:.2f}")
+        if self.blocks_seed_generation:
+            status = "blocks Seed"
+            if self.answered:
+                status = "answered"
+            elif self.deferred:
+                status = "deferred"
+            details.append(status)
+        return f"{label} ({'; '.join(details)})"
+
+
+class PreWorkSynthesisLedger(BaseModel):
+    """Pre-work ledger for context-first inverted interviews."""
+
+    confirmed_facts: list[PreWorkLedgerEntry] = Field(default_factory=list)
+    inferred_assumptions: list[PreWorkLedgerEntry] = Field(default_factory=list)
+    unresolved_ambiguities: list[PreWorkLedgerEntry] = Field(default_factory=list)
+    human_only_decisions: list[PreWorkLedgerEntry] = Field(default_factory=list)
+
+    def entries_for(self, section: PreWorkLedgerSection) -> list[PreWorkLedgerEntry]:
+        """Return the mutable entry list for a section."""
+        return getattr(self, section.value)
+
+    def add_entry(
+        self,
+        section: PreWorkLedgerSection,
+        entry: PreWorkLedgerEntry,
+    ) -> None:
+        """Append an entry to a section."""
+        self.entries_for(section).append(entry)
+
+    def apply_human_correction(
+        self,
+        *,
+        original_text: str,
+        corrected_text: str,
+        source: str = "human correction",
+        target_section: PreWorkLedgerSection = PreWorkLedgerSection.CONFIRMED_FACTS,
+    ) -> PreWorkLedgerEntry:
+        """Apply a human correction and return the replacement entry.
+
+        Matching entries are removed from all sections before the corrected
+        value is recorded. This lets a human promote an inferred assumption to
+        a confirmed fact or demote a previously confirmed item to ambiguity.
+        """
+        replacement = PreWorkLedgerEntry(
+            value=corrected_text,
+            source=source,
+            confidence=1.0 if target_section == PreWorkLedgerSection.CONFIRMED_FACTS else None,
+            blocks_seed_generation=target_section
+            in {
+                PreWorkLedgerSection.UNRESOLVED_AMBIGUITIES,
+                PreWorkLedgerSection.HUMAN_ONLY_DECISIONS,
+            },
+            answered=target_section == PreWorkLedgerSection.CONFIRMED_FACTS,
+        )
+        normalized_original = original_text.strip().casefold()
+        for section in PreWorkLedgerSection:
+            entries = self.entries_for(section)
+            entries[:] = [
+                entry for entry in entries if entry.text.strip().casefold() != normalized_original
+            ]
+        self.add_entry(target_section, replacement)
+        return replacement
+
+    def blocking_human_decisions(self) -> list[PreWorkLedgerEntry]:
+        """Return human-only decisions that still block Seed generation."""
+        return [entry for entry in self.human_only_decisions if entry.blocks_seed]
+
+    def is_empty(self) -> bool:
+        """True when no pre-work entries have been captured."""
+        return not any(self.entries_for(section) for section in PreWorkLedgerSection)
+
+    def render_numbered_synthesis(self) -> str:
+        """Render a numbered, reviewable synthesis from all ledger sections."""
+        lines = ["Pre-work synthesis ledger:"]
+        number = 1
+        for section in PreWorkLedgerSection:
+            entries = self.entries_for(section)
+            heading = section.value.replace("_", " ").title()
+            if not entries:
+                lines.append(f"{number}. {heading}: none")
+                number += 1
+                continue
+            for entry in entries:
+                lines.append(f"{number}. {heading}: {entry.render()}")
+                number += 1
+        return "\n".join(lines)
+
+
 class InterviewState(BaseModel):
     """Persistent state of an interview session.
 
@@ -189,6 +314,9 @@ class InterviewState(BaseModel):
     ambiguity_breakdown: dict[str, Any] | None = None
     completion_candidate_streak: int = Field(default=0, ge=0)
     lateral_review_advised_milestones: list[str] = Field(default_factory=list)
+    pre_work_synthesis_ledger: PreWorkSynthesisLedger = Field(
+        default_factory=PreWorkSynthesisLedger
+    )
 
     @property
     def current_round_number(self) -> int:
@@ -253,6 +381,28 @@ class InterviewState(BaseModel):
         self.ambiguity_score = None
         self.ambiguity_breakdown = None
         self.mark_updated()
+
+    def render_pre_work_synthesis(self) -> str:
+        """Render the pre-work ledger for human review."""
+        return self.pre_work_synthesis_ledger.render_numbered_synthesis()
+
+    def apply_pre_work_correction(
+        self,
+        *,
+        original_text: str,
+        corrected_text: str,
+        source: str = "human correction",
+        target_section: PreWorkLedgerSection = PreWorkLedgerSection.CONFIRMED_FACTS,
+    ) -> PreWorkLedgerEntry:
+        """Apply a correction to the pre-work ledger and mark state updated."""
+        entry = self.pre_work_synthesis_ledger.apply_human_correction(
+            original_text=original_text,
+            corrected_text=corrected_text,
+            source=source,
+            target_section=target_section,
+        )
+        self.mark_updated()
+        return entry
 
 
 def prompt_safe_initial_context(state: InterviewState) -> str:

@@ -167,6 +167,21 @@ class SeedGenerator:
                 )
             )
 
+        blocking_decisions = state.pre_work_synthesis_ledger.blocking_human_decisions()
+        if blocking_decisions:
+            questions = [entry.text for entry in blocking_decisions if entry.text]
+            return Result.err(
+                ValidationError(
+                    "Human-only decisions must be answered or explicitly deferred "
+                    "before seed generation",
+                    field="pre_work_synthesis_ledger.human_only_decisions",
+                    details={
+                        "interview_id": state.interview_id,
+                        "blocking_decisions": questions,
+                    },
+                )
+            )
+
         # Extract structured requirements from interview
         extraction_result = await self._extract_requirements(state)
 
@@ -460,6 +475,9 @@ PROJECT_TYPE: greenfield"""
             parts.append(f"\nQ: {round_data.question}")
             if round_data.user_response:
                 parts.append(f"A: {round_data.user_response}")
+
+        if not state.pre_work_synthesis_ledger.is_empty():
+            parts.append(f"\n{state.render_pre_work_synthesis()}")
 
         return "\n".join(parts)
 
