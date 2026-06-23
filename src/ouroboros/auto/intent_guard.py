@@ -114,6 +114,16 @@ _ARTIFACT_OUTPUT_TERMS = (
     "html",
     "report",
     "reports",
+    "cli",
+    "command",
+    "commands",
+    "web",
+    "webapp",
+    "web app",
+    "app",
+    "application",
+    "tool",
+    "tools",
 )
 
 _ARTIFACT_GENERATION_TERMS = (
@@ -142,6 +152,21 @@ _REVIEW_ONLY_TERMS = (
     "no automated export",
     "no mp4",
     "no export",
+)
+
+_SCOPE_REDUCTION_TERMS = (
+    "docs-only",
+    "docs only",
+    "documentation-only",
+    "documentation only",
+    "document-only",
+    "document only",
+    "handoff-only",
+    "handoff only",
+    "handoff package",
+    "checkpack",
+    "check pack",
+    "checklist package",
 )
 
 _DIAGNOSTIC_MARKERS = (
@@ -210,7 +235,7 @@ def guard_auto_answer(
             IntentGuardCheck(
                 code="generated_option_conflict",
                 status=IntentGuardStatus.FAIL,
-                message="generated review-only framing conflicts with the user output contract",
+                message="generated narrowed-output framing conflicts with the user output contract",
                 action="discard the generated option and answer from USER_GOAL/USER_PREFERENCE; block if retry still conflicts",
             )
         )
@@ -252,14 +277,13 @@ def guard_interview_turn(
             message="initial interview context contains an artifact-output contract",
         )
     )
-    question_has_generated_choice = _contains_review_only_option(question) or (
+    question_has_generated_choice = _contains_scope_reduction_option(question) or (
         "--mode auto" in question.casefold() and "--mode review" in question.casefold()
     )
-    answer_has_review_only = _contains_review_only_option(answer_text) or (
-        "review" in answer_text.casefold()
-        and not _has_artifact_output_terms(answer_text)
-        and question_has_generated_choice
+    answer_has_review_only = _contains_scope_reduction_option(answer_text) or (
+        "review" in answer_text.casefold() and not _has_artifact_output_terms(answer_text)
     )
+
     if not question_has_generated_choice or not answer_has_review_only:
         return IntentGuardReport(tuple(checks))
 
@@ -269,7 +293,7 @@ def guard_interview_turn(
             IntentGuardCheck(
                 code="user_contract_change",
                 status=IntentGuardStatus.WARN,
-                message="human answer appears to change the initial output contract toward review-only behavior",
+                message="human answer appears to change the initial output contract toward a narrower output class",
                 action="record it, but ask/confirm whether this is an intentional scope change before Seed generation",
             )
         )
@@ -324,7 +348,7 @@ def diagnose_auto_state(
                 message="output contract is anchored in user/repo evidence",
             )
         )
-        if pending_question and _contains_review_only_option(pending_question):
+        if pending_question and _contains_scope_reduction_option(pending_question):
             checks.append(
                 IntentGuardCheck(
                     code="generated_option_present",
@@ -429,13 +453,13 @@ def _generated_review_option_conflicts(
     source = answer_source.strip().casefold()
     if source in {"user_goal", "user_preference", "repo_fact", "existing_convention"}:
         return False
-    question_has_generated_choice = _contains_review_only_option(question) or (
+    question_has_generated_choice = _contains_scope_reduction_option(question) or (
         "--mode auto" in question.casefold() and "--mode review" in question.casefold()
     )
     if not question_has_generated_choice:
         return False
     answer_lower = answer_text.casefold()
-    if _contains_review_only_option(answer_lower):
+    if _contains_scope_reduction_option(answer_lower):
         return True
     return "review" in answer_lower and not _has_artifact_output_terms(answer_lower)
 
@@ -445,13 +469,18 @@ def _contains_review_only_option(text: str) -> bool:
     return any(term in lowered for term in _REVIEW_ONLY_TERMS)
 
 
+def _contains_scope_reduction_option(text: str) -> bool:
+    lowered = text.casefold()
+    return any(term in lowered for term in (*_REVIEW_ONLY_TERMS, *_SCOPE_REDUCTION_TERMS))
+
+
 def _looks_like_artifact_generation(text: str) -> bool:
     lowered = text.casefold()
     return (
         bool(text.strip())
         and any(term in lowered for term in _ARTIFACT_GENERATION_TERMS)
         and _has_artifact_output_terms(lowered)
-        and not _contains_review_only_option(lowered)
+        and not _contains_scope_reduction_option(lowered)
     )
 
 
