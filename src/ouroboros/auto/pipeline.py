@@ -4379,7 +4379,7 @@ def _artifact_state_for_result(
         return "complete_unverified" if partial_product else "complete_verified"
     if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
         return "partial_artifact_generated" if has_generated_artifact else phase.value
-    return "complete_unverified"
+    return "artifact_in_progress" if has_generated_artifact else "not_generated"
 
 
 def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:

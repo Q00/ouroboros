@@ -2641,6 +2641,40 @@ def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
     )
 
 
+def test_auto_artifact_state_does_not_report_completion_for_pending_interview() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="interview",
+            phase=AutoPhase.INTERVIEW,
+            seed_path=None,
+            execution_id=None,
+            job_id=None,
+            run_session_id=None,
+            partial_product=False,
+        )
+        == "not_generated"
+    )
+
+
+def test_auto_artifact_state_marks_nonterminal_handles_as_in_progress() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="running",
+            phase=AutoPhase.RUN,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec-123",
+            job_id=None,
+            run_session_id="run-123",
+            partial_product=False,
+        )
+        == "artifact_in_progress"
+    )
+
+
 def test_auto_handler_surfaces_orchestration_and_artifact_state_for_blocked_result() -> None:
     from ouroboros.auto.pipeline import AutoPipelineResult
     from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
