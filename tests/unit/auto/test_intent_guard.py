@@ -7,7 +7,7 @@ from ouroboros.auto.intent_guard import (
     guard_auto_answer,
     guard_interview_turn,
 )
-from ouroboros.auto.ledger import SeedDraftLedger
+from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 
 VIDEO_GOAL = (
     "I want to make a video harness when I put a video to harness, "
@@ -77,6 +77,72 @@ def test_intent_guard_doctor_surfaces_pending_generated_option_and_spec_pollutio
     codes = {check.code: check.status for check in report.checks}
     assert codes["generated_option_present"] is IntentGuardStatus.WARN
     assert codes["spec_pollution"] is IntentGuardStatus.FAIL
+
+
+def test_intent_guard_doctor_recommends_inverted_interview_for_high_context_prompt() -> None:
+    report = diagnose_auto_state(
+        goal=(
+            "As discussed in the recording, use the transcript and raw files from the "
+            "previous failed run to generate the handoff workflow."
+        ),
+        user_preferences={},
+        ledger=SeedDraftLedger.from_goal(
+            "As discussed in the recording, use the transcript and raw files from the "
+            "previous failed run to generate the handoff workflow."
+        ),
+        pending_question="What kind of project should this be?",
+        auto_answer_log=(),
+    )
+
+    assert report.status is IntentGuardStatus.WARN
+    checks = {check.code: check for check in report.checks}
+    assert checks["high_context_inverted_interview_recommended"].status is IntentGuardStatus.WARN
+    assert "inverted interview" in (
+        checks["high_context_inverted_interview_recommended"].action or ""
+    )
+
+
+def test_intent_guard_doctor_does_not_warn_for_low_context_prompt() -> None:
+    report = diagnose_auto_state(
+        goal="Build a small habit tracking CLI",
+        user_preferences={},
+        ledger=SeedDraftLedger.from_goal("Build a small habit tracking CLI"),
+        pending_question="Who is the main user?",
+        auto_answer_log=(),
+    )
+
+    assert report.status is IntentGuardStatus.PASS
+    assert not any(
+        check.code == "high_context_inverted_interview_recommended" for check in report.checks
+    )
+
+
+def test_intent_guard_doctor_suppresses_inverted_warning_after_synthesis_pass() -> None:
+    goal = "Use the transcript and raw files from the previous run to create the workflow."
+    ledger = SeedDraftLedger.from_goal(goal)
+    ledger.add_entry(
+        "inputs",
+        LedgerEntry(
+            key="inputs.synthesized_context",
+            value="Pre-work synthesis pass summarized the transcript and raw files.",
+            source=LedgerSource.USER_GOAL,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+        ),
+    )
+
+    report = diagnose_auto_state(
+        goal=goal,
+        user_preferences={},
+        ledger=ledger,
+        pending_question=None,
+        auto_answer_log=(),
+    )
+
+    assert report.status is IntentGuardStatus.PASS
+    assert not any(
+        check.code == "high_context_inverted_interview_recommended" for check in report.checks
+    )
 
 
 def test_interview_turn_guard_warns_when_human_changes_output_contract() -> None:

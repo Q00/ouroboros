@@ -152,6 +152,31 @@ _DIAGNOSTIC_MARKERS = (
     "qa suggestions:",
 )
 
+_HIGH_CONTEXT_SIGNALS = (
+    "as discussed",
+    "recording",
+    "recordings",
+    "transcript",
+    "transcripts",
+    "raw data",
+    "raw file",
+    "raw files",
+    "pre-work",
+    "prework",
+    "previous run",
+    "previous failed run",
+    "failed seed",
+    "already explained",
+)
+
+_SYNTHESIS_SIGNALS = (
+    "pre-work synthesis",
+    "prework synthesis",
+    "synthesis pass",
+    "synthesized context",
+    "context synthesis",
+)
+
 _HUMAN_ANSWER_SOURCES = {
     "human",
     "user",
@@ -353,6 +378,23 @@ def diagnose_auto_state(
                 )
                 break
 
+    if _should_recommend_inverted_interview(
+        goal=goal,
+        user_preferences=user_preferences,
+        ledger=ledger,
+        pending_question=pending_question,
+        auto_answer_log=auto_answer_log,
+        seed_artifact=seed_artifact or {},
+    ):
+        checks.append(
+            IntentGuardCheck(
+                code="high_context_inverted_interview_recommended",
+                status=IntentGuardStatus.WARN,
+                message="high-context prompt signals are present before a pre-work synthesis pass",
+                action="suggest inverted interview: summarize supplied context first, then ask targeted follow-up questions",
+            )
+        )
+
     if _seed_artifact_has_diagnostic_constraints(seed_artifact or {}):
         checks.append(
             IntentGuardCheck(
@@ -458,6 +500,81 @@ def _looks_like_artifact_generation(text: str) -> bool:
 def _has_artifact_output_terms(text: str) -> bool:
     lowered = text.casefold()
     return any(term in lowered for term in _ARTIFACT_OUTPUT_TERMS)
+
+
+def _should_recommend_inverted_interview(
+    *,
+    goal: str,
+    user_preferences: Mapping[str, str],
+    ledger: SeedDraftLedger,
+    pending_question: str | None,
+    auto_answer_log: Sequence[Mapping[str, Any]],
+    seed_artifact: Mapping[str, Any],
+) -> bool:
+    context = _high_context_text(
+        goal=goal,
+        user_preferences=user_preferences,
+        pending_question=pending_question,
+        auto_answer_log=auto_answer_log,
+        seed_artifact=seed_artifact,
+    )
+    if not _has_high_context_signal(context):
+        return False
+    if _has_synthesis_signal(context) or _ledger_has_synthesis_pass(ledger):
+        return False
+    return _evidence_backed_section_count(ledger) <= 2
+
+
+def _high_context_text(
+    *,
+    goal: str,
+    user_preferences: Mapping[str, str],
+    pending_question: str | None,
+    auto_answer_log: Sequence[Mapping[str, Any]],
+    seed_artifact: Mapping[str, Any],
+) -> str:
+    parts: list[str] = [goal, pending_question or ""]
+    parts.extend(str(value) for value in user_preferences.values())
+    for entry in auto_answer_log[-5:]:
+        parts.append(str(entry.get("question", "")))
+        parts.append(str(entry.get("answer", "")))
+    parts.append(_stringify_seed_artifact(seed_artifact))
+    return "\n".join(part for part in parts if part)
+
+
+def _stringify_seed_artifact(seed_artifact: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for value in seed_artifact.values():
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            parts.extend(str(item) for item in value)
+        elif value is not None:
+            parts.append(str(value))
+    return "\n".join(parts)
+
+
+def _has_high_context_signal(text: str) -> bool:
+    lowered = text.casefold()
+    return any(signal in lowered for signal in _HIGH_CONTEXT_SIGNALS)
+
+
+def _has_synthesis_signal(text: str) -> bool:
+    lowered = text.casefold()
+    return any(signal in lowered for signal in _SYNTHESIS_SIGNALS)
+
+
+def _ledger_has_synthesis_pass(ledger: SeedDraftLedger) -> bool:
+    for section in ledger.sections.values():
+        for entry in section.entries:
+            text = f"{entry.key}\n{entry.value}\n{entry.rationale}\n{' '.join(entry.evidence)}"
+            if _has_synthesis_signal(text):
+                return True
+    return False
+
+
+def _evidence_backed_section_count(ledger: SeedDraftLedger) -> int:
+    return len(ledger.summary().get("evidence_backed_sections", ()))
 
 
 def _seed_artifact_has_diagnostic_constraints(seed_artifact: Mapping[str, Any]) -> bool:
