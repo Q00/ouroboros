@@ -167,6 +167,8 @@ _SCOPE_REDUCTION_TERMS = (
     "handoff package",
     "checkpack",
     "check pack",
+    "checklist-only",
+    "checklist only",
     "checklist package",
 )
 

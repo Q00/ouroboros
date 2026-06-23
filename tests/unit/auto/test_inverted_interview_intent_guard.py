@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from ouroboros.auto.intent_guard import (
     IntentGuardStatus,
     diagnose_auto_state,
@@ -65,17 +67,25 @@ def test_inverted_intent_guard_warns_when_human_changes_to_docs_only() -> None:
     assert any(check.code == "user_contract_change" for check in report.checks)
 
 
-def test_inverted_intent_guard_preserves_goal_contract_when_checklist_is_supporting_output() -> (
-    None
-):
+@pytest.mark.parametrize(
+    "generated_reduction",
+    [
+        "docs-only handoff package",
+        "checklist-only output",
+        "checklist only output",
+    ],
+)
+def test_inverted_intent_guard_preserves_goal_contract_when_checklist_is_supporting_output(
+    generated_reduction: str,
+) -> None:
     report = guard_auto_answer(
         goal="Build a local CLI and web app that generate checklist packages.",
         user_preferences={},
         ledger=SeedDraftLedger.from_goal(
             "Build a local CLI and web app that generate checklist packages."
         ),
-        question="Should the MVP be a CLI/web implementation or a docs-only handoff package?",
-        answer_text="[from-auto][conservative_default] Use a docs-only handoff package.",
+        question=(f"Should the MVP be a CLI/web implementation or {generated_reduction}?"),
+        answer_text=(f"[from-auto][conservative_default] Use a {generated_reduction}."),
         answer_source="conservative_default",
     )
 
