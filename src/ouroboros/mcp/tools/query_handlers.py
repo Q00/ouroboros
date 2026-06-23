@@ -196,9 +196,15 @@ class SessionStatusHandler:
         lines = [
             f"Auto session: {state.auto_session_id}",
             f"Phase: {phase_value}",
+            f"Orchestration state: {state.phase.value}",
+            f"Artifact state: {state.artifact_state().value}",
             f"Terminal: {is_terminal}",
             f"Last progress: {state.last_progress_message}",
         ]
+        if state.artifact_state().value == "partial_artifact_generated":
+            lines.append(
+                "Artifact note: supporting/spike artifacts only; orchestration did not verify completion"
+            )
         if state.pending_question:
             lines.append("Pending question:")
             for line in str(state.pending_question).strip().splitlines() or [""]:
@@ -239,6 +245,8 @@ class SessionStatusHandler:
             "session_id": state.auto_session_id,
             "auto_session_id": state.auto_session_id,
             "phase": phase_value,
+            "orchestration_state": state.phase.value,
+            "artifact_state": state.artifact_state().value,
             "is_terminal": is_terminal,
             "ralph_job_id": state.ralph_job_id,
             "ralph_lineage_id": state.ralph_lineage_id,

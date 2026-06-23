@@ -310,6 +310,44 @@ def _clean_provenance_value(key: str, value: Any) -> Any:
     return cleaned
 
 
+_ARTIFACT_EVIDENCE_KEYS = frozenset(
+    {
+        "artifact",
+        "artifacts",
+        "artifact_path",
+        "artifact_paths",
+        "changed_files",
+        "files",
+        "files_changed",
+        "generated_files",
+        "output_files",
+    }
+)
+
+
+def _mapping_has_artifact_evidence(value: Any) -> bool:
+    """Return True when nested metadata contains non-empty artifact/file evidence."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in _ARTIFACT_EVIDENCE_KEYS and _non_empty_artifact_value(item):
+                return True
+            if _mapping_has_artifact_evidence(item):
+                return True
+    elif isinstance(value, list | tuple):
+        return any(_mapping_has_artifact_evidence(item) for item in value)
+    return False
+
+
+def _non_empty_artifact_value(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict | list | tuple | set):
+        return bool(value)
+    return True
+
+
 def redact_provenance(raw: Any) -> dict[str, Any] | None:
     """Return an allowlisted, type-checked provenance dict (or None).
 
@@ -351,6 +389,16 @@ class AutoResumeCapability(StrEnum):
 
     RESUME = "resume"
     """Continues exactly where it left off with full context."""
+
+
+class AutoArtifactState(StrEnum):
+    """Derived terminal artifact classification for user-facing summaries."""
+
+    COMPLETE_VERIFIED = "complete_verified"
+    COMPLETE_UNVERIFIED = "complete_unverified"
+    PARTIAL_ARTIFACT_GENERATED = "partial_artifact_generated"
+    BLOCKED = "blocked"
+    FAILED = "failed"
 
 
 TERMINAL_PHASES = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
@@ -750,6 +798,42 @@ class AutoPipelineState:
     def is_terminal(self) -> bool:
         """Return True when the state cannot continue automatically."""
         return self.phase in TERMINAL_PHASES
+
+    def has_generated_artifact_evidence(self) -> bool:
+        """Return True when execution produced evidence beyond the Seed spec."""
+        if self.evaluate_artifact is not None:
+            return True
+        if self.runtime_probe_evidence or self.checkpoint_commits:
+            return True
+        if any((self.job_id, self.execution_id, self.run_session_id)):
+            return True
+        if self.run_handoff_status in {"completed", "attached"}:
+            return True
+        if _mapping_has_artifact_evidence(self.run_subagent):
+            return True
+        if _mapping_has_artifact_evidence(self.last_recovery_plan or {}):
+            return True
+        return False
+
+    def artifact_state(self) -> AutoArtifactState:
+        """Classify artifacts separately from orchestration terminal state."""
+        if self.phase is AutoPhase.BLOCKED:
+            if self.has_generated_artifact_evidence():
+                return AutoArtifactState.PARTIAL_ARTIFACT_GENERATED
+            return AutoArtifactState.BLOCKED
+        if self.phase is AutoPhase.FAILED:
+            if self.has_generated_artifact_evidence():
+                return AutoArtifactState.PARTIAL_ARTIFACT_GENERATED
+            return AutoArtifactState.FAILED
+        if self.phase is AutoPhase.COMPLETE:
+            if (
+                self.last_qa_passed is True
+                or self.run_handoff_status == "completed"
+                or bool(self.runtime_probe_evidence)
+            ):
+                return AutoArtifactState.COMPLETE_VERIFIED
+            return AutoArtifactState.COMPLETE_UNVERIFIED
+        return AutoArtifactState.COMPLETE_UNVERIFIED
 
     def invoked_by(self) -> str:
         """Return the high-level invocation source for blocker/summary output.

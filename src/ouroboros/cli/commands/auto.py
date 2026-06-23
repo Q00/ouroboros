@@ -731,6 +731,13 @@ def _print_status(state: AutoPipelineState) -> None:
     print_info("Auto session status")
     console.print(f"Auto session: [cyan]{state.auto_session_id}[/]")
     console.print(f"Phase: [bold]{state.phase.value}[/]")
+    console.print(f"Orchestration state: [bold]{state.phase.value}[/]")
+    artifact_state = state.artifact_state().value
+    console.print(f"Artifact state: [bold]{artifact_state}[/]")
+    if artifact_state == "partial_artifact_generated":
+        console.print(
+            "Artifact note: [yellow]supporting/spike artifacts only; orchestration did not verify completion[/]"
+        )
     authoring, run_label = _format_runtime_labels(state.runtime_backend, state.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
@@ -871,6 +878,12 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     console.print(f"Auto session: [cyan]{result.auto_session_id}[/]")
     displayed_status = "run_handoff_started" if handoff_only else result.status
     console.print(f"Status: [bold]{displayed_status}[/]")
+    console.print(f"Orchestration state: [bold]{result.orchestration_state or result.phase}[/]")
+    console.print(f"Artifact state: [bold]{result.artifact_state}[/]")
+    if result.artifact_state == "partial_artifact_generated":
+        console.print(
+            "Artifact note: [yellow]supporting/spike artifacts only; orchestration did not verify completion[/]"
+        )
     if handoff_only:
         console.print(
             "Product status: [yellow]not verified complete; execution is still external/pending[/]"

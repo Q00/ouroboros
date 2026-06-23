@@ -102,6 +102,85 @@ def _fully_specified_hello_goal() -> str:
     )
 
 
+def _noop_pipeline(tmp_path) -> AutoPipeline:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_noop", seed_ready=True, completed=True)
+
+    async def answer(
+        session_id: str, text: str, *, last_question: str | None = None
+    ) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def seed_generator(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    return AutoPipeline(
+        AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path)),
+        seed_generator,
+        store=AutoStore(tmp_path),
+    )
+
+
+def test_blocked_seed_qa_with_generated_files_renders_partial_artifact_state(tmp_path) -> None:
+    from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
+
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    state.seed_artifact = _seed().to_dict()
+    state.run_subagent = {
+        "tool_name": "ouroboros_execute_seed",
+        "artifacts": {"changed_files": ["src/demo.py"]},
+    }
+    state.mark_blocked("Seed QA timed out after 60s", tool_name="seed_qa")
+
+    result = _noop_pipeline(tmp_path)._result(
+        state,
+        SeedDraftLedger.from_goal(state.goal),
+        blocker=state.last_error,
+    )
+    text = _format_result(result)
+    meta = _result_meta(result)
+
+    assert result.status == "blocked"
+    assert result.orchestration_state == "blocked"
+    assert result.artifact_state == "partial_artifact_generated"
+    assert meta["orchestration_state"] == "blocked"
+    assert meta["artifact_state"] == "partial_artifact_generated"
+    assert "Orchestration state: blocked" in text
+    assert "Artifact state: partial_artifact_generated" in text
+    assert "supporting/spike artifacts only" in text
+    assert "complete_verified" not in text
+
+
+@pytest.mark.asyncio
+async def test_session_status_diagnostics_report_partial_artifact_generated_for_blocked_seed_qa(
+    tmp_path,
+) -> None:
+    from ouroboros.mcp.tools.query_handlers import SessionStatusHandler
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    state.seed_artifact = _seed().to_dict()
+    state.run_subagent = {"files": ["src/demo.py"]}
+    state.mark_blocked(
+        "Seed QA did not pass after 1 attempt(s): revise (score 0.30)",
+        tool_name="seed_qa",
+    )
+    store.save(state)
+
+    result = await SessionStatusHandler(auto_store=store).handle(
+        {"session_id": state.auto_session_id}
+    )
+
+    assert result.is_ok
+    meta = result.value.meta
+    text = result.value.content[0].text
+    assert meta["orchestration_state"] == "blocked"
+    assert meta["artifact_state"] == "partial_artifact_generated"
+    assert "Orchestration state: blocked" in text
+    assert "Artifact state: partial_artifact_generated" in text
+    assert "supporting/spike artifacts only" in text
+
+
 def test_seed_draft_ledger_hydrates_explicit_goal_facts() -> None:
     ledger = SeedDraftLedger.from_goal(_fully_specified_hello_goal())
 

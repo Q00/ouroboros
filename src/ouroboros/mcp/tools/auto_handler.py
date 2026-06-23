@@ -1359,6 +1359,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     handoff_only = _is_run_handoff_only_completion(result)
     meta: dict[str, Any] = {
         "status": result.status,
+        "orchestration_state": result.orchestration_state or result.phase,
+        "artifact_state": result.artifact_state,
         "auto_session_id": result.auto_session_id,
         "phase": result.phase,
         "current_round": result.current_round,
@@ -2169,8 +2171,14 @@ def _format_result(result: AutoPipelineResult) -> str:
     lines = [
         f"Auto session: {result.auto_session_id}",
         f"Status: {_presentation_status(result)}",
+        f"Orchestration state: {result.orchestration_state or result.phase}",
+        f"Artifact state: {result.artifact_state}",
         f"Phase: {result.phase}",
     ]
+    if result.artifact_state == "partial_artifact_generated":
+        lines.append(
+            "Artifact note: supporting/spike artifacts only; orchestration did not verify completion"
+        )
     if handoff_only:
         lines.append("Product status: not verified complete; execution is still external/pending")
     elif result.status == "detached":

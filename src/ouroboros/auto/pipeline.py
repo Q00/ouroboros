@@ -57,6 +57,7 @@ from ouroboros.auto.state import (
     DEFAULT_TIMEOUT_SECONDS_BY_PHASE,
     MAX_EVALUATE_ROUNDS,
     AutoCommitPolicy,
+    AutoArtifactState,
     AutoPhase,
     AutoPipelineState,
     AutoResumeCapability,
@@ -385,6 +386,8 @@ class AutoPipelineResult:
     partial_product: bool = False
     partial_product_reason: str | None = None
     partial_unresolved_slots: tuple[str, ...] = ()
+    orchestration_state: str | None = None
+    artifact_state: str = AutoArtifactState.COMPLETE_UNVERIFIED.value
 
 
 @dataclass(slots=True)
@@ -4103,6 +4106,8 @@ class AutoPipeline:
             status=status_override or state.phase.value,
             auto_session_id=state.auto_session_id,
             phase=state.phase.value,
+            orchestration_state=state.phase.value,
+            artifact_state=state.artifact_state().value,
             grade=review.grade_result.grade.value if review else state.last_grade,
             seed_path=state.seed_path,
             seed_origin=state.seed_origin.value,

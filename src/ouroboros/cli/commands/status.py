@@ -49,7 +49,13 @@ def _format_auto_status(state) -> str:
         "===========",
         f"Auto session: {state.auto_session_id}",
         f"Phase: {state.phase.value}",
+        f"Orchestration state: {state.phase.value}",
+        f"Artifact state: {state.artifact_state().value}",
     ]
+    if state.artifact_state().value == "partial_artifact_generated":
+        lines.append(
+            "Artifact note: supporting/spike artifacts only; orchestration did not verify completion"
+        )
 
     is_terminal = state.phase in {
         AutoPhase.COMPLETE,
