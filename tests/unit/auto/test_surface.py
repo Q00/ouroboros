@@ -2636,6 +2636,7 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
     assert "Product status: not verified complete" in text
     assert "Artifact state: complete_unverified" in text
 
+
 def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
     from ouroboros.auto.pipeline import _artifact_state_for_result
 
