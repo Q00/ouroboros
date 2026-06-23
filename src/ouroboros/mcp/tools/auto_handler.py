@@ -1376,6 +1376,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
     }
+    if result.artifact_state is not None:
+        meta["artifact_state"] = result.artifact_state
     if handoff_only:
         meta["presentation_status"] = _presentation_status(result)
         meta["product_status"] = "not_verified_complete"
@@ -2171,6 +2173,8 @@ def _format_result(result: AutoPipelineResult) -> str:
         f"Status: {_presentation_status(result)}",
         f"Phase: {result.phase}",
     ]
+    if result.artifact_state:
+        lines.append(f"Artifact state: {result.artifact_state}")
     if handoff_only:
         lines.append("Product status: not verified complete; execution is still external/pending")
     elif result.status == "detached":

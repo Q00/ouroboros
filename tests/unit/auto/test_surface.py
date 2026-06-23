@@ -2622,3 +2622,43 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
     assert meta["product_status"] == "not_verified_complete"
     assert "Status: run_handoff_started" in text
     assert "Product status: not verified complete" in text
+
+
+def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="blocked",
+            phase=AutoPhase.BLOCKED,
+            seed_path="/tmp/seed.yaml",
+            execution_id=None,
+            job_id=None,
+            run_session_id=None,
+            partial_product=False,
+        )
+        == "partial_artifact_generated"
+    )
+
+
+def test_auto_handler_surfaces_orchestration_and_artifact_state_for_blocked_result() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
+
+    result = AutoPipelineResult(
+        status="blocked",
+        auto_session_id="auto_blocked_artifact",
+        phase="blocked",
+        seed_path="/tmp/seed.yaml",
+        artifact_state="partial_artifact_generated",
+        blocker="Seed QA timed out",
+    )
+
+    meta = _result_meta(result)
+    text = _format_result(result)
+
+    assert meta["status"] == "blocked"
+    assert meta["artifact_state"] == "partial_artifact_generated"
+    assert "Status: blocked" in text
+    assert "Artifact state: partial_artifact_generated" in text
+    assert "Status: complete" not in text

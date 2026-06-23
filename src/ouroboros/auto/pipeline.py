@@ -385,6 +385,11 @@ class AutoPipelineResult:
     partial_product: bool = False
     partial_product_reason: str | None = None
     partial_unresolved_slots: tuple[str, ...] = ()
+    # #1509: final-status surfaces must distinguish orchestration state
+    # from artifact state so BLOCKED/FAILED sessions with generated files are
+    # not mistaken for verified completion. Values are intentionally stringly
+    # typed for stable CLI/MCP wire compatibility.
+    artifact_state: str | None = None
 
 
 @dataclass(slots=True)
@@ -4099,8 +4104,18 @@ class AutoPipeline:
         # (e.g. on a safety blocker) keeps ``partial_product=False`` so the
         # field cannot be misread as "deadline recovery succeeded".
         partial_product = seed_degraded and state.phase == AutoPhase.COMPLETE
+        result_status = status_override or state.phase.value
+        artifact_state = _artifact_state_for_result(
+            status=result_status,
+            phase=state.phase,
+            seed_path=state.seed_path,
+            execution_id=state.execution_id,
+            job_id=state.job_id,
+            run_session_id=state.run_session_id,
+            partial_product=partial_product,
+        )
         return AutoPipelineResult(
-            status=status_override or state.phase.value,
+            status=result_status,
             auto_session_id=state.auto_session_id,
             phase=state.phase.value,
             grade=review.grade_result.grade.value if review else state.last_grade,
@@ -4157,6 +4172,7 @@ class AutoPipeline:
             partial_product=partial_product,
             partial_product_reason=partial_product_reason,
             partial_unresolved_slots=partial_unresolved_slots,
+            artifact_state=artifact_state,
         )
 
     def _checkpoint_final_commit(self, state: AutoPipelineState) -> None:
@@ -4337,6 +4353,33 @@ class AutoPipeline:
         except Exception:
             # Observers must never break the pipeline. Swallow callback errors.
             pass
+
+
+def _artifact_state_for_result(
+    *,
+    status: str,
+    phase: AutoPhase,
+    seed_path: str | None,
+    execution_id: str | None,
+    job_id: str | None,
+    run_session_id: str | None,
+    partial_product: bool,
+) -> str:
+    """Classify the generated-artifact outcome separately from orchestration.
+
+    ``status`` remains the authoritative orchestration state. This companion
+    value prevents final renderers from implying completion when a BLOCKED or
+    FAILED run still left useful generated files behind.
+    """
+
+    has_generated_artifact = bool(seed_path or execution_id or job_id or run_session_id)
+    if status in {AutoPhase.BLOCKED.value, AutoPhase.FAILED.value}:
+        return "partial_artifact_generated" if has_generated_artifact else status
+    if status == AutoPhase.COMPLETE.value:
+        return "complete_unverified" if partial_product else "complete_verified"
+    if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
+        return "partial_artifact_generated" if has_generated_artifact else phase.value
+    return "complete_unverified"
 
 
 def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:

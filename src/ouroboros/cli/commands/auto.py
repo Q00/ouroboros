@@ -871,6 +871,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     console.print(f"Auto session: [cyan]{result.auto_session_id}[/]")
     displayed_status = "run_handoff_started" if handoff_only else result.status
     console.print(f"Status: [bold]{displayed_status}[/]")
+    if result.artifact_state:
+        console.print(f"Artifact state: [bold]{result.artifact_state}[/]")
     if handoff_only:
         console.print(
             "Product status: [yellow]not verified complete; execution is still external/pending[/]"
