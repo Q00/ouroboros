@@ -2602,9 +2602,19 @@ def test_auto_handler_attached_completion_is_not_handoff_started() -> None:
 
 
 def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion() -> None:
-    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.pipeline import AutoPipelineResult, _artifact_state_for_result
     from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
 
+    artifact_state = _artifact_state_for_result(
+        status="complete",
+        phase=AutoPhase.COMPLETE,
+        seed_path=None,
+        execution_id="exec_123",
+        job_id="job_123",
+        run_session_id=None,
+        run_handoff_status="started",
+        partial_product=False,
+    )
     result = AutoPipelineResult(
         status="complete",
         auto_session_id="auto_handoff",
@@ -2612,6 +2622,7 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
         run_handoff_status="started",
         job_id="job_123",
         execution_id="exec_123",
+        artifact_state=artifact_state,
     )
 
     meta = _result_meta(result)
@@ -2620,9 +2631,10 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
     assert meta["status"] == "complete"
     assert meta["presentation_status"] == "run_handoff_started"
     assert meta["product_status"] == "not_verified_complete"
+    assert meta["artifact_state"] == "complete_unverified"
     assert "Status: run_handoff_started" in text
     assert "Product status: not verified complete" in text
-
+    assert "Artifact state: complete_unverified" in text
 
 def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
     from ouroboros.auto.pipeline import _artifact_state_for_result
@@ -2635,6 +2647,7 @@ def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
             execution_id=None,
             job_id=None,
             run_session_id=None,
+            run_handoff_status=None,
             partial_product=False,
         )
         == "partial_artifact_generated"
@@ -2652,6 +2665,7 @@ def test_auto_artifact_state_does_not_report_completion_for_pending_interview() 
             execution_id=None,
             job_id=None,
             run_session_id=None,
+            run_handoff_status=None,
             partial_product=False,
         )
         == "not_generated"

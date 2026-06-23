@@ -4112,6 +4112,7 @@ class AutoPipeline:
             execution_id=state.execution_id,
             job_id=state.job_id,
             run_session_id=state.run_session_id,
+            run_handoff_status=state.run_handoff_status,
             partial_product=partial_product,
         )
         return AutoPipelineResult(
@@ -4364,6 +4365,7 @@ def _artifact_state_for_result(
     job_id: str | None,
     run_session_id: str | None,
     partial_product: bool,
+    run_handoff_status: str | None = None,
 ) -> str:
     """Classify the generated-artifact outcome separately from orchestration.
 
@@ -4376,7 +4378,9 @@ def _artifact_state_for_result(
     if status in {AutoPhase.BLOCKED.value, AutoPhase.FAILED.value}:
         return "partial_artifact_generated" if has_generated_artifact else status
     if status == AutoPhase.COMPLETE.value:
-        return "complete_unverified" if partial_product else "complete_verified"
+        if partial_product or run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
+            return "complete_unverified"
+        return "complete_verified"
     if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
         return "partial_artifact_generated" if has_generated_artifact else phase.value
     return "artifact_in_progress" if has_generated_artifact else "not_generated"
