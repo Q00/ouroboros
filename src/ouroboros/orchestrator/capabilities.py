@@ -1952,6 +1952,271 @@ def _code_investigation_repo_inspection_tool_capabilities() -> tuple[dict[str, A
     return tuple(capabilities)
 
 
+def _interview_question_advisory_request_schema() -> dict[str, Any]:
+    """Return the runtime request model for per-question answer assistance."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "session_id",
+            "question_identity",
+            "question",
+            "phase",
+            "user_question_first",
+            "advisory_goal",
+            "parallel_preference",
+            "sequential_fallback",
+            "allowed_capabilities",
+            "lanes",
+            "synthesis_contract",
+            "mcp_tool_capability",
+        ],
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Current Ouroboros interview session ID.",
+            },
+            "question_identity": {
+                "type": "string",
+                "pattern": r"^interview-question:[0-9a-f]{16}$",
+                "description": (
+                    "Stable identity derived from the originating interview "
+                    "question using stable_code_investigation_question_identity()."
+                ),
+            },
+            "question": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The already user-visible MCP interview question.",
+            },
+            "last_question": {
+                "type": "string",
+                "description": "Previously asked question text, when available.",
+            },
+            "phase": {
+                "type": "string",
+                "enum": ["start", "resume_pending", "answer"],
+            },
+            "ambiguity_score": {
+                "type": ["number", "null"],
+                "minimum": 0,
+                "maximum": 1,
+            },
+            "milestone": {
+                "type": ["string", "null"],
+                "enum": ["initial", "progress", "refined", "ready", None],
+            },
+            "user_question_first": {
+                "const": True,
+                "description": (
+                    "The parent runtime must surface the interview question before "
+                    "or while advisory fanout runs; advisory must never hide the "
+                    "question behind background research."
+                ),
+            },
+            "advisory_goal": {
+                "const": "help_human_answer_interview_question",
+                "description": (
+                    "Generate concise answer options, uncertainty notes, and a "
+                    "recommended draft without mutating interview state."
+                ),
+            },
+            "parallel_preference": {
+                "const": "parallel_when_runtime_supports_subagents",
+            },
+            "sequential_fallback": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["supported", "mode", "trigger"],
+                "properties": {
+                    "supported": {"const": True},
+                    "mode": {"const": "sequential_advisory_lane_dispatch"},
+                    "trigger": {"const": "runtime_has_no_native_parallel_subagent_primitive"},
+                },
+            },
+            "allowed_capabilities": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "string",
+                    "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                },
+            },
+            "lanes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["lane_id", "purpose", "capability", "required"],
+                    "properties": {
+                        "lane_id": {
+                            "type": "string",
+                            "enum": [
+                                "code_context",
+                                "web_context",
+                                "ambiguity_contrarian",
+                                "answer_simplifier",
+                                "architecture_implications",
+                            ],
+                        },
+                        "purpose": {"type": "string", "minLength": 1},
+                        "capability": {
+                            "type": "string",
+                            "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                        },
+                        "persona": {
+                            "type": "string",
+                            "enum": ["researcher", "contrarian", "simplifier", "architect"],
+                        },
+                        "required": {"type": "boolean"},
+                    },
+                },
+            },
+            "code_investigation_request": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": (
+                    "Optional code-fact request emitted alongside this advisory; "
+                    "reuse it for the code_context lane when present."
+                ),
+            },
+            "synthesis_contract": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "output_shape",
+                    "max_options",
+                    "include_recommended_draft",
+                    "preserve_user_agency",
+                    "forward_to_mcp_only_after_user_or_auto_confirm",
+                ],
+                "properties": {
+                    "output_shape": {
+                        "const": "answer_advisory",
+                    },
+                    "max_options": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                    },
+                    "include_recommended_draft": {"type": "boolean"},
+                    "preserve_user_agency": {"const": True},
+                    "forward_to_mcp_only_after_user_or_auto_confirm": {"const": True},
+                },
+            },
+            "mcp_tool_capability": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": [
+                    "tool_name",
+                    "stable_id",
+                    "source_kind",
+                    "source_name",
+                    "input_schema",
+                    "mutation_class",
+                    "execution_mode",
+                    "companions",
+                    "required_context_keys",
+                    "mutation_targets",
+                    "state_mutations",
+                    "side_effects",
+                    "retry",
+                    "interrupt",
+                    "cancel",
+                    "fallback_used",
+                    "orchestration",
+                ],
+                "properties": {
+                    "tool_name": {"const": "ouroboros_interview"},
+                    "fallback_used": {"const": False},
+                },
+            },
+        },
+    }
+
+
+def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
+    """Return structured metadata for parent-session interview answer help."""
+    lanes = [
+        {
+            "lane_id": "code_context",
+            "purpose": "Find repo-local facts that may answer or constrain the question.",
+            "capability": "inspect_code",
+            "required": False,
+        },
+        {
+            "lane_id": "web_context",
+            "purpose": (
+                "Check current external facts only when the question depends on "
+                "third-party APIs, pricing, standards, security, or recent changes."
+            ),
+            "capability": "web_research",
+            "required": False,
+        },
+        {
+            "lane_id": "ambiguity_contrarian",
+            "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
+            "capability": "run_lateral_review",
+            "persona": "contrarian",
+            "required": True,
+        },
+        {
+            "lane_id": "answer_simplifier",
+            "purpose": "Turn the question into easy choices or a concise answer draft.",
+            "capability": "run_lateral_review",
+            "persona": "simplifier",
+            "required": True,
+        },
+        {
+            "lane_id": "architecture_implications",
+            "purpose": (
+                "Check whether the answer would change system shape, ownership, "
+                "interfaces, or rollout strategy."
+            ),
+            "capability": "run_lateral_review",
+            "persona": "architect",
+            "required": False,
+        },
+    ]
+    return {
+        "contract_id": "interview_question_advisory_fanout.v1",
+        "mcp_tool": "ouroboros_interview",
+        "companion_tool": "ouroboros_lateral_think",
+        "dispatch_timing": "after_question_is_visible_to_user",
+        "parallel_preference": "parallel_when_runtime_supports_subagents",
+        "sequential_fallback": {
+            "supported": True,
+            "mode": "sequential_advisory_lane_dispatch",
+            "trigger": "runtime_has_no_native_parallel_subagent_primitive",
+        },
+        "request_model_schema": _interview_question_advisory_request_schema(),
+        "lanes": lanes,
+        "synthesis_contract": {
+            "output_shape": "answer_advisory",
+            "max_options": 3,
+            "include_recommended_draft": True,
+            "preserve_user_agency": True,
+            "forward_to_mcp_only_after_user_or_auto_confirm": True,
+        },
+        "response_payload_refs": {
+            "plugin": "parent_runtime.ouroboros_dispatch.children",
+            "result_correlation_key": "lane_id",
+            "requires_prose_parsing": False,
+            "synthesis_owner": "parent_session",
+        },
+        "runtime_instruction": (
+            "Show the MCP interview question to the user first, then fan out "
+            "advisory lanes for code context, current web facts when needed, "
+            "ambiguity critique, simplification, and architecture implications. "
+            "Read child task results as they complete and synthesize them into "
+            "two or three answer options or one recommended draft. Do not forward advisory text to "
+            "ouroboros_interview until the user approves, edits, or explicitly "
+            "chooses auto-confirm."
+        ),
+    }
+
+
 def _serialized_metadata_for_descriptor(
     descriptor: CapabilityDescriptor,
 ) -> dict[str, Any] | None:
@@ -2930,6 +3195,7 @@ def _orchestration_metadata_for_ouroboros_tool(name: str) -> Mapping[str, Any]:
                 "decision or low-confidence confirmation to the user."
             ),
         },
+        "question_advisory_fanout": _interview_question_advisory_fanout_metadata(),
         "lateral_panel": lateral_panel,
     }
 

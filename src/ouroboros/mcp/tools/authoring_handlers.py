@@ -45,6 +45,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     build_generate_seed_subagent,
+    build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
@@ -556,19 +557,19 @@ def _with_lateral_review_dispatch(
     return enriched
 
 
-def _prepend_lateral_review_notice(
+def _append_lateral_review_notice(
     response_text: str,
     lateral_review_meta: dict[str, Any] | None,
 ) -> str:
-    """Surface a short user-visible cue when a lateral review should run."""
+    """Surface a short user-visible cue without hiding the question first."""
     if lateral_review_meta is None:
         return response_text
     personas = ", ".join(str(p) for p in lateral_review_meta["lateral_review_personas"])
     milestone = lateral_review_meta["lateral_review_milestone"]
     return (
-        "Lateral review queued: running "
+        f"{response_text}\n\nLateral review queued: running "
         f"{personas} before this interview turn "
-        f"(milestone: {milestone}).\n\n{response_text}"
+        f"(milestone: {milestone})."
     )
 
 
@@ -650,6 +651,80 @@ def _build_code_investigation_request(
     if last_question:
         request["last_question"] = last_question
     return request
+
+
+def _build_question_advisory_request(
+    *,
+    session_id: str,
+    question: str,
+    phase: str,
+    score: AmbiguityScore | None,
+    code_investigation_request: dict[str, Any] | None = None,
+    last_question: str | None = None,
+) -> dict[str, Any]:
+    """Build parent-runtime request metadata for per-question answer help."""
+    mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
+    advisory = mcp_tool_capability["orchestration"]["question_advisory_fanout"]
+    request: dict[str, Any] = {
+        "session_id": session_id,
+        "question_identity": stable_code_investigation_question_identity(question),
+        "question": question,
+        "phase": phase,
+        "ambiguity_score": score.overall_score if score is not None else None,
+        "milestone": _milestone_for_score(score),
+        "user_question_first": True,
+        "advisory_goal": "help_human_answer_interview_question",
+        "parallel_preference": advisory["parallel_preference"],
+        "sequential_fallback": dict(advisory["sequential_fallback"]),
+        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
+        "lanes": list(advisory["lanes"]),
+        "synthesis_contract": dict(advisory["synthesis_contract"]),
+        "mcp_tool_capability": mcp_tool_capability,
+    }
+    if last_question:
+        request["last_question"] = last_question
+    if code_investigation_request is not None:
+        request["code_investigation_request"] = code_investigation_request
+    return request
+
+
+def _attach_question_assist_requests(
+    meta: dict[str, Any],
+    *,
+    session_id: str,
+    question: str,
+    phase: str,
+    score: AmbiguityScore | None,
+    last_question: str | None = None,
+) -> None:
+    """Attach code-fact and advisory fanout requests for a question turn."""
+    code_request = _build_code_investigation_request(
+        session_id=session_id,
+        question=question,
+        last_question=last_question,
+    )
+    meta["code_investigation_request"] = code_request
+    meta["question_advisory_recommended"] = True
+    advisory_request = _build_question_advisory_request(
+        session_id=session_id,
+        question=question,
+        phase=phase,
+        score=score,
+        code_investigation_request=code_request,
+        last_question=last_question,
+    )
+    meta["question_advisory_request"] = advisory_request
+    try:
+        advisory_payloads = build_interview_question_advisory_subagents(advisory_request)
+    except ValueError as exc:
+        log.warning(
+            "mcp.tool.interview.question_advisory_build_failed",
+            session_id=session_id,
+            error=str(exc),
+        )
+        return
+    meta["question_advisory_subagents"] = [payload.to_dict() for payload in advisory_payloads]
+    meta["question_advisory_preserve_content"] = True
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -2090,6 +2165,8 @@ class InterviewHandler:
                     "action": action,
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
+                    "question_advisory_strategy": "plugin_child_question_first_advisory",
+                    "question_advisory_recommended": True,
                     **_interview_reasoning_meta(
                         state=plugin_state,
                         session_id=real_session_id,
@@ -2413,9 +2490,12 @@ class InterviewHandler:
                     # would raise on every oversized ``initial_context``.
                     start_meta.update(_length_guard_meta_fields())
                 else:
-                    start_meta["code_investigation_request"] = _build_code_investigation_request(
+                    _attach_question_assist_requests(
+                        start_meta,
                         session_id=state.interview_id,
                         question=question,
+                        phase="start",
+                        score=live_score,
                     )
 
                 start_response_text = (
@@ -2502,11 +2582,12 @@ class InterviewHandler:
                         # summarize prompt as a hard failure.
                         resume_meta.update(_length_guard_meta_fields())
                     else:
-                        resume_meta["code_investigation_request"] = (
-                            _build_code_investigation_request(
-                                session_id=session_id,
-                                question=pending_question,
-                            )
+                        _attach_question_assist_requests(
+                            resume_meta,
+                            session_id=session_id,
+                            question=pending_question,
+                            phase="resume_pending",
+                            score=_load_state_ambiguity_score(state),
                         )
 
                     resume_response_text = f"Session {session_id}\n\n{display_question}"
@@ -3050,16 +3131,19 @@ class InterviewHandler:
                     # the auto driver's ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
                 else:
-                    answer_meta["code_investigation_request"] = _build_code_investigation_request(
+                    _attach_question_assist_requests(
+                        answer_meta,
                         session_id=session_id,
                         question=question,
+                        phase="answer",
+                        score=live_score,
                     )
 
                 if lateral_review_dispatch_meta is not None:
                     answer_meta.update(lateral_review_dispatch_meta)
 
                 answer_response_text = f"Session {session_id}\n\n{display_question}"
-                answer_response_text = _prepend_lateral_review_notice(
+                answer_response_text = _append_lateral_review_notice(
                     answer_response_text,
                     lateral_review_dispatch_meta,
                 )

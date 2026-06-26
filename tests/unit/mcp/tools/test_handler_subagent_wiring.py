@@ -218,6 +218,12 @@ class TestInterviewHandlerSubagentDispatch:
         payload = result.value.meta["_subagent"]
         assert payload["tool_name"] == "ouroboros_interview"
         assert "Build a web app" in payload["prompt"]
+        assert "## Question-first Advisory Fanout" in payload["prompt"]
+        assert result.value.meta["question_advisory_recommended"] is True
+        assert (
+            result.value.meta["question_advisory_strategy"]
+            == "plugin_child_question_first_advisory"
+        )
 
     async def test_answer_returns_subagent(self, handler) -> None:
         result = await handler.handle(

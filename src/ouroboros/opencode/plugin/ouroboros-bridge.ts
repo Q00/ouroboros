@@ -222,6 +222,35 @@ export function parse(raw: string): { subs: Sub[]; responseShape: Record<string,
   return empty
 }
 
+export function parseMetadata(meta: unknown): { subs: Sub[]; responseShape: Record<string, unknown>; preserveContent: boolean } {
+  const empty = { subs: [], responseShape: {}, preserveContent: false }
+  if (!meta || typeof meta !== "object") return empty
+  const record = meta as Record<string, unknown>
+  const raw = record.question_advisory_subagents
+  if (!Array.isArray(raw) || raw.length === 0) return empty
+  if (raw.length > MAX_FANOUT) log(`WARN metadata_fanout_capped requested=${raw.length} cap=${MAX_FANOUT}`)
+  const subs = raw.slice(0, MAX_FANOUT).flatMap((p, i) => {
+    const s = build(p, i)
+    return s ? [s] : []
+  })
+  if (subs.length === 0) return empty
+  const responseShape: Record<string, unknown> = {}
+  for (const key of [
+    "session_id",
+    "ambiguity_score",
+    "milestone",
+    "seed_ready",
+    "question_advisory_recommended",
+  ]) {
+    if (key in record) responseShape[key] = record[key]
+  }
+  return {
+    subs,
+    responseShape,
+    preserveContent: record.question_advisory_preserve_content === true,
+  }
+}
+
 export function readText(r: Output): string {
   if (Array.isArray(r.content)) {
     const texts = r.content
@@ -310,8 +339,9 @@ export function buildEnvelope(
   }
 }
 
-function fail(r: Output, label: string, err: unknown): void {
-  stamp(r, `[Ouroboros] Dispatch failed for '${label}': ${errMsg(err)}. See ${LOG}.`)
+function fail(r: Output, label: string, err: unknown, preservePrefix?: string): void {
+  const msg = `[Ouroboros] Dispatch failed for '${label}': ${errMsg(err)}. See ${LOG}.`
+  stamp(r, preservePrefix ? `${preservePrefix}\n\n${msg}` : msg)
 }
 
 const seen = new Map<string, number>()
@@ -556,16 +586,22 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         if (!output || typeof output !== "object") return
 
         const out = output as Output
-        const { subs, responseShape } = parse(readText(out))
+        const originalText = readText(out)
+        const parsedText = parse(originalText)
+        const parsedMeta = parsedText.subs.length === 0 ? parseMetadata(out.metadata) : { subs: [], responseShape: {}, preserveContent: false }
+        const subs = parsedText.subs.length > 0 ? parsedText.subs : parsedMeta.subs
+        const responseShape = parsedText.subs.length > 0 ? parsedText.responseShape : parsedMeta.responseShape
+        const preserveContent = parsedText.subs.length === 0 && parsedMeta.preserveContent
         if (subs.length === 0) return
 
         const pid = typeof input.sessionID === "string" ? input.sessionID : ""
         const callID = typeof input.callID === "string" ? input.callID : ""
-        if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID")); return }
-        if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID")); return }
+        const failurePrefix = preserveContent ? originalText : undefined
+        if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID"), failurePrefix); return }
+        if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID"), failurePrefix); return }
         if (isNestedRalphDispatch(pid, subs)) {
           log(`REJECT reason=nested_ralph pid=${pid} tool=${subs[0].tool}`)
-          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"))
+          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"), failurePrefix)
           return
         }
 
@@ -573,7 +609,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const b = base(ctx.client)
         if (!cli?.session?.create || !cli.session.prompt || !cli.session.abort || !cli.session.messages || !b) {
           log(`REJECT reason=client_not_ready tool=${subs[0].tool}`)
-          fail(out, subs[0].tool, new Error("client not ready"))
+          fail(out, subs[0].tool, new Error("client not ready"), failurePrefix)
           return
         }
 
@@ -582,7 +618,8 @@ export const OuroborosBridge: Plugin = async (ctx) => {
           const dedupeShapeSuffix = Object.keys(responseShape).length > 0
             ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
             : ""
-          stamp(out, notify([], [], subs) + dedupeShapeSuffix)
+          const dedupeBanner = notify([], [], subs) + dedupeShapeSuffix
+          stamp(out, preserveContent ? `${originalText}\n\n${dedupeBanner}` : dedupeBanner)
           const meta = (out.metadata ?? {}) as Record<string, unknown>
           meta.ouroboros_dispatch = buildEnvelope([], [], subs)
           if (Object.keys(responseShape).length > 0) meta.ouroboros_response_shape = responseShape
@@ -593,7 +630,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const mid = await resolveMid(cli, pid, callID)
         if (!mid) {
           log(`REJECT reason=no_message_found pid=${pid} callID=${callID}`)
-          fail(out, subs[0].tool, new Error("could not resolve messageID"))
+          fail(out, subs[0].tool, new Error("could not resolve messageID"), failurePrefix)
           return
         }
 
@@ -622,7 +659,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const shapeSuffix = Object.keys(responseShape).length > 0
           ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
           : ""
-        stamp(out, banner + shapeSuffix)
+        stamp(out, preserveContent ? `${originalText}\n\n${banner}${shapeSuffix}` : banner + shapeSuffix)
 
         const envelope = buildEnvelope(ok, failed, [])
         const meta = (out.metadata ?? {}) as Record<string, unknown>

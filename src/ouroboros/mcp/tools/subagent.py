@@ -60,6 +60,8 @@ _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS = 200
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
+_INTERVIEW_ADVISORY_MAX_QUESTION_CHARS = 900
+_INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -120,6 +122,17 @@ def _default_code_investigation_confirmation_prompt(output: Mapping[str, Any]) -
     if len(answer_text) > _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS:
         answer_text = answer_text[: _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS - 1].rstrip() + "…"
     return f"Confirm before forwarding this code-derived answer: {answer_text}"
+
+
+def _bounded_json(value: Any, max_chars: int) -> str:
+    """Render JSON for prompts without letting metadata dominate context."""
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
+    except (TypeError, ValueError):
+        rendered = json.dumps(str(value), ensure_ascii=False)
+    if len(rendered) <= max_chars:
+        return rendered
+    return rendered[:max_chars].rstrip() + "\n... [truncated]"
 
 
 def _payload_persona(payload: Mapping[str, Any]) -> str:
@@ -1131,6 +1144,12 @@ def build_interview_subagent(
 
     system_prompt = load_agent_prompt("socratic-interviewer")
     seed_closer_summary = _load_seed_closer_summary()
+    plugin_question_advisory = """
+## Question-first Advisory Fanout
+1. Show the interview question first.
+2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
+   answer_simplifier, architecture_implications.
+3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
 
     transcript_section = ""
     if transcript:
@@ -1160,6 +1179,7 @@ Do not treat ambiguity <= 0.2 as sufficient for closure.
 Start a Socratic interview to clarify requirements for the following project idea.
 Ask probing questions to reduce ambiguity. Score ambiguity after each exchange.
 {seed_ready_guard}
+{plugin_question_advisory}
 
 ## Initial Context
 {bounded_initial_context}
@@ -1180,6 +1200,7 @@ Continue the Socratic interview. The user has answered your previous question.
 Analyze their answer, update your understanding, score current ambiguity,
 and ask the next clarifying question or declare ready only after the Seed-ready Guard passes.
 {seed_ready_guard}
+{plugin_question_advisory}
 
 ## Session ID
 {session_id}
@@ -1200,6 +1221,7 @@ Resume the Socratic interview for session {session_id}.
 Review the conversation history and continue from where we left off.
 {transcript_section}
 {seed_ready_guard}
+{plugin_question_advisory}
 
 ## Action: {action}
 
@@ -1211,6 +1233,7 @@ Continue the interview."""
         "initial_context": initial_context,
         "answer": answer,
         "cwd": cwd,
+        "question_advisory_strategy": "plugin_child_question_first_advisory",
     }
 
     return build_subagent_payload(
@@ -1219,6 +1242,167 @@ Continue the interview."""
         prompt=prompt,
         context=context,
     )
+
+
+def build_interview_question_advisory_subagents(
+    request: Mapping[str, Any],
+) -> list[SubagentPayload]:
+    """Build per-lane advisory subagents for an interview question.
+
+    The parent session owns the user-facing question. These payloads are an
+    assist layer: independent child contexts inspect code, check current facts
+    when needed, challenge ambiguity, and make the answer easier to provide.
+    """
+    session_id = str(request.get("session_id") or "")
+    question_identity = str(request.get("question_identity") or "")
+    question = str(request.get("question") or "")
+    if not session_id:
+        raise ValueError("request.session_id must not be empty")
+    if not question_identity:
+        raise ValueError("request.question_identity must not be empty")
+    if not question:
+        raise ValueError("request.question must not be empty")
+
+    raw_lanes = request.get("lanes")
+    if not isinstance(raw_lanes, (list, tuple)) or not raw_lanes:
+        raise ValueError("request.lanes must be a non-empty list")
+
+    bounded_question = _truncate_head(question, _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS)
+    code_request_json = _bounded_json(
+        request.get("code_investigation_request"),
+        _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
+    )
+    synthesis_contract = request.get("synthesis_contract")
+    synthesis_contract_json = _bounded_json(
+        synthesis_contract,
+        _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
+    )
+    ambiguity_score = request.get("ambiguity_score")
+    milestone = request.get("milestone")
+
+    payloads: list[SubagentPayload] = []
+    seen: set[str] = set()
+    for raw_lane in raw_lanes:
+        if not isinstance(raw_lane, Mapping):
+            continue
+        lane_id = str(raw_lane.get("lane_id") or "").strip()
+        capability = str(raw_lane.get("capability") or "").strip()
+        if not lane_id or lane_id in seen:
+            continue
+        seen.add(lane_id)
+
+        persona = str(raw_lane.get("persona") or "").strip()
+        agent = persona or (
+            "researcher" if capability in {"inspect_code", "web_research"} else "general"
+        )
+        purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
+        required = bool(raw_lane.get("required"))
+
+        if lane_id == "code_context":
+            lane_task = (
+                "Inspect the local repository for facts that directly answer or "
+                "constrain the question. Use exact file/config evidence. Do not "
+                "make product decisions. If the code does not answer it, say so."
+            )
+            extra = f"## Code Investigation Request\n```json\n{code_request_json}\n```"
+        elif lane_id == "web_context":
+            lane_task = (
+                "Decide whether current external knowledge is needed. If yes, "
+                "research the minimum necessary current facts and cite sources. "
+                "If no current web facts are needed, return that no-op finding."
+            )
+            extra = "Use web research only when the answer depends on current external facts."
+        elif lane_id == "ambiguity_contrarian":
+            lane_task = (
+                "Challenge the question and the likely answer. Identify hidden "
+                "assumptions, overloaded terms, missing constraints, and decisions "
+                "the human might accidentally skip."
+            )
+            extra = "Lean into the contrarian role, but keep the advice user-safe and actionable."
+        elif lane_id == "answer_simplifier":
+            lane_task = (
+                "Turn the question into an easy response surface: 2-3 concrete "
+                "answer options or one recommended draft the user can approve or edit."
+            )
+            extra = "Prefer concise choices over a broad essay."
+        elif lane_id == "architecture_implications":
+            lane_task = (
+                "Check whether the answer would affect system shape, ownership, "
+                "interfaces, rollout, data model, or verification strategy."
+            )
+            extra = "Only raise architecture implications that materially affect implementation."
+        else:
+            lane_task = "Help the parent session answer this interview question."
+            extra = ""
+
+        prompt = f"""## Task
+You are an Ouroboros interview advisory subagent.
+
+The parent session has already shown the interview question to the user. Your job
+is to help the user answer it; do not answer on behalf of the user unless the
+answer is a descriptive fact with clear evidence.
+
+## Interview Question
+{bounded_question}
+
+## Session
+- session_id: {session_id}
+- question_identity: {question_identity}
+- ambiguity_score: {ambiguity_score}
+- milestone: {milestone}
+
+## Advisory Lane
+- lane_id: {lane_id}
+- capability: {capability}
+- required: {str(required).lower()}
+- purpose: {purpose}
+
+## Lane Task
+{lane_task}
+
+{extra}
+
+## Synthesis Contract
+```json
+{synthesis_contract_json}
+```
+
+## Output
+Return a compact JSON object with:
+- lane_id
+- finding: the single most useful advisory finding
+- evidence: short list of file paths, source URLs, or reasoning anchors
+- suggested_options: up to 3 answer options or draft snippets
+- unresolved_ambiguities: short list of what the human still must decide
+
+Keep it brief. The parent session will synthesize multiple advisory lanes before
+forwarding anything back to ouroboros_interview."""
+
+        payloads.append(
+            build_subagent_payload(
+                tool_name="ouroboros_interview",
+                title=f"Interview advisory: {lane_id}",
+                agent=agent,
+                prompt=prompt,
+                context={
+                    "session_id": session_id,
+                    "question_identity": question_identity,
+                    "question": question,
+                    "lane_id": lane_id,
+                    "capability": capability,
+                    "required": required,
+                    "persona": persona or None,
+                    "user_question_first": bool(request.get("user_question_first")),
+                    "synthesis_contract": dict(synthesis_contract)
+                    if isinstance(synthesis_contract, Mapping)
+                    else {},
+                },
+            )
+        )
+
+    if not payloads:
+        raise ValueError("request.lanes did not contain any valid advisory lanes")
+    return payloads
 
 
 def build_generate_seed_subagent(

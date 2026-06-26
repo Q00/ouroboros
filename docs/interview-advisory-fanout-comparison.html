@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ouroboros Interview Flow Comparison</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #617083;
+      --line: #d8dee8;
+      --paper: #f7f9fc;
+      --panel: #ffffff;
+      --old: #7a4c12;
+      --old-bg: #fff5df;
+      --new: #175f55;
+      --new-bg: #e7f7f2;
+      --accent: #3f5edb;
+      --accent-bg: #edf1ff;
+      --risk: #9b2d27;
+      --risk-bg: #fff0ef;
+      --shadow: 0 18px 55px rgba(34, 45, 70, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 48px 24px 64px;
+    }
+
+    header {
+      margin-bottom: 34px;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 64px);
+      line-height: 1.02;
+      letter-spacing: 0;
+      max-width: 900px;
+    }
+
+    .lead {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 860px;
+    }
+
+    section {
+      margin-top: 28px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+
+    .panel.old {
+      border-top: 5px solid var(--old);
+    }
+
+    .panel.new {
+      border-top: 5px solid var(--new);
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    .tag.old {
+      background: var(--old-bg);
+      color: var(--old);
+    }
+
+    .tag.new {
+      background: var(--new-bg);
+      color: var(--new);
+    }
+
+    .tag.accent {
+      background: var(--accent-bg);
+      color: var(--accent);
+    }
+
+    .tag.risk {
+      background: var(--risk-bg);
+      color: var(--risk);
+    }
+
+    .steps {
+      list-style: none;
+      margin: 16px 0 0;
+      padding: 0;
+      display: grid;
+      gap: 10px;
+    }
+
+    .steps li {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: start;
+      color: var(--muted);
+    }
+
+    .num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: inline-grid;
+      place-items: center;
+      background: #eef2f7;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .new .num {
+      background: var(--new-bg);
+      color: var(--new);
+    }
+
+    .old .num {
+      background: var(--old-bg);
+      color: var(--old);
+    }
+
+    .compare {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .compare th,
+    .compare td {
+      border-bottom: 1px solid var(--line);
+      padding: 14px 16px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .compare th {
+      background: #eef2f7;
+      font-size: 14px;
+    }
+
+    .compare tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .compare td {
+      color: var(--muted);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .flow-card {
+      min-height: 120px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      box-shadow: 0 10px 32px rgba(34, 45, 70, 0.08);
+    }
+
+    .flow-card strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 15px;
+    }
+
+    .flow-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .lanes {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .lane {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 148px;
+    }
+
+    .lane h3 {
+      color: var(--new);
+      font-size: 15px;
+      overflow-wrap: anywhere;
+    }
+
+    .lane p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .note {
+      background: var(--accent-bg);
+      border: 1px solid #cdd7ff;
+      border-radius: 8px;
+      padding: 18px;
+      color: #263b8f;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #eef2f7;
+      color: #243044;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    @media (max-width: 920px) {
+      main {
+        padding: 34px 16px 46px;
+      }
+
+      .grid,
+      .flow,
+      .lanes {
+        grid-template-columns: 1fr;
+      }
+
+      .compare {
+        display: block;
+        overflow-x: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Ouroboros Interview Upgrade</div>
+      <h1>기존 인터뷰 vs 새 인터뷰</h1>
+      <p class="lead">
+        새 흐름은 MCP가 질문을 만들면 질문을 먼저 보여주고, 동시에 subagent들이 코드, 웹, 모호함, 답변 선택지, 아키텍처 영향을 나눠 조사해 사용자가 더 쉽게 답하도록 돕는다.
+      </p>
+    </header>
+
+    <section class="grid" aria-label="old and new summary">
+      <article class="panel old">
+        <div class="tag old">기존 인터뷰</div>
+        <h2>질문 생성 중심</h2>
+        <p>
+          MCP interview tool이 다음 질문을 만들고, 메인 세션은 그 질문을 사용자에게 전달한 뒤 사용자의 답변을 다시 MCP에 넘기는 구조였다.
+        </p>
+        <ol class="steps">
+          <li><span class="num">1</span><span>MCP가 현재 transcript와 ambiguity score를 보고 다음 질문 생성</span></li>
+          <li><span class="num">2</span><span>메인 세션이 질문을 사용자에게 전달</span></li>
+          <li><span class="num">3</span><span>사용자는 맥락을 스스로 정리해서 답변</span></li>
+          <li><span class="num">4</span><span>메인 세션이 답변을 그대로 MCP에 전달</span></li>
+        </ol>
+      </article>
+
+      <article class="panel new">
+        <div class="tag new">새 인터뷰</div>
+        <h2>질문-first advisory fanout</h2>
+        <p>
+          질문은 그대로 먼저 노출하고, 그 뒤 subagent fanout이 사용자의 빈칸을 찾아 답변 후보와 위험한 모호함을 정리한다.
+        </p>
+        <ol class="steps">
+          <li><span class="num">1</span><span>MCP가 질문과 함께 advisory fanout metadata 생성</span></li>
+          <li><span class="num">2</span><span>브리지가 질문 텍스트를 보존한 채 subagent들을 병렬 dispatch</span></li>
+          <li><span class="num">3</span><span>각 lane이 독립적으로 코드, 웹, 모호함, 선택지, 아키텍처를 점검</span></li>
+          <li><span class="num">4</span><span>메인 세션이 child 결과를 합성해 사용자의 답변을 쉽게 만든 뒤 승인된 답만 MCP에 전달</span></li>
+        </ol>
+      </article>
+    </section>
+
+    <section aria-label="side by side table">
+      <h2>무엇이 달라졌나</h2>
+      <table class="compare">
+        <thead>
+          <tr>
+            <th>관점</th>
+            <th>기존</th>
+            <th>현재</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>메인 세션 역할</td>
+            <td>질문 전달자와 답변 라우터에 가까웠다.</td>
+            <td>질문을 보존하고 subagent 결과를 조율하는 interview conductor가 됐다.</td>
+          </tr>
+          <tr>
+            <td>사용자 경험</td>
+            <td>사용자가 혼자 의도를 정리해서 답해야 했다.</td>
+            <td>답변 전 선택지, 초안, 남은 모호함을 받을 수 있다.</td>
+          </tr>
+          <tr>
+            <td>코드베이스 반영</td>
+            <td>질문 생성 자체는 코드 사실 조사와 느슨하게 연결됐다.</td>
+            <td><code>code_context</code> lane이 repo-local evidence를 찾아 답변을 제약한다.</td>
+          </tr>
+          <tr>
+            <td>웹 조사</td>
+            <td>필요하면 사람이 별도로 요청하거나 메인 세션이 판단해야 했다.</td>
+            <td><code>web_context</code> lane이 최신 외부 사실이 필요한지 먼저 판단하고 최소 조사한다.</td>
+          </tr>
+          <tr>
+            <td>모호함 탐지</td>
+            <td>MCP ambiguity score와 질문 품질에 의존했다.</td>
+            <td><code>ambiguity_contrarian</code>이 숨은 가정, 빠진 결정, 애매한 용어를 따로 찾는다.</td>
+          </tr>
+          <tr>
+            <td>답변 보조</td>
+            <td>질문만 받고 사용자가 직접 문장을 만들어야 했다.</td>
+            <td><code>answer_simplifier</code>가 2-3개 선택지나 승인 가능한 draft를 만든다.</td>
+          </tr>
+          <tr>
+            <td>시스템 영향</td>
+            <td>답변이 구조, ownership, rollout에 미치는 영향이 뒤늦게 드러날 수 있었다.</td>
+            <td><code>architecture_implications</code>가 구현 전에 영향도를 짚는다.</td>
+          </tr>
+          <tr>
+            <td>실패 모드</td>
+            <td>보조 dispatch 실패라는 개념이 없었다.</td>
+            <td>dispatch가 실패해도 질문 텍스트는 유지되고 실패 안내만 뒤에 붙는다.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section aria-label="new flow">
+      <h2>새 흐름</h2>
+      <div class="flow">
+        <div class="flow-card">
+          <strong>1. MCP 질문</strong>
+          <span><code>ouroboros_interview</code>가 다음 질문과 advisory metadata를 반환한다.</span>
+        </div>
+        <div class="flow-card">
+          <strong>2. 질문 먼저 표시</strong>
+          <span>사용자는 기다리지 않고 질문을 먼저 본다. advisory는 질문을 가리지 않는다.</span>
+        </div>
+        <div class="flow-card">
+          <strong>3. Subagent fanout</strong>
+          <span>브리지가 lane별 child task를 만들고 Task widget으로 진행을 보여준다.</span>
+        </div>
+        <div class="flow-card">
+          <strong>4. Advisory 합성</strong>
+          <span>메인 세션이 child 결과를 읽고 짧은 선택지나 draft로 정리한다.</span>
+        </div>
+        <div class="flow-card">
+          <strong>5. 승인 후 전달</strong>
+          <span>사용자가 승인하거나 고친 답변만 MCP state에 저장된다.</span>
+        </div>
+      </div>
+    </section>
+
+    <section aria-label="advisory lanes">
+      <h2>Subagent lanes</h2>
+      <div class="lanes">
+        <article class="lane">
+          <h3>code_context</h3>
+          <p>코드와 설정에서 질문 답변을 제한하는 사실을 찾는다.</p>
+        </article>
+        <article class="lane">
+          <h3>web_context</h3>
+          <p>가격, API, 정책, 표준처럼 최신 외부 사실이 필요할 때만 조사한다.</p>
+        </article>
+        <article class="lane">
+          <h3>ambiguity_contrarian</h3>
+          <p>사용자가 놓치기 쉬운 가정, 애매한 단어, 빠진 의사결정을 드러낸다.</p>
+        </article>
+        <article class="lane">
+          <h3>answer_simplifier</h3>
+          <p>답하기 쉽게 2-3개 선택지나 짧은 draft를 만든다.</p>
+        </article>
+        <article class="lane">
+          <h3>architecture_implications</h3>
+          <p>답변이 ownership, interface, rollout, data, verification에 미치는 영향을 본다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="grid" aria-label="runtime details">
+      <article class="panel">
+        <div class="tag accent">OpenCode bridge</div>
+        <h2>질문을 절대 덮지 않음</h2>
+        <p>
+          브리지는 <code>question_advisory_subagents</code> metadata를 읽어 dispatch한다.
+          성공, 중복, 실패 어느 경우에도 <code>question_advisory_preserve_content</code>가 켜져 있으면 원래 질문 텍스트를 앞에 둔다.
+        </p>
+      </article>
+
+      <article class="panel">
+        <div class="tag accent">Plugin mode</div>
+        <h2>Child interviewer가 보조</h2>
+        <p>
+          plugin mode에서는 실제 질문이 child interview session 안에서 생성된다.
+          그래서 child prompt 자체에 Question-first Advisory Fanout 지침을 넣어 질문 뒤에 compact helper를 만들게 했다.
+        </p>
+      </article>
+    </section>
+
+    <section aria-label="why it matters">
+      <div class="note">
+        <strong>한 줄 요약:</strong>
+        기존 인터뷰는 질문을 잘 만드는 쪽에 집중했다면, 새 인터뷰는 질문을 받은 사람이 더 잘 답할 수 있게 주변 맥락을 병렬로 찾아주는 구조다.
+        사람의 기억, 코드 맥락 부족, 최신 정보 부족, 모호한 표현을 subagent들이 보완하고, 메인 세션은 그 결과를 사용자가 결정하기 쉬운 형태로 정리한다.
+      </div>
+    </section>
+  </main>
+</body>
+</html>

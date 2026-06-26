@@ -22,6 +22,7 @@ from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
     build_execute_subagent,
     build_generate_seed_subagent,
+    build_interview_question_advisory_subagents,
     build_interview_subagent,
     build_pm_interview_subagent,
     build_qa_subagent,
@@ -692,6 +693,98 @@ class TestBuildInterviewSubagent:
             action="start",
         )
         assert p.context["session_id"] == "sess-123"
+
+    def test_plugin_interview_prompt_embeds_question_first_advisory_strategy(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="start",
+            initial_context="Build a planning assistant",
+        )
+
+        assert "## Question-first Advisory Fanout" in p.prompt
+        assert "1. Show the interview question first." in p.prompt
+        assert "code_context" in p.prompt
+        assert "ambiguity_contrarian" in p.prompt
+        assert "answer_simplifier" in p.prompt
+        assert (
+            p.context["question_advisory_strategy"]
+            == "plugin_child_question_first_advisory"
+        )
+
+
+class TestBuildInterviewQuestionAdvisorySubagents:
+    """Test per-question advisory fanout payloads."""
+
+    def test_builds_one_payload_per_lane(self) -> None:
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which users need this first?",
+            "ambiguity_score": 0.35,
+            "milestone": "progress",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "code_context",
+                    "capability": "inspect_code",
+                    "purpose": "Find code facts.",
+                    "required": False,
+                },
+                {
+                    "lane_id": "ambiguity_contrarian",
+                    "capability": "run_lateral_review",
+                    "persona": "contrarian",
+                    "purpose": "Find hidden assumptions.",
+                    "required": True,
+                },
+                {
+                    "lane_id": "answer_simplifier",
+                    "capability": "run_lateral_review",
+                    "persona": "simplifier",
+                    "purpose": "Make it easy to answer.",
+                    "required": True,
+                },
+            ],
+            "synthesis_contract": {
+                "output_shape": "answer_advisory",
+                "max_options": 3,
+                "include_recommended_draft": True,
+                "preserve_user_agency": True,
+                "forward_to_mcp_only_after_user_or_auto_confirm": True,
+            },
+            "code_investigation_request": {"question": "Which users need this first?"},
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        assert [payload.title for payload in payloads] == [
+            "Interview advisory: code_context",
+            "Interview advisory: ambiguity_contrarian",
+            "Interview advisory: answer_simplifier",
+        ]
+        assert [payload.agent for payload in payloads] == [
+            "researcher",
+            "contrarian",
+            "simplifier",
+        ]
+        assert all(payload.tool_name == "ouroboros_interview" for payload in payloads)
+        assert all(
+            "The parent session has already shown the interview question" in payload.prompt
+            for payload in payloads
+        )
+        assert payloads[0].context["lane_id"] == "code_context"
+        assert payloads[0].context["user_question_first"] is True
+        assert payloads[1].context["persona"] == "contrarian"
+
+    def test_requires_question_identity(self) -> None:
+        with pytest.raises(ValueError, match="question_identity"):
+            build_interview_question_advisory_subagents(
+                {
+                    "session_id": "sess-123",
+                    "question": "Q?",
+                    "lanes": [{"lane_id": "answer_simplifier"}],
+                }
+            )
 
 
 # ---------------------------------------------------------------------------

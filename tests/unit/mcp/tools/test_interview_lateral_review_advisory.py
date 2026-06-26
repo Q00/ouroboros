@@ -233,8 +233,41 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
         "requires_prose_parsing": False,
         "synthesize_before_interview_continuation": True,
     }
+    assert result.value.meta["question_advisory_recommended"] is True
+    advisory = result.value.meta["question_advisory_request"]
+    assert advisory["session_id"] == "sess-817"
+    assert advisory["question"] == "What edge case remains?"
+    assert advisory["phase"] == "answer"
+    assert advisory["user_question_first"] is True
+    assert advisory["allowed_capabilities"] == [
+        "inspect_code",
+        "web_research",
+        "run_lateral_review",
+    ]
+    assert {lane["lane_id"] for lane in advisory["lanes"]} == {
+        "code_context",
+        "web_context",
+        "ambiguity_contrarian",
+        "answer_simplifier",
+        "architecture_implications",
+    }
+    assert advisory["code_investigation_request"]["question"] == "What edge case remains?"
+    advisory_subagents = result.value.meta["question_advisory_subagents"]
+    assert [subagent["context"]["lane_id"] for subagent in advisory_subagents] == [
+        "code_context",
+        "web_context",
+        "ambiguity_contrarian",
+        "answer_simplifier",
+        "architecture_implications",
+    ]
+    assert result.value.meta["question_advisory_preserve_content"] is True
     content_text = result.value.content[0].text
-    assert content_text.startswith("Lateral review queued:")
+    assert content_text.startswith("Session sess-817\n\n")
+    assert "What edge case remains?" in content_text
+    assert "Lateral review queued:" in content_text
+    assert content_text.index("What edge case remains?") < content_text.index(
+        "Lateral review queued:"
+    )
     assert "Session sess-817" in content_text
     assert state.lateral_review_advised_milestones == ["progress"]
     handler._emit_event_bg.assert_called()

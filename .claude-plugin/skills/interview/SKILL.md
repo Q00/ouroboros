@@ -164,6 +164,36 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `last_question` is required on this path so MCP can persist the real
    transcript even though the parent session generated the question.
 
+   **Question-first advisory fanout**:
+   If an MCP response includes `meta.question_advisory_request`, show the
+   interview question to the user first, then use the advisory request as a
+   parent-session assist layer. The advisory exists to help the human answer;
+   it must not hide, replace, or delay the question itself.
+
+   Run the advisory lanes in parallel when the runtime supports subagents; use
+   the request's `sequential_fallback` semantics otherwise. The standard lanes
+   are:
+   - `code_context` — inspect repo-local facts and reuse
+     `meta.code_investigation_request` when present.
+   - `web_context` — browse/search only when current external facts genuinely
+     affect the answer.
+   - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
+     decisions, and risky defaults.
+   - `answer_simplifier` — turn the question into 2-3 easy choices or one
+     concise draft answer.
+   - `architecture_implications` — check whether the answer changes ownership,
+     interfaces, rollout, or system shape.
+
+   Synthesize advisory results into a compact helper for the user: 2-3 answer
+   options, one recommended draft, or a short "I found these ambiguities" note.
+   Do not forward advisory output to `ouroboros_interview` until the user
+   approves, edits, or explicitly asks you to auto-confirm a safe answer.
+   When `meta.question_advisory_subagents` is present, treat each entry as a
+   spawn-ready advisory payload with `title`, `agent`, `prompt`, and `context`;
+   dispatch those payloads through the runtime's native subagent primitive
+   instead of reconstructing prompts from prose. Preserve the original question
+   text while advisory children run.
+
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
    as a required lightweight subagent review for that turn. The interview just
@@ -171,7 +201,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `progress -> refined`, or `refined -> ready`, which is exactly when hidden
    assumptions tend to matter.
 
-   Before answering or asking the returned question:
+   After showing the returned question to the user:
    - Tell the user briefly that a few perspectives are checking the question.
    - Call `ouroboros_lateral_think` with `meta.lateral_review_tool_args` when
      present. If only the legacy advisory fields are present, call it with
