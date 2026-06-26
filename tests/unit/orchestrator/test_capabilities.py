@@ -4872,10 +4872,7 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         "preserve_user_agency": True,
         "forward_to_mcp_only_after_user_or_auto_confirm": True,
     }
-    assert (
-        fanout["response_payload_refs"]["plugin"]
-        == "parent_runtime.ouroboros_dispatch.children"
-    )
+    assert fanout["response_payload_refs"]["plugin"] == "parent_runtime.ouroboros_dispatch.children"
     assert fanout["response_payload_refs"]["requires_prose_parsing"] is False
     assert fanout["response_payload_refs"]["synthesis_owner"] == "parent_session"
     assert "Show the MCP interview question to the user first" in fanout["runtime_instruction"]

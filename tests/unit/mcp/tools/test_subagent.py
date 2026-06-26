@@ -706,10 +706,7 @@ class TestBuildInterviewSubagent:
         assert "code_context" in p.prompt
         assert "ambiguity_contrarian" in p.prompt
         assert "answer_simplifier" in p.prompt
-        assert (
-            p.context["question_advisory_strategy"]
-            == "plugin_child_question_first_advisory"
-        )
+        assert p.context["question_advisory_strategy"] == "plugin_child_question_first_advisory"
 
 
 class TestBuildInterviewQuestionAdvisorySubagents:

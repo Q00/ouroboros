@@ -1064,8 +1064,9 @@ describe("OuroborosBridge hook — metadata advisory fanout", () => {
     expect(text.startsWith(originalQuestion)).toBe(true)
     expect(text).toContain("[Ouroboros] Dispatched 2 subagents.")
     expect(text).toContain('"question_advisory_recommended": true')
-    expect(output.metadata.ouroboros_dispatch.status).toBe("dispatched")
-    expect(output.metadata.ouroboros_children).toEqual([
+    const metadata = output.metadata as Record<string, any>
+    expect(metadata.ouroboros_dispatch.status).toBe("dispatched")
+    expect(metadata.ouroboros_children).toEqual([
       { title: "Interview advisory: code_context", childID: "child_1" },
       { title: "Interview advisory: answer_simplifier", childID: "child_2" },
     ])
