@@ -16,6 +16,7 @@ from ouroboros.config import (
     get_hermes_cli_path,
     get_kiro_cli_path,
     get_llm_backend,
+    get_opencode_stdout_idle_timeout_seconds,
     get_runtime_profile,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
@@ -96,6 +97,11 @@ def create_agent_runtime(
         return OpenCodeRuntime(
             cli_path=cli_path or get_opencode_cli_path(),
             opencode_mode="subprocess",
+            stdout_idle_timeout_seconds=(
+                stdout_idle_timeout_seconds
+                if stdout_idle_timeout_seconds is not None
+                else get_opencode_stdout_idle_timeout_seconds()
+            ),
             **runtime_kwargs,
         )
 

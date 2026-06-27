@@ -24,6 +24,7 @@ import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -72,6 +73,53 @@ _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
 _CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
+_STDOUT_IDLE_TIMEOUT_ENV = "OUROBOROS_OPENCODE_STDOUT_IDLE_TIMEOUT"
+
+
+def _resolve_timeout_override(
+    explicit: float | None,
+    env_name: str,
+    fallback: float | None,
+) -> float | None:
+    """Resolve an OpenCode stream-timeout override.
+
+    Priority: explicit kwarg -> environment variable -> class fallback.
+    Non-positive values disable the stream-loop guard so long silent reasoning
+    can be governed by the orchestrator's higher-level watchdog instead.
+    """
+    if explicit is not None:
+        candidate = explicit
+    else:
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            candidate = fallback
+        else:
+            try:
+                candidate = float(raw)
+            except ValueError:
+                log.warning(
+                    "opencode_runtime.timeout_env_invalid",
+                    env=env_name,
+                    raw=raw,
+                    fallback=fallback,
+                )
+                candidate = fallback
+
+    if candidate is None:
+        return None
+    if not math.isfinite(candidate):
+        log.warning(
+            "opencode_runtime.timeout_non_finite_rejected",
+            env=env_name,
+            value=candidate,
+            fallback=fallback,
+        )
+        candidate = fallback
+    if candidate is None:
+        return None
+    if candidate <= 0:
+        return None
+    return candidate
 
 
 class OpenCodeRuntime:
@@ -149,6 +197,7 @@ class OpenCodeRuntime:
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
         opencode_mode: str | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         """Initialise the OpenCode runtime.
 
@@ -182,6 +231,11 @@ class OpenCodeRuntime:
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
         self._opencode_mode = opencode_mode
+        self._stdout_idle_timeout_seconds = _resolve_timeout_override(
+            stdout_idle_timeout_seconds,
+            _STDOUT_IDLE_TIMEOUT_ENV,
+            type(self)._stdout_idle_timeout_seconds,
+        )
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         log.info(
@@ -190,6 +244,7 @@ class OpenCodeRuntime:
             permission_mode=permission_mode,
             model=model,
             cwd=self._cwd,
+            stdout_idle_timeout_seconds=self._stdout_idle_timeout_seconds,
         )
 
     # -- AgentRuntime protocol properties ----------------------------------

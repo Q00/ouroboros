@@ -1147,6 +1147,33 @@ def get_opencode_cli_path() -> str | None:
     return None
 
 
+def get_opencode_stdout_idle_timeout_seconds() -> float | None:
+    """Get OpenCode stdout-idle timeout from environment or config.
+
+    Priority:
+        1. OUROBOROS_OPENCODE_STDOUT_IDLE_TIMEOUT environment variable
+        2. config.yaml orchestrator.opencode_stdout_idle_timeout_seconds
+        3. None (runtime class default)
+
+    Non-positive environment values disable the runtime stream-loop guard.
+    Invalid values fall through to config/default behavior.
+    """
+    env_value = os.environ.get("OUROBOROS_OPENCODE_STDOUT_IDLE_TIMEOUT", "").strip()
+    if env_value:
+        try:
+            parsed = float(env_value)
+        except ValueError:
+            parsed = None
+        if parsed is not None and math.isfinite(parsed):
+            return None if parsed <= 0 else parsed
+
+    try:
+        config = load_config()
+        return config.orchestrator.opencode_stdout_idle_timeout_seconds
+    except ConfigError:
+        return None
+
+
 def get_hermes_cli_path() -> str | None:
     """Get Hermes CLI path from environment variable or config file.
 

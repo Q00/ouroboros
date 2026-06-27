@@ -326,6 +326,37 @@ class TestCreateAgentRuntime:
         assert isinstance(runtime, OpenCodeRuntime)
         assert runtime._opencode_mode == "subprocess"
 
+    def test_create_opencode_runtime_accepts_stdout_idle_timeout_override(self) -> None:
+        """OpenCode seed execution can disable quiet-stream guards explicitly."""
+        with patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=object(),
+        ):
+            runtime = create_agent_runtime(
+                backend="opencode",
+                stdout_idle_timeout_seconds=0,
+            )
+
+        assert isinstance(runtime, OpenCodeRuntime)
+        assert runtime._stdout_idle_timeout_seconds is None
+
+    def test_create_opencode_runtime_uses_configured_stdout_idle_timeout(self) -> None:
+        """Factory wires the OpenCode-specific idle timeout config into runtime."""
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_opencode_stdout_idle_timeout_seconds",
+                return_value=1800.0,
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=object(),
+            ),
+        ):
+            runtime = create_agent_runtime(backend="opencode")
+
+        assert isinstance(runtime, OpenCodeRuntime)
+        assert runtime._stdout_idle_timeout_seconds == 1800.0
+
     def test_opencode_runtime_ignores_config_plugin_mode(self) -> None:
         """Even when config says plugin, runtime factory forces subprocess.
 

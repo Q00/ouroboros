@@ -527,6 +527,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     codex_cli_path: str | None = None
     copilot_cli_path: str | None = None
     opencode_cli_path: str | None = None
+    opencode_stdout_idle_timeout_seconds: float | None = Field(default=None, gt=0.0)
     hermes_cli_path: str | None = None
     gemini_cli_path: str | None = None
     kiro_cli_path: str | None = None
