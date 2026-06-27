@@ -16,8 +16,10 @@ from ouroboros.cli.commands.run import (
     _resolve_max_decomposition_depth,
     _resolve_max_parallel_workers,
     _resolve_resume_fat_harness_mode,
+    _resolve_run_execute_runtime_backend,
     _run_orchestrator,
 )
+from ouroboros.config.models import OrchestratorConfig, OuroborosConfig, RuntimeProfileConfig
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.evaluation.verification_artifacts import VerificationArtifacts
@@ -781,6 +783,50 @@ async def test_run_orchestrator_passes_execution_model_to_runtime(
 
     assert mock_runtime.call_args.kwargs["backend"] == "pi"
     assert mock_runtime.call_args.kwargs["model"] == "openai-codex/gpt-5.4-mini"
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrator_honors_execute_stage_runtime_profile(tmp_path: Path) -> None:
+    """CLI run should route execution through runtime_profile.stages.execute."""
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+
+    fake_exec = SimpleNamespace(
+        success=True,
+        session_id="sess-test",
+        messages_processed=5,
+        duration_seconds=1.0,
+        execution_id="exec-test",
+        summary={},
+        final_message="done",
+    )
+    mock_runner = MagicMock()
+    mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+    mock_runner.resume_session = AsyncMock()
+    config = OuroborosConfig(
+        orchestrator=OrchestratorConfig(
+            runtime_backend="claude",
+            runtime_profile=RuntimeProfileConfig(stages={"execute": "opencode"}),
+        )
+    )
+
+    with (
+        patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
+        patch("ouroboros.cli.commands.run.load_config", return_value=config),
+        patch("ouroboros.orchestrator.create_agent_runtime") as mock_runtime,
+        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
+    ):
+        mock_event_store_cls.return_value.initialize = AsyncMock()
+        await _run_orchestrator(seed_file, no_qa=True)
+
+    assert mock_runtime.call_args.kwargs["backend"] == "opencode"
+    assert mock_runtime.call_args.kwargs["model"] is None
+
+
+def test_run_execute_runtime_cli_override_wins_over_profile() -> None:
+    """An explicit --runtime value remains authoritative for ooo run."""
+    assert _resolve_run_execute_runtime_backend("codex") == "codex"
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_max_parallel_workers
+from ouroboros.config.loader import get_config_dir, get_max_parallel_workers, load_config
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -34,6 +34,7 @@ from ouroboros.core.worktree import (
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
+from ouroboros.orchestrator_stage import Stage, parse_stage, resolve_runtime_for_stage
 
 
 def _resolve_execution_model(runtime_backend: str | None) -> str | None:
@@ -44,6 +45,39 @@ def _resolve_execution_model(runtime_backend: str | None) -> str | None:
     if runtime_backend == "claude":
         return DEFAULT_SONNET_MODEL
     return None
+
+
+def _resolve_run_execute_runtime_backend(runtime_backend: str | None) -> str | None:
+    """Resolve the agent runtime backend for ``ooo run``'s execute stage.
+
+    ``--runtime`` remains an explicit override. Without it, ``ooo run`` honors
+    the same ``orchestrator.runtime_profile`` execute-stage routing used by
+    auto/MCP, while a missing config preserves the historical ``backend=None``
+    factory fallback.
+    """
+    if runtime_backend is not None:
+        return runtime_backend
+
+    try:
+        config = load_config()
+    except ConfigError:
+        if (get_config_dir() / "config.yaml").exists():
+            raise
+        return None
+
+    profile = config.orchestrator.runtime_profile
+    if profile is None:
+        return None
+
+    from ouroboros.orchestrator import resolve_agent_runtime_backend
+
+    resolved = resolve_runtime_for_stage(
+        Stage.EXECUTE,
+        stages={parse_stage(stage): backend for stage, backend in profile.stages.items()},
+        default=profile.default,
+        fallback=config.orchestrator.runtime_backend,
+    )
+    return resolve_agent_runtime_backend(resolved)
 
 
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
@@ -630,9 +664,10 @@ async def _run_orchestrator(
         print_info(f"Task worktree: {workspace.worktree_path}")
         print_info(f"Task branch: {workspace.branch}")
 
+    execute_runtime_backend = _resolve_run_execute_runtime_backend(runtime_backend)
     adapter = create_agent_runtime(
-        backend=runtime_backend,
-        model=_resolve_execution_model(runtime_backend),
+        backend=execute_runtime_backend,
+        model=_resolve_execution_model(execute_runtime_backend),
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
     runner = OrchestratorRunner(
