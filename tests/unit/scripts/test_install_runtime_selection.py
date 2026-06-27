@@ -207,6 +207,32 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     ]
 
 
+def test_explicit_goose_installs_base_and_runs_goose_setup(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "goose"},
+        fake_commands={"goose": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "Runtime: goose (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
+    assert "ouroboros setup --runtime goose --non-interactive" in calls
+
+
+def test_explicit_gjc_installs_base_and_runs_gjc_setup(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "gjc"},
+        fake_commands={"gjc": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "Runtime: gjc (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
+    assert "ouroboros setup --runtime gjc --non-interactive" in calls
+
+
 def test_uv_install_setup_prefers_fresh_tool_bin_over_stale_path_command(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
@@ -288,6 +314,74 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
         "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
     ]
+
+
+def test_explicit_codex_refreshes_codex_artifacts(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "codex"},
+        fake_commands={"codex": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros setup --runtime codex --non-interactive" in calls
+    assert "ouroboros codex refresh" in calls
+
+
+def test_preserved_non_codex_runtime_still_refreshes_codex_when_detected(tmp_path: Path) -> None:
+    config_dir = tmp_path / "home" / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: opencode\n",
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"codex": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros setup --runtime opencode --non-interactive" in calls
+    assert "ouroboros codex refresh" in calls
+
+
+def test_preserved_codex_runtime_refreshes_claude_skills_when_detected(tmp_path: Path) -> None:
+    config_dir = tmp_path / "home" / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: codex\n",
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={
+            "claude": (
+                f'#!/bin/sh\nprintf "claude %s\\n" "$*" >> {tmp_path / "calls.log"}\nexit 0\n'
+            ),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros setup --runtime codex --non-interactive" in calls
+    assert "claude plugin marketplace update ouroboros" in calls
+    assert "claude plugin install ouroboros@ouroboros" in calls
+    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
+
+
+def test_all_runtime_install_refreshes_codex_artifacts(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
+    assert "ouroboros codex refresh" in calls
 
 
 def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path) -> None:

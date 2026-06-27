@@ -4,7 +4,7 @@
 #
 # Runtime selection (first match wins):
 #   1. OUROBOROS_INSTALL_RUNTIME env var
-#      (claude|codex|opencode|hermes|gemini|kiro|copilot|pi|all)
+#      (claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|all)
 #   2. Existing ~/.ouroboros/config.yaml runtime — preserved on upgrade
 #      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
 #   3. Interactive prompt when stdin is a TTY.
@@ -214,7 +214,7 @@ if [ "$HAS_UV" = false ]; then
 fi
 
 # 2. Detect runtimes
-_step "2/4  Choosing an agent backend" "Codex, Claude, Hermes, OpenCode, Gemini, Kiro, Copilot, and Pi are supported."
+_step "2/4  Choosing an agent backend" "Codex, Claude, Hermes, OpenCode, Gemini, Goose, Kiro, Copilot, Pi, and GJC are supported."
 EXTRAS=""
 RUNTIME=""
 HAS_CODEX=false
@@ -222,9 +222,11 @@ HAS_CLAUDE=false
 HAS_HERMES=false
 HAS_OPENCODE=false
 HAS_GEMINI=false
+HAS_GOOSE=false
 HAS_KIRO=false
 HAS_COPILOT=false
 HAS_PI=false
+HAS_GJC=false
 if command -v codex &>/dev/null; then
   _ok "Codex found: $(which codex)"
   HAS_CODEX=true
@@ -245,6 +247,10 @@ if command -v gemini &>/dev/null; then
   _ok "Gemini found: $(which gemini)"
   HAS_GEMINI=true
 fi
+if command -v goose &>/dev/null; then
+  _ok "Goose found: $(which goose)"
+  HAS_GOOSE=true
+fi
 if command -v kiro-cli &>/dev/null; then
   _ok "Kiro found: $(which kiro-cli)"
   HAS_KIRO=true
@@ -257,6 +263,10 @@ if command -v pi &>/dev/null; then
   _ok "Pi: $(which pi)"
   HAS_PI=true
 fi
+if command -v gjc &>/dev/null; then
+  _ok "GJC found: $(which gjc)"
+  HAS_GJC=true
+fi
 
 RUNTIME_COUNT=0
 [ "$HAS_CLAUDE" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
@@ -264,9 +274,11 @@ RUNTIME_COUNT=0
 [ "$HAS_HERMES" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_OPENCODE" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_GEMINI" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_GOOSE" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_KIRO" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_COPILOT" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 [ "$HAS_PI" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_GJC" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
 
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
@@ -282,14 +294,16 @@ _runtime_to_extras() {
     opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
     hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
     gemini)  EXTRAS="[tui]"; RUNTIME="gemini" ;;
+    goose)   EXTRAS="[tui]"; RUNTIME="goose" ;;
     kiro)    EXTRAS="[tui]"; RUNTIME="kiro" ;;
     copilot) EXTRAS="[tui]"; RUNTIME="copilot" ;;
     pi)      EXTRAS="[tui]"; RUNTIME="pi" ;;
+    gjc)     EXTRAS="[tui]"; RUNTIME="gjc" ;;
     all)     EXTRAS="[all]"; RUNTIME="" ;;
     "")      EXTRAS="[tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
-      _info "Expected one of: claude, codex, opencode, hermes, gemini, kiro, copilot, pi, all"
+      _info "Expected one of: claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
       exit 1
       ;;
   esac
@@ -306,7 +320,7 @@ FRESH_CONFIG=true
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
-supported = {'claude', 'codex', 'opencode', 'hermes', 'gemini', 'kiro', 'copilot', 'pi'}
+supported = {'claude', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc'}
 try:
     lines = open(os.environ['EXISTING_CONFIG']).read().splitlines()
     in_orchestrator = False
@@ -344,10 +358,12 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
     _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
-    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 9 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 6 "Goose" "Goose CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 7 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
+    _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _prompt "Select [1]: "
     read -r choice
     case "${choice:-1}" in
@@ -355,10 +371,12 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
       3) _runtime_to_extras "hermes" ;;
       4) _runtime_to_extras "opencode" ;;
       5) _runtime_to_extras "gemini" ;;
-      6) _runtime_to_extras "kiro" ;;
-      7) _runtime_to_extras "copilot" ;;
-      8) _runtime_to_extras "pi" ;;
-      9) _runtime_to_extras "all" ;;
+      6) _runtime_to_extras "goose" ;;
+      7) _runtime_to_extras "kiro" ;;
+      8) _runtime_to_extras "copilot" ;;
+      9) _runtime_to_extras "pi" ;;
+      10) _runtime_to_extras "gjc" ;;
+      11) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
@@ -376,12 +394,16 @@ elif [ "$HAS_OPENCODE" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "opencode"
 elif [ "$HAS_GEMINI" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "gemini"
+elif [ "$HAS_GOOSE" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "goose"
 elif [ "$HAS_KIRO" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "kiro"
 elif [ "$HAS_COPILOT" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "copilot"
 elif [ "$HAS_PI" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
   _runtime_to_extras "pi"
+elif [ "$HAS_GJC" = true ] && [ "$RUNTIME_COUNT" -eq 1 ]; then
+  _runtime_to_extras "gjc"
 else
   # No runtime CLI on PATH yet — first install. Always prompt when interactive
   # so the user picks deliberately rather than silently defaulting to claude.
@@ -393,10 +415,12 @@ else
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
     _choice 5 "Gemini" "Gemini CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 6 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
-    _choice 7 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
-    _choice 8 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
-    _choice 9 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
+    _choice 6 "Goose" "Goose CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 7 "Kiro" "Kiro CLI integration (${PACKAGE_NAME}[tui])"
+    _choice 8 "Copilot" "GitHub Copilot integration (${PACKAGE_NAME}[tui])"
+    _choice 9 "Pi" "Pi CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 10 "GJC" "GJC CLI bridge and instruction artifacts (${PACKAGE_NAME}[tui])"
+    _choice 11 "All" "Install every optional integration (${PACKAGE_NAME}[all])"
     _choice 0 "None" "Base CLI only; choose a backend later"
     _prompt "Select [1]: "
     read -r choice
@@ -406,17 +430,19 @@ else
       3) _runtime_to_extras "hermes" ;;
       4) _runtime_to_extras "opencode" ;;
       5) _runtime_to_extras "gemini" ;;
-      6) _runtime_to_extras "kiro" ;;
-      7) _runtime_to_extras "copilot" ;;
-      8) _runtime_to_extras "pi" ;;
-      9) _runtime_to_extras "all" ;;
+      6) _runtime_to_extras "goose" ;;
+      7) _runtime_to_extras "kiro" ;;
+      8) _runtime_to_extras "copilot" ;;
+      9) _runtime_to_extras "pi" ;;
+      10) _runtime_to_extras "gjc" ;;
+      11) _runtime_to_extras "all" ;;
       *) _runtime_to_extras "claude" ;;
     esac
   else
     # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
     _blank
     _warn "No runtime detected in non-interactive mode; installing the base package."
-    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
+    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
     _runtime_to_extras ""
   fi
 fi
@@ -530,10 +556,16 @@ if [ -z "$OUROBOROS_BIN" ] && ! command -v ouroboros &>/dev/null; then
   done
 fi
 
+OUROBOROS_SETUP_CMD=""
+if [ -n "$OUROBOROS_BIN" ]; then
+  OUROBOROS_SETUP_CMD="$OUROBOROS_BIN"
+elif command -v ouroboros &>/dev/null; then
+  OUROBOROS_SETUP_CMD="ouroboros"
+fi
+
 # 4. Setup (ouroboros CLI configures runtime-specific integration)
 _step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
-if [ -n "$RUNTIME" ] && { [ -n "$OUROBOROS_BIN" ] || command -v ouroboros &>/dev/null; }; then
-  OUROBOROS_SETUP_CMD="${OUROBOROS_BIN:-ouroboros}"
+if [ -n "$RUNTIME" ] && [ -n "$OUROBOROS_SETUP_CMD" ]; then
   _info "Running: $OUROBOROS_SETUP_CMD setup --runtime $RUNTIME --non-interactive"
   "$OUROBOROS_SETUP_CMD" setup --runtime "$RUNTIME" --non-interactive || true
 elif [ -n "$RUNTIME" ]; then
@@ -542,9 +574,24 @@ else
   _info "No backend selected; skipping runtime setup."
 fi
 
+# Refresh Codex rules/skills whenever this machine appears to use Codex, even
+# if the preserved primary runtime is another backend. Setup already does this
+# for `--runtime codex`, but upgrades and `all` installs should not leave stale
+# ~/.codex artifacts behind.
+if [ -n "$OUROBOROS_SETUP_CMD" ] && {
+  [ "$RUNTIME" = "codex" ] ||
+    [ "$EXTRAS" = "[all]" ] ||
+    [ "$HAS_CODEX" = true ] ||
+    [ -d "$HOME/.codex" ]
+}; then
+  _info "Refreshing Codex rules and skills"
+  "$OUROBOROS_SETUP_CMD" codex refresh || _warn "Codex artifact refresh skipped; run: ouroboros codex refresh"
+fi
+
 # 5. Claude Code integration (MCP + skills)
-# Only apply Claude-specific integration when Claude was the selected runtime,
-# or when the user explicitly asked for the all-runtimes install.
+# MCP registration changes Claude's tool wiring, so keep it tied to Claude/all.
+# Skill refresh is artifact-only and should happen whenever Claude is present;
+# otherwise a Codex-primary upgrade can leave Claude Code reading stale skills.
 if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
   _blank
   _say "${BLUE}◆${RESET} ${BOLD}Claude Code extras${RESET}"
@@ -616,7 +663,13 @@ with open(mcp_file, 'w') as f:
   else
     _warn "MCP skipped: no python3 found. Add the entry manually to $MCP_FILE."
   fi
+fi
 
+if command -v claude &>/dev/null; then
+  if ! { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
+    _blank
+    _say "${BLUE}◆${RESET} ${BOLD}Claude Code skills${RESET}"
+  fi
   # 5b. Install/update Ouroboros skills (claude plugin)
   _info "Installing Ouroboros skills via Claude plugin marketplace..."
   claude plugin marketplace add Q00/ouroboros 2>/dev/null || true
@@ -637,7 +690,7 @@ _info 'Or from the terminal: ouroboros init start "your idea here"'
 if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
-_info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|kiro|copilot|pi>"
+_info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
 _say "${BOLD}Settings GUI — pick per-stage agents & models${RESET}"
 _info 'Inside your AI agent: > ooo config   (opens in your browser)'
 _info 'From this terminal:  ouroboros config   (full-screen TUI)'
