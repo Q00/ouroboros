@@ -136,7 +136,24 @@ def test_codex_skill_execution_guidance_is_registry_owned() -> None:
 
     assert capability is not None
     names = {item.name for item in capability.skill_execution_capabilities}
-    assert names == REQUIRED_SKILL_CAPABILITY_NAMES
+    # Codex additionally exposes host-driven subagent orchestration guidance so
+    # the host model fans out the inline ``host_driven`` dispatch itself.
+    assert names == REQUIRED_SKILL_CAPABILITY_NAMES | {"orchestrate_subagents"}
+
+
+def test_codex_host_driven_subagent_orchestration_is_registry_owned() -> None:
+    capability = get_backend_capability("codex")
+
+    assert capability is not None
+    assert capability.supports_host_driven_subagents is True
+    assert capability.supports_native_parallel_subagents is False
+
+    guide = render_backend_skill_capability_guide("codex")
+    assert "### When a skill requires `orchestrate_subagents`" in guide
+    assert "dispatch_mode=host_driven" in guide
+    assert "host_action=spawn_subagents" in guide
+    assert "multi_agent_v1.spawn_agent" in guide
+    assert "context.persona" in guide
 
 
 def test_generic_skill_execution_guidance_covers_interview_requirements() -> None:
@@ -163,14 +180,16 @@ def test_native_parallel_subagent_runtime_exposes_orchestrate_subagents() -> Non
 
 
 def test_unsupported_parallel_subagent_runtime_gets_sequential_fallback_contract() -> None:
+    # ``gemini`` has neither a passive bridge nor a host-driven primitive flag,
+    # so it stays on the sequential-fallback branch.
     contract = build_runtime_subagent_orchestration_contract(
-        "codex_cli",
+        "gemini_cli",
         directive_metadata=_LATERAL_PANEL_DIRECTIVE_METADATA,
     )
 
-    assert contract.backend_name == "codex"
+    assert contract.backend_name == "gemini"
     assert contract.supports_native_parallel_subagents is False
-    assert contract.dispatch_mode == "sequential_fallback"
+    assert contract.dispatch_mode == "sequential"
     assert contract.mcp_directive_keys == ("_subagent", "_subagents")
     assert contract.sequential_fallback == {
         "supported": True,
@@ -186,16 +205,37 @@ def test_unsupported_parallel_subagent_runtime_gets_sequential_fallback_contract
     )
 
 
+def test_host_driven_runtime_gets_host_driven_contract() -> None:
+    """Codex has a native primitive but no passive bridge → host_driven contract.
+
+    Guards against the contract regressing to ``sequential_fallback`` (which
+    would emit a wrong instruction once a consumer reads the contract) while
+    the resolver says ``host_driven``.
+    """
+    contract = build_runtime_subagent_orchestration_contract(
+        "codex_cli",
+        directive_metadata=_LATERAL_PANEL_DIRECTIVE_METADATA,
+        opencode_mode="plugin",
+    )
+
+    assert contract.backend_name == "codex"
+    # The boolean is the *passive bridge* axis only — host-driven runtimes are False here.
+    assert contract.supports_native_parallel_subagents is False
+    assert contract.dispatch_mode == "host_driven"
+    assert "host_action=spawn_subagents" in contract.runtime_instruction_handling
+    assert "no passive" in contract.runtime_instruction_handling
+
+
 @pytest.mark.parametrize("directive_metadata", [{}, {"sequential_fallback": "invalid"}])
 def test_subagent_orchestration_contract_handles_absent_or_malformed_fallback(
     directive_metadata: dict[str, object],
 ) -> None:
     contract = build_runtime_subagent_orchestration_contract(
-        "codex_cli",
+        "gemini_cli",
         directive_metadata=directive_metadata,
     )
 
-    assert contract.dispatch_mode == "sequential_fallback"
+    assert contract.dispatch_mode == "sequential"
     assert contract.sequential_fallback == {}
     assert "MCP `sequential_fallback` contract" in contract.runtime_instruction_handling
 
@@ -209,7 +249,7 @@ def test_subagent_orchestration_cancel_job_capability_stays_callable_in_same_env
     )
     envelope = contract.to_dict()
 
-    assert envelope["dispatch_mode"] == "native_parallel_subagents"
+    assert envelope["dispatch_mode"] == "plugin_passive"
     assert envelope["mcp_directive_keys"] == ["_subagent", "_subagents"]
     assert envelope["callable_mcp_tool_capabilities"] == [_CANCEL_JOB_CAPABILITY]
 
@@ -248,7 +288,7 @@ def test_opencode_without_plugin_surface_uses_sequential_fallback(
 
     assert contract.backend_name == "opencode"
     assert contract.supports_native_parallel_subagents is False
-    assert contract.dispatch_mode == "sequential_fallback"
+    assert contract.dispatch_mode == "sequential"
     assert "no native parallel subagent primitive" in contract.runtime_instruction_handling
 
 
@@ -261,7 +301,7 @@ def test_opencode_plugin_surface_uses_native_parallel_subagents() -> None:
 
     assert contract.backend_name == "opencode"
     assert contract.supports_native_parallel_subagents is True
-    assert contract.dispatch_mode == "native_parallel_subagents"
+    assert contract.dispatch_mode == "plugin_passive"
     assert "opencode_mode=plugin" in contract.runtime_instruction_handling
 
 

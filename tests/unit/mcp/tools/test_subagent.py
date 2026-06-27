@@ -1021,6 +1021,74 @@ class TestShouldDispatchViaPlugin:
         assert should_dispatch_via_plugin("OPENCODE", "Subprocess") is False
 
 
+class TestResolveSubagentDispatch:
+    """resolve_subagent_dispatch() — the 3-way source of truth."""
+
+    def test_opencode_plugin_is_plugin_passive(self) -> None:
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        assert (
+            resolve_subagent_dispatch("opencode", "plugin") is SubagentDispatchMode.PLUGIN_PASSIVE
+        )
+        assert (
+            resolve_subagent_dispatch("opencode_cli", "plugin")
+            is SubagentDispatchMode.PLUGIN_PASSIVE
+        )
+
+    def test_codex_is_host_driven_even_with_plugin_mode(self) -> None:
+        """Codex has a native primitive but no passive bridge — never plugin_passive."""
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        # The real user config: runtime=codex, opencode_mode=plugin.
+        assert resolve_subagent_dispatch("codex", "plugin") is SubagentDispatchMode.HOST_DRIVEN
+        assert resolve_subagent_dispatch("codex", None) is SubagentDispatchMode.HOST_DRIVEN
+        assert (
+            resolve_subagent_dispatch("codex_cli", "subprocess") is SubagentDispatchMode.HOST_DRIVEN
+        )
+
+    def test_runtimes_without_any_subagent_surface_are_sequential(self) -> None:
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        for backend in ("claude", "gemini", "gjc", "opencode", "", None):
+            assert resolve_subagent_dispatch(backend, None) is SubagentDispatchMode.SEQUENTIAL, (
+                backend
+            )
+        # OpenCode without the plugin surface is sequential, not plugin_passive.
+        assert (
+            resolve_subagent_dispatch("opencode", "subprocess") is SubagentDispatchMode.SEQUENTIAL
+        )
+
+    def test_should_dispatch_is_plugin_passive_alias(self) -> None:
+        """should_dispatch_via_plugin must stay exactly True iff PLUGIN_PASSIVE."""
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+            should_dispatch_via_plugin,
+        )
+
+        for backend, mode in (
+            ("opencode", "plugin"),
+            ("opencode", "subprocess"),
+            ("codex", "plugin"),
+            ("claude", None),
+            ("gemini", "plugin"),
+            (None, None),
+        ):
+            expected = (
+                resolve_subagent_dispatch(backend, mode) is SubagentDispatchMode.PLUGIN_PASSIVE
+            )
+            assert should_dispatch_via_plugin(backend, mode) is expected
+
+
 class TestEmitSubagentDispatchedEvent:
     """emit_subagent_dispatched_event() audit emission."""
 

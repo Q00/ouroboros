@@ -44,11 +44,13 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
+    SubagentDispatchMode,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
+    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -696,8 +698,16 @@ def _attach_question_assist_requests(
     phase: str,
     score: AmbiguityScore | None,
     last_question: str | None = None,
+    dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
 ) -> None:
-    """Attach code-fact and advisory fanout requests for a question turn."""
+    """Attach code-fact and advisory fanout requests for a question turn.
+
+    ``dispatch_mode`` carries the runtime's resolved subagent dispatch mode. On
+    a ``HOST_DRIVEN`` runtime (e.g. Codex) there is no passive bridge to consume
+    ``question_advisory_subagents``, so the response is stamped with an explicit
+    ``host_action=spawn_subagents`` cue for the host model to fan the advisory
+    lanes out itself.
+    """
     code_request = _build_code_investigation_request(
         session_id=session_id,
         question=question,
@@ -725,6 +735,9 @@ def _attach_question_assist_requests(
         return
     meta["question_advisory_subagents"] = [payload.to_dict() for payload in advisory_payloads]
     meta["question_advisory_preserve_content"] = True
+    if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
+        meta["question_advisory_dispatch_mode"] = "host_driven"
+        meta["question_advisory_host_action"] = "spawn_subagents"
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -2496,6 +2509,9 @@ class InterviewHandler:
                         question=question,
                         phase="start",
                         score=live_score,
+                        dispatch_mode=resolve_subagent_dispatch(
+                            self.agent_runtime_backend, self.opencode_mode
+                        ),
                     )
 
                 start_response_text = (
@@ -2588,6 +2604,9 @@ class InterviewHandler:
                             question=pending_question,
                             phase="resume_pending",
                             score=_load_state_ambiguity_score(state),
+                            dispatch_mode=resolve_subagent_dispatch(
+                                self.agent_runtime_backend, self.opencode_mode
+                            ),
                         )
 
                     resume_response_text = f"Session {session_id}\n\n{display_question}"
@@ -3137,6 +3156,9 @@ class InterviewHandler:
                         question=question,
                         phase="answer",
                         score=live_score,
+                        dispatch_mode=resolve_subagent_dispatch(
+                            self.agent_runtime_backend, self.opencode_mode
+                        ),
                     )
 
                 if lateral_review_dispatch_meta is not None:

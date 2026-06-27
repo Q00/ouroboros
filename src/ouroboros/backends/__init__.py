@@ -4,6 +4,7 @@ from ouroboros.backends.capabilities import (
     BackendCapability,
     RuntimeSubagentOrchestrationContract,
     SkillExecutionCapability,
+    SubagentDispatchMode,
     backend_supports_tool_envelope,
     build_runtime_subagent_orchestration_contract,
     get_backend_capability,
@@ -14,6 +15,7 @@ from ouroboros.backends.capabilities import (
     resolve_interview_driver_backend,
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
+    resolve_subagent_dispatch,
     runtime_backend_choices,
     soft_tool_enforcement_backends,
 )
@@ -22,6 +24,7 @@ __all__ = [
     "BackendCapability",
     "RuntimeSubagentOrchestrationContract",
     "SkillExecutionCapability",
+    "SubagentDispatchMode",
     "backend_supports_tool_envelope",
     "build_runtime_subagent_orchestration_contract",
     "get_backend_capability",
@@ -32,6 +35,7 @@ __all__ = [
     "resolve_interview_driver_backend",
     "resolve_llm_backend_name",
     "resolve_runtime_backend_name",
+    "resolve_subagent_dispatch",
     "runtime_backend_choices",
     "soft_tool_enforcement_backends",
 ]

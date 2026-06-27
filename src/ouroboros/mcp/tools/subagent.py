@@ -43,6 +43,10 @@ from typing import Any
 from jsonschema import Draft202012Validator
 import structlog
 
+from ouroboros.backends.capabilities import (
+    SubagentDispatchMode,
+    resolve_subagent_dispatch,
+)
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.types import (
@@ -755,9 +759,6 @@ def build_subagent_result(
 # ---------------------------------------------------------------------------
 
 
-_OPENCODE_RUNTIMES = frozenset({"opencode", "opencode_cli"})
-
-
 def should_dispatch_via_plugin(
     runtime_backend: str | None,
     opencode_mode: str | None,
@@ -769,15 +770,11 @@ def should_dispatch_via_plugin(
     (claude, codex, opencode subprocess, none) the envelope has no receiver
     and the handler must run the real in-process execution path instead.
 
-    Rules:
-        - runtime_backend not OpenCode → False.
-        - runtime_backend OpenCode, opencode_mode="plugin" → True.
-        - runtime_backend OpenCode, opencode_mode="subprocess" → False.
-        - runtime_backend OpenCode, opencode_mode None/empty → False.
-            Safe default: upgraded users who haven't re-run ``ouroboros setup``
-            will have opencode_mode=None. They don't have the bridge plugin
-            installed, so dispatching envelopes would break their flows.
-            Require explicit opt-in via ``ouroboros setup --opencode-mode=plugin``.
+    This is now a thin alias over :func:`resolve_subagent_dispatch` — it is
+    True iff the resolved mode is ``PLUGIN_PASSIVE`` — so existing call sites
+    keep their exact behaviour while the 3-way resolver becomes the source of
+    truth. New code should prefer :func:`resolve_subagent_dispatch` to also
+    distinguish ``HOST_DRIVEN`` from ``SEQUENTIAL``.
 
     Args:
         runtime_backend: Resolved agent runtime backend name.
@@ -786,11 +783,10 @@ def should_dispatch_via_plugin(
     Returns:
         True when dispatch envelope should be returned; False otherwise.
     """
-    backend = (runtime_backend or "").strip().lower()
-    if backend not in _OPENCODE_RUNTIMES:
-        return False
-    mode = (opencode_mode or "").strip().lower()
-    return mode == "plugin"
+    return (
+        resolve_subagent_dispatch(runtime_backend, opencode_mode)
+        is SubagentDispatchMode.PLUGIN_PASSIVE
+    )
 
 
 def _truncate_tail(text: str | None, max_chars: int) -> str:

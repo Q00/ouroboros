@@ -273,6 +273,56 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     handler._emit_event_bg.assert_called()
 
 
+async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None:
+    """Codex (host-driven) advisory fanout must carry an explicit spawn directive."""
+    state = InterviewState(
+        interview_id="sess-codex",
+        ambiguity_score=None,
+        rounds=[
+            InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+            InterviewRound(round_number=2, question="Q2?", user_response="A2"),
+            InterviewRound(round_number=3, question="Q3?", user_response=None),
+        ],
+    )
+
+    async def record_response(
+        state: InterviewState, user_response: str, question: str
+    ) -> Result[InterviewState, object]:
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=user_response,
+            )
+        )
+        return Result.ok(state)
+
+    mock_engine = MagicMock()
+    mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+    mock_engine.record_response = AsyncMock(side_effect=record_response)
+    mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    mock_engine.ask_next_question = AsyncMock(return_value=Result.ok("What edge case remains?"))
+
+    handler = InterviewHandler(
+        interview_engine=mock_engine,
+        agent_runtime_backend="codex",
+        opencode_mode="plugin",
+    )
+    handler.llm_adapter = MagicMock()
+    handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+
+    result = await handler.handle({"session_id": "sess-codex", "answer": "A3"})
+
+    assert result.is_ok
+    meta = result.value.meta
+    # Advisory lanes are still attached...
+    assert len(meta["question_advisory_subagents"]) == 5
+    # ...but now stamped so the Codex host fans them out itself.
+    assert meta["question_advisory_dispatch_mode"] == "host_driven"
+    assert meta["question_advisory_host_action"] == "spawn_subagents"
+
+
 def test_lateral_orchestration_falls_back_to_skill_prose_when_panel_metadata_absent() -> None:
     tool_args = {
         "problem_context": (

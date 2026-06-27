@@ -411,6 +411,39 @@ async def test_inline_lateral_content_converts_to_sequential_persona_panel_entri
 
 
 @pytest.mark.asyncio
+async def test_codex_runtime_emits_host_driven_spawn_directive() -> None:
+    """Codex has a native subagent primitive but no passive bridge → host_driven.
+
+    Regression guard for the real user config (``runtime=codex`` with
+    ``opencode_mode=plugin``): codex must NOT be misrouted to the passive
+    ``plugin`` envelope path; it must get an explicit host-driven spawn stamp.
+    """
+    handler = LateralThinkHandler(
+        agent_runtime_backend="codex",
+        opencode_mode="plugin",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs a lightweight review",
+            "current_approach": "ask the next Socratic question",
+            "personas": ["researcher", "simplifier"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta["dispatch_mode"] == "host_driven"
+    assert payload.meta["host_action"] == "spawn_subagents"
+    assert payload.meta["persona_count"] == 2
+    assert len(payload.meta["payloads"]) == 2
+    # Visible deterministic cue for transports that drop ``meta``.
+    assert "Host action — spawn subagents" in payload.text_content
+    # The inline base64 dispatch block still rides in content for older consumers.
+    assert "ouroboros-lateral-inline-dispatch-v1" in payload.text_content
+
+
+@pytest.mark.asyncio
 async def test_sequential_lateral_consumer_receives_persona_payloads_in_order() -> None:
     """Sequential fallback consumers receive persona payloads in request order."""
     requested_personas = ["simplifier", "hacker", "researcher"]
