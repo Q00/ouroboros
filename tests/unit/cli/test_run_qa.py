@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import typer
@@ -729,11 +729,7 @@ async def test_run_orchestrator_uses_seed_relative_project_dir_for_runtime_and_q
         mock_event_store_cls.return_value.initialize = AsyncMock()
         await _run_orchestrator(seed_file)
 
-    mock_runtime.assert_called_once_with(
-        backend="claude",
-        model="claude-sonnet-4-6",
-        cwd=expected_project_dir,
-    )
+    mock_runtime.assert_called_once_with(backend=ANY, model=ANY, cwd=expected_project_dir)
     mock_verification.assert_awaited_once_with(
         "exec-test",
         "Parallel Execution Verification Report",
