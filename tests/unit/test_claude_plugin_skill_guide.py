@@ -17,6 +17,10 @@ def test_claude_plugin_interview_skill_includes_lateral_review_dispatch() -> Non
     skill_path = Path(".claude-plugin") / "skills" / "interview" / "SKILL.md"
     skill_text = skill_path.read_text(encoding="utf-8")
 
+    assert "question_advisory_subagents` is present you MUST fan out" in skill_text
+    assert "Task/Agent" in skill_text
+    assert "a reinforcing cue for host-driven runtimes" in skill_text
+    assert "as a prerequisite" in skill_text
     assert "`run_lateral_review`" in skill_text
     assert "**Milestone lateral-review dispatch**" in skill_text
     assert "meta.lateral_review_tool_args" in skill_text

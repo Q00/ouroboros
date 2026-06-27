@@ -317,7 +317,7 @@ async def test_interview_orchestration_reader_uses_capability_panel_metadata() -
 async def test_interview_orchestration_reader_honors_custom_capability_metadata() -> None:
     """Regression guard against hard-coded lateral panel metadata in the reader."""
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 
@@ -369,7 +369,7 @@ async def test_interview_orchestration_reader_honors_custom_capability_metadata(
 async def test_inline_lateral_content_converts_to_sequential_persona_panel_entries() -> None:
     """Content-only inline fallback still yields structured panel entries."""
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 
@@ -445,11 +445,36 @@ async def test_codex_runtime_emits_host_driven_spawn_directive() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claude_code_runtime_emits_host_driven_spawn_directive() -> None:
+    """Claude Code has Task/Agent fan-out but no passive bridge → host_driven."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="claude_code",
+        opencode_mode=None,
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "interview needs a lightweight review",
+            "current_approach": "ask the next Socratic question",
+            "personas": ["researcher", "simplifier"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta["dispatch_mode"] == "host_driven"
+    assert payload.meta["host_action"] == "spawn_subagents"
+    assert payload.meta["result_correlation_key"] == "context.persona"
+    assert len(payload.meta["payloads"]) == 2
+    assert "Host action — spawn subagents" in payload.text_content
+
+
+@pytest.mark.asyncio
 async def test_sequential_lateral_consumer_receives_persona_payloads_in_order() -> None:
     """Sequential fallback consumers receive persona payloads in request order."""
     requested_personas = ["simplifier", "hacker", "researcher"]
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 
@@ -497,7 +522,7 @@ async def test_sequential_lateral_synthesis_waits_for_configured_sequence_output
     """Sequential fallback gates synthesis until every ordered persona output arrives."""
     requested_personas = ["simplifier", "hacker", "researcher"]
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 
@@ -567,7 +592,7 @@ async def test_sequential_lateral_synthesis_precedes_interview_continuation() ->
     """Sequential fallback also synthesizes before the interview turn resumes."""
     requested_personas = ["simplifier", "hacker", "researcher"]
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 
@@ -672,7 +697,7 @@ async def test_multi_persona_subprocess_mode_falls_back_inline() -> None:
 async def test_multi_persona_non_opencode_runtime_falls_back_inline() -> None:
     """Non-OpenCode runtime → inline fallback regardless of ``opencode_mode``."""
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode="plugin",
     )
 
@@ -869,7 +894,7 @@ def _extract_inline_dispatch(content_text: str) -> dict:
 async def test_inline_fallback_carries_dispatch_block_in_content() -> None:
     """Non-plugin debate response embeds canonical payloads in ``content``."""
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 
@@ -919,7 +944,7 @@ async def test_inline_fallback_dispatch_survives_html_close_in_user_context() ->
     ``[A-Za-z0-9+/=]`` — ``-->`` cannot occur inside the encoded body.
     """
     handler = LateralThinkHandler(
-        agent_runtime_backend="claude_code",
+        agent_runtime_backend="gemini",
         opencode_mode=None,
     )
 

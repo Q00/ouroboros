@@ -1052,13 +1052,24 @@ class TestResolveSubagentDispatch:
             resolve_subagent_dispatch("codex_cli", "subprocess") is SubagentDispatchMode.HOST_DRIVEN
         )
 
+    def test_claude_is_host_driven_via_task_primitive(self) -> None:
+        """Claude Code has a native Task/Agent primitive but no passive bridge."""
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        assert resolve_subagent_dispatch("claude", None) is SubagentDispatchMode.HOST_DRIVEN
+        # opencode_mode is irrelevant for claude — no passive bridge exists.
+        assert resolve_subagent_dispatch("claude", "plugin") is SubagentDispatchMode.HOST_DRIVEN
+
     def test_runtimes_without_any_subagent_surface_are_sequential(self) -> None:
         from ouroboros.mcp.tools.subagent import (
             SubagentDispatchMode,
             resolve_subagent_dispatch,
         )
 
-        for backend in ("claude", "gemini", "gjc", "opencode", "", None):
+        for backend in ("gemini", "gjc", "opencode", "", None):
             assert resolve_subagent_dispatch(backend, None) is SubagentDispatchMode.SEQUENTIAL, (
                 backend
             )

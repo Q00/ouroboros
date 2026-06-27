@@ -170,9 +170,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    parent-session assist layer. The advisory exists to help the human answer;
    it must not hide, replace, or delay the question itself.
 
-   Run the advisory lanes in parallel when the runtime supports subagents; use
-   the request's `sequential_fallback` semantics otherwise. The standard lanes
-   are:
+   Run the advisory lanes in parallel using your host's native subagent
+   primitive. In Claude Code that primitive is the **Task/Agent tool** — spawn
+   one subagent per lane in a single batch so they run concurrently. Only fall
+   back to the request's `sequential_fallback` semantics when the host has no
+   subagent primitive at all. The standard lanes are:
    - `code_context` — inspect repo-local facts and reuse
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
@@ -188,11 +190,17 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    options, one recommended draft, or a short "I found these ambiguities" note.
    Do not forward advisory output to `ouroboros_interview` until the user
    approves, edits, or explicitly asks you to auto-confirm a safe answer.
-   When `meta.question_advisory_subagents` is present, treat each entry as a
-   spawn-ready advisory payload with `title`, `agent`, `prompt`, and `context`;
-   dispatch those payloads through the runtime's native subagent primitive
-   instead of reconstructing prompts from prose. Preserve the original question
-   text while advisory children run.
+   When `meta.question_advisory_subagents` is present you MUST fan out: treat
+   each entry as a spawn-ready advisory payload with `title`, `agent`, `prompt`,
+   and `context`, and dispatch every payload through your host's native subagent
+   primitive (Claude Code → one Task/Agent call per payload, all in one parallel
+   batch) instead of reconstructing prompts from prose. This is required
+   regardless of dispatch mode: the payloads themselves are the spawn signal.
+   Treat `meta.question_advisory_host_action=spawn_subagents`, when present, as
+   a reinforcing cue for host-driven runtimes such as Codex or Claude Code, not
+   as a prerequisite. The only time you skip spawning is when the host has no
+   subagent primitive at all (then use `sequential_fallback`).
+   Preserve the original question text while advisory children run.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it

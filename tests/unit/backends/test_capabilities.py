@@ -160,12 +160,20 @@ def test_codex_host_driven_subagent_orchestration_is_registry_owned() -> None:
     assert "result_correlation_key" in guide
 
 
-def test_generic_skill_execution_guidance_covers_interview_requirements() -> None:
+def test_claude_host_driven_subagent_orchestration_is_registry_owned() -> None:
     capability = get_backend_capability("claude")
 
     assert capability is not None
+    assert capability.supports_host_driven_subagents is True
+    assert capability.supports_native_parallel_subagents is False
     names = {item.name for item in capability.skill_execution_capabilities}
-    assert names == REQUIRED_SKILL_CAPABILITY_NAMES
+    assert names == REQUIRED_SKILL_CAPABILITY_NAMES | {"orchestrate_subagents"}
+
+    guide = render_backend_skill_capability_guide("claude")
+    assert "### When a skill requires `orchestrate_subagents`" in guide
+    assert "Task/Agent" in guide
+    assert "host_action=spawn_subagents" in guide
+    assert "question_advisory_subagents" in guide
 
 
 def test_native_parallel_subagent_runtime_exposes_orchestrate_subagents() -> None:
@@ -209,20 +217,27 @@ def test_unsupported_parallel_subagent_runtime_gets_sequential_fallback_contract
     )
 
 
-def test_host_driven_runtime_gets_host_driven_contract() -> None:
-    """Codex has a native primitive but no passive bridge → host_driven contract.
+@pytest.mark.parametrize(
+    ("backend_name", "canonical_name"),
+    (("codex_cli", "codex"), ("claude_code", "claude")),
+)
+def test_host_driven_runtime_gets_host_driven_contract(
+    backend_name: str,
+    canonical_name: str,
+) -> None:
+    """Host-driven runtimes have a native primitive but no passive bridge.
 
     Guards against the contract regressing to ``sequential_fallback`` (which
     would emit a wrong instruction once a consumer reads the contract) while
     the resolver says ``host_driven``.
     """
     contract = build_runtime_subagent_orchestration_contract(
-        "codex_cli",
+        backend_name,
         directive_metadata=_LATERAL_PANEL_DIRECTIVE_METADATA,
         opencode_mode="plugin",
     )
 
-    assert contract.backend_name == "codex"
+    assert contract.backend_name == canonical_name
     # The boolean is the *passive bridge* axis only — host-driven runtimes are False here.
     assert contract.supports_native_parallel_subagents is False
     assert contract.dispatch_mode == "host_driven"

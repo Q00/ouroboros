@@ -249,6 +249,25 @@ _GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
     ),
 )
 
+_CLAUDE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
+    *_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    SkillExecutionCapability(
+        name="orchestrate_subagents",
+        guidance=(
+            "Claude Code has a native Task/Agent subagent primitive but no "
+            "passive Ouroboros bridge, so subagent fan-out is host-driven. "
+            "When an Ouroboros MCP tool returns inline payloads stamped with "
+            "`dispatch_mode=host_driven` / `host_action=spawn_subagents`, or "
+            "when a skill provides spawn-ready payloads such as "
+            "`question_advisory_subagents`, spawn one Task/Agent subagent per "
+            "payload in one batch, passing each payload's `prompt`. Correlate "
+            "results by the payload-specific `result_correlation_key` when "
+            "present, then synthesize in the parent session. If the Task/Agent "
+            "primitive is unavailable, follow the sequential fallback."
+        ),
+    ),
+)
+
 _OPENCODE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
     *_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     SkillExecutionCapability(
@@ -272,7 +291,8 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         switchable_runtime=True,
         cli_name="claude",
         cli_config_key="cli_path",
-        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+        skill_execution_capabilities=_CLAUDE_SKILL_EXECUTION_CAPABILITIES,
+        supports_host_driven_subagents=True,
     ),
     BackendCapability(
         name="codex",
