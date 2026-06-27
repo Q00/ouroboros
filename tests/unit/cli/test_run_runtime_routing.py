@@ -56,3 +56,35 @@ def test_run_runtime_profile_config_error_fails_fast_when_config_exists(
             None,
             resolve_backend=lambda value=None: value or "claude",
         )
+
+
+def test_run_execute_runtime_honors_runtime_profile_default(monkeypatch) -> None:
+    config = OuroborosConfig(
+        orchestrator=OrchestratorConfig(
+            runtime_backend="claude",
+            runtime_profile=RuntimeProfileConfig(default="opencode"),
+        )
+    )
+    monkeypatch.setattr(run, "load_config", lambda: config)
+
+    resolved = run._resolve_run_execute_runtime_backend(
+        None,
+        resolve_backend=lambda value=None: value or "claude",
+    )
+
+    assert resolved == "opencode"
+
+
+def test_run_runtime_profile_absent_config_falls_back(monkeypatch, tmp_path) -> None:
+    def _raise() -> OuroborosConfig:
+        raise ConfigError("Configuration file not found")
+
+    monkeypatch.setattr(run, "load_config", _raise)
+    monkeypatch.setattr(run, "get_config_dir", lambda: tmp_path)
+
+    resolved = run._resolve_run_execute_runtime_backend(
+        None,
+        resolve_backend=lambda value=None: value or "claude",
+    )
+
+    assert resolved == "claude"
