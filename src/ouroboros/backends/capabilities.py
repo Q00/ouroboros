@@ -188,8 +188,11 @@ _CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
             "read the inline text: spawn one subagent per entry in the payload array "
             "(`payloads` or `question_advisory_subagents`) using your native "
             "multi-agent spawn primitive (`multi_agent_v1.spawn_agent`), passing "
-            "each payload's `prompt`. Correlate every child result by "
-            "`context.persona`, collect them, then synthesise — preserving the "
+            "each payload's `prompt`. Correlate every child result by the "
+            "payload-specific key named in the result `meta` "
+            "(`result_correlation_key`): lateral payloads use `context.persona`, "
+            "interview advisory payloads use `context.lane_id` (their `persona` is "
+            "absent on some lanes). Collect them, then synthesise — preserving the "
             "user-facing content. If you have no parallel primitive available, "
             "process the payloads sequentially instead."
         ),

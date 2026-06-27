@@ -1527,6 +1527,8 @@ class LateralThinkHandler(BridgeAwareMixin):
             }
             if host_driven:
                 dispatch_record["host_action"] = "spawn_subagents"
+                # Lateral payloads are keyed by persona (always set, one per lane).
+                dispatch_record["result_correlation_key"] = "context.persona"
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (

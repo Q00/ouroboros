@@ -738,6 +738,9 @@ def _attach_question_assist_requests(
     if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
         meta["question_advisory_dispatch_mode"] = "host_driven"
         meta["question_advisory_host_action"] = "spawn_subagents"
+        # Advisory lanes are keyed by lane_id; their persona is absent on some
+        # lanes (code_context, web_context), so correlate by lane_id, not persona.
+        meta["question_advisory_result_correlation_key"] = "context.lane_id"
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:

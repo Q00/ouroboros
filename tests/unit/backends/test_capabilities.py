@@ -153,7 +153,11 @@ def test_codex_host_driven_subagent_orchestration_is_registry_owned() -> None:
     assert "dispatch_mode=host_driven" in guide
     assert "host_action=spawn_subagents" in guide
     assert "multi_agent_v1.spawn_agent" in guide
+    # Correlation keys are payload-specific — the guide must not tell the host to
+    # blanket-correlate advisory results by persona (absent on some lanes).
     assert "context.persona" in guide
+    assert "context.lane_id" in guide
+    assert "result_correlation_key" in guide
 
 
 def test_generic_skill_execution_guidance_covers_interview_requirements() -> None:

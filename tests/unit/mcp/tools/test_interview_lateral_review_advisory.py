@@ -321,6 +321,8 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
     # ...but now stamped so the Codex host fans them out itself.
     assert meta["question_advisory_dispatch_mode"] == "host_driven"
     assert meta["question_advisory_host_action"] == "spawn_subagents"
+    # Advisory lanes correlate by lane_id (persona is None on some lanes).
+    assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
 
 
 def test_lateral_orchestration_falls_back_to_skill_prose_when_panel_metadata_absent() -> None:

@@ -435,6 +435,7 @@ async def test_codex_runtime_emits_host_driven_spawn_directive() -> None:
     payload = result.unwrap()
     assert payload.meta["dispatch_mode"] == "host_driven"
     assert payload.meta["host_action"] == "spawn_subagents"
+    assert payload.meta["result_correlation_key"] == "context.persona"
     assert payload.meta["persona_count"] == 2
     assert len(payload.meta["payloads"]) == 2
     # Visible deterministic cue for transports that drop ``meta``.
