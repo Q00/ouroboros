@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.auto.intent_guard import diagnose_auto_pipeline_state
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -186,6 +187,7 @@ class SessionStatusHandler:
             AutoPhase.FAILED,
         }
         ralph_block = self._build_ralph_block(state)
+        intent_guard = diagnose_auto_pipeline_state(state)
 
         # Render a short text block; the structured detail lives in ``meta``
         # so machine consumers do not have to parse strings. Keep the layout
@@ -230,6 +232,7 @@ class SessionStatusHandler:
                     lines.append(f"  {key}: {ralph_block[key]}")
         if state.last_error:
             lines.append(f"Blocker: {state.last_error}")
+        lines.extend(intent_guard.render_lines())
         status_text = "\n".join(lines) + "\n"
 
         meta: dict[str, Any] = {
@@ -241,6 +244,7 @@ class SessionStatusHandler:
             "ralph_lineage_id": state.ralph_lineage_id,
             "last_progress_message": state.last_progress_message,
             "last_progress_at": state.last_progress_at,
+            "intent_guard": intent_guard.to_dict(),
         }
         if state.pending_question:
             meta["pending_question"] = state.pending_question

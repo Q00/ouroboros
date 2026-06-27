@@ -1352,17 +1352,18 @@ async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
 
     monkeypatch.setattr(auto_module, "AutoStore", lambda: AutoStore(tmp_path / "store"))
     monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
-    monkeypatch.setattr(
-        auto_module,
-        "resolve_auto_stage_runtime_plan",
-        lambda **_kwargs: AutoStageRuntimePlan(
+
+    def fake_runtime_plan(**kwargs):  # noqa: ANN003
+        captured["runtime_plan_kwargs"] = kwargs
+        return AutoStageRuntimePlan(
             default=StageRuntime("opencode", "plugin"),
             interview=StageRuntime("gjc", None),
             execute=StageRuntime("pi", None),
             evaluate=StageRuntime("opencode", "plugin"),
             reflect=StageRuntime("opencode", "plugin"),
-        ),
-    )
+        )
+
+    monkeypatch.setattr(auto_module, "resolve_auto_stage_runtime_plan", fake_runtime_plan)
 
     result = await AutoHandler(agent_runtime_backend="opencode", opencode_mode="plugin").handle(
         {"goal": "Build a CLI", "cwd": str(tmp_path)}
@@ -1376,6 +1377,11 @@ async def test_auto_handler_routes_interview_and_execute_from_stage_plan(
         "execute_runtime": "pi",
         "qa_runtime": "gjc",
         "state_runtime": "opencode",
+        "runtime_plan_kwargs": {
+            "runtime_override": None,
+            "fallback_runtime_backend": "opencode",
+            "fallback_opencode_mode": "plugin",
+        },
     }
 
 

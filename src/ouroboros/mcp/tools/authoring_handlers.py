@@ -16,6 +16,7 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
+from ouroboros.auto.intent_guard import IntentGuardReport, IntentGuardStatus, guard_interview_turn
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
@@ -43,10 +44,13 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
+    SubagentDispatchMode,
     build_generate_seed_subagent,
+    build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
+    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -555,19 +559,19 @@ def _with_lateral_review_dispatch(
     return enriched
 
 
-def _prepend_lateral_review_notice(
+def _append_lateral_review_notice(
     response_text: str,
     lateral_review_meta: dict[str, Any] | None,
 ) -> str:
-    """Surface a short user-visible cue when a lateral review should run."""
+    """Surface a short user-visible cue without hiding the question first."""
     if lateral_review_meta is None:
         return response_text
     personas = ", ".join(str(p) for p in lateral_review_meta["lateral_review_personas"])
     milestone = lateral_review_meta["lateral_review_milestone"]
     return (
-        "Lateral review queued: running "
+        f"{response_text}\n\nLateral review queued: running "
         f"{personas} before this interview turn "
-        f"(milestone: {milestone}).\n\n{response_text}"
+        f"(milestone: {milestone})."
     )
 
 
@@ -649,6 +653,94 @@ def _build_code_investigation_request(
     if last_question:
         request["last_question"] = last_question
     return request
+
+
+def _build_question_advisory_request(
+    *,
+    session_id: str,
+    question: str,
+    phase: str,
+    score: AmbiguityScore | None,
+    code_investigation_request: dict[str, Any] | None = None,
+    last_question: str | None = None,
+) -> dict[str, Any]:
+    """Build parent-runtime request metadata for per-question answer help."""
+    mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
+    advisory = mcp_tool_capability["orchestration"]["question_advisory_fanout"]
+    request: dict[str, Any] = {
+        "session_id": session_id,
+        "question_identity": stable_code_investigation_question_identity(question),
+        "question": question,
+        "phase": phase,
+        "ambiguity_score": score.overall_score if score is not None else None,
+        "milestone": _milestone_for_score(score),
+        "user_question_first": True,
+        "advisory_goal": "help_human_answer_interview_question",
+        "parallel_preference": advisory["parallel_preference"],
+        "sequential_fallback": dict(advisory["sequential_fallback"]),
+        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
+        "lanes": list(advisory["lanes"]),
+        "synthesis_contract": dict(advisory["synthesis_contract"]),
+        "mcp_tool_capability": mcp_tool_capability,
+    }
+    if last_question:
+        request["last_question"] = last_question
+    if code_investigation_request is not None:
+        request["code_investigation_request"] = code_investigation_request
+    return request
+
+
+def _attach_question_assist_requests(
+    meta: dict[str, Any],
+    *,
+    session_id: str,
+    question: str,
+    phase: str,
+    score: AmbiguityScore | None,
+    last_question: str | None = None,
+    dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
+) -> None:
+    """Attach code-fact and advisory fanout requests for a question turn.
+
+    ``dispatch_mode`` carries the runtime's resolved subagent dispatch mode. On
+    a ``HOST_DRIVEN`` runtime (e.g. Codex) there is no passive bridge to consume
+    ``question_advisory_subagents``, so the response is stamped with an explicit
+    ``host_action=spawn_subagents`` cue for the host model to fan the advisory
+    lanes out itself.
+    """
+    code_request = _build_code_investigation_request(
+        session_id=session_id,
+        question=question,
+        last_question=last_question,
+    )
+    meta["code_investigation_request"] = code_request
+    meta["question_advisory_recommended"] = True
+    advisory_request = _build_question_advisory_request(
+        session_id=session_id,
+        question=question,
+        phase=phase,
+        score=score,
+        code_investigation_request=code_request,
+        last_question=last_question,
+    )
+    meta["question_advisory_request"] = advisory_request
+    try:
+        advisory_payloads = build_interview_question_advisory_subagents(advisory_request)
+    except ValueError as exc:
+        log.warning(
+            "mcp.tool.interview.question_advisory_build_failed",
+            session_id=session_id,
+            error=str(exc),
+        )
+        return
+    meta["question_advisory_subagents"] = [payload.to_dict() for payload in advisory_payloads]
+    meta["question_advisory_preserve_content"] = True
+    if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
+        meta["question_advisory_dispatch_mode"] = "host_driven"
+        meta["question_advisory_host_action"] = "spawn_subagents"
+        # Advisory lanes are keyed by lane_id; their persona is absent on some
+        # lanes (code_context, web_context), so correlate by lane_id, not persona.
+        meta["question_advisory_result_correlation_key"] = "context.lane_id"
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -779,6 +871,41 @@ def _interview_reasoning_meta(
             "question_chars": len(question) if question else None,
         },
     }
+
+
+def _classify_interview_answer_source(answer: str) -> str:
+    """Return a coarse provenance class for an ``ooo interview`` answer."""
+    lowered = str(answer).lstrip().casefold()
+    if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
+        return "repo_fact"
+    if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
+        return "generated"
+    if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
+        return "generated"
+    return "human"
+
+
+def _guard_interview_answer(
+    *,
+    state: InterviewState,
+    question: str,
+    answer: str,
+) -> IntentGuardReport:
+    return guard_interview_turn(
+        goal=state.initial_context,
+        question=question,
+        answer_text=answer,
+        answer_source=_classify_interview_answer_source(answer),
+    )
+
+
+def _format_intent_guard_blocker(report: IntentGuardReport) -> str:
+    for check in report.checks:
+        if check.status is IntentGuardStatus.FAIL:
+            if check.action:
+                return f"IntentGuard blocked interview answer: {check.message} ({check.action})"
+            return f"IntentGuard blocked interview answer: {check.message}"
+    return "IntentGuard blocked interview answer"
 
 
 def _ambiguity_warning_for_failed_question(
@@ -1913,6 +2040,7 @@ class InterviewHandler:
             transcript = ""
             real_session_id = session_id
             plugin_state: InterviewState | None = None
+            plugin_intent_guard_report: IntentGuardReport | None = None
 
             if action == "start" and initial_context:
                 cwd = arguments.get("cwd") or os.getcwd()
@@ -1978,6 +2106,19 @@ class InterviewHandler:
                 # question text instead of a placeholder.
                 if answer:
                     if state.rounds and state.rounds[-1].user_response is None:
+                        question_text = last_question or state.rounds[-1].question
+                        plugin_intent_guard_report = _guard_interview_answer(
+                            state=state,
+                            question=question_text,
+                            answer=answer,
+                        )
+                        if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
+                            return Result.err(
+                                MCPToolError(
+                                    _format_intent_guard_blocker(plugin_intent_guard_report),
+                                    tool_name="ouroboros_interview",
+                                )
+                            )
                         # Round exists with question but no answer yet — fill it.
                         # If last_question was provided, update the question text
                         # in case the existing one is a stale placeholder from a
@@ -1995,6 +2136,18 @@ class InterviewHandler:
                         question_text = (
                             last_question if last_question else "(continued from subagent)"
                         )
+                        plugin_intent_guard_report = _guard_interview_answer(
+                            state=state,
+                            question=question_text,
+                            answer=answer,
+                        )
+                        if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
+                            return Result.err(
+                                MCPToolError(
+                                    _format_intent_guard_blocker(plugin_intent_guard_report),
+                                    tool_name="ouroboros_interview",
+                                )
+                            )
                         state.rounds.append(
                             InterviewRound(
                                 round_number=len(state.rounds) + 1,
@@ -2028,6 +2181,8 @@ class InterviewHandler:
                     "action": action,
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
+                    "question_advisory_strategy": "plugin_child_question_first_advisory",
+                    "question_advisory_recommended": True,
                     **_interview_reasoning_meta(
                         state=plugin_state,
                         session_id=real_session_id,
@@ -2038,6 +2193,11 @@ class InterviewHandler:
                         "When the user answers, pass the child session's "
                         "question text as 'last_question' alongside 'answer' "
                         "to preserve interview transcript fidelity."
+                    ),
+                    **(
+                        {"intent_guard": plugin_intent_guard_report.to_dict()}
+                        if plugin_intent_guard_report is not None
+                        else {}
                     ),
                 },
             )
@@ -2346,9 +2506,15 @@ class InterviewHandler:
                     # would raise on every oversized ``initial_context``.
                     start_meta.update(_length_guard_meta_fields())
                 else:
-                    start_meta["code_investigation_request"] = _build_code_investigation_request(
+                    _attach_question_assist_requests(
+                        start_meta,
                         session_id=state.interview_id,
                         question=question,
+                        phase="start",
+                        score=live_score,
+                        dispatch_mode=resolve_subagent_dispatch(
+                            self.agent_runtime_backend, self.opencode_mode
+                        ),
                     )
 
                 start_response_text = (
@@ -2435,11 +2601,15 @@ class InterviewHandler:
                         # summarize prompt as a hard failure.
                         resume_meta.update(_length_guard_meta_fields())
                     else:
-                        resume_meta["code_investigation_request"] = (
-                            _build_code_investigation_request(
-                                session_id=session_id,
-                                question=pending_question,
-                            )
+                        _attach_question_assist_requests(
+                            resume_meta,
+                            session_id=session_id,
+                            question=pending_question,
+                            phase="resume_pending",
+                            score=_load_state_ambiguity_score(state),
+                            dispatch_mode=resolve_subagent_dispatch(
+                                self.agent_runtime_backend, self.opencode_mode
+                            ),
                         )
 
                     resume_response_text = f"Session {session_id}\n\n{display_question}"
@@ -2472,6 +2642,7 @@ class InterviewHandler:
                     )
 
                 lateral_review_meta: dict[str, Any] | None = None
+                intent_guard_report: IntentGuardReport | None = None
 
                 # If answer provided, record it first
                 if answer:
@@ -2720,7 +2891,6 @@ class InterviewHandler:
                         pass
                     elif state.rounds[-1].user_response is None:
                         pending_question = last_question or state.rounds[-1].question
-                        state.rounds.pop()
                     else:
                         if not last_question:
                             return Result.err(
@@ -2734,6 +2904,21 @@ class InterviewHandler:
                                 )
                             )
                         pending_question = last_question
+
+                    intent_guard_report = _guard_interview_answer(
+                        state=state,
+                        question=pending_question,
+                        answer=answer,
+                    )
+                    if intent_guard_report.status is IntentGuardStatus.FAIL:
+                        return Result.err(
+                            MCPToolError(
+                                _format_intent_guard_blocker(intent_guard_report),
+                                tool_name="ouroboros_interview",
+                            )
+                        )
+                    if state.rounds and state.rounds[-1].user_response is None:
+                        state.rounds.pop()
 
                     record_result = await engine.record_response(state, answer, pending_question)
                     if record_result.is_err:
@@ -2959,6 +3144,8 @@ class InterviewHandler:
                         question=question,
                     ),
                 }
+                if intent_guard_report is not None:
+                    answer_meta["intent_guard"] = intent_guard_report.to_dict()
                 if answer_is_length_guard:
                     # Q00/ouroboros#831 (Direction A): structured signal when
                     # the next question after an answer is again the length-
@@ -2966,16 +3153,22 @@ class InterviewHandler:
                     # the auto driver's ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
                 else:
-                    answer_meta["code_investigation_request"] = _build_code_investigation_request(
+                    _attach_question_assist_requests(
+                        answer_meta,
                         session_id=session_id,
                         question=question,
+                        phase="answer",
+                        score=live_score,
+                        dispatch_mode=resolve_subagent_dispatch(
+                            self.agent_runtime_backend, self.opencode_mode
+                        ),
                     )
 
                 if lateral_review_dispatch_meta is not None:
                     answer_meta.update(lateral_review_dispatch_meta)
 
                 answer_response_text = f"Session {session_id}\n\n{display_question}"
-                answer_response_text = _prepend_lateral_review_notice(
+                answer_response_text = _append_lateral_review_notice(
                     answer_response_text,
                     lateral_review_dispatch_meta,
                 )

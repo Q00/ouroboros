@@ -4848,6 +4848,81 @@ def test_interview_metadata_includes_lateral_persona_panel_contract() -> None:
     assert panel["sequential_fallback"]["supported"] is True
 
 
+def test_interview_metadata_includes_question_advisory_fanout_contract() -> None:
+    owned_tools = tuple(handler.definition for handler in get_ouroboros_tools(include_auto=False))
+    catalog = assemble_session_tool_catalog(attached_tools=owned_tools)
+
+    graph = build_capability_graph(catalog)
+
+    interview = graph.by_name()["ouroboros_interview"]
+    assert interview.metadata is not None
+    fanout = interview.metadata.orchestration["question_advisory_fanout"]
+    assert fanout["contract_id"] == "interview_question_advisory_fanout.v1"
+    assert fanout["dispatch_timing"] == "after_question_is_visible_to_user"
+    assert fanout["parallel_preference"] == "parallel_when_runtime_supports_subagents"
+    assert fanout["sequential_fallback"] == {
+        "supported": True,
+        "mode": "sequential_advisory_lane_dispatch",
+        "trigger": "runtime_has_no_native_parallel_subagent_primitive",
+    }
+    assert fanout["synthesis_contract"] == {
+        "output_shape": "answer_advisory",
+        "max_options": 3,
+        "include_recommended_draft": True,
+        "preserve_user_agency": True,
+        "forward_to_mcp_only_after_user_or_auto_confirm": True,
+    }
+    assert fanout["response_payload_refs"]["plugin"] == "parent_runtime.ouroboros_dispatch.children"
+    assert fanout["response_payload_refs"]["requires_prose_parsing"] is False
+    assert fanout["response_payload_refs"]["synthesis_owner"] == "parent_session"
+    assert "Show the MCP interview question to the user first" in fanout["runtime_instruction"]
+
+    lane_by_id = {lane["lane_id"]: lane for lane in fanout["lanes"]}
+    assert set(lane_by_id) == {
+        "code_context",
+        "web_context",
+        "ambiguity_contrarian",
+        "answer_simplifier",
+        "architecture_implications",
+    }
+    assert lane_by_id["code_context"]["capability"] == "inspect_code"
+    assert lane_by_id["web_context"]["capability"] == "web_research"
+    assert lane_by_id["ambiguity_contrarian"]["persona"] == "contrarian"
+    assert lane_by_id["answer_simplifier"]["persona"] == "simplifier"
+    assert lane_by_id["architecture_implications"]["persona"] == "architect"
+
+
+def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    schema = fanout["request_model_schema"]
+    Draft202012Validator.check_schema(schema)
+
+    question = "Which users need this first?"
+    request = {
+        "session_id": "sess-123",
+        "question_identity": stable_code_investigation_question_identity(question),
+        "question": question,
+        "phase": "answer",
+        "ambiguity_score": 0.35,
+        "milestone": "progress",
+        "user_question_first": True,
+        "advisory_goal": "help_human_answer_interview_question",
+        "parallel_preference": fanout["parallel_preference"],
+        "sequential_fallback": dict(fanout["sequential_fallback"]),
+        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
+        "lanes": list(fanout["lanes"]),
+        "synthesis_contract": dict(fanout["synthesis_contract"]),
+        "code_investigation_request": {
+            **_code_investigation_base_request(question),
+            "investigation_targets": [{"target_type": "workspace", "scope": "active"}],
+        },
+        "mcp_tool_capability": metadata,
+    }
+
+    Draft202012Validator(schema).validate(request)
+
+
 def test_code_investigation_request_model_validates_supported_target_forms() -> None:
     owned_tools = tuple(handler.definition for handler in get_ouroboros_tools(include_auto=False))
     catalog = assemble_session_tool_catalog(attached_tools=owned_tools)

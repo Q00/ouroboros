@@ -27,6 +27,7 @@ from ouroboros.auto.answerer import (
 )
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.gap_detector import GapDetector
+from ouroboros.auto.intent_guard import IntentGuardStatus, guard_auto_answer
 from ouroboros.auto.lateral_routing import (
     select_persona_for_qa_failure,
     select_persona_for_safe_default_block,
@@ -818,6 +819,27 @@ class AutoInterviewDriver:
                     state.current_round,
                     blocker_text,
                 )
+            answer = self._guard_intent_answer(
+                state,
+                answer,
+                ledger,
+                answer_context,
+                question=question_for_record,
+            )
+            if answer.blocker is not None:
+                self.answerer.apply(answer, ledger, question=question_for_record)
+                state.ledger = ledger.to_dict()
+                blocker_text = answer.blocker.reason
+                state.mark_blocked(blocker_text, tool_name="intent_guard")
+                record_authoring_backend(state)
+                self._save(state)
+                return AutoInterviewResult(
+                    "blocked",
+                    state.interview_session_id,
+                    ledger,
+                    state.current_round,
+                    blocker_text,
+                )
             # Apply the answer to the in-memory ledger only. Do NOT persist
             # ``state.ledger`` / ``state.current_round`` / ``state.pending_question``
             # / ``state.auto_answer_log`` until ``backend.answer`` acknowledges
@@ -1386,6 +1408,47 @@ class AutoInterviewDriver:
             source=AutoAnswerSource.BLOCKER,
             confidence=1.0,
             blocker=blocker,
+        )
+
+    def _guard_intent_answer(
+        self,
+        state: AutoPipelineState,
+        answer: AutoAnswer,
+        ledger: SeedDraftLedger,
+        context: AutoAnswerContext,
+        *,
+        question: str,
+    ) -> AutoAnswer:
+        """Fail closed when generated interview framing conflicts with user intent."""
+        if answer.blocker is not None:
+            return answer
+        report = guard_auto_answer(
+            goal=state.goal,
+            user_preferences=context.user_preferences,
+            ledger=ledger,
+            question=question,
+            answer_text=answer.text,
+            answer_source=answer.source.value,
+        )
+        if not report.failed:
+            return answer
+        failure = next(check for check in report.checks if check.status is IntentGuardStatus.FAIL)
+        reason = f"IntentGuard blocked auto answer: {failure.message}"
+        if failure.action:
+            reason = f"{reason} ({failure.action})"
+        log.warning(
+            "auto.interview.intent_guard_blocked",
+            auto_session_id=state.auto_session_id,
+            code=failure.code,
+            answer_source=answer.source.value,
+            question=question[:500],
+            answer=answer.text[:500],
+        )
+        return AutoAnswer(
+            text=f"Cannot safely decide automatically: {reason}",
+            source=AutoAnswerSource.BLOCKER,
+            confidence=1.0,
+            blocker=AutoBlocker(reason=reason, question=question),
         )
 
     def _answer_reduces_open_gaps(

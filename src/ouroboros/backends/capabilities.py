@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 
@@ -35,13 +36,41 @@ class BackendCapability:
     cli_config_key: str | None = None
     soft_tool_enforcement: bool = False
     supports_tool_envelope: bool = True
+    # ``supports_native_parallel_subagents``: a *passive* bridge receiver auto-
+    # consumes ``_subagents`` envelopes (OpenCode plugin). ``supports_host_driven_
+    # subagents``: the host *model* spawns subagents from inline payloads via its
+    # own native primitive (e.g. Codex Desktop). These are different layers — a
+    # backend can have the latter without the former. Do NOT conflate them.
     supports_native_parallel_subagents: bool = False
+    supports_host_driven_subagents: bool = False
     skill_execution_capabilities: tuple[SkillExecutionCapability, ...] = ()
 
     @property
     def names(self) -> tuple[str, ...]:
         """Canonical name plus accepted aliases."""
         return (self.name, *self.aliases)
+
+
+class SubagentDispatchMode(StrEnum):
+    """How a handler should surface subagent fan-out for the active runtime.
+
+    Three distinct layers, not a boolean:
+
+    - ``PLUGIN_PASSIVE``: a passive bridge receiver (the OpenCode plugin) auto-
+      intercepts the ``_subagents`` envelope and spawns children. The handler
+      returns the envelope and skips the real in-process work.
+    - ``HOST_DRIVEN``: there is no passive receiver, but the host *model* can
+      spawn subagents from inline payloads via its own native primitive (e.g.
+      Codex Desktop's multi-agent spawn). The handler returns the inline result
+      plus an explicit ``dispatch_mode=host_driven`` / ``host_action`` stamp so
+      the host deterministically fans out.
+    - ``SEQUENTIAL``: neither a passive receiver nor a native parallel primitive
+      is available; the handler runs the in-process / inline sequential path.
+    """
+
+    PLUGIN_PASSIVE = "plugin_passive"
+    HOST_DRIVEN = "host_driven"
+    SEQUENTIAL = "sequential"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +177,26 @@ _CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
             "constraints, and acceptance criteria, then require explicit user approval."
         ),
     ),
+    SkillExecutionCapability(
+        name="orchestrate_subagents",
+        guidance=(
+            "Codex has a native subagent primitive but no passive Ouroboros bridge, "
+            "so subagent fan-out is host-driven. When an Ouroboros MCP tool returns "
+            "`host_action=spawn_subagents` (via `dispatch_mode=host_driven` or "
+            "`question_advisory_dispatch_mode=host_driven` in the result `meta`, or "
+            "the `ouroboros-lateral-inline-dispatch-v1` content block), do NOT just "
+            "read the inline text: spawn one subagent per entry in the payload array "
+            "(`payloads` or `question_advisory_subagents`) using your native "
+            "multi-agent spawn primitive (`multi_agent_v1.spawn_agent`), passing "
+            "each payload's `prompt`. Correlate every child result by the "
+            "payload-specific key named in the result `meta` "
+            "(`result_correlation_key`): lateral payloads use `context.persona`, "
+            "interview advisory payloads use `context.lane_id` (their `persona` is "
+            "absent on some lanes). Collect them, then synthesise — preserving the "
+            "user-facing content. If you have no parallel primitive available, "
+            "process the payloads sequentially instead."
+        ),
+    ),
 )
 
 _GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
@@ -235,6 +284,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_name="codex",
         cli_config_key="codex_cli_path",
         skill_execution_capabilities=_CODEX_SKILL_EXECUTION_CAPABILITIES,
+        supports_host_driven_subagents=True,
     ),
     # Leader-driven worker runtime over ``codex mcp-server`` (codex/codex-reply).
     # Same codex binary, runtime-only (not an LLM/interview backend); declares
@@ -422,13 +472,13 @@ def build_runtime_subagent_orchestration_contract(
     if not isinstance(sequential_fallback, Mapping):
         sequential_fallback = {}
 
-    native_parallel_available = _supports_native_parallel_subagent_surface(
-        capability,
-        opencode_mode=opencode_mode,
-    )
+    mode = resolve_subagent_dispatch(name, opencode_mode)
+    # The contract speaks the same vocabulary as the resolver: ``dispatch_mode``
+    # is exactly the ``SubagentDispatchMode`` value, so there is one source of
+    # truth for the mode string ({plugin_passive | host_driven | sequential}).
+    dispatch_mode = mode.value
 
-    if native_parallel_available:
-        dispatch_mode = "native_parallel_subagents"
+    if mode is SubagentDispatchMode.PLUGIN_PASSIVE:
         runtime_instruction_handling = (
             "Consume MCP `_subagent` or `_subagents` directive payloads with the "
             "runtime's native parallel subagent primitive. For OpenCode this "
@@ -436,8 +486,17 @@ def build_runtime_subagent_orchestration_contract(
             "MCP-declared sequential fallback available for downgraded runtime "
             "surfaces."
         )
+    elif mode is SubagentDispatchMode.HOST_DRIVEN:
+        runtime_instruction_handling = (
+            "This runtime has a native subagent primitive but no passive "
+            "Ouroboros bridge. Consume the inline `host_driven` dispatch payloads "
+            "(the `payloads` array stamped with `host_action=spawn_subagents`) "
+            "and spawn each one with the runtime's own subagent primitive, "
+            "correlating results by the directive metadata's correlation key. "
+            "Fall back to the MCP `sequential_fallback` contract only when no "
+            "parallel primitive is available."
+        )
     else:
-        dispatch_mode = "sequential_fallback"
         runtime_instruction_handling = (
             "This runtime has no native parallel subagent primitive. Follow the "
             "MCP `sequential_fallback` contract and process each structured "
@@ -447,7 +506,9 @@ def build_runtime_subagent_orchestration_contract(
 
     return RuntimeSubagentOrchestrationContract(
         backend_name=capability.name,
-        supports_native_parallel_subagents=native_parallel_available,
+        # This boolean is the *passive bridge* axis only; ``HOST_DRIVEN`` runtimes
+        # report False here and carry their capability via ``dispatch_mode``.
+        supports_native_parallel_subagents=mode is SubagentDispatchMode.PLUGIN_PASSIVE,
         dispatch_mode=dispatch_mode,
         mcp_directive_keys=("_subagent", "_subagents"),
         sequential_fallback=dict(sequential_fallback),
@@ -474,6 +535,35 @@ def _supports_native_parallel_subagent_surface(
 def get_backend_capability(name: str) -> BackendCapability | None:
     """Return capability metadata for a canonical backend name or alias."""
     return _BY_NAME.get(name.strip().lower())
+
+
+def resolve_subagent_dispatch(
+    runtime_backend: str | None,
+    opencode_mode: str | None,
+) -> SubagentDispatchMode:
+    """Resolve the subagent dispatch mode for a runtime — the production SoT.
+
+    Separates two registry axes that must not be conflated:
+
+    - ``supports_native_parallel_subagents`` → a *passive* ``_subagents``
+      envelope receiver exists (OpenCode plugin surface, gated on
+      ``opencode_mode``). Maps to ``PLUGIN_PASSIVE``.
+    - ``supports_host_driven_subagents`` → the host *model* spawns from inline
+      payloads with its own primitive (e.g. Codex). No passive receiver. Maps
+      to ``HOST_DRIVEN``.
+
+    A backend may have the second without the first; routing such a backend
+    into the passive-envelope path would drop the envelope (no receiver) AND
+    skip the real work, so they stay on separate axes.
+    """
+    capability = get_backend_capability((runtime_backend or "").strip().lower())
+    if capability is None:
+        return SubagentDispatchMode.SEQUENTIAL
+    if _supports_native_parallel_subagent_surface(capability, opencode_mode=opencode_mode):
+        return SubagentDispatchMode.PLUGIN_PASSIVE
+    if capability.supports_host_driven_subagents:
+        return SubagentDispatchMode.HOST_DRIVEN
+    return SubagentDispatchMode.SEQUENTIAL
 
 
 def resolve_backend_alias(name: str) -> str:
@@ -552,6 +642,7 @@ __all__ = [
     "BackendCapability",
     "RuntimeSubagentOrchestrationContract",
     "SkillExecutionCapability",
+    "SubagentDispatchMode",
     "backend_supports_tool_envelope",
     "build_runtime_subagent_orchestration_contract",
     "get_backend_capability",
@@ -562,6 +653,7 @@ __all__ = [
     "resolve_interview_driver_backend",
     "resolve_llm_backend_name",
     "resolve_runtime_backend_name",
+    "resolve_subagent_dispatch",
     "runtime_backend_choices",
     "soft_tool_enforcement_backends",
 ]

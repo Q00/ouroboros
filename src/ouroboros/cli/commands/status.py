@@ -15,6 +15,7 @@ from rich.text import Text
 import typer
 import yaml
 
+from ouroboros.auto.intent_guard import diagnose_auto_pipeline_state
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.backends import (
     get_backend_capability,
@@ -106,6 +107,7 @@ def _format_auto_status(state) -> str:
 
     if state.last_error:
         lines.append(f"Blocker: {state.last_error}")
+    lines.extend(diagnose_auto_pipeline_state(state).render_lines())
 
     return "\n".join(lines) + "\n"
 

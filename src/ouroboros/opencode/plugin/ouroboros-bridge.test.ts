@@ -29,7 +29,9 @@ import {
   markRalphChild,
   notify,
   num,
+  OuroborosBridge,
   parse,
+  parseMetadata,
   parseChildTimeout,
   rand62,
   readText,
@@ -419,6 +421,54 @@ describe("parse", () => {
     const out = parse(raw)
     expect(out.subs.length).toBe(1)
     expect(out.responseShape).toEqual({ job_id: "job_789" })
+  })
+})
+
+describe("parseMetadata", () => {
+  const empty = { subs: [], responseShape: {}, preserveContent: false }
+
+  test("empty metadata returns empty", () => {
+    expect(parseMetadata(undefined)).toEqual(empty)
+    expect(parseMetadata({})).toEqual(empty)
+  })
+
+  test("question advisory metadata produces subs and preserves content flag", () => {
+    const out = parseMetadata({
+      session_id: "sess-1",
+      ambiguity_score: 0.35,
+      milestone: "progress",
+      seed_ready: false,
+      question_advisory_recommended: true,
+      question_advisory_preserve_content: true,
+      question_advisory_subagents: [
+        { tool_name: "ouroboros_interview", title: "Code", agent: "researcher", prompt: "inspect" },
+        { tool_name: "ouroboros_interview", title: "Simplify", agent: "simplifier", prompt: "simplify" },
+      ],
+    })
+
+    expect(out.subs.length).toBe(2)
+    expect(out.subs.map((s) => s.title)).toEqual(["Code", "Simplify"])
+    expect(out.subs.map((s) => s.agent)).toEqual(["researcher", "simplifier"])
+    expect(out.preserveContent).toBe(true)
+    expect(out.responseShape).toEqual({
+      session_id: "sess-1",
+      ambiguity_score: 0.35,
+      milestone: "progress",
+      seed_ready: false,
+      question_advisory_recommended: true,
+    })
+  })
+
+  test("invalid advisory children are skipped", () => {
+    const out = parseMetadata({
+      question_advisory_subagents: [
+        { prompt: "missing tool" },
+        { tool_name: "ouroboros_interview", prompt: "ok" },
+      ],
+    })
+
+    expect(out.subs.length).toBe(1)
+    expect(out.subs[0].tool).toBe("ouroboros_interview")
   })
 })
 
@@ -943,5 +993,124 @@ describe("_dispatch — child session lifecycle", () => {
     expect(errorPatch.state.error).toContain("stop_reason=iteration_timeout")
     expect(errorPatch.state.metadata.stop_reason).toBe("iteration_timeout")
     expect(errorPatch.state.metadata.timeout_source).toBe("per_iteration_timeout_seconds")
+  })
+})
+
+describe("OuroborosBridge hook — metadata advisory fanout", () => {
+  test("preserves interview question text while dispatching metadata subagents", async () => {
+    _resetDedupe()
+    let created = 0
+    const promptCalls: unknown[] = []
+    const patchBodies: unknown[] = []
+    const cli = {
+      session: {
+        _client: {
+          patch: async (a: unknown) => {
+            patchBodies.push((a as { body?: unknown }).body)
+            return {}
+          },
+        },
+        create: async () => ({ data: { id: `child_${++created}` } }),
+        prompt: async (a: unknown) => {
+          promptCalls.push(a)
+          return { data: { parts: [{ type: "text", text: "done" }] } }
+        },
+        abort: async () => ({}),
+        messages: async () => ({
+          data: [
+            {
+              info: { id: "msg_1", role: "assistant" },
+              parts: [{ type: "tool", callID: "call_advisory" }],
+            },
+          ],
+        }),
+      },
+    }
+    const plugin = await OuroborosBridge({ client: cli, directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const originalQuestion = "Session sess-1\n\nWhich users need this first?"
+    const output = {
+      content: [{ type: "text", text: originalQuestion }],
+      metadata: {
+        session_id: "sess-1",
+        ambiguity_score: 0.35,
+        milestone: "progress",
+        seed_ready: false,
+        question_advisory_recommended: true,
+        question_advisory_preserve_content: true,
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: code_context",
+            agent: "researcher",
+            prompt: "Inspect code facts.",
+          },
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: answer_simplifier",
+            agent: "simplifier",
+            prompt: "Suggest answer options.",
+          },
+        ],
+      },
+    }
+
+    await hook(
+      { tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_advisory" },
+      output,
+    )
+
+    const text = readText(output)
+    expect(text.startsWith(originalQuestion)).toBe(true)
+    expect(text).toContain("[Ouroboros] Dispatched 2 subagents.")
+    expect(text).toContain('"question_advisory_recommended": true')
+    const metadata = output.metadata as Record<string, any>
+    expect(metadata.ouroboros_dispatch.status).toBe("dispatched")
+    expect(metadata.ouroboros_children).toEqual([
+      { title: "Interview advisory: code_context", childID: "child_1" },
+      { title: "Interview advisory: answer_simplifier", childID: "child_2" },
+    ])
+    expect(promptCalls.length).toBe(2)
+    const runningPatches = patchBodies.filter(
+      (body) => (body as { state?: { status?: string } })?.state?.status === "running",
+    )
+    expect(runningPatches).toHaveLength(2)
+  })
+
+  test("preserves interview question text when metadata advisory dispatch fails early", async () => {
+    _resetDedupe()
+    const cli = {
+      session: {
+        _client: { patch: async () => ({}) },
+        create: async () => ({ data: { id: "child_unused" } }),
+        prompt: async () => ({ data: { parts: [{ type: "text", text: "unused" }] } }),
+        abort: async () => ({}),
+        messages: async () => ({ data: [] }),
+      },
+    }
+    const plugin = await OuroborosBridge({ client: cli, directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const originalQuestion = "Session sess-1\n\nWhich risk should we resolve first?"
+    const output = {
+      content: [{ type: "text", text: originalQuestion }],
+      metadata: {
+        question_advisory_preserve_content: true,
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: ambiguity_contrarian",
+            agent: "contrarian",
+            prompt: "Find ambiguity.",
+          },
+        ],
+      },
+    }
+
+    await hook({ tool: "ouroboros_interview", callID: "call_missing_session" }, output)
+
+    const text = readText(output)
+    expect(text.startsWith(originalQuestion)).toBe(true)
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("empty sessionID")
   })
 })

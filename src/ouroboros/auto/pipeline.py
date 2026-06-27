@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import inspect
+import re
 import threading
 import time
 from typing import Any, Protocol
@@ -4547,14 +4548,16 @@ def _seed_with_seed_qa_lateral_feedback(
     chosen binding contract) rather than a restatement of the gap. The text is
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
-    decision = lateral_result.text.strip()
-    summary = (lateral_result.approach_summary or "").strip()
-    prefix = f"[seed qa lateral repair attempt {attempt}] "
-    body = f"{summary}: {decision}" if summary else decision
-    constraint = (prefix + body)[:2000]
+    del attempt
+    normalized_feedback = _normalized_seed_qa_lateral_feedback(lateral_result)
+    existing_constraints = tuple(
+        constraint
+        for constraint in seed.constraints
+        if not _is_seed_qa_diagnostic_constraint(constraint)
+    )
     return seed.model_copy(
         update={
-            "constraints": tuple(dict.fromkeys((*seed.constraints, constraint))),
+            "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
             "metadata": seed.metadata.model_copy(
                 update={
                     "seed_id": f"seed_{uuid4().hex[:12]}",
@@ -4568,16 +4571,16 @@ def _seed_with_seed_qa_lateral_feedback(
 
 def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attempt: int) -> Seed:
     """Return a Seed revised with bounded pre-run Seed QA feedback."""
-    feedback = [*qa_result.differences[:3], *qa_result.suggestions[:3]]
-    normalized_feedback = tuple(dict.fromkeys(item.strip() for item in feedback if item.strip()))
-    if not normalized_feedback:
-        normalized_feedback = ("Seed QA failed without actionable differences or suggestions.",)
-    constraint = f"[seed qa repair attempt {attempt}] Resolve before execution: " + " | ".join(
-        normalized_feedback
+    del attempt
+    normalized_feedback = _normalized_seed_qa_feedback(qa_result)
+    existing_constraints = tuple(
+        constraint
+        for constraint in seed.constraints
+        if not _is_seed_qa_diagnostic_constraint(constraint)
     )
     return seed.model_copy(
         update={
-            "constraints": tuple(dict.fromkeys((*seed.constraints, constraint))),
+            "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
             "metadata": seed.metadata.model_copy(
                 update={
                     "seed_id": f"seed_{uuid4().hex[:12]}",
@@ -4585,8 +4588,119 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
                     "parent_seed_id": seed.metadata.seed_id,
                 }
             ),
-        }
+        },
     )
+
+
+def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
+    lowered = constraint.casefold()
+    return (
+        lowered.startswith("[seed qa repair attempt")
+        or lowered.startswith("[seed qa lateral repair attempt")
+        or "# lateral thinking:" in lowered
+        or "qa differences:" in lowered
+        or "qa suggestions:" in lowered
+    )
+
+
+_SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
+    r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
+    re.IGNORECASE,
+)
+
+
+def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple[str, ...]:
+    """Translate lateral Seed QA output into durable implementation constraints.
+
+    Persona output is useful evidence for choosing a repair direction, but the
+    Seed must not persist the review transcript, attempt counters, or lateral
+    diagnostic headings that status doctor classifies as spec pollution.
+    """
+    summary = _clean_seed_qa_repair_text(lateral_result.approach_summary or "", limit=320)
+    decision = _clean_seed_qa_repair_text(lateral_result.text, limit=1600)
+    repairs: list[str] = []
+    if summary:
+        repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
+    if decision:
+        repairs.append(f"Adopt this concrete implementation decision before execution: {decision}")
+    if not repairs:
+        repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
+    return tuple(dict.fromkeys(repairs))
+
+
+def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
+    text = _SEED_QA_DIAGNOSTIC_PREFIX_RE.sub("", text.strip())
+    cleaned_lines: list[str] = []
+    skipping_diagnostic_block = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        lowered = line.casefold()
+        if not line:
+            continue
+        if lowered.startswith("# lateral thinking:"):
+            continue
+        if lowered.startswith("qa differences:") or lowered.startswith("qa suggestions:"):
+            skipping_diagnostic_block = True
+            continue
+        if skipping_diagnostic_block:
+            if line.startswith(("-", "*")) or re.match(r"^\d+[\.)]\s+", line):
+                continue
+            skipping_diagnostic_block = False
+        cleaned_lines.append(line)
+    cleaned = " ".join(cleaned_lines)
+    cleaned = cleaned.replace("# Lateral Thinking:", "").replace("# lateral thinking:", "")
+    return cleaned[:limit].strip()
+
+
+def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
+    """Translate QA diagnostics into short actionable Seed repair constraints.
+
+    The Seed direction must not absorb raw reviewer/lateral transcripts. Keep
+    the feedback as bounded repair intent, not as pasted diagnostic evidence.
+    """
+    feedback = tuple(
+        item.strip()
+        for item in (*qa_result.differences[:5], *qa_result.suggestions[:5])
+        if item.strip()
+    )
+    lowered = "\n".join(feedback).casefold()
+    repairs: list[str] = []
+    if "ambiguity_score" in lowered:
+        repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
+    if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
+        repairs.append("Preserve ledger non-goals and runtime context in executable Seed surfaces.")
+    if "polluted" in lowered or "diagnostic" in lowered or "lateral repair" in lowered:
+        repairs.append(
+            "Constraints must contain only actionable product/runtime constraints; omit QA or lateral diagnostic prose."
+        )
+    if "transcript schema" in lowered or "schema_version" in lowered:
+        repairs.append("Use one transcript JSON schema consistently across acceptance criteria.")
+    if "no-op" in lowered or "noop" in lowered:
+        repairs.append("Define explicit no-op scope for supported command behavior.")
+    if "review-blocking" in lowered:
+        repairs.append("Introduce the review-blocking post-QA constraint before execution.")
+    if "templated" in lowered or "indirect" in lowered:
+        repairs.append(
+            "Acceptance criteria must be direct executable checks, not generic templates."
+        )
+    if "partial" in lowered and (
+        "output" in lowered or "mp4" in lowered or "transcript" in lowered
+    ):
+        repairs.append("Failure paths must leave no partial output artifacts.")
+    if not repairs:
+        repairs.extend(_actionable_seed_qa_feedback_constraints(feedback))
+    if not repairs:
+        repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
+    return tuple(dict.fromkeys(repairs))
+
+
+def _actionable_seed_qa_feedback_constraints(feedback: tuple[str, ...]) -> tuple[str, ...]:
+    repairs: list[str] = []
+    for item in feedback[:5]:
+        cleaned = _clean_seed_qa_repair_text(item, limit=420)
+        if cleaned and not _is_seed_qa_diagnostic_constraint(cleaned):
+            repairs.append(f"Address this Seed QA finding before execution: {cleaned}")
+    return tuple(dict.fromkeys(repairs))
 
 
 def _first_nonempty(*values: str | None) -> str | None:

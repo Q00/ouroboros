@@ -1221,18 +1221,23 @@ class LateralThinkHandler(BridgeAwareMixin):
     the lateral-think dispatch path so dynamic external MCP servers
     reach the unstuck pipeline.
 
-    The multi-persona fan-out path emits a ``_subagents`` envelope that is
-    consumed by the OpenCode bridge plugin. It is gated on
-    ``should_dispatch_via_plugin(agent_runtime_backend, opencode_mode)`` —
-    identical to the other subagent-emitting handlers — so that subprocess
-    mode (or non-OpenCode runtimes) falls back to an inline multi-persona
-    text response instead of emitting an envelope nobody will consume.
+    The multi-persona fan-out path resolves a 3-way dispatch mode via
+    ``resolve_subagent_dispatch(agent_runtime_backend, opencode_mode)``:
+
+    - ``PLUGIN_PASSIVE`` (OpenCode + ``opencode_mode=plugin``): emit a
+      ``_subagents`` envelope for the bridge plugin to consume.
+    - ``HOST_DRIVEN`` (e.g. Codex): no passive bridge, but the host model can
+      spawn subagents itself, so emit the inline result stamped with
+      ``dispatch_mode=host_driven`` / ``host_action=spawn_subagents`` so the
+      host fans out via its native primitive.
+    - ``SEQUENTIAL`` (subprocess / runtimes without a parallel primitive): fall
+      back to a plain inline multi-persona ``inline_fallback`` text response.
 
     Attributes:
         agent_runtime_backend: Configured runtime (e.g. ``"opencode"``).
         opencode_mode: Configured ``orchestrator.opencode_mode`` value
             (``"plugin"`` or ``"subprocess"``). ``None`` falls through as
-            non-plugin (safe default — see ``should_dispatch_via_plugin``).
+            non-plugin (safe default — see ``resolve_subagent_dispatch``).
     """
 
     agent_runtime_backend: str | None = field(default=None, repr=False)
@@ -1380,9 +1385,10 @@ class LateralThinkHandler(BridgeAwareMixin):
 
         if explicit_list or dispatch_all:
             from ouroboros.mcp.tools.subagent import (
+                SubagentDispatchMode,
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
-                should_dispatch_via_plugin,
+                resolve_subagent_dispatch,
             )
 
             if explicit_list:
@@ -1435,12 +1441,15 @@ class LateralThinkHandler(BridgeAwareMixin):
                 failed_count=len(failed_attempts),
             )
 
-            # Gate on runtime + opencode_mode — identical contract to the
-            # other subagent-emitting handlers. Subprocess mode (or a
-            # non-OpenCode runtime) falls back to synthesising a combined
-            # persona-prompt text inline, because no bridge plugin will
-            # consume the ``_subagents`` envelope.
-            if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Resolve the 3-way dispatch mode (the production source of truth).
+            #   - PLUGIN_PASSIVE: a bridge plugin will consume the ``_subagents``
+            #     envelope, so emit it and skip the inline work.
+            #   - HOST_DRIVEN: no passive receiver, but the host model can spawn
+            #     from inline payloads via its own primitive (e.g. Codex). Emit
+            #     the inline result stamped with ``host_action=spawn_subagents``.
+            #   - SEQUENTIAL: no parallel surface at all → plain inline fallback.
+            dispatch = resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode)
+            if dispatch is SubagentDispatchMode.PLUGIN_PASSIVE:
                 # Preserve public response shape (#442): ouroboros_lateral_think
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
@@ -1500,17 +1509,41 @@ class LateralThinkHandler(BridgeAwareMixin):
             #      payload into the visible markdown.
             #   2. Base64 has no significant whitespace, so line wrapping
             #      and trimming can't corrupt the encoded body.
+            # HOST_DRIVEN runtimes (e.g. Codex) have no passive bridge but can
+            # spawn subagents themselves. Stamp the response with an explicit
+            # ``dispatch_mode=host_driven`` / ``host_action=spawn_subagents``
+            # signal — in structured ``meta`` (primary) and a visible banner
+            # (so meta-dropping transports still get a deterministic cue) — so
+            # the host's capability guide fans out instead of reading inline.
+            # SEQUENTIAL runtimes keep the byte-identical ``inline_fallback``
+            # output they emitted before.
+            host_driven = dispatch is SubagentDispatchMode.HOST_DRIVEN
+            dispatch_mode_value = "host_driven" if host_driven else "inline_fallback"
             payload_dicts = [p.to_dict() for p in payloads]
-            dispatch_blob = json.dumps(
-                {
-                    "dispatch_mode": "inline_fallback",
-                    "persona_count": len(sections),
-                    "payloads": payload_dicts,
-                }
-            )
+            dispatch_record: dict[str, Any] = {
+                "dispatch_mode": dispatch_mode_value,
+                "persona_count": len(sections),
+                "payloads": payload_dicts,
+            }
+            if host_driven:
+                dispatch_record["host_action"] = "spawn_subagents"
+                # Lateral payloads are keyed by persona (always set, one per lane).
+                dispatch_record["result_correlation_key"] = "context.persona"
+            dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
+            host_banner = (
+                (
+                    "> **Host action — spawn subagents:** this runtime drives "
+                    "fan-out itself. Spawn one subagent per payload below with "
+                    "your native subagent primitive, correlate results by "
+                    f"`context.persona`, then synthesise. Payloads: {len(sections)} "
+                    "(structured copy in `meta` and the dispatch block).\n\n"
+                )
+                if host_driven
+                else ""
+            )
             content_text = (
-                f"{combined}\n\n"
+                f"{host_banner}{combined}\n\n"
                 "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
                 f"{dispatch_b64}\n"
                 "-->"
@@ -1519,11 +1552,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=content_text),),
                     is_error=False,
-                    meta={
-                        "persona_count": len(sections),
-                        "dispatch_mode": "inline_fallback",
-                        "payloads": payload_dicts,
-                    },
+                    meta=dispatch_record,
                 )
             )
 

@@ -1805,6 +1805,11 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
     outputs = _section_text(sections, "outputs", "deliverables")
     if outputs:
         preferences["outputs"] = outputs
+    elif not sections:
+        inline_outputs = _inline_artifact_output_contract(goal)
+        if inline_outputs:
+            preferences["outputs"] = inline_outputs
+            preferences.setdefault("acceptance_criteria", inline_outputs)
 
     constraint_lines = _matching_lines(
         goal,
@@ -1849,6 +1854,72 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
         preferences["failure_modes"] = "\n".join(failure_lines)
 
     return preferences
+
+
+_ARTIFACT_OUTPUT_TERMS: tuple[str, ...] = (
+    "artifact",
+    "artifacts",
+    "file",
+    "files",
+    "output",
+    "outputs",
+    "export",
+    "exports",
+    "video",
+    "videos",
+    "mp4",
+    "clip",
+    "clips",
+    "short",
+    "shorts",
+    "long-form",
+    "long form",
+    "transcript",
+    "transcripts",
+    "json",
+    "csv",
+    "pdf",
+    "html",
+    "report",
+    "reports",
+)
+
+_ARTIFACT_GENERATION_TERMS: tuple[str, ...] = (
+    "make",
+    "makes",
+    "create",
+    "creates",
+    "generate",
+    "generates",
+    "produce",
+    "produces",
+    "export",
+    "exports",
+    "write",
+    "writes",
+)
+
+
+def _inline_artifact_output_contract(goal: str) -> str:
+    """Extract an explicit artifact-output contract from a sentence-shaped goal.
+
+    Structured prompts already use ``Outputs:`` / ``Success criteria:`` blocks.
+    Natural ``ooo auto "..."`` prompts often state the same contract inline, e.g.
+    "when I put a video in, the harness will make shorts and transcript".  Treat
+    only artifact-generation language as evidence-backed; broad wishes like
+    "make it better" intentionally do not match.
+    """
+    cleaned = _clean_prompt_line(goal)
+    lowered = cleaned.casefold()
+    if not cleaned:
+        return ""
+    if not any(term in lowered for term in _ARTIFACT_GENERATION_TERMS):
+        return ""
+    if not any(term in lowered for term in _ARTIFACT_OUTPUT_TERMS):
+        return ""
+    if re.search(r"\b(review[- ]only|review package|only review)\b", lowered):
+        return ""
+    return cleaned
 
 
 def _extract_goal_sections(goal: str) -> dict[str, list[str]]:

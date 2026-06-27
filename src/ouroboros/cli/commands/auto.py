@@ -27,6 +27,7 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
+from ouroboros.auto.intent_guard import diagnose_auto_pipeline_state
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.policies import apply_domain_policy_defaults
@@ -770,6 +771,12 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Run reconciled at: {state.run_reconciled_at}")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
+    intent_guard = diagnose_auto_pipeline_state(state)
+    console.print(f"IntentGuard: [bold]{intent_guard.status.value}[/]")
+    for check in intent_guard.checks:
+        message = _rich_escape(check.message)
+        action = f" Action: {_rich_escape(check.action)}" if check.action else ""
+        console.print(f"  {check.status.value.upper()} {check.code}: {message}{action}")
     if state.auto_answer_log:
         recent = state.auto_answer_log[-5:]
         console.print(f"Recent auto answers (last {len(recent)}):")

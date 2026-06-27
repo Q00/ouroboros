@@ -22,6 +22,7 @@ from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
     build_execute_subagent,
     build_generate_seed_subagent,
+    build_interview_question_advisory_subagents,
     build_interview_subagent,
     build_pm_interview_subagent,
     build_qa_subagent,
@@ -693,6 +694,95 @@ class TestBuildInterviewSubagent:
         )
         assert p.context["session_id"] == "sess-123"
 
+    def test_plugin_interview_prompt_embeds_question_first_advisory_strategy(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="start",
+            initial_context="Build a planning assistant",
+        )
+
+        assert "## Question-first Advisory Fanout" in p.prompt
+        assert "1. Show the interview question first." in p.prompt
+        assert "code_context" in p.prompt
+        assert "ambiguity_contrarian" in p.prompt
+        assert "answer_simplifier" in p.prompt
+        assert p.context["question_advisory_strategy"] == "plugin_child_question_first_advisory"
+
+
+class TestBuildInterviewQuestionAdvisorySubagents:
+    """Test per-question advisory fanout payloads."""
+
+    def test_builds_one_payload_per_lane(self) -> None:
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which users need this first?",
+            "ambiguity_score": 0.35,
+            "milestone": "progress",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "code_context",
+                    "capability": "inspect_code",
+                    "purpose": "Find code facts.",
+                    "required": False,
+                },
+                {
+                    "lane_id": "ambiguity_contrarian",
+                    "capability": "run_lateral_review",
+                    "persona": "contrarian",
+                    "purpose": "Find hidden assumptions.",
+                    "required": True,
+                },
+                {
+                    "lane_id": "answer_simplifier",
+                    "capability": "run_lateral_review",
+                    "persona": "simplifier",
+                    "purpose": "Make it easy to answer.",
+                    "required": True,
+                },
+            ],
+            "synthesis_contract": {
+                "output_shape": "answer_advisory",
+                "max_options": 3,
+                "include_recommended_draft": True,
+                "preserve_user_agency": True,
+                "forward_to_mcp_only_after_user_or_auto_confirm": True,
+            },
+            "code_investigation_request": {"question": "Which users need this first?"},
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        assert [payload.title for payload in payloads] == [
+            "Interview advisory: code_context",
+            "Interview advisory: ambiguity_contrarian",
+            "Interview advisory: answer_simplifier",
+        ]
+        assert [payload.agent for payload in payloads] == [
+            "researcher",
+            "contrarian",
+            "simplifier",
+        ]
+        assert all(payload.tool_name == "ouroboros_interview" for payload in payloads)
+        assert all(
+            "The parent session has already shown the interview question" in payload.prompt
+            for payload in payloads
+        )
+        assert payloads[0].context["lane_id"] == "code_context"
+        assert payloads[0].context["user_question_first"] is True
+        assert payloads[1].context["persona"] == "contrarian"
+
+    def test_requires_question_identity(self) -> None:
+        with pytest.raises(ValueError, match="question_identity"):
+            build_interview_question_advisory_subagents(
+                {
+                    "session_id": "sess-123",
+                    "question": "Q?",
+                    "lanes": [{"lane_id": "answer_simplifier"}],
+                }
+            )
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: Generate Seed
@@ -950,6 +1040,74 @@ class TestShouldDispatchViaPlugin:
 
         assert should_dispatch_via_plugin("OpenCode", "PLUGIN") is True
         assert should_dispatch_via_plugin("OPENCODE", "Subprocess") is False
+
+
+class TestResolveSubagentDispatch:
+    """resolve_subagent_dispatch() — the 3-way source of truth."""
+
+    def test_opencode_plugin_is_plugin_passive(self) -> None:
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        assert (
+            resolve_subagent_dispatch("opencode", "plugin") is SubagentDispatchMode.PLUGIN_PASSIVE
+        )
+        assert (
+            resolve_subagent_dispatch("opencode_cli", "plugin")
+            is SubagentDispatchMode.PLUGIN_PASSIVE
+        )
+
+    def test_codex_is_host_driven_even_with_plugin_mode(self) -> None:
+        """Codex has a native primitive but no passive bridge — never plugin_passive."""
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        # The real user config: runtime=codex, opencode_mode=plugin.
+        assert resolve_subagent_dispatch("codex", "plugin") is SubagentDispatchMode.HOST_DRIVEN
+        assert resolve_subagent_dispatch("codex", None) is SubagentDispatchMode.HOST_DRIVEN
+        assert (
+            resolve_subagent_dispatch("codex_cli", "subprocess") is SubagentDispatchMode.HOST_DRIVEN
+        )
+
+    def test_runtimes_without_any_subagent_surface_are_sequential(self) -> None:
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+        )
+
+        for backend in ("claude", "gemini", "gjc", "opencode", "", None):
+            assert resolve_subagent_dispatch(backend, None) is SubagentDispatchMode.SEQUENTIAL, (
+                backend
+            )
+        # OpenCode without the plugin surface is sequential, not plugin_passive.
+        assert (
+            resolve_subagent_dispatch("opencode", "subprocess") is SubagentDispatchMode.SEQUENTIAL
+        )
+
+    def test_should_dispatch_is_plugin_passive_alias(self) -> None:
+        """should_dispatch_via_plugin must stay exactly True iff PLUGIN_PASSIVE."""
+        from ouroboros.mcp.tools.subagent import (
+            SubagentDispatchMode,
+            resolve_subagent_dispatch,
+            should_dispatch_via_plugin,
+        )
+
+        for backend, mode in (
+            ("opencode", "plugin"),
+            ("opencode", "subprocess"),
+            ("codex", "plugin"),
+            ("claude", None),
+            ("gemini", "plugin"),
+            (None, None),
+        ):
+            expected = (
+                resolve_subagent_dispatch(backend, mode) is SubagentDispatchMode.PLUGIN_PASSIVE
+            )
+            assert should_dispatch_via_plugin(backend, mode) is expected
 
 
 class TestEmitSubagentDispatchedEvent:

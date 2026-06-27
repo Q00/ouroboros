@@ -23,6 +23,7 @@ from ouroboros.auto.adapters import HandlerError, HandlerInterviewBackend
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
+from ouroboros.auto.runtime_routing import AutoStageRuntimePlan, StageRuntime
 from ouroboros.auto.state import AutoPipelineState, AutoResumeCapability, AutoStore
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
@@ -405,6 +406,31 @@ def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     assert "non_goals" in summary["evidence_backed_sections"]
     assert "Final report" not in preferences["acceptance_criteria"]
     assert "`hello_auto.py` exists" in preferences["acceptance_criteria"]
+
+
+def test_inline_artifact_goal_seeds_output_contract() -> None:
+    """Sentence-shaped artifact goals are intent evidence, not loose hints.
+
+    Regression coverage for a video-harness auto run where the initial goal
+    explicitly requested shorts, long-form videos, and transcripts but the
+    interview later introduced a review-only alternative.
+    """
+    goal = (
+        "I want to make a video harness when I put a video to harness, "
+        "the harness will make some shorts and long form video with transcript"
+    )
+
+    preferences = _derive_goal_user_preferences(goal)
+    ledger = _seed_initial_ledger_from_user_preferences(goal, preferences)
+
+    assert "outputs" in preferences
+    assert "acceptance_criteria" in preferences
+    assert "shorts" in preferences["outputs"]
+    assert "transcript" in preferences["outputs"]
+    assert any(
+        entry.source.value == "user_preference" and "long form video" in entry.value
+        for entry in ledger.sections["outputs"].entries
+    )
 
 
 def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
@@ -945,6 +971,16 @@ def test_auto_handler_run_constructs_and_invokes_authoring_interviewer_path(
         patch(
             "ouroboros.mcp.tools.authoring_handlers.resolve_llm_backend",
             side_effect=lambda backend: backend or "claude",
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.resolve_auto_stage_runtime_plan",
+            return_value=AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime("opencode", "plugin"),
+                execute=StageRuntime("opencode", "plugin"),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
         ),
         patch(
             "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
