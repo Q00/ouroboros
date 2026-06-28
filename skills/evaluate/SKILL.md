@@ -79,7 +79,9 @@ fallback instead of retrying the failing call.
    exposes acting tools — **computer-use / browser, `Bash`/shell, file reads**: don't
    just reason over the diff, **run the result and observe the real effect** (the
    command's output, the endpoint's response, the rendered UI via a screenshot). Do
-   it via a dedicated verification sub-agent to keep the main session lean. Probe the
+   it via a dedicated verification sub-agent to keep the main session lean — or
+   inline in the main session where the runtime restricts sub-agent spawning (the
+   observation is what matters; the delegation is only an optimization). Probe the
    acceptance criteria against the ACTUAL observable behaviour and the adversarial
    classes (`misleading_output`, `hung_command`, `stale_state`, `dirty_worktree`, …).
    Feed the captured evidence (commands, outputs, artifact paths) into the evaluate

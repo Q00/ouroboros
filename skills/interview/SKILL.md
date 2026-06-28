@@ -144,7 +144,10 @@ the interview is where ouroboros earns its keep (grounding hidden assumptions in
 real facts before any code), and parallel research makes that both deeper and visible.
 
 Whenever the runtime exposes native sub-agents (the Task/Agent tool, codex
-`spawn_agent`, etc.), prefer fanning out over answering single-threaded:
+`spawn_agent`, etc.) **and its policy allows spawning them without a per-spawn
+user request**, prefer fanning out over answering single-threaded — where a
+runtime restricts spawning, do the same research inline in the main session
+(the grounding is what matters; the fan-out is only an optimization):
 
 - **Ground every factual MCP question in the real repo** — dispatch one or more
   `codebase-explorer` sub-agents (in a single parallel burst) instead of a lone
