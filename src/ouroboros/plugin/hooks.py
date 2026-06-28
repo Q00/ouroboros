@@ -79,8 +79,8 @@ class HookKind(StrEnum):
     #: scopes, failure policy, audit event names, and helper dispatch
     #: semantics are locked in ``docs/rfc/plugin-tool-call-hook-contract.md``.
     #: ``ouroboros.plugin.firewall`` exposes dispatcher helpers for
-    #: tool-mediation callers, but the production ``invoke_plugin`` path does
-    #: not call those helpers end-to-end yet.
+    #: tool-mediation callers, and production ``invoke_plugin`` dispatches
+    #: them around the mediated subprocess boundary.
     BEFORE_TOOL_CALL = "before_tool_call"
 
     #: Tool-call after-call observation hook promoted out of
@@ -235,7 +235,7 @@ TOOL_CALL_HOOK_NAMES: Final[frozenset[str]] = frozenset(hook.value for hook in T
 #: scope MUST also hold the tool-specific permission declared in the
 #: manifest's ``commands[].permissions`` / ``tools.allowed`` surface;
 #: that enforcement remains the helper dispatcher's responsibility. The
-#: current production ``invoke_plugin`` path is not yet wired through that
+#: production ``invoke_plugin`` path is wired through that
 #: tool-call boundary.
 HOOK_TOOL_INTERCEPT_SCOPE: Final[str] = "plugin:tool:intercept"
 
@@ -255,10 +255,9 @@ HOOK_TOOL_CALL_SCOPES: Final[frozenset[str]] = frozenset(
 #: Reserved audit event names for the tool-call hook family.
 #: Locked in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6 and
 #: vendored in the v0.4 JSON Schema's ``audit.events`` enum.
-#: The standalone firewall dispatcher helpers emit these events when a
-#: tool-mediation caller invokes them. They are not emitted by the production
-#: ``invoke_plugin`` command path until that path is wired through the
-#: tool-call dispatch boundary.
+#: The firewall dispatcher helpers emit these events when a tool-mediation
+#: caller invokes them, including the production ``invoke_plugin`` command path
+#: around its mediated subprocess boundary.
 HOOK_TOOL_INTERCEPT_REQUESTED_EVENT: Final[str] = "plugin.tool.intercept.requested"
 HOOK_TOOL_INTERCEPT_COMPLETED_EVENT: Final[str] = "plugin.tool.intercept.completed"
 HOOK_TOOL_INTERCEPT_BLOCKED_EVENT: Final[str] = "plugin.tool.intercept.blocked"
@@ -340,8 +339,8 @@ def is_tool_call_hook_kind(value: str) -> bool:
     Use this in manifest validators and dispatcher helpers so the
     boundary between lifecycle and tool-call hooks stays explicit. The
     v0.4 schema accepts these names and the firewall exposes helper
-    dispatchers, but production command invocation remains inert unless
-    a tool-mediation caller explicitly invokes those helpers.
+    dispatchers, and production command invocation now invokes those helpers
+    around the mediated command subprocess.
     """
     return value in TOOL_CALL_HOOK_NAMES
 

@@ -17,6 +17,7 @@ from ouroboros.plugin.hooks import (
     HOOK_EVENT_TYPES,
     HOOK_LIFECYCLE_POLICY_SCOPE,
     HOOK_LIFECYCLE_READ_SCOPE,
+    HOOK_TOOL_OBSERVE_SCOPE,
 )
 from ouroboros.plugin.manifest import load_manifest
 from ouroboros.plugin.trust_store import TrustRecord, TrustStore
@@ -2026,6 +2027,72 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
+
+
+def test_v04_after_tool_call_observes_launch_failure_paths(tmp_path: Path) -> None:
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["schema_version"] = "0.4"
+    payload["permissions"].append(
+        {
+            "scope": HOOK_TOOL_OBSERVE_SCOPE,
+            "risk": "read_only",
+            "required": True,
+            "reason": "Allow tool-call observation.",
+        }
+    )
+    payload["hooks"] = [
+        {
+            "name": "after_tool_call",
+            "entrypoint": {"type": "command", "command": "python -m hook_after_tool"},
+            "permissions": [HOOK_TOOL_OBSERVE_SCOPE],
+            "failure_policy": "fail_open",
+        }
+    ]
+    program = _make_program(tmp_path, payload)
+    trust = _grant_trust_scopes(tmp_path, "github:read", HOOK_TOOL_OBSERVE_SCOPE)
+    observed_payloads: list[dict] = []
+
+    def _runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
+        if argv[:3] == ["python", "-m", "hook_after_tool"]:
+            observed_payloads.append(
+                json.loads(kwargs["env"]["OUROBOROS_PLUGIN_TOOL_CALL_PAYLOAD"])
+            )
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        raise FileNotFoundError("synthetic missing entrypoint")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v04-launch-failure-after-tool",
+        subprocess_runner=_runner,
+    )
+
+    assert result.status == "failed"
+    assert result.exit_code == 127
+    assert observed_payloads == [
+        {
+            "correlation_id": "corr-v04-launch-failure-after-tool",
+            "duration_ms": observed_payloads[0]["duration_ms"],
+            "exit_code": 127,
+            "invocation_id": observed_payloads[0]["invocation_id"],
+            "output_digest": observed_payloads[0]["output_digest"],
+            "status": "failed",
+            "tool": "github-pr.review",
+        }
+    ]
+    assert observed_payloads[0]["duration_ms"] >= 1
+    assert observed_payloads[0]["output_digest"].startswith("sha256:")
+    assert [event["event_type"] for event in events] == [
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.failed",
+        "plugin.tool.observe.recorded",
+    ]
 
 
 def test_subprocess_invocation_uses_default_timeout(tmp_path: Path) -> None:
