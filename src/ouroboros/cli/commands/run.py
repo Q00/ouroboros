@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_max_parallel_workers
+from ouroboros.config.loader import get_config_dir, get_max_parallel_workers, load_config
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -44,6 +44,46 @@ def _resolve_execution_model(runtime_backend: str | None) -> str | None:
     if runtime_backend == "claude":
         return DEFAULT_SONNET_MODEL
     return None
+
+
+def _resolve_run_execute_runtime_backend(
+    runtime_backend: str | None,
+    *,
+    resolve_backend,
+) -> str:
+    """Resolve the agent runtime backend used by ``ooo run`` execution.
+
+    ``--runtime`` remains an explicit whole-run override. Without it, the CLI
+    honors ``orchestrator.runtime_profile.stages.execute`` with the same
+    precedence as auto/MCP: execute stage mapping, profile default, then
+    ``orchestrator.runtime_backend``.
+    """
+
+    resolved_default = resolve_backend(runtime_backend)
+    if runtime_backend is not None:
+        return resolved_default
+
+    from ouroboros.orchestrator_stage import Stage, parse_stage, resolve_runtime_for_stage
+
+    try:
+        profile = load_config().orchestrator.runtime_profile
+    except ConfigError:
+        if (get_config_dir() / "config.yaml").exists():
+            raise
+        profile = None
+
+    if profile is None:
+        return resolved_default
+
+    profile_stages = {parse_stage(key): value for key, value in profile.stages.items()}
+    return resolve_backend(
+        resolve_runtime_for_stage(
+            Stage.EXECUTE,
+            stages=profile_stages,
+            default=profile.default,
+            fallback=resolved_default,
+        )
+    )
 
 
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
@@ -535,7 +575,11 @@ async def _run_orchestrator(
         project_dir: Optional explicit project directory for seed path resolution.
     """
     from ouroboros.core.seed import Seed
-    from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
+    from ouroboros.orchestrator import (
+        OrchestratorRunner,
+        create_agent_runtime,
+        resolve_agent_runtime_backend,
+    )
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
@@ -630,9 +674,16 @@ async def _run_orchestrator(
         print_info(f"Task worktree: {workspace.worktree_path}")
         print_info(f"Task branch: {workspace.branch}")
 
+    resolved_runtime_backend = _resolve_run_execute_runtime_backend(
+        runtime_backend,
+        resolve_backend=resolve_agent_runtime_backend,
+    )
+    if debug:
+        print_info(f"Execution runtime: {resolved_runtime_backend}")
+
     adapter = create_agent_runtime(
-        backend=runtime_backend,
-        model=_resolve_execution_model(runtime_backend),
+        backend=resolved_runtime_backend,
+        model=_resolve_execution_model(resolved_runtime_backend),
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
     runner = OrchestratorRunner(
