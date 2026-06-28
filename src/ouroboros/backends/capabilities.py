@@ -43,6 +43,10 @@ class BackendCapability:
     # backend can have the latter without the former. Do NOT conflate them.
     supports_native_parallel_subagents: bool = False
     supports_host_driven_subagents: bool = False
+    host_driven_subagent_mechanism: SubagentSpawnTriggerMechanism | None = None
+    host_driven_subagent_requires_explicit_request: bool = False
+    host_driven_callable_spawn_tool_name: str | None = None
+    prohibited_subagent_spawn_tool_names: tuple[str, ...] = ()
     skill_execution_capabilities: tuple[SkillExecutionCapability, ...] = ()
 
     @property
@@ -73,6 +77,15 @@ class SubagentDispatchMode(StrEnum):
     SEQUENTIAL = "sequential"
 
 
+class SubagentSpawnTriggerMechanism(StrEnum):
+    """Concrete runtime mechanism used after dispatch mode is resolved."""
+
+    PASSIVE_BRIDGE_ENVELOPE = "passive_bridge_envelope"
+    CODEX_NATURAL_LANGUAGE_DELEGATION = "codex_natural_language_delegation"
+    CLAUDE_TASK_AGENT_TOOL = "claude_task_agent_tool"
+    SEQUENTIAL_FALLBACK = "sequential_fallback"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSubagentOrchestrationContract:
     """Runtime handling contract for MCP subagent directive metadata."""
@@ -80,6 +93,10 @@ class RuntimeSubagentOrchestrationContract:
     backend_name: str
     supports_native_parallel_subagents: bool
     dispatch_mode: str
+    spawn_trigger_mechanism: str
+    requires_explicit_spawn_request: bool
+    callable_spawn_tool_name: str | None
+    prohibited_spawn_tool_names: tuple[str, ...]
     mcp_directive_keys: tuple[str, ...]
     sequential_fallback: Mapping[str, Any]
     runtime_instruction_handling: str
@@ -91,6 +108,10 @@ class RuntimeSubagentOrchestrationContract:
             "backend_name": self.backend_name,
             "supports_native_parallel_subagents": self.supports_native_parallel_subagents,
             "dispatch_mode": self.dispatch_mode,
+            "spawn_trigger_mechanism": self.spawn_trigger_mechanism,
+            "requires_explicit_spawn_request": self.requires_explicit_spawn_request,
+            "callable_spawn_tool_name": self.callable_spawn_tool_name,
+            "prohibited_spawn_tool_names": list(self.prohibited_spawn_tool_names),
             "mcp_directive_keys": list(self.mcp_directive_keys),
             "sequential_fallback": dict(self.sequential_fallback),
             "runtime_instruction_handling": self.runtime_instruction_handling,
@@ -186,9 +207,12 @@ _CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
             "`question_advisory_dispatch_mode=host_driven` in the result `meta`, or "
             "the `ouroboros-lateral-inline-dispatch-v1` content block), do NOT just "
             "read the inline text: spawn one subagent per entry in the payload array "
-            "(`payloads` or `question_advisory_subagents`) using your native "
-            "multi-agent spawn primitive (`multi_agent_v1.spawn_agent`), passing "
-            "each payload's `prompt`. Correlate every child result by the "
+            "(`payloads` or `question_advisory_subagents`) using Codex's native "
+            "subagent workflow. Codex subagents are triggered by an explicit "
+            "natural-language delegation, not by a callable tool name: explicitly "
+            "spawn one Codex subagent per payload, give each child the payload's "
+            "`prompt`, wait for all children, then summarize the results. Correlate "
+            "every child result by the "
             "payload-specific key named in the result `meta` "
             "(`result_correlation_key`): lateral payloads use `context.persona`, "
             "interview advisory payloads use `context.lane_id` (their `persona` is "
@@ -293,6 +317,9 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_config_key="cli_path",
         skill_execution_capabilities=_CLAUDE_SKILL_EXECUTION_CAPABILITIES,
         supports_host_driven_subagents=True,
+        host_driven_subagent_mechanism=SubagentSpawnTriggerMechanism.CLAUDE_TASK_AGENT_TOOL,
+        host_driven_subagent_requires_explicit_request=True,
+        host_driven_callable_spawn_tool_name="Task/Agent",
     ),
     BackendCapability(
         name="codex",
@@ -305,6 +332,12 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_config_key="codex_cli_path",
         skill_execution_capabilities=_CODEX_SKILL_EXECUTION_CAPABILITIES,
         supports_host_driven_subagents=True,
+        host_driven_subagent_mechanism=(
+            SubagentSpawnTriggerMechanism.CODEX_NATURAL_LANGUAGE_DELEGATION
+        ),
+        host_driven_subagent_requires_explicit_request=True,
+        host_driven_callable_spawn_tool_name=None,
+        prohibited_subagent_spawn_tool_names=("multi_agent_v1.spawn_agent",),
     ),
     BackendCapability(
         name="copilot",
@@ -478,6 +511,10 @@ def build_runtime_subagent_orchestration_contract(
     dispatch_mode = mode.value
 
     if mode is SubagentDispatchMode.PLUGIN_PASSIVE:
+        spawn_trigger_mechanism = SubagentSpawnTriggerMechanism.PASSIVE_BRIDGE_ENVELOPE
+        requires_explicit_spawn_request = False
+        callable_spawn_tool_name = None
+        prohibited_spawn_tool_names: tuple[str, ...] = ()
         runtime_instruction_handling = (
             "Consume MCP `_subagent` or `_subagents` directive payloads with the "
             "runtime's native parallel subagent primitive. For OpenCode this "
@@ -486,6 +523,13 @@ def build_runtime_subagent_orchestration_contract(
             "surfaces."
         )
     elif mode is SubagentDispatchMode.HOST_DRIVEN:
+        spawn_trigger_mechanism = (
+            capability.host_driven_subagent_mechanism
+            or SubagentSpawnTriggerMechanism.SEQUENTIAL_FALLBACK
+        )
+        requires_explicit_spawn_request = capability.host_driven_subagent_requires_explicit_request
+        callable_spawn_tool_name = capability.host_driven_callable_spawn_tool_name
+        prohibited_spawn_tool_names = capability.prohibited_subagent_spawn_tool_names
         runtime_instruction_handling = (
             "This runtime has a native subagent primitive but no passive "
             "Ouroboros bridge. Consume the inline `host_driven` dispatch payloads "
@@ -496,6 +540,10 @@ def build_runtime_subagent_orchestration_contract(
             "parallel primitive is available."
         )
     else:
+        spawn_trigger_mechanism = SubagentSpawnTriggerMechanism.SEQUENTIAL_FALLBACK
+        requires_explicit_spawn_request = False
+        callable_spawn_tool_name = None
+        prohibited_spawn_tool_names = ()
         runtime_instruction_handling = (
             "This runtime has no native parallel subagent primitive. Follow the "
             "MCP `sequential_fallback` contract and process each structured "
@@ -509,6 +557,10 @@ def build_runtime_subagent_orchestration_contract(
         # report False here and carry their capability via ``dispatch_mode``.
         supports_native_parallel_subagents=mode is SubagentDispatchMode.PLUGIN_PASSIVE,
         dispatch_mode=dispatch_mode,
+        spawn_trigger_mechanism=spawn_trigger_mechanism.value,
+        requires_explicit_spawn_request=requires_explicit_spawn_request,
+        callable_spawn_tool_name=callable_spawn_tool_name,
+        prohibited_spawn_tool_names=prohibited_spawn_tool_names,
         mcp_directive_keys=("_subagent", "_subagents"),
         sequential_fallback=dict(sequential_fallback),
         runtime_instruction_handling=runtime_instruction_handling,
@@ -642,6 +694,7 @@ __all__ = [
     "RuntimeSubagentOrchestrationContract",
     "SkillExecutionCapability",
     "SubagentDispatchMode",
+    "SubagentSpawnTriggerMechanism",
     "backend_supports_tool_envelope",
     "build_runtime_subagent_orchestration_contract",
     "get_backend_capability",

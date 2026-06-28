@@ -19,6 +19,7 @@ def test_claude_plugin_interview_skill_includes_lateral_review_dispatch() -> Non
 
     assert "question_advisory_subagents` is present you MUST fan out" in skill_text
     assert "Task/Agent" in skill_text
+    assert "spawn one Codex subagent per payload" in skill_text
     assert "a reinforcing cue for host-driven runtimes" in skill_text
     assert "as a prerequisite" in skill_text
     assert "`run_lateral_review`" in skill_text

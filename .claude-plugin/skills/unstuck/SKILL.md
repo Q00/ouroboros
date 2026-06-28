@@ -151,7 +151,9 @@ Driving fan-out from this dispatch block — instead of from the joined human-di
 
 1. Locate the dispatch block at the end of the MCP response's `content` text — the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n` and `\n-->`. Base64-decode the captured body, then `JSON.parse` to get `{dispatch_mode, persona_count, payloads}`. If the block is missing (older handler that pre-dates the v1 sentinel), fall through to the constrained-runtime path below — *do not* split the joined text.
 2. Surface a short "what the lateral toolkit suggests" header to the user, with the markdown above the dispatch block, so the MCP call is visible as a real product surface, not silent.
-3. In a **single message**, emit N parallel `Task` calls (`general-purpose` subagent) — one per entry in `payloads`. Each Task receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded. Strict isolation per Task. The user sees "Running N agents…".
+3. Spawn N persona subagents in parallel — one per entry in `payloads` — using your host's native subagent mechanism. Each child receives the payload's `prompt` verbatim plus the payload's `context` so the persona is grounded, with strict isolation per child. The user sees "Running N agents…".
+   - **Claude Code** → emit N `Task` calls (`general-purpose` subagent) in a **single message** so they run concurrently.
+   - **Codex** → Codex subagents are triggered by explicit natural-language delegation, not a callable tool name (do NOT call `multi_agent_v1.spawn_agent` — it does not exist). In one turn, explicitly spawn one Codex subagent per payload, hand each child its payload `prompt` + `context`, wait for all children, then continue.
 4. Wait for all N to return.
 5. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
 6. Synthesize per the **Synthesize** block below.
@@ -226,8 +228,9 @@ with 2 tables, you haven't found the core feature yet.
                   followed by hidden <!-- ouroboros-lateral-inline-dispatch-v1 base64
                   <base64 body> --> sentinel block]
 [Extract via the sentinel; base64-decode then JSON.parse → payloads[]]
-[Single message: 5 parallel Task calls — one per payloads[] entry,
- each Task receives payload.prompt + payload.context verbatim;
+[Spawn 5 parallel persona subagents — one per payloads[] entry — via the
+ host's native mechanism (Claude: Task calls; Codex: explicit NL delegation);
+ each child receives payload.prompt + payload.context verbatim;
  the visible markdown is shown to the user as the lateral scaffold]
 [User sees "Running 5 agents…"]
 [Round 1 returns]

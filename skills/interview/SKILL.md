@@ -171,10 +171,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    it must not hide, replace, or delay the question itself.
 
    Run the advisory lanes in parallel using your host's native subagent
-   primitive. In Claude Code that primitive is the **Task/Agent tool** — spawn
-   one subagent per lane in a single batch so they run concurrently. Only fall
-   back to the request's `sequential_fallback` semantics when the host has no
-   subagent primitive at all. The standard lanes are:
+   mechanism. In Claude Code that mechanism is the **Task/Agent tool** — spawn
+   one subagent per lane in a single batch so they run concurrently. In Codex,
+   explicitly start a native subagent workflow in natural language: spawn one
+   Codex subagent per lane, pass that lane's payload prompt, wait for all
+   agents, then synthesize. Only fall back to the request's
+   `sequential_fallback` semantics when the host has no subagent mechanism at
+   all. The standard lanes are:
    - `code_context` — inspect repo-local facts and reuse
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
@@ -193,9 +196,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    When `meta.question_advisory_subagents` is present you MUST fan out: treat
    each entry as a spawn-ready advisory payload with `title`, `agent`, `prompt`,
    and `context`, and dispatch every payload through your host's native subagent
-   primitive (Claude Code → one Task/Agent call per payload, all in one parallel
-   batch) instead of reconstructing prompts from prose. This is required
-   regardless of dispatch mode: the payloads themselves are the spawn signal.
+   mechanism (Claude Code → one Task/Agent call per payload in one parallel
+   batch; Codex → explicitly spawn one Codex subagent per payload, wait for all
+   results, then synthesize) instead of reconstructing prompts from prose. This
+   is required regardless of dispatch mode: the payloads themselves are the
+   spawn signal.
    Treat `meta.question_advisory_host_action=spawn_subagents`, when present, as
    a reinforcing cue for host-driven runtimes such as Codex or Claude Code, not
    as a prerequisite. The only time you skip spawning is when the host has no

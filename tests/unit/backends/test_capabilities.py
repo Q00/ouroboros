@@ -4,6 +4,7 @@ from jsonschema import Draft202012Validator
 import pytest
 
 from ouroboros.backends import (
+    SubagentSpawnTriggerMechanism,
     backend_supports_tool_envelope,
     build_runtime_subagent_orchestration_contract,
     get_backend_capability,
@@ -147,12 +148,21 @@ def test_codex_host_driven_subagent_orchestration_is_registry_owned() -> None:
     assert capability is not None
     assert capability.supports_host_driven_subagents is True
     assert capability.supports_native_parallel_subagents is False
+    assert (
+        capability.host_driven_subagent_mechanism
+        is SubagentSpawnTriggerMechanism.CODEX_NATURAL_LANGUAGE_DELEGATION
+    )
+    assert capability.host_driven_subagent_requires_explicit_request is True
+    assert capability.host_driven_callable_spawn_tool_name is None
+    assert "multi_agent_v1.spawn_agent" in capability.prohibited_subagent_spawn_tool_names
 
     guide = render_backend_skill_capability_guide("codex")
     assert "### When a skill requires `orchestrate_subagents`" in guide
     assert "dispatch_mode=host_driven" in guide
     assert "host_action=spawn_subagents" in guide
-    assert "multi_agent_v1.spawn_agent" in guide
+    assert "native subagent workflow" in guide
+    assert "explicit natural-language delegation" in guide
+    assert "multi_agent_v1.spawn_agent" not in guide
     # Correlation keys are payload-specific — the guide must not tell the host to
     # blanket-correlate advisory results by persona (absent on some lanes).
     assert "context.persona" in guide
@@ -166,6 +176,12 @@ def test_claude_host_driven_subagent_orchestration_is_registry_owned() -> None:
     assert capability is not None
     assert capability.supports_host_driven_subagents is True
     assert capability.supports_native_parallel_subagents is False
+    assert (
+        capability.host_driven_subagent_mechanism
+        is SubagentSpawnTriggerMechanism.CLAUDE_TASK_AGENT_TOOL
+    )
+    assert capability.host_driven_subagent_requires_explicit_request is True
+    assert capability.host_driven_callable_spawn_tool_name == "Task/Agent"
     names = {item.name for item in capability.skill_execution_capabilities}
     assert names == REQUIRED_SKILL_CAPABILITY_NAMES | {"orchestrate_subagents"}
 
@@ -243,6 +259,45 @@ def test_host_driven_runtime_gets_host_driven_contract(
     assert contract.dispatch_mode == "host_driven"
     assert "host_action=spawn_subagents" in contract.runtime_instruction_handling
     assert "no passive" in contract.runtime_instruction_handling
+
+
+def test_codex_subagent_contract_codifies_documented_natural_language_trigger() -> None:
+    """Codex subagents are explicit NL delegation, not a callable spawn tool."""
+    contract = build_runtime_subagent_orchestration_contract(
+        "codex",
+        directive_metadata=_LATERAL_PANEL_DIRECTIVE_METADATA,
+    )
+
+    assert contract.dispatch_mode == "host_driven"
+    assert (
+        contract.spawn_trigger_mechanism
+        == SubagentSpawnTriggerMechanism.CODEX_NATURAL_LANGUAGE_DELEGATION.value
+    )
+    assert contract.requires_explicit_spawn_request is True
+    assert contract.callable_spawn_tool_name is None
+    assert contract.prohibited_spawn_tool_names == ("multi_agent_v1.spawn_agent",)
+
+    envelope = contract.to_dict()
+    assert envelope["spawn_trigger_mechanism"] == "codex_natural_language_delegation"
+    assert envelope["requires_explicit_spawn_request"] is True
+    assert envelope["callable_spawn_tool_name"] is None
+    assert envelope["prohibited_spawn_tool_names"] == ["multi_agent_v1.spawn_agent"]
+
+
+def test_claude_subagent_contract_codifies_task_agent_trigger() -> None:
+    contract = build_runtime_subagent_orchestration_contract(
+        "claude_code",
+        directive_metadata=_LATERAL_PANEL_DIRECTIVE_METADATA,
+    )
+
+    assert contract.dispatch_mode == "host_driven"
+    assert (
+        contract.spawn_trigger_mechanism
+        == SubagentSpawnTriggerMechanism.CLAUDE_TASK_AGENT_TOOL.value
+    )
+    assert contract.requires_explicit_spawn_request is True
+    assert contract.callable_spawn_tool_name == "Task/Agent"
+    assert contract.prohibited_spawn_tool_names == ()
 
 
 @pytest.mark.parametrize("directive_metadata", [{}, {"sequential_fallback": "invalid"}])
