@@ -401,11 +401,13 @@ class RalphHandler:
             auto_session_id=arguments.get("auto_session_id"),
             execution_id=arguments.get("execution_id"),
             checkpoint_commits=tuple(
-                item for item in arguments.get("checkpoint_commits", []) if isinstance(item, dict)
+                item
+                for item in (arguments.get("checkpoint_commits") or [])
+                if isinstance(item, dict)
             ),
             checkpoint_attempted_ac_ids=tuple(
                 item
-                for item in arguments.get("checkpoint_attempted_ac_ids", [])
+                for item in (arguments.get("checkpoint_attempted_ac_ids") or [])
                 if isinstance(item, str)
             ),
         )

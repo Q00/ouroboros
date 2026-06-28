@@ -399,6 +399,42 @@ async def test_ralph_handler_plugin_mode_omits_checkpoint_when_unset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ralph_handler_accepts_plugin_null_checkpoint_arrays() -> None:
+    """#1501 follow-up (sibling of #1502 evolve_step fix): plugin MCP clients
+    may serialize optional array parameters as explicit JSON ``null`` rather
+    than omitting them. Building ``RalphLoopConfig`` must not crash with
+    ``'NoneType' object is not iterable`` when ``checkpoint_commits`` /
+    ``checkpoint_attempted_ac_ids`` arrive as ``None``.
+    """
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    job_manager = JobManager(store)
+    evolve = _FakeEvolveHandler(["converged"])
+    handler = RalphHandler(
+        evolve_handler=evolve,  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=job_manager,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    try:
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_null_ckpt",
+                "seed_content": "goal: plugin",
+                "max_generations": 3,
+                "checkpoint_commits": None,
+                "checkpoint_attempted_ac_ids": None,
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_plugin"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_start_ralph_handler_plugin_mode_delegates_without_local_job() -> None:
     store = EventStore("sqlite+aiosqlite:///:memory:")
     job_manager = JobManager(store)
