@@ -2602,9 +2602,19 @@ def test_auto_handler_attached_completion_is_not_handoff_started() -> None:
 
 
 def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion() -> None:
-    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.pipeline import AutoPipelineResult, _artifact_state_for_result
     from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
 
+    artifact_state = _artifact_state_for_result(
+        status="complete",
+        phase=AutoPhase.COMPLETE,
+        seed_path=None,
+        execution_id="exec_123",
+        job_id="job_123",
+        run_session_id=None,
+        run_handoff_status="started",
+        partial_product=False,
+    )
     result = AutoPipelineResult(
         status="complete",
         auto_session_id="auto_handoff",
@@ -2612,6 +2622,7 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
         run_handoff_status="started",
         job_id="job_123",
         execution_id="exec_123",
+        artifact_state=artifact_state,
     )
 
     meta = _result_meta(result)
@@ -2620,5 +2631,102 @@ def test_auto_handler_meta_and_text_distinguish_handoff_from_product_completion(
     assert meta["status"] == "complete"
     assert meta["presentation_status"] == "run_handoff_started"
     assert meta["product_status"] == "not_verified_complete"
+    assert meta["artifact_state"] == "complete_unverified"
     assert "Status: run_handoff_started" in text
     assert "Product status: not verified complete" in text
+    assert "Artifact state: complete_unverified" in text
+
+
+def test_auto_artifact_state_preserves_verified_ralph_completion_with_stale_handoff() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec_123",
+            job_id="job_123",
+            run_session_id=None,
+            run_handoff_status="started",
+            partial_product=False,
+            product_verified=True,
+        )
+        == "complete_verified"
+    )
+
+
+def test_auto_artifact_state_marks_blocked_seed_as_partial_artifact() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="blocked",
+            phase=AutoPhase.BLOCKED,
+            seed_path="/tmp/seed.yaml",
+            execution_id=None,
+            job_id=None,
+            run_session_id=None,
+            run_handoff_status=None,
+            partial_product=False,
+        )
+        == "partial_artifact_generated"
+    )
+
+
+def test_auto_artifact_state_does_not_report_completion_for_pending_interview() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="interview",
+            phase=AutoPhase.INTERVIEW,
+            seed_path=None,
+            execution_id=None,
+            job_id=None,
+            run_session_id=None,
+            run_handoff_status=None,
+            partial_product=False,
+        )
+        == "not_generated"
+    )
+
+
+def test_auto_artifact_state_marks_nonterminal_handles_as_in_progress() -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="running",
+            phase=AutoPhase.RUN,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec-123",
+            job_id=None,
+            run_session_id="run-123",
+            partial_product=False,
+        )
+        == "artifact_in_progress"
+    )
+
+
+def test_auto_handler_surfaces_orchestration_and_artifact_state_for_blocked_result() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result, _result_meta
+
+    result = AutoPipelineResult(
+        status="blocked",
+        auto_session_id="auto_blocked_artifact",
+        phase="blocked",
+        seed_path="/tmp/seed.yaml",
+        artifact_state="partial_artifact_generated",
+        blocker="Seed QA timed out",
+    )
+
+    meta = _result_meta(result)
+    text = _format_result(result)
+
+    assert meta["status"] == "blocked"
+    assert meta["artifact_state"] == "partial_artifact_generated"
+    assert "Status: blocked" in text
+    assert "Artifact state: partial_artifact_generated" in text
+    assert "Status: complete" not in text
