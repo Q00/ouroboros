@@ -1477,9 +1477,16 @@ def get_llm_backend_for_stage(
     ``llm.backend`` / ``OUROBOROS_LLM_BACKEND`` override → orchestrator default
     agent runtime. Per-stage routing stays authoritative while existing LLM-only
     overrides remain honored for un-mapped stages.
+
+    The explicit path is still guarded against *runtime-only* backends: callers
+    that reuse the agent runtime backend as the explicit LLM backend (e.g. the
+    evolution executor / validation repair with ``llm_backend=
+    execute_runtime_backend``) would otherwise leak a runtime-only backend such
+    as ``antigravity`` into provider construction. See
+    :func:`_guard_explicit_llm_backend`.
     """
     if explicit_backend:
-        return explicit_backend
+        return _guard_explicit_llm_backend(explicit_backend)
 
     parsed_stage = stage if isinstance(stage, Stage) else parse_stage(stage)
     try:
@@ -1509,6 +1516,41 @@ def _backend_supports_llm(name: str | None) -> bool:
         return False
     capability = get_backend_capability(name)
     return capability is not None and capability.supports_llm
+
+
+def _backend_is_runtime_only(name: str | None) -> bool:
+    """Whether a backend is a *registered* runtime-only backend.
+
+    True only when the name is present in the capability registry AND declares
+    ``supports_llm=False`` (e.g. ``antigravity``). This is deliberately stricter
+    than ``not _backend_supports_llm(name)``: an unregistered name (a pure
+    LLM-provider alias such as ``anthropic``/``grok`` that has no *runtime*
+    capability entry) is NOT runtime-only and must be honored as-is when passed
+    as an explicit LLM backend.
+    """
+    if not name:
+        return False
+    capability = get_backend_capability(name)
+    return capability is not None and not capability.supports_llm
+
+
+def _guard_explicit_llm_backend(explicit_backend: str) -> str:
+    """Guard an explicit internal-LLM backend against runtime-only backends.
+
+    Callers that reuse the *agent runtime* backend as the explicit internal-LLM
+    backend (e.g. the evolution executor / validation repair, which pass
+    ``llm_backend=execute_runtime_backend``) would otherwise leak a runtime-only
+    backend (``supports_llm=False`` — e.g. ``antigravity``) into provider
+    construction and crash with ``Unsupported LLM backend``.
+
+    Only a *registered runtime-only* backend is rerouted to a completion
+    backend; every other explicit backend — including completion-capable
+    runtimes (``codex``/``claude``) and pure LLM-provider aliases that have no
+    runtime capability entry (``anthropic``) — is honored unchanged.
+    """
+    if _backend_is_runtime_only(explicit_backend):
+        return _guard_llm_completion_backend(explicit_backend)
+    return explicit_backend
 
 
 def _guard_llm_completion_backend(resolved: str) -> str:
@@ -1550,9 +1592,15 @@ def get_llm_backend_for_role(
     runtime-only backend, but the LLM call falls back to a completion backend
     (the explicit ``llm.backend`` override when valid, else the documented
     ``llm.backend`` default).
+
+    The same guard applies to ``explicit_backend``: a runtime-only backend
+    reused as the explicit LLM backend (e.g. the evolution executor / validation
+    repair passing ``llm_backend=execute_runtime_backend``) is rerouted to a
+    completion backend, while completion-capable runtimes and pure LLM-provider
+    aliases pass through unchanged. See :func:`_guard_explicit_llm_backend`.
     """
     if explicit_backend:
-        return explicit_backend
+        return _guard_explicit_llm_backend(explicit_backend)
 
     try:
         config = load_config()

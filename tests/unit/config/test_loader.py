@@ -1205,6 +1205,53 @@ class TestLLMHelperLookups:
         with patch.dict(os.environ, {}, clear=True):
             assert get_llm_backend_for_role("qa", explicit_backend="opencode") == "opencode"
 
+    def test_get_llm_backend_for_role_guards_explicit_runtime_only_backend(self) -> None:
+        """Regression for the Antigravity evolution/validation path (PR #1482).
+
+        The evolution executor and validation repair call
+        ``create_agent_runtime(llm_backend=execute_runtime_backend)``, reusing
+        the *runtime* backend as the internal-LLM backend. When the runtime is
+        runtime-only (``antigravity``, ``supports_llm=False``) that explicit
+        backend reached ``get_llm_backend_for_role/_for_stage`` and bypassed the
+        completion guard via the ``if explicit_backend`` early return, later
+        crashing in ``resolve_llm_backend`` with ``Unsupported LLM backend:
+        antigravity``. The explicit path must now reroute a runtime-only backend
+        to a completion backend, while still honoring completion-capable runtimes
+        and pure LLM-provider aliases.
+        """
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(runtime_backend="antigravity"),
+            llm=LLMConfig(backend="codex"),
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            # The defect: explicit runtime-only backend must fall back to the
+            # configured completion backend (codex), never the runtime-only one.
+            assert (
+                get_llm_backend_for_role("semantic_evaluation", explicit_backend="antigravity")
+                == "codex"
+            )
+            assert get_llm_backend_for_stage("execute", explicit_backend="antigravity") == "codex"
+            # No regression: completion-capable runtimes pass through unchanged.
+            assert get_llm_backend_for_role("qa", explicit_backend="claude_code") == "claude_code"
+            # No regression: a pure LLM-provider alias with no *runtime*
+            # capability entry (anthropic) must be honored as-is, not downgraded.
+            assert get_llm_backend_for_role("qa", explicit_backend="anthropic") == "anthropic"
+
+    def test_get_llm_backend_for_role_explicit_runtime_only_honors_env_override(
+        self,
+    ) -> None:
+        """When an explicit runtime-only backend is rerouted, a valid
+        ``OUROBOROS_LLM_BACKEND`` override is preferred over the documented
+        default — matching the per-stage guard's precedence."""
+        with patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": "gemini"}, clear=True):
+            assert (
+                get_llm_backend_for_role("semantic_evaluation", explicit_backend="antigravity")
+                == "gemini"
+            )
+
     def test_get_llm_backend_for_role_honors_legacy_llm_backend_config(self) -> None:
         # No per-stage routing: the documented llm.backend override must win over
         # the default agent runtime instead of being silently ignored.
