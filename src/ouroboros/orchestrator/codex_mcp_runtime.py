@@ -287,6 +287,15 @@ def build_codex_mcp_worker_runtime(
         model=model,
         reasoning_effort_support=ParamSupport.NATIVE,
         enforceable_reasoning_efforts=_CODEX_REASONING_EFFORT_LEVELS,
+        # codex mcp-server sessions are PROCESS-BOUND (in-memory threadId,
+        # addressable only by the SAME server process) and the warm pool is
+        # aclose()d after each parallel run, so a persisted RuntimeHandle is
+        # always dead on reload: resume() returns a guaranteed terminal
+        # "session is process-bound" error instead of respawning fresh. So this
+        # runtime must NOT advertise targeted_resume nor emit a resumable handle
+        # — unlike the disk-persisted Claude (claude -p --resume) and codex exec
+        # backends. Mirrors build_claude_worker_runtime's targeted_resume gate.
+        targeted_resume=False,
     )
 
 

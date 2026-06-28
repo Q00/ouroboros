@@ -145,6 +145,10 @@ class ClaudeWorkerTransport:
                 stdout_b, stderr_b = await proc.communicate(prompt.encode("utf-8"))
         except TimeoutError:
             proc.kill()
+            # Reap the SIGKILL'd child so it does not linger as a zombie. kill()
+            # only sends the signal; wait() collects the exit status. It returns
+            # promptly because SIGKILL is uncatchable.
+            await proc.wait()
             return WorkerTurn(text="", is_error=True, error="claude worker turn timed out")
 
         stdout = stdout_b.decode("utf-8", errors="replace").strip()

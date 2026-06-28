@@ -13,6 +13,7 @@ from ouroboros.orchestrator.codex_mcp_runtime import (
     _map_permission_mode,
     build_codex_mcp_worker_runtime,
 )
+from ouroboros.orchestrator.worker_runtime import WorkerTurn
 
 
 class TestPermissionMapping:
@@ -69,6 +70,29 @@ class TestRuntimeWiring:
         caps = rt.capabilities
         assert caps.subagent_orchestration is SubagentOrchestration.EXTERNAL_LEADER_DRIVEN
         assert is_leader_driven_worker(caps) is True
+
+    def test_does_not_declare_targeted_resume(self) -> None:
+        # codex mcp-server sessions are process-bound and the warm pool is closed
+        # after each run → a persisted handle is always dead on reload. So this
+        # runtime must NOT advertise resume (mirrors the dashboard-centric Claude
+        # worker), unlike the disk-persisted codex exec / claude --resume backends.
+        rt = build_codex_mcp_worker_runtime(cwd="/tmp")
+        assert rt.capabilities.targeted_resume is False
+
+    @pytest.mark.asyncio
+    async def test_does_not_emit_resumable_handle(self) -> None:
+        # Even when a turn surfaces a live threadId, no RuntimeHandle is emitted:
+        # ParallelExecutor must not persist a handle that resume() can only fail on.
+        rt = build_codex_mcp_worker_runtime(cwd="/tmp")
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return WorkerTurn(text="ok", session_id="process-bound-threadid")
+
+        rt._transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+        assert [message.type for message in messages] == ["result"]
+        assert messages[0].resume_handle is None
+        assert messages[0].data["session_id"] == "process-bound-threadid"
 
 
 class _RecordingActor:
