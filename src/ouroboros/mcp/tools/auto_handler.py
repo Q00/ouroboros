@@ -1259,6 +1259,7 @@ def _claim_start_lease(
         token_error = _validate_start_lease_payload(auto_session_id, token, lease)
         if token_error is not None:
             return token_error
+        assert lease is not None
         mode = str(lease.get("mode") or "")
         if mode in {"job", "job_pending"}:
             claimed_mode = "job"
