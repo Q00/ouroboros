@@ -269,9 +269,19 @@ class AutoHandler:
                 )
             )
         if auto_session_id is not None and start_lease_token is not None:
-            token_error = _validate_start_lease_token(store, auto_session_id, start_lease_token)
-            if token_error is not None:
-                return Result.err(token_error)
+            try:
+                state = store.load(auto_session_id)
+            except ValueError as exc:
+                _release_start_lease(store, auto_session_id, token=start_lease_token)
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_auto"))
+            claim_error = _claim_start_lease(
+                store,
+                auto_session_id,
+                token=start_lease_token,
+                ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
+            )
+            if claim_error is not None:
+                return Result.err(claim_error)
             release_start_lease = True
         elif auto_session_id is not None:
             try:
@@ -784,7 +794,7 @@ class StartAutoHandler:
                     auto_session_id,
                     token=lease_token,
                     mode="plugin_dispatched",
-                    ttl_seconds=max(1.0, state.pipeline_timeout_seconds),
+                    ttl_seconds=_START_AUTO_PENDING_LEASE_SECONDS,
                 )
             except Exception as exc:
                 _release_start_lease(self._store, auto_session_id, token=lease_token)
@@ -1236,10 +1246,54 @@ def _release_start_lease(
         path.unlink(missing_ok=True)
 
 
-def _validate_start_lease_token(
-    store: AutoStore, auto_session_id: str, token: str
+def _claim_start_lease(
+    store: AutoStore,
+    auto_session_id: str,
+    *,
+    token: str,
+    ttl_seconds: float,
 ) -> MCPToolError | None:
-    lease = _read_start_lease(store, auto_session_id)
+    path = _start_lease_path(store, auto_session_id)
+    with file_lock(path):
+        lease = _read_start_lease_locked(path)
+        token_error = _validate_start_lease_payload(auto_session_id, token, lease)
+        if token_error is not None:
+            return token_error
+        mode = str(lease.get("mode") or "")
+        if mode in {"job", "job_pending"}:
+            claimed_mode = "job"
+            claimed_ttl_seconds = None
+        elif mode == "plugin_dispatched":
+            claimed_mode = "plugin_claimed"
+            claimed_ttl_seconds = ttl_seconds
+        else:
+            return MCPToolError(
+                "Invalid start_auto lease token: lease is not claimable for "
+                f"auto_session_id={auto_session_id}.",
+                tool_name="ouroboros_auto",
+                is_retriable=True,
+                details={
+                    "auto_session_id": auto_session_id,
+                    "session_id": auto_session_id,
+                    "lease_mode": mode or lease.get("mode"),
+                },
+            )
+        lease["mode"] = claimed_mode
+        lease["updated_at"] = _utc_iso()
+        if claimed_ttl_seconds is None:
+            lease.pop("expires_at", None)
+        else:
+            lease["expires_at"] = _utc_iso(ttl_seconds=claimed_ttl_seconds)
+        lease.update(_current_lease_owner())
+        _write_start_lease_locked(path, lease)
+    return None
+
+
+def _validate_start_lease_payload(
+    auto_session_id: str,
+    token: str,
+    lease: dict[str, Any] | None,
+) -> MCPToolError | None:
     if lease is None:
         return MCPToolError(
             "Invalid start_auto lease token: no active lease exists for "
