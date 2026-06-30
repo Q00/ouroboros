@@ -76,11 +76,11 @@ This pre-call branch applies to solo *and* debate. Skipping it makes `ooo latera
 
 Per the `ooo` routing contract in `src/ouroboros/codex/ouroboros.md`, every `ooo lateral` invocation MUST route through the MCP tool — solo *and* debate, in every runtime. This SKILL never substitutes a direct sub-agent fan-out for the MCP call.
 
-1. Call `ToolSearch` with query `"+ouroboros lateral"` to load `ouroboros_lateral_think` (often prefixed, e.g., `mcp__plugin_ouroboros_ouroboros__ouroboros_lateral_think`). Deferred tools won't appear until `ToolSearch` runs.
+1. Use the active runtime's tool-discovery capability with query `"+ouroboros lateral"` to load `ouroboros_lateral_think` (often prefixed, e.g., `mcp__plugin_ouroboros_ouroboros__ouroboros_lateral_think`). Deferred tools won't appear until runtime tool discovery runs.
 2. Invoke the tool with the parsed mode and the context from Step 2:
    - **Solo**: `persona=<one>`, `problem_context`, `current_approach`, `failed_attempts`.
    - **Debate**: `personas=[...]`, `problem_context`, `current_approach`, `failed_attempts`.
-3. If `ToolSearch` cannot load the tool, **stop and report that the MCP dispatch surface is broken** — same rule the contract applies to `ooo auto`. Do not improvise a sub-agent fan-out as a workaround; that bypasses the contract the bot review explicitly flagged.
+3. If runtime tool discovery cannot load the tool, **stop and report that the MCP dispatch surface is broken** — same rule the contract applies to `ooo auto`. Do not improvise a sub-agent fan-out as a workaround; that bypasses the contract the bot review explicitly flagged.
 
 The MCP call is cheap. The handler's inline path is a *deterministic prompt builder* — it constructs per-persona reframing prompts via `LateralThinker.generate_alternative` (`src/ouroboros/mcp/tools/evaluation_handlers.py:1444+`); it does not run an LLM rollout.
 
@@ -198,7 +198,7 @@ You only need this if a parent SKILL or the user explicitly requests *one* perso
 
 ## When MCP is unavailable
 
-The contract is "fail loud, don't substitute": if `ouroboros_lateral_think` cannot be loaded via `ToolSearch`, stop and report that the MCP dispatch surface is broken. Do not improvise either solo or debate by reading persona files directly when MCP-driven invocation was requested — that re-introduces the contract bypass the bot review flagged.
+The contract is "fail loud, don't substitute": if `ouroboros_lateral_think` cannot be loaded via runtime tool discovery, stop and report that the MCP dispatch surface is broken. Do not improvise either solo or debate by reading persona files directly when MCP-driven invocation was requested — that re-introduces the contract bypass the bot review flagged.
 
 The one exception, retained for documented offline use: a parent SKILL operating in degraded-offline mode that has *already* announced it cannot reach MCP MAY read `src/ouroboros/agents/<persona>.md` and adopt that persona inline for solo reframing. This is not a fallback for `ooo lateral`; it's a degraded helper for a parent SKILL that has already given up on MCP. Debate has no offline equivalent — report the broken surface and stop.
 
@@ -222,7 +222,7 @@ with 2 tables, you haven't found the core feature yet.
 
 [Step 2: Confirm problem_context + current_approach are present;
  ask the user one short combined question if not]
-[ToolSearch loads ouroboros_lateral_think]
+[runtime tool discovery loads ouroboros_lateral_think]
 [Call ouroboros_lateral_think(personas=[hacker,researcher,simplifier,architect,contrarian], ...)]
 [Handler returns: content = N persona blocks joined by ---,
                   followed by hidden <!-- ouroboros-lateral-inline-dispatch-v1 base64

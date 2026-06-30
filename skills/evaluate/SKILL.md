@@ -43,12 +43,12 @@ When the user invokes this skill:
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before proceeding.**
 
-1. Use the `ToolSearch` tool to find and load the evaluate MCP tool:
+1. Use the active runtime's tool-discovery capability to find and load the evaluate MCP tool:
    ```
-   ToolSearch query: "+ouroboros evaluate"
+   tool discovery query: "+ouroboros evaluate"
    ```
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_evaluate` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
-3. If ToolSearch finds the tool → proceed with the MCP-based evaluation below. If not → skip to **Fallback** section.
+2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_evaluate` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable.
+3. If runtime tool discovery finds the tool → proceed with the MCP-based evaluation below. If not → skip to **Fallback** section.
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
@@ -58,7 +58,7 @@ schema loaded on one turn is NOT guaranteed to still be loaded on the next. If
 you call it while its schema is not loaded in the **current** turn, the runtime
 rejects the call with **"Invalid tool parameters"** before it reaches the server.
 Therefore: **immediately before EVERY `ouroboros_evaluate` call in this skill,
-re-run `ToolSearch query: "+ouroboros evaluate"`** (idempotent — a no-op when
+re-run `tool discovery query: "+ouroboros evaluate"`** (idempotent — a no-op when
 already loaded). If the load returns no matching tool, switch to the documented
 fallback instead of retrying the failing call.
 

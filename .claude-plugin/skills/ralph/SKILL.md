@@ -52,13 +52,13 @@ When the user invokes this skill:
 The Ouroboros MCP tools are often registered as deferred tools that must be
 explicitly loaded before use. Do this before preparing input or calling Ralph:
 
-1. Use the `ToolSearch` tool to find and load the Ralph/job MCP tools:
+1. Use the active runtime's tool-discovery capability to find and load the Ralph/job MCP tools:
    ```
-   ToolSearch query: "+ouroboros ralph job"
+   tool discovery query: "+ouroboros ralph job"
    ```
 2. The loaded tools may be exposed under plugin-prefixed names such as
    `mcp__plugin_ouroboros_ouroboros__ouroboros_ralph`. Use the actual tool
-   names returned by `ToolSearch`; the bare names below are the canonical MCP
+   names returned by runtime tool discovery; the bare names below are the canonical MCP
    tool names for documentation.
 3. Confirm that `ouroboros_ralph` and the job tools (`ouroboros_job_wait`,
    `ouroboros_job_status`, `ouroboros_job_result`, and

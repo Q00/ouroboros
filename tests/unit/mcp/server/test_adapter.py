@@ -121,6 +121,13 @@ class TestMCPServerAdapter:
         assert adapter.info.name == "custom-server"
         assert adapter.info.version == "2.0.0"
 
+    def test_adapter_stores_instructions_for_serve(self) -> None:
+        """MCP server ``instructions`` are stored so ``serve()`` can pass them to FastMCP."""
+        adapter = MCPServerAdapter(instructions="hello ubiquitous language")
+        assert adapter._instructions == "hello ubiquitous language"
+        # Default is None when the caller does not supply instructions.
+        assert MCPServerAdapter()._instructions is None
+
     def test_project_dir_from_seed_uses_primary_brownfield_reference(self, tmp_path) -> None:
         """Brownfield primary context should be treated as the project directory."""
         seed = SimpleNamespace(

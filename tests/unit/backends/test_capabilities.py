@@ -5,15 +5,18 @@ import pytest
 
 from ouroboros.backends import (
     SubagentSpawnTriggerMechanism,
+    ToolDiscoveryMechanism,
     backend_supports_tool_envelope,
     build_runtime_subagent_orchestration_contract,
     get_backend_capability,
     interview_driver_backend_choices,
     llm_backend_choices,
     render_backend_skill_capability_guide,
+    render_mcp_server_instructions,
     resolve_backend_alias,
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
+    resolve_tool_discovery,
     runtime_backend_choices,
     soft_tool_enforcement_backends,
 )
@@ -388,7 +391,12 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
     assert "### When a skill requires `inspect_code`" in guide
     assert "`rg`" in guide
     assert "### When a skill requires `call_mcp`" in guide
-    assert "Do not rely on Claude-specific `ToolSearch` names." in guide
+    # Provider-neutral: codex references its OWN discovery surface, never another
+    # runtime's tool name (the ubiquitous-language convention lives in the MCP
+    # server instructions, not as a cross-runtime band-aid here).
+    assert "Codex's own" in guide
+    assert "tool-discovery surface (not another runtime's discovery tool)" in guide
+    assert "ToolSearch" not in guide
     assert "### When a skill requires `run_lateral_review`" in guide
     assert "lateral_review_required=true" in guide
     assert "### When a skill requires `run_closure_gate`" in guide
@@ -404,3 +412,53 @@ def test_renders_generic_skill_capability_guides_for_runtime_backends() -> None:
         assert guide.startswith(f"## Ouroboros Skill Capability Guide: {backend_name.title()}\n")
         for capability_name in REQUIRED_SKILL_CAPABILITY_NAMES:
             assert f"### When a skill requires `{capability_name}`" in guide
+
+
+def test_resolve_tool_discovery_maps_each_runtime_to_its_mechanism() -> None:
+    """The abstract tool-discovery concept resolves to one concrete per-runtime mechanism."""
+    # Claude exposes a callable discovery tool (ToolSearch); Codex drives its own
+    # native discovery; everything else exposes tools directly.
+    assert resolve_tool_discovery("claude") == (
+        ToolDiscoveryMechanism.DEFERRED_TOOL_SEARCH,
+        "ToolSearch",
+    )
+    assert resolve_tool_discovery("claude_code") == (
+        ToolDiscoveryMechanism.DEFERRED_TOOL_SEARCH,
+        "ToolSearch",
+    )
+    assert resolve_tool_discovery("codex") == (
+        ToolDiscoveryMechanism.NATIVE_RUNTIME_DISCOVERY,
+        None,
+    )
+    assert resolve_tool_discovery("opencode") == (
+        ToolDiscoveryMechanism.DIRECT_EXPOSURE,
+        None,
+    )
+    # Unknown backends and backends with no registered mechanism default to
+    # direct exposure (no discovery step), never raising.
+    assert resolve_tool_discovery("gemini") == (ToolDiscoveryMechanism.DIRECT_EXPOSURE, None)
+    assert resolve_tool_discovery("does-not-exist") == (
+        ToolDiscoveryMechanism.DIRECT_EXPOSURE,
+        None,
+    )
+    assert resolve_tool_discovery(None) == (ToolDiscoveryMechanism.DIRECT_EXPOSURE, None)
+
+
+def test_mcp_server_instructions_are_provider_neutral_and_budget_safe() -> None:
+    """The MCP instructions field is the cross-provider ubiquitous-language channel."""
+    text = render_mcp_server_instructions()
+
+    # Fits the host instructions budget (Claude Code truncates at ~2KB).
+    assert len(text.encode("utf-8")) < 2048
+
+    # Carries both ubiquitous-language conventions and the shared query/payload keys.
+    assert "TOOL DISCOVERY" in text
+    assert "SUBAGENT FAN-OUT" in text
+    assert "+ouroboros <skill>" in text
+    assert "host_action=spawn_subagents" in text
+    assert "result_correlation_key" in text
+
+    # Stays runtime-neutral: it must NOT name any one provider's concrete
+    # mechanism — each runtime maps the abstract concept to its own.
+    assert "ToolSearch" not in text
+    assert "Task/Agent" not in text

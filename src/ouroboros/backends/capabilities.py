@@ -47,6 +47,14 @@ class BackendCapability:
     host_driven_subagent_requires_explicit_request: bool = False
     host_driven_callable_spawn_tool_name: str | None = None
     prohibited_subagent_spawn_tool_names: tuple[str, ...] = ()
+    # Tool discovery axis: how this runtime makes a *deferred* Ouroboros MCP
+    # tool callable. ``tool_discovery_mechanism`` is the concrete per-runtime
+    # translation of the abstract "load a deferred tool by query" concept;
+    # ``tool_discovery_tool_name`` names the callable discovery tool when the
+    # runtime exposes one (Claude → ``ToolSearch``). ``None`` mechanism means
+    # the runtime exposes tools directly and needs no discovery step.
+    tool_discovery_mechanism: ToolDiscoveryMechanism | None = None
+    tool_discovery_tool_name: str | None = None
     skill_execution_capabilities: tuple[SkillExecutionCapability, ...] = ()
 
     @property
@@ -84,6 +92,28 @@ class SubagentSpawnTriggerMechanism(StrEnum):
     CODEX_NATURAL_LANGUAGE_DELEGATION = "codex_natural_language_delegation"
     CLAUDE_TASK_AGENT_TOOL = "claude_task_agent_tool"
     SEQUENTIAL_FALLBACK = "sequential_fallback"
+
+
+class ToolDiscoveryMechanism(StrEnum):
+    """Concrete per-runtime mechanism for loading a *deferred* MCP tool.
+
+    "Tool discovery" is the ubiquitous concept: an Ouroboros MCP tool may ship
+    with its schema deferred (not loaded into context), so a runtime must load
+    it by a discovery query before it becomes callable. Each runtime translates
+    that one concept differently:
+
+    - ``DEFERRED_TOOL_SEARCH``: the runtime exposes a callable discovery tool
+      that loads deferred schemas on demand (Claude Code's ``ToolSearch``).
+    - ``NATIVE_RUNTIME_DISCOVERY``: the runtime has its own (non-``ToolSearch``)
+      discovery surface it must drive when a deferred tool must be loaded
+      (Codex).
+    - ``DIRECT_EXPOSURE``: tools are always exposed; no discovery step exists
+      and calling directly is correct (OpenCode plugin and sequential runtimes).
+    """
+
+    DEFERRED_TOOL_SEARCH = "deferred_tool_search"
+    NATIVE_RUNTIME_DISCOVERY = "native_runtime_discovery"
+    DIRECT_EXPOSURE = "direct_exposure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,9 +170,15 @@ _CODEX_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
     SkillExecutionCapability(
         name="call_mcp",
         guidance=(
-            "Use available Ouroboros MCP tools directly when exposed, and use "
-            "Codex tool discovery only when a deferred MCP surface must be loaded. "
-            "Do not rely on Claude-specific `ToolSearch` names."
+            "Use available Ouroboros MCP tools directly when exposed. When a "
+            "deferred Ouroboros tool must be loaded, use Codex's own "
+            "tool-discovery surface (not another runtime's discovery tool) with "
+            "the `+ouroboros <skill>` query, then call the tool by its full "
+            "name. Keep this routing internal: when a tool is already exposed, "
+            "call it directly without running discovery, and never narrate the "
+            "deferred-tool / tool-discovery plumbing to the user. An empty "
+            "discovery result for an already-available tool is an expected "
+            "no-op, not a failure, warning, or uncertainty — do not surface it."
         ),
     ),
     SkillExecutionCapability(
@@ -320,6 +356,8 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         host_driven_subagent_mechanism=SubagentSpawnTriggerMechanism.CLAUDE_TASK_AGENT_TOOL,
         host_driven_subagent_requires_explicit_request=True,
         host_driven_callable_spawn_tool_name="Task/Agent",
+        tool_discovery_mechanism=ToolDiscoveryMechanism.DEFERRED_TOOL_SEARCH,
+        tool_discovery_tool_name="ToolSearch",
     ),
     BackendCapability(
         name="codex",
@@ -338,6 +376,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         host_driven_subagent_requires_explicit_request=True,
         host_driven_callable_spawn_tool_name=None,
         prohibited_subagent_spawn_tool_names=("multi_agent_v1.spawn_agent",),
+        tool_discovery_mechanism=ToolDiscoveryMechanism.NATIVE_RUNTIME_DISCOVERY,
     ),
     BackendCapability(
         name="copilot",
@@ -394,6 +433,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         skill_execution_capabilities=_OPENCODE_SKILL_EXECUTION_CAPABILITIES,
         soft_tool_enforcement=True,
         supports_native_parallel_subagents=True,
+        tool_discovery_mechanism=ToolDiscoveryMechanism.DIRECT_EXPOSURE,
     ),
     BackendCapability(
         name="goose",
@@ -479,6 +519,62 @@ def render_backend_skill_capability_guide(name: str) -> str:
             )
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_mcp_server_instructions() -> str:
+    """Render the provider-neutral 'ubiquitous language' for every MCP client.
+
+    Delivered via the MCP server ``instructions`` field, which Claude Code and
+    other MCP hosts inject into the model's context at session start. This is
+    the one channel every provider reads symmetrically, so the text stays
+    runtime-neutral — it names the *concepts* (tool discovery, subagent fan-out)
+    and the shared conventions (the ``+ouroboros <skill>`` discovery query, the
+    ``host_action=spawn_subagents`` payload contract), and lets each runtime map
+    them onto its own concrete mechanism (``ToolDiscoveryMechanism`` /
+    ``SubagentSpawnTriggerMechanism``). Keep it within the host's instructions
+    budget (Claude Code truncates at ~2KB) with the load-bearing rules first.
+    """
+    return (
+        "Ouroboros drives interview/seed/run/evaluate/evolve workflows through "
+        "MCP tools named `...ouroboros_*`.\n"
+        "\n"
+        "TOOL DISCOVERY: these tools may be DEFERRED — the tool exists but its "
+        "schema is not loaded, so it is not in your immediate tool list. Do NOT "
+        "conclude a tool is unavailable from its absence. Load it through your "
+        "runtime's own tool-discovery mechanism using the query "
+        "`+ouroboros <skill>` (e.g. `+ouroboros evaluate`), then call it by its "
+        "full `...ouroboros_*` name. A deferred schema can unload between turns, "
+        "so re-run discovery immediately before each call. If a tool is already "
+        "exposed, call it directly — discovery is a no-op then, and an empty "
+        "discovery result is expected, not a failure. Never surface this "
+        "tool-discovery plumbing to the user.\n"
+        "\n"
+        "SUBAGENT FAN-OUT: when a tool result's `meta` carries "
+        "`host_action=spawn_subagents` (or `dispatch_mode=host_driven`) with a "
+        "payload array (e.g. `question_advisory_subagents`), spawn ONE subagent "
+        "per payload using your runtime's native primitive, give each the "
+        "payload `prompt`, await all, correlate results by the "
+        "`result_correlation_key` named in `meta`, then synthesize while "
+        "preserving the user-facing content. With no parallel primitive, process "
+        "the payloads sequentially. Keep any user-facing question visible before "
+        "the assistive work it triggers."
+    )
+
+
+def resolve_tool_discovery(
+    runtime_backend: str | None,
+) -> tuple[ToolDiscoveryMechanism, str | None]:
+    """Resolve the (mechanism, callable discovery tool name) for a runtime.
+
+    Mirrors :func:`resolve_subagent_dispatch`: the abstract tool-discovery
+    concept resolves to one concrete per-runtime mechanism. Unknown backends or
+    backends with no registered mechanism are treated as ``DIRECT_EXPOSURE``
+    (tools are always exposed; no discovery step).
+    """
+    capability = get_backend_capability((runtime_backend or "").strip().lower())
+    if capability is None or capability.tool_discovery_mechanism is None:
+        return ToolDiscoveryMechanism.DIRECT_EXPOSURE, None
+    return capability.tool_discovery_mechanism, capability.tool_discovery_tool_name
 
 
 def build_runtime_subagent_orchestration_contract(

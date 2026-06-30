@@ -37,12 +37,12 @@ When the user invokes this skill:
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before proceeding.**
 
-1. Use the `ToolSearch` tool to find and load the execution MCP tools:
+1. Use the active runtime's tool-discovery capability to find and load the execution MCP tools:
    ```
-   ToolSearch query: "+ouroboros execute"
+   tool discovery query: "+ouroboros execute"
    ```
-2. The tools will typically be named with prefix `mcp__plugin_ouroboros_ouroboros__` (e.g., `ouroboros_execute_seed`, `ouroboros_session_status`). After ToolSearch returns, the tools become callable.
-3. If ToolSearch finds the tools → proceed with the steps below. If not → skip to **Fallback** section.
+2. The tools will typically be named with prefix `mcp__plugin_ouroboros_ouroboros__` (e.g., `ouroboros_execute_seed`, `ouroboros_session_status`). After runtime tool discovery returns, the tools become callable.
+3. If runtime tool discovery finds the tools → proceed with the steps below. If not → skip to **Fallback** section.
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
@@ -53,7 +53,7 @@ guaranteed to still be loaded on the next. If you call any execution `ouroboros_
 MCP tool while its schema is not loaded in the **current** turn, the runtime
 rejects the call with **"Invalid tool parameters"** before it reaches the server.
 Therefore: **immediately before EVERY execution MCP call in this skill, re-run
-`ToolSearch query: "+ouroboros execute"`** to reload the execution tool family,
+`tool discovery query: "+ouroboros execute"`** to reload the execution tool family,
 including `ouroboros_start_execute_seed`, `ouroboros_job_wait`,
 `ouroboros_ac_tree_hud`, and `ouroboros_job_result` (idempotent — a no-op when
 already loaded). If the load returns no matching tool, switch to the documented

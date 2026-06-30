@@ -585,6 +585,7 @@ class MCPServerAdapter:
         *,
         name: str = "ouroboros-mcp",
         version: str = "1.0.0",
+        instructions: str | None = None,
         auth_config: AuthConfig | None = None,
         rate_limit_config: RateLimitConfig | None = None,
     ) -> None:
@@ -593,11 +594,15 @@ class MCPServerAdapter:
         Args:
             name: Server name for identification.
             version: Server version.
+            instructions: Optional MCP server ``instructions`` text injected into
+                every MCP client's context at session start (the cross-provider
+                "ubiquitous language" channel). Truncated by some hosts (~2KB).
             auth_config: Optional authentication configuration.
             rate_limit_config: Optional rate limiting configuration.
         """
         self._name = name
         self._version = version
+        self._instructions = instructions
         self._tool_handlers: dict[str, ToolHandler] = {}
         self._resource_handlers: dict[str, ResourceHandler] = {}
         self._prompt_handlers: dict[str, PromptHandler] = {}
@@ -905,11 +910,12 @@ class MCPServerAdapter:
         if transport in {"sse", "streamable-http"}:
             self._mcp_server = FastMCP(
                 self._name,
+                instructions=self._instructions,
                 host=host,
                 port=port,
             )
         else:
-            self._mcp_server = FastMCP(self._name)
+            self._mcp_server = FastMCP(self._name, instructions=self._instructions)
 
         # Register tools with FastMCP
         for _name, handler in self._tool_handlers.items():
@@ -1130,6 +1136,7 @@ def create_ouroboros_server(
     *,
     name: str = "ouroboros-mcp",
     version: str = "1.0.0",
+    instructions: str | None = None,
     auth_config: AuthConfig | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     event_store: Any | None = None,
@@ -1963,10 +1970,15 @@ def create_ouroboros_server(
         EventsResourceHandler(event_store=event_store),
     ]
 
-    # Create server adapter
+    # Create server adapter. The MCP ``instructions`` field is the cross-provider
+    # "ubiquitous language" channel — default to the registry-rendered guidance so
+    # every MCP client (Claude included) receives it at session start.
+    from ouroboros.backends import render_mcp_server_instructions
+
     server = MCPServerAdapter(
         name=name,
         version=version,
+        instructions=instructions if instructions is not None else render_mcp_server_instructions(),
         auth_config=auth_config,
         rate_limit_config=rate_limit_config,
     )
