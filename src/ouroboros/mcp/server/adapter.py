@@ -1260,6 +1260,9 @@ def create_ouroboros_server(
             if profile.default:
                 profile_default = resolve_agent_runtime_backend(profile.default)
     except ConfigError:
+        from ouroboros.config.models import get_default_config
+
+        config = get_default_config()
         profile_stages = None
         profile_default = None
 
@@ -1318,20 +1321,19 @@ def create_ouroboros_server(
     # Create shared LLM adapter for interview/seed paths.
     # Evaluation constructs its own adapter with higher max_turns — see
     # EvaluateHandler.handle in mcp/tools/evaluation_handlers.py.
-    # ``allowed_tools=[]`` paired with ``max_turns=1``: any tool-use block
-    # emitted by the model would consume the only allowed turn and the SDK
-    # then raises ``Reached maximum number of turns (1)`` before a final
-    # text response can stream. See issue #781.
+    # Keep the empty tool envelope for providers that support it, but do not
+    # force a single-turn budget: even denied or empty-envelope tool attempts
+    # can consume the first turn before the model emits final text.
+    stage_max_turns = config.orchestrator.default_max_turns
     from ouroboros.backends import backend_supports_tool_envelope
     from ouroboros.providers import resolve_llm_backend
 
     llm_adapters: dict[str, Any] = {}
 
     def create_stage_llm_adapter(backend: str) -> Any:
-        # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
         return create_llm_adapter(
             backend=backend,
-            max_turns=1,
+            max_turns=stage_max_turns,
             cwd=effective_cwd,
             allowed_tools=(
                 [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
@@ -1382,10 +1384,9 @@ def create_ouroboros_server(
 
     def fresh_llm_adapter(role: str = "reflect"):
         backend = role_llm_backend(role)
-        # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
         return create_llm_adapter(
             backend=backend,
-            max_turns=1,
+            max_turns=stage_max_turns,
             cwd=effective_cwd,
             allowed_tools=(
                 [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None

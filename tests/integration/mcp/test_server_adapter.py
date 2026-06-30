@@ -626,7 +626,7 @@ class TestCreateOuroborosServer:
         ``test_runtime_profile_stages_drive_internal_llm_backends``.
         """
         config = OuroborosConfig(
-            orchestrator=OrchestratorConfig(runtime_backend="codex"),
+            orchestrator=OrchestratorConfig(runtime_backend="codex", default_max_turns=15),
         )
         with (
             patch("ouroboros.config.load_config", return_value=config),
@@ -641,7 +641,7 @@ class TestCreateOuroborosServer:
 
         mock_create_llm_adapter.assert_called_once()
         assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
-        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
+        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 15
 
     def test_evolution_adapter_factory_resolves_live_backend_with_cwd(self) -> None:
         """Per-call evolution adapter factory must not freeze startup llm_backend."""
@@ -667,7 +667,7 @@ class TestCreateOuroborosServer:
         assert initial_kwargs["backend"] == "codex"
         assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
         assert mock_create_llm_adapter.call_args.kwargs["cwd"] == initial_kwargs["cwd"]
-        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
+        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 10
 
     def test_evolution_adapter_factory_uses_stage_backend_without_explicit_override(self) -> None:
         """Per-call evolution adapter factory resolves the Reflect stage backend."""
