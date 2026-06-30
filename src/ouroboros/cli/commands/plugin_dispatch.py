@@ -160,7 +160,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
                 f"Inspect or replace the file (`ooo plugin list --lockfile "
                 f"<path>` accepts an override), then retry."
             )
-            raise click.exceptions.Exit(code=1)
+            raise SystemExit(1)
 
         return _broken_lockfile
 
@@ -192,7 +192,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
                     f"ouroboros.plugin.json, or run `ooo plugin remove "
                     f"{cmd_name}` to reset its install."
                 )
-                raise click.exceptions.Exit(code=1)
+                raise SystemExit(1)
 
             return _broken_manifest
         return None
@@ -215,7 +215,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
                 f"(available: {available}). "
                 f"Run `ooo {cmd_name} <command> [args...]`."
             )
-            raise click.exceptions.Exit(code=1)
+            raise SystemExit(1)
 
         trust = TrustStore(root=trust_root)
         # The dispatcher is now a primary user-facing invocation path,
@@ -236,7 +236,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
                 f"Run `ooo plugin inspect {program.name}` for details, or "
                 f"remove the offending file under {trust_root}."
             )
-            raise click.exceptions.Exit(code=1) from exc
+            raise SystemExit(1) from exc
         plugin_home = Path(entry.plugin_home).expanduser()
 
         # Per the locked RFC ("Invocation Contract / Confirmation gate"),
@@ -300,7 +300,7 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
             # Blocked or failed without a launched subprocess — use 1
             # so shells / CI treat the refused invocation as failure.
             click_exit_code = 1
-        raise click.exceptions.Exit(code=click_exit_code)
+        raise SystemExit(click_exit_code)
 
     _dispatch.help = (
         f"Dispatch a command to the installed plugin {program.name!r} "

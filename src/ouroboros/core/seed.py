@@ -236,6 +236,8 @@ class Seed(BaseModel, frozen=True):
     """
 
     # Direction - IMMUTABLE
+    model_config = {"extra": "allow"}
+
     goal: str = Field(..., min_length=1, description="Primary objective of the workflow")
     task_type: str = Field(
         default="code",

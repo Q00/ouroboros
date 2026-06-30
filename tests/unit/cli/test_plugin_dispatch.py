@@ -25,7 +25,9 @@ import subprocess
 
 from click.testing import CliRunner
 import pytest
+from typer.testing import CliRunner as TyperCliRunner
 
+from ouroboros.cli.main import app as ouroboros_app
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
 from ouroboros.plugin.lockfile import LockEntry, Lockfile
 from ouroboros.plugin.trust_store import TrustStore
@@ -186,6 +188,64 @@ def test_dispatch_runs_subprocess_with_artifact_digest_recomputed(
     # The plugin's stdout reaches the user's terminal — this is the
     # core regression catch.
     assert "PR #1 looks good to merge" in result.stdout
+
+
+def test_top_level_plugin_dispatch_success_exits_without_traceback(
+    stub_default_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the Typer top-level fallback must treat successful
+    plugin dispatch as a clean process exit, not as a rich traceback.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    plugin_home = _stage_installed_plugin(
+        home_root=stub_default_paths["homes"],
+        lockfile_path=stub_default_paths["lockfile"],
+        trust_root=stub_default_paths["trust"],
+    )
+    real_digest = canonical_tree_hash(plugin_home)
+    Lockfile(stub_default_paths["lockfile"]).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0" * 8,
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest=real_digest,
+        )
+    )
+    TrustStore(root=stub_default_paths["trust"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity=str(plugin_home),
+        artifact_digest=real_digest,
+    )
+
+    def _spy_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"top-level dispatch ok\n", stderr=b""
+        )
+
+    monkeypatch.setattr("ouroboros.plugin.firewall.subprocess.run", _spy_runner)
+
+    runner = TyperCliRunner()
+    result = runner.invoke(
+        ouroboros_app,
+        ["github-pr-ops", "review", "https://example.com/pr/1"],
+    )
+
+    assert result.exit_code == 0
+    assert "top-level dispatch ok" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_dispatch_blocked_invocation_exits_nonzero(

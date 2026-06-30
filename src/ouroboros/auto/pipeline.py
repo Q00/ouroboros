@@ -19,6 +19,10 @@ import yaml
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
+from ouroboros.auto.autoresearch_contract import (
+    apply_autoresearch_contract,
+    has_autoresearch_contract,
+)
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
@@ -1093,6 +1097,7 @@ class AutoPipeline:
                     timeout=bounded_repair_timeout,
                 )
                 seed = normalize_execution_acceptance(seed)
+                seed = apply_autoresearch_contract(seed)
             except TimeoutError:
                 cancel_event.set()
                 if self._enforce_deadline(state):
@@ -2651,6 +2656,7 @@ class AutoPipeline:
                         state, current_seed, qa_result, attempt=attempt
                     )
                 )
+                current_seed = apply_autoresearch_contract(current_seed)
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
                     ledger=ledger,
@@ -4001,6 +4007,7 @@ class AutoPipeline:
         self, state: AutoPipelineState, seed: Seed, *, persist: bool = True
     ) -> Seed:
         normalized = normalize_execution_acceptance(seed)
+        normalized = apply_autoresearch_contract(normalized)
         if normalized is not seed and persist:
             state.seed_artifact = normalized.to_dict()
             self._save(state)
@@ -4021,6 +4028,7 @@ class AutoPipeline:
                 }
             )
         seed = normalize_execution_acceptance(seed)
+        seed = apply_autoresearch_contract(seed)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()
         state.seed_origin = SeedOrigin.AUTO_PIPELINE
@@ -4029,10 +4037,11 @@ class AutoPipeline:
         # and prepend the catalog's default AC template to the Seed.
         inference = derive_domain_from_ledger(ledger)
         task_class = next(iter(inference.classes)) if inference.is_single else None
-        if task_class is not None:
+        if task_class is not None and not has_autoresearch_contract(seed):
             applied = apply_default_ac_template(seed, task_class)
             if applied.injected_ac:
                 seed = normalize_execution_acceptance(applied.seed)
+                seed = apply_autoresearch_contract(seed)
                 state.seed_id = seed.metadata.seed_id
                 state.seed_artifact = seed.to_dict()
             state.active_task_class = task_class.value
