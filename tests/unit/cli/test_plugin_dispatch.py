@@ -27,8 +27,8 @@ from click.testing import CliRunner
 import pytest
 from typer.testing import CliRunner as TyperCliRunner
 
-from ouroboros.cli.main import app as ouroboros_app
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
+from ouroboros.cli.main import app as ouroboros_app
 from ouroboros.plugin.lockfile import LockEntry, Lockfile
 from ouroboros.plugin.trust_store import TrustStore
 
