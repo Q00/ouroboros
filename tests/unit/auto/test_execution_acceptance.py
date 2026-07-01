@@ -443,6 +443,61 @@ def test_normalize_execution_acceptance_canonicalizes_autoresearch_contract() ->
     ]
 
 
+def test_normalize_execution_acceptance_preserves_distinct_autoresearch_user_ac() -> None:
+    seed = _seed(
+        "Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+        "train.py must preserve the existing --device CLI flag behavior.",
+        "Final report must include the baseline val_bpb and memory.",
+    ).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert "train.py must preserve the existing --device CLI flag behavior." in (
+        normalized.acceptance_criteria
+    )
+    assert "Final report must include the baseline val_bpb and memory." in (
+        normalized.acceptance_criteria
+    )
+
+
+def test_normalize_execution_acceptance_preserves_existing_autoresearch_runtime_context() -> None:
+    seed = Seed.from_dict(
+        {
+            **_seed(
+                "Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated."
+            ).to_dict(),
+            "goal": "Run a bounded Karpathy-style autoresearch loop over train.py val_bpb.",
+            "constraints": ["Runtime Context: local autoresearch repository with train.py."],
+            "runtime_context": {
+                "repository_path": "/custom/repo",
+                "measurement_command": "python custom_measure.py",
+                "timeout_seconds": 120,
+                "experiment_budget": 3,
+            },
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    runtime_context = normalized.to_dict()["runtime_context"]
+    assert runtime_context["repository_path"] == "/custom/repo"
+    assert runtime_context["measurement_command"] == "python custom_measure.py"
+    assert runtime_context["timeout_seconds"] == 120
+    assert runtime_context["experiment_budget"] == 3
+    assert runtime_context["verification_command"] == "uv run train.py"
+
+
 def test_normalize_execution_acceptance_leaves_non_autoresearch_train_metric_seed_alone() -> None:
     seed = _seed(
         "A command/API check returns stable observable output or artifacts proving the task goal.",

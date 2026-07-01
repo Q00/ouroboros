@@ -336,8 +336,7 @@ def _with_autoresearch_seed_extras(seed: Seed, context_text: str) -> Seed:
     runtime_context = data.get("runtime_context")
     if not isinstance(runtime_context, dict):
         runtime_context = {}
-    data["runtime_context"] = {
-        **runtime_context,
+    defaults = {
         "repository_path": runtime_context.get("repository_path")
         or _extract_autoresearch_repository_path(context_text),
         "research_program": "program.md",
@@ -352,6 +351,7 @@ def _with_autoresearch_seed_extras(seed: Seed, context_text: str) -> Seed:
         "memory_source": "maximum resident set size from /usr/bin/time -l stderr, recorded as bytes.",
         "memory_heavy_threshold": "discard if experiment memory exceeds baseline by more than max(10% of baseline, 67108864 bytes).",
     }
+    data["runtime_context"] = {**defaults, **runtime_context}
     data.setdefault("non_goals", list(_AUTORESEARCH_NON_GOALS))
     data.setdefault(
         "candidate_sequence",
@@ -382,27 +382,17 @@ def _is_autoresearch_generic_or_covered(criterion: str) -> bool:
         return True
     if "command/api check returns stable observable output" in key:
         return True
-    covered_markers = (
+    covered_phrases = (
         "seed has explicit runtime context",
         "seed preserves explicit runtime context",
-        "runtime context and non-goals",
-        "first-class content",
-        "baseline",
-        "uv run train.py",
-        "sequential",
-        "current best",
-        "at most 2",
-        "at most two",
-        "diff summary",
-        "changed files",
-        "val_bpb",
-        "memory",
-        "train.py",
-        "scope widening",
-        "discard",
-        "keep/discard",
+        "seed requires execution to record a baseline",
+        "execution records baseline val_bpb before train.py experiments",
+        "seed requires up to two post-baseline experiments",
+        "seed requires every baseline and experiment ledger entry",
+        "seed requires final kept changes to limited to train.py",
+        "seed defines discard behavior for ties, regressions, invalid runs, missing val_bpb, missing memory, timeouts, memory-heavy behavior, nonzero exits, and unauthorized file changes",
     )
-    return any(marker in key for marker in covered_markers)
+    return any(key.startswith(phrase) for phrase in covered_phrases)
 
 
 def _is_library_default_acceptance(criterion: str) -> bool:

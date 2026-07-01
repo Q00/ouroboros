@@ -4704,14 +4704,7 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
         and not (persona_prefix and summary.casefold().startswith(f"{persona_prefix}:"))
     ):
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
-    # Seed QA lateral output often includes the persona prompt and full problem
-    # context in ``text``. Preserve only short explicit Decision lines; raw
-    # bodies are too likely to be diagnostic transcript material.
-    if (
-        decision
-        and decision.casefold().startswith("decision:")
-        and not _is_seed_qa_recovery_transcript(decision)
-    ):
+    if _is_clean_seed_qa_lateral_decision(decision, raw_text=lateral_result.text):
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {decision}")
     if not repairs:
         repairs.append(
@@ -4747,6 +4740,25 @@ def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
     cleaned = " ".join(cleaned_lines)
     cleaned = cleaned.replace("# Lateral Thinking:", "").replace("# lateral thinking:", "")
     return cleaned[:limit].strip()
+
+
+def _is_clean_seed_qa_lateral_decision(decision: str, *, raw_text: str) -> bool:
+    if not decision or _is_seed_qa_recovery_transcript(decision):
+        return False
+    if decision.casefold().startswith("decision:"):
+        return True
+    if _is_seed_qa_recovery_transcript(raw_text) or _starts_seed_qa_recovery_context_block(
+        raw_text.strip()
+    ):
+        return False
+    lowered = raw_text.casefold()
+    if (
+        "# lateral thinking:" in lowered
+        or "qa differences:" in lowered
+        or "qa suggestions:" in lowered
+    ):
+        return False
+    return len(decision) <= 420
 
 
 def _is_seed_qa_recovery_transcript(text: str) -> bool:
