@@ -426,7 +426,7 @@ This may take a moment...
 A deferred schema loaded before scan is NOT guaranteed to remain loaded for the
 later `set_defaults` call. Immediately before EVERY `ouroboros_brownfield` call
 in this section, re-run `tool discovery query: "+ouroboros brownfield"` (idempotent —
-a no-op when already loaded). If the load returns no matching tool, use the
+a no-op when already loaded). If the load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), use the
 non-MCP setup fallback instead of retrying the failing call.
 
 1. Load the brownfield MCP tool: `tool discovery query: "+ouroboros brownfield"`

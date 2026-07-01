@@ -46,7 +46,7 @@ This skill can call `ouroboros_brownfield` across multiple turns (`scan`,
 `set_defaults`, `defaults`, and `set`). A deferred schema loaded for one turn is
 NOT guaranteed to remain loaded for the next. Immediately before EVERY
 `ouroboros_brownfield` call, re-run `tool discovery query: "+ouroboros brownfield"`
-(idempotent — a no-op when already loaded). If the load returns no matching tool,
+(idempotent — a no-op when already loaded). If the load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence),
 stop with the MCP-not-available message instead of retrying the failing call.
 
 1. Load the brownfield MCP tool: `tool discovery query: "+ouroboros brownfield"`

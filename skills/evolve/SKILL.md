@@ -66,7 +66,7 @@ you are about to call**. Use `"+ouroboros evolve"` for `ouroboros_evolve_step`,
 `ouroboros_lineage_status`, and the evolve flow's documented tool family;
 use `"+ouroboros interview"` before `ouroboros_interview`, `"+ouroboros seed"`
 before `ouroboros_generate_seed`, and `"+ouroboros lateral"` before
-`ouroboros_lateral_think`. If a load returns no matching tool, switch to the
+`ouroboros_lateral_think`. If a load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the
 documented fallback / Path B instead of retrying the failing call.
 
 ### Path A: MCP Available (loaded via runtime tool discovery above)

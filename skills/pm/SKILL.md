@@ -22,7 +22,7 @@ Calling `ouroboros_pm_interview` while its schema is unloaded in the **current**
 turn makes the runtime reject it with **"Invalid tool parameters"** every message.
 Therefore **re-run `tool discovery query: "+ouroboros pm_interview"` immediately before
 EVERY `ouroboros_pm_interview` call** below (idempotent — a no-op if already
-loaded). If the load ever returns no matching tool, follow the not-found diagnosis
+loaded). If the load ever returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), follow the not-found diagnosis
 below instead of retrying the failing call.
 
 If not found → **diagnose before telling user to run setup**:

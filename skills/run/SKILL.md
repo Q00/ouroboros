@@ -56,7 +56,7 @@ Therefore: **immediately before EVERY execution MCP call in this skill, re-run
 `tool discovery query: "+ouroboros execute"`** to reload the execution tool family,
 including `ouroboros_start_execute_seed`, `ouroboros_job_wait`,
 `ouroboros_ac_tree_hud`, and `ouroboros_job_result` (idempotent — a no-op when
-already loaded). If the load returns no matching tool, switch to the documented
+already loaded). If the load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the documented
 fallback instead of retrying the failing call.
 
 ### Execution Steps

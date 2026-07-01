@@ -41,7 +41,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    tool discovery query: "+ouroboros seed"
    ```
 2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable through the active runtime's `call_mcp` capability.
-3. If runtime tool discovery finds the tool → proceed to **Path A**. If not → proceed to **Path B**.
+3. If the tool is callable — already exposed, or loaded by discovery — proceed to **Path A**. An empty discovery result for an already-exposed tool is expected, not a failure. Proceed to **Path B** only if the tool is genuinely absent (no Ouroboros MCP server).
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
@@ -57,7 +57,7 @@ the tool-discovery load query for the specific MCP tool you are about to call**
 guaranteed present for that call. Use `"+ouroboros seed"` before
 `ouroboros_generate_seed`, `"+ouroboros qa"` before `ouroboros_qa`, and
 `"+ouroboros lateral"` before `ouroboros_lateral_think`. If a load ever returns
-no matching tool, switch to the documented fallback / Path B instead of retrying
+no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the documented fallback / Path B instead of retrying
 the failing call.
 
 ### Path A: MCP Mode (Preferred)

@@ -59,7 +59,7 @@ you call it while its schema is not loaded in the **current** turn, the runtime
 rejects the call with **"Invalid tool parameters"** before it reaches the server.
 Therefore: **immediately before EVERY `ouroboros_evaluate` call in this skill,
 re-run `tool discovery query: "+ouroboros evaluate"`** (idempotent — a no-op when
-already loaded). If the load returns no matching tool, switch to the documented
+already loaded). If the load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the documented
 fallback instead of retrying the failing call.
 
 ### Evaluation Steps

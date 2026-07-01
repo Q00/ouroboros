@@ -83,3 +83,36 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
             for query, tool in pairs:
                 assert query in text
                 assert tool in text
+
+
+def test_packaged_skills_gate_fallback_on_callability_not_empty_discovery() -> None:
+    """No packaged skill may route to fallback/Path B on empty discovery alone.
+
+    ``render_mcp_server_instructions()`` declares that an empty discovery result
+    for an already-exposed tool is a no-op (not unavailability). Skill bodies
+    must therefore gate fallback on whether the MCP tool is *callable*, not on
+    whether discovery returned a match — otherwise direct-exposure or
+    already-loaded runtimes skip a callable tool. This guards that contract for
+    every packaged skill in both trees.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    # Bare "empty discovery -> fallback" routing that predated the server contract.
+    forbidden = (
+        "If not → proceed to **Path B**",
+        "If not → skip to **Fallback**",
+        "returns no matching tools → proceed to **Path B**",
+    )
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill_path in root.glob("*/SKILL.md"):
+            text = skill_path.read_text(encoding="utf-8")
+            for phrase in forbidden:
+                assert phrase not in text, (
+                    f"{skill_path}: bare empty-discovery fallback `{phrase}` — "
+                    "gate on tool callability instead"
+                )
+            # Every deferred-schema-guard "no matching tool" fallback must carry
+            # a callability qualifier (an empty load for an exposed tool is fine).
+            if "no matching tool" in text:
+                assert "not already callable" in text, (
+                    f"{skill_path}: `no matching tool` fallback not gated on callability"
+                )
