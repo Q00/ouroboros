@@ -4598,7 +4598,11 @@ def _seed_with_recovery_constraint(seed: Seed, plan: AutoRecoveryPlan) -> Seed:
     reframing context while preserving the user-approved ACs that EVALUATE
     will grade after redispatch.
     """
-    instruction = plan.instruction.strip()
+    instruction = _clean_seed_qa_repair_text(plan.instruction.strip(), limit=420)
+    if not instruction:
+        instruction = (
+            "Do not copy recovery persona prompts or failed-run transcripts into Seed constraints."
+        )
     constraint = (
         "[auto recovery] Previous QA failed. Use this lateral recovery "
         "instruction to change implementation/verification approach without "
@@ -4692,23 +4696,30 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
     summary = _clean_seed_qa_repair_text(lateral_result.approach_summary or "", limit=320)
     decision = _clean_seed_qa_repair_text(lateral_result.text, limit=1600)
     repairs: list[str] = []
-    if summary:
+    if summary and not _is_seed_qa_recovery_transcript(summary):
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
-    if decision:
+    if decision and not _is_seed_qa_recovery_transcript(decision):
         repairs.append(f"Adopt this concrete implementation decision before execution: {decision}")
     if not repairs:
-        repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
+        repairs.append(
+            "Resolve Seed QA feedback before execution without copying recovery persona prompts, failed-run transcripts, or diagnostic prose."
+        )
     return tuple(dict.fromkeys(repairs))
 
 
 def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
     text = _SEED_QA_DIAGNOSTIC_PREFIX_RE.sub("", text.strip())
+    if _is_seed_qa_recovery_transcript(text):
+        return ""
     cleaned_lines: list[str] = []
     skipping_diagnostic_block = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
         lowered = line.casefold()
         if not line:
+            continue
+        if _is_seed_qa_recovery_transcript(line):
+            skipping_diagnostic_block = True
             continue
         if lowered.startswith("# lateral thinking:"):
             continue
@@ -4722,7 +4733,29 @@ def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
         cleaned_lines.append(line)
     cleaned = " ".join(cleaned_lines)
     cleaned = cleaned.replace("# Lateral Thinking:", "").replace("# lateral thinking:", "")
+    if _is_seed_qa_recovery_transcript(cleaned):
+        return ""
     return cleaned[:limit].strip()
+
+
+def _is_seed_qa_recovery_transcript(text: str) -> bool:
+    lowered = text.casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "## persona:",
+            "# persona:",
+            "persona:",
+            "hacker:",
+            "contrarian:",
+            "current approach (not working)",
+            "most recent run artifact",
+            "evaluate failed",
+            "failed-run transcript",
+            "repair transcript",
+            "diagnostic recovery text",
+        )
+    )
 
 
 def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:

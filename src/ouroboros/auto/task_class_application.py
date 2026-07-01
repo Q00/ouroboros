@@ -83,6 +83,8 @@ def apply_default_ac_template(seed: Seed, task_class: TaskClass) -> AppliedTaskC
     template = profile.default_ac_template
     if not template:
         return AppliedTaskClassDefaults(seed=seed, injected_ac=(), task_class=task_class)
+    if _has_explicit_execution_contract(seed):
+        return AppliedTaskClassDefaults(seed=seed, injected_ac=(), task_class=task_class)
 
     existing = set(seed.acceptance_criteria)
     new_entries = tuple(item for item in template if item not in existing)
@@ -92,3 +94,13 @@ def apply_default_ac_template(seed: Seed, task_class: TaskClass) -> AppliedTaskC
     updated_ac = new_entries + tuple(seed.acceptance_criteria)
     new_seed = seed.model_copy(update={"acceptance_criteria": updated_ac})
     return AppliedTaskClassDefaults(seed=new_seed, injected_ac=new_entries, task_class=task_class)
+
+
+def _has_explicit_execution_contract(seed: Seed) -> bool:
+    """Return True when a Seed already carries a concrete domain contract."""
+    haystack = "\n".join((*seed.constraints, *seed.acceptance_criteria)).casefold()
+    return (
+        "runtime context" in haystack
+        and "non-goal" in haystack
+        and ("acceptance criteria" in haystack or bool(seed.acceptance_criteria))
+    )
