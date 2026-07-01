@@ -491,6 +491,24 @@ class TestSeed:
 
         assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
 
+    def test_seed_rejects_non_serializable_plugin_extra_fields(
+        self, full_seed: Seed
+    ) -> None:
+        """Seed extras fail early when plugin data cannot be persisted."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {"callback": object()}
+
+        with pytest.raises(PydanticValidationError, match="JSON/YAML-serializable"):
+            Seed.from_dict(seed_dict)
+
+    def test_seed_rejects_non_finite_plugin_extra_float(self, full_seed: Seed) -> None:
+        """Seed extras cannot contain floats that are invalid JSON values."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {"score": float("nan")}
+
+        with pytest.raises(PydanticValidationError, match="finite float"):
+            Seed.from_dict(seed_dict)
+
     def test_seed_validation_empty_goal(self) -> None:
         """Seed validates goal is not empty."""
         with pytest.raises(PydanticValidationError):

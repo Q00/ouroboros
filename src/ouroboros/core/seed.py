@@ -17,10 +17,11 @@ This module defines:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import math
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -235,7 +236,8 @@ class Seed(BaseModel, frozen=True):
         seed.goal = "New goal"  # Raises ValidationError (frozen)
     """
 
-    # Direction - IMMUTABLE
+    # Direction - IMMUTABLE. Extra fields are reserved for plugin-owned,
+    # structured handoff data and must stay JSON/YAML serializable.
     model_config = {"extra": "allow"}
 
     goal: str = Field(..., min_length=1, description="Primary objective of the workflow")
@@ -316,6 +318,15 @@ class Seed(BaseModel, frozen=True):
             )
         return value
 
+    @model_validator(mode="after")
+    def _validate_plugin_extra_fields(self) -> Seed:
+        """Keep plugin-owned extra fields safe for Seed persistence paths."""
+        for key, value in (self.model_extra or {}).items():
+            if not isinstance(key, str):
+                raise ValueError("Seed extra field keys must be strings")
+            _validate_seed_extra_value(value, path=key)
+        return self
+
     def to_dict(self) -> dict[str, Any]:
         """Convert seed to dictionary for serialization.
 
@@ -335,3 +346,25 @@ class Seed(BaseModel, frozen=True):
             Seed instance.
         """
         return cls.model_validate(data)
+
+
+def _validate_seed_extra_value(value: Any, *, path: str) -> None:
+    if value is None or isinstance(value, str | bool | int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"Seed extra field {path!r} must be a finite float")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_seed_extra_value(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Seed extra field {path!r} dict keys must be strings")
+            _validate_seed_extra_value(item, path=f"{path}.{key}")
+        return
+    raise ValueError(
+        f"Seed extra field {path!r} must be JSON/YAML-serializable structured data"
+    )
