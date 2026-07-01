@@ -17,7 +17,7 @@ Ouroboros transforms vague ideas into verified, working codebases by replacing a
 
 ## Architecture Layers
 
-- Plugin Layer: Skills (Claude Code slash commands via `ooo`) and agents that interface with the user. Skills map to `commands/*.md` and `skills/*/SKILL.md`.
+- Plugin Layer: Skills (Claude Code slash commands via `ooo`) and agents that interface with the user. Skills map to `skills/*/SKILL.md`.
 - Core Layer: Seed spec management, AC tree lifecycle, event sourcing, lineage tracking. Located in `src/ouroboros/core/`.
 - Orchestrator: Coordinates execution strategy, manages level context, routes tasks to appropriate backends. Located in `src/ouroboros/orchestrator/`.
 - Evaluation: Three-stage pipeline (mechanical, LLM, consensus), artifact collection, language-specific checks. Located in `src/ouroboros/evaluation/`.
@@ -53,7 +53,6 @@ Ouroboros transforms vague ideas into verified, working codebases by replacing a
 
 ```
 ouroboros/
-  commands/           # Claude Code slash-command definitions (*.md)
   skills/             # Skill implementations (*/SKILL.md)
   src/ouroboros/
     cli/              # Typer CLI entry point and command groups

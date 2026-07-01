@@ -1,6 +1,7 @@
 ---
 name: seed
 description: "Generate validated Seed specifications from interview results"
+aliases: [crystallize]
 mcp_tool: ouroboros_generate_seed
 mcp_args:
   session_id: "$1"

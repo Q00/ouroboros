@@ -1,6 +1,7 @@
 ---
 name: run
 description: "Execute a Seed specification through the workflow engine"
+aliases: [execute]
 mcp_tool: ouroboros_execute_seed
 mcp_args:
   seed_path: "$1"

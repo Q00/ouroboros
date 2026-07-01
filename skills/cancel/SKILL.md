@@ -1,6 +1,7 @@
 ---
 name: cancel
 description: "Cancel stuck or orphaned executions"
+aliases: [kill, abort]
 ---
 
 # /ouroboros:cancel

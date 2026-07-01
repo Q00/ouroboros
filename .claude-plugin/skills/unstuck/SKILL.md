@@ -1,6 +1,7 @@
 ---
 name: unstuck
 description: "Break through stagnation with lateral thinking personas — single or multi-persona debate"
+aliases: [stuck, lateral]
 ---
 
 # /ouroboros:unstuck

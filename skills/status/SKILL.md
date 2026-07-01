@@ -1,6 +1,7 @@
 ---
 name: status
 description: "Check session status and measure goal drift"
+aliases: [drift]
 mcp_tool: ouroboros_session_status
 mcp_args:
   session_id: "$1"
