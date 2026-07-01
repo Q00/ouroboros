@@ -365,6 +365,4 @@ def _validate_seed_extra_value(value: Any, *, path: str) -> None:
                 raise ValueError(f"Seed extra field {path!r} dict keys must be strings")
             _validate_seed_extra_value(item, path=f"{path}.{key}")
         return
-    raise ValueError(
-        f"Seed extra field {path!r} must be JSON/YAML-serializable structured data"
-    )
+    raise ValueError(f"Seed extra field {path!r} must be JSON/YAML-serializable structured data")

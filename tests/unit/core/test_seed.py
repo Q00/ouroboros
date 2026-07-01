@@ -491,9 +491,7 @@ class TestSeed:
 
         assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
 
-    def test_seed_rejects_non_serializable_plugin_extra_fields(
-        self, full_seed: Seed
-    ) -> None:
+    def test_seed_rejects_non_serializable_plugin_extra_fields(self, full_seed: Seed) -> None:
         """Seed extras fail early when plugin data cannot be persisted."""
         seed_dict = full_seed.to_dict()
         seed_dict["plugin_contract"] = {"callback": object()}
