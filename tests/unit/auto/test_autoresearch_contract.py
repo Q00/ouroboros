@@ -18,6 +18,22 @@ def _contract() -> dict[str, object]:
         "experiment_budget": 2,
         "timeout_seconds": 60,
         "verification_command": "python3 train.py",
+        "execution_command": {
+            "command": "python3 train.py",
+            "cwd": "/tmp/autoresearch-demo",
+            "timeout_seconds": 60,
+            "timeout_policy": "Apply timeout_seconds in the harness/orchestrator.",
+        },
+        "seed_artifact_policy": {
+            "handoff_brief_path": "/tmp/autoresearch-demo/.ouroboros/autoresearch/seed.md",
+            "handoff_brief_only": True,
+            "saved_seed_path_runtime_owned": True,
+            "repo_local_seed_output_required": False,
+            "forbidden_repo_local_seed_outputs": [
+                ".ouroboros/autoresearch/seed.yaml",
+                ".ouroboros/autoresearch/generated-seed.yaml",
+            ],
+        },
         "candidate_sequence": [
             {"id": 1, "name": "baseline", "train_py_change": "none"},
             {"id": 2, "name": "additive-smoothing", "train_py_change": "tune alpha"},
@@ -71,16 +87,21 @@ def test_apply_autoresearch_contract_promotes_json_to_top_level_seed_fields() ->
     assert payload["editable_files"] == ["train.py"]
     assert payload["fixed_files"] == ["program.md", "prepare.py"]
     assert payload["primary_metric"] == "val_bpb"
+    assert payload["execution_command"]["command"] == "python3 train.py"
+    assert payload["seed_artifact_policy"]["saved_seed_path_runtime_owned"] is True
     assert payload["candidate_sequence"][0]["name"] == "baseline"
     assert "runtime_context" in payload
     assert "metric_fallback" in payload
     assert "verification_plan" in payload
     assert any("top-level values" in item for item in payload["acceptance_criteria"])
+    assert any("seed_artifact_policy" in item for item in payload["acceptance_criteria"])
     assert any("top-level verification_plan" in item for item in payload["acceptance_criteria"])
     assert any("baseline-only rerun" in item for item in payload["acceptance_criteria"])
     assert any("final best val_bpb" in item for item in payload["acceptance_criteria"])
     assert any("Candidate sequence contains exactly 2 experiments" in item for item in payload["acceptance_criteria"])
     assert any("baseline-only output is insufficient" in item for item in payload["constraints"])
+    assert any("saved Seed artifact path is owned" in item for item in payload["constraints"])
+    assert any("do not rewrite the command string" in item for item in payload["constraints"])
     assert not any("headless simulation" in item for item in payload["constraints"])
     assert not any("quit signal" in item for item in payload["acceptance_criteria"])
     assert not any("Persona" in item for item in payload["constraints"])
@@ -94,6 +115,7 @@ def test_apply_autoresearch_contract_removes_format_drift_constraints() -> None:
                 "top-level `actors` must be [\"codex\"]",
                 "top-level `inputs` must include repository",
                 "top-level `outputs` must include seed.yaml",
+                "top-level seed_artifact_path must be .ouroboros/autoresearch/generated-seed.yaml",
                 "acceptance inspector prints SEED_VERIFICATION_OK",
             ),
         }
@@ -104,7 +126,8 @@ def test_apply_autoresearch_contract_removes_format_drift_constraints() -> None:
 
     assert not any("actors" in item for item in constraints)
     assert not any("inputs" in item for item in constraints)
-    assert not any("outputs" in item for item in constraints)
+    assert not any("top-level `outputs`" in item for item in constraints)
+    assert not any("seed_artifact_path" in item for item in constraints)
     assert not any("SEED_VERIFICATION_OK" in item for item in constraints)
 
 
@@ -115,3 +138,4 @@ def test_seed_extra_contract_fields_roundtrip() -> None:
 
     assert restored.to_dict()["repository"] == "/tmp/autoresearch-demo"
     assert restored.to_dict()["verification_command"] == "python3 train.py"
+    assert restored.to_dict()["seed_artifact_policy"]["repo_local_seed_output_required"] is False

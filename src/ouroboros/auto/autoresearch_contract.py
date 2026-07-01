@@ -39,6 +39,11 @@ _AUTORESEARCH_FORMAT_DRIFT_MARKERS = (
     "seed_verification_ok",
     "seed_verification_failed",
     "seed.yaml",
+    "generated-seed.yaml",
+    "seed_artifact_path",
+    "repo-local seed",
+    "repository-local seed",
+    "authoritative saved ouroboros seed artifact",
     "acceptance inspector",
 )
 
@@ -53,6 +58,8 @@ _REQUIRED_KEYS = (
     "experiment_budget",
     "timeout_seconds",
     "verification_command",
+    "execution_command",
+    "seed_artifact_policy",
     "candidate_sequence",
     "non_goals",
     "runtime_context",
@@ -140,9 +147,9 @@ def _autoresearch_acceptance(contract: Mapping[str, Any]) -> tuple[str, ...]:
     return (
         "Seed artifact exposes the authoritative autoresearch contract as top-level "
         "values: repository, program_path, editable_files, fixed_files, primary_metric, "
-        "experiment_budget, timeout_seconds, verification_command, candidate_sequence, "
-        "non_goals, runtime_context, metric_fallback, ledger, validity_rules, and "
-        "conflict_resolution.",
+        "experiment_budget, timeout_seconds, verification_command, execution_command, "
+        "seed_artifact_policy, candidate_sequence, non_goals, runtime_context, "
+        "metric_fallback, ledger, validity_rules, and conflict_resolution.",
         f"Candidate sequence contains exactly {budget} experiments in order: {candidate_names}.",
         "Execution runs experiment 1 as the unmodified baseline and then attempts experiments 2 through the configured budget as concrete train.py candidate changes.",
         f"Execution may edit only {editable}; fixed files must remain unchanged: {fixed}.",
@@ -173,10 +180,31 @@ def _autoresearch_constraints(
             f"runtime_context.{key}: {value}"
             for key, value in runtime_context.items()
         ]
+    execution_command = contract.get("execution_command")
+    execution_command_items = []
+    if isinstance(execution_command, Mapping):
+        command = execution_command.get("command") or contract.get("verification_command")
+        timeout = execution_command.get("timeout_seconds") or contract.get("timeout_seconds")
+        execution_command_items = [
+            f"Execution command: {command}",
+            f"Execution timeout_seconds: {timeout}",
+            "Apply timeout_seconds as an orchestrator budget; do not rewrite the command string into a shell-specific timeout wrapper.",
+        ]
+    seed_artifact_policy = contract.get("seed_artifact_policy")
+    seed_artifact_policy_items = []
+    if isinstance(seed_artifact_policy, Mapping):
+        handoff_path = seed_artifact_policy.get("handoff_brief_path") or contract.get("handoff_brief_path")
+        seed_artifact_policy_items = [
+            f"Seed handoff brief path: {handoff_path}",
+            "The handoff brief is input only; the saved Seed artifact path is owned by the Ouroboros runtime.",
+            "Do not require repository-local Seed YAML outputs such as .ouroboros/autoresearch/seed.yaml or .ouroboros/autoresearch/generated-seed.yaml.",
+        ]
     added = [
         "Autoresearch contract is authoritative over inferred task-class defaults.",
         *[f"Non-goal: {item}" for item in non_goals],
         *runtime_items,
+        *execution_command_items,
+        *seed_artifact_policy_items,
         f"Verification command: {contract.get('verification_command')}",
         "Execution deliverable must be experimental evidence and the final train.py state, not only validation prose.",
         "Run or explicitly reject each configured candidate; baseline-only output is insufficient for autoresearch completion.",
