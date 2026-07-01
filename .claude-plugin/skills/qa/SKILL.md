@@ -42,13 +42,13 @@ When the user invokes this skill:
 
 This skill works in two modes. Determine which one **before** attempting any tool calls:
 
-- **MCP mode** — If runtime tool discovery is available, try loading the QA MCP tool:
+- **MCP mode** — If the QA MCP tool is available (already exposed, or loadable via discovery), use it:
   ```
   tool discovery query: "+ouroboros qa"
   ```
   If found (typically named `mcp__plugin_ouroboros_ouroboros__ouroboros_qa`), proceed with **QA Steps** below.
 
-- **Fallback mode** — If runtime tool discovery is not available, or it finds no matching tool, skip directly to the **Fallback** section. This skill is designed to work without MCP setup.
+- **Fallback mode** — Only if the QA MCP tool is genuinely absent (no Ouroboros MCP server) skip to the **Fallback** section; an empty discovery result for an already-exposed tool is expected — call it directly rather than falling back. This skill is designed to work without MCP setup.
 
 ### QA Steps (MCP mode)
 

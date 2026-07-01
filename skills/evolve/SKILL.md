@@ -50,7 +50,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    tool discovery query: "+ouroboros evolve"
    ```
 2. The tools will typically be named with prefix `mcp__plugin_ouroboros_ouroboros__` (e.g., `ouroboros_evolve_step`, `ouroboros_interview`, `ouroboros_generate_seed`). After runtime tool discovery returns, the tools become callable.
-3. If runtime tool discovery finds the tools → proceed to **Path A**. If not → proceed to **Path B**.
+3. If the tools are callable — already exposed, or loaded by discovery — proceed to **Path A**. An empty discovery result for already-exposed tools is expected, not a failure. Proceed to **Path B** only if they are genuinely absent (no Ouroboros MCP server).
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
