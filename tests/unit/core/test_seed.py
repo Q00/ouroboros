@@ -478,6 +478,19 @@ class TestSeed:
 
         assert seed_dict == second_dict
 
+    def test_seed_roundtrip_preserves_plugin_extra_fields(self, full_seed: Seed) -> None:
+        """Seed preserves structured plugin-owned fields without core-specific hooks."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {
+            "plugin": "example",
+            "handoff_version": 1,
+            "candidate_sequence": [{"name": "baseline"}],
+        }
+
+        reconstructed = Seed.from_dict(seed_dict)
+
+        assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
+
     def test_seed_validation_empty_goal(self) -> None:
         """Seed validates goal is not empty."""
         with pytest.raises(PydanticValidationError):

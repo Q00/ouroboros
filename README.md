@@ -71,9 +71,6 @@ sit in front of. Three repos, one stack:
 - **Plugins** (`ouroboros-plugins`) declare scoped capabilities against that
   contract, so domain workflows (review a PR, triage a Linear ticket, run a
   release) stay auditable and policy-bound instead of being one-off prompts.
-  For research loops, the `autoresearch` plugin prepares a checkout for the
-  normal `ouroboros auto` pipeline; see
-  [`docs/guides/autoresearch-plugin.md`](docs/guides/autoresearch-plugin.md).
 - **Ourocode** is the terminal shell: it surfaces MCP state, interview
   questions, and wonderTool decisions as first-class TUI elements, so you can
   drive the OS without leaving the keyboard or switching between CLIs.
