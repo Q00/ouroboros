@@ -507,6 +507,20 @@ class TestSeed:
 
         assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
 
+    def test_seed_model_extra_mapping_is_immutable(self, full_seed: Seed) -> None:
+        """Seed.model_extra cannot bypass plugin extra validation."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {"plugin": "example"}
+        reconstructed = Seed.from_dict(seed_dict)
+
+        with pytest.raises(TypeError):
+            reconstructed.model_extra["plugin_contract"] = {"plugin": "mutated"}  # type: ignore[index]
+        with pytest.raises(TypeError):
+            reconstructed.model_extra["bad"] = object()  # type: ignore[index]
+
+        assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
+        assert "bad" not in reconstructed.to_dict()
+
     def test_seed_plugin_extra_fields_use_standard_pydantic_serialization(
         self, full_seed: Seed
     ) -> None:

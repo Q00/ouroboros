@@ -326,7 +326,7 @@ class Seed(BaseModel, frozen=True):
             if not isinstance(key, str):
                 raise ValueError("Seed extra field keys must be strings")
             frozen_extra[key] = _freeze_seed_extra_value(value, path=key)
-        object.__setattr__(self, "__pydantic_extra__", frozen_extra)
+        object.__setattr__(self, "__pydantic_extra__", _FrozenDict(frozen_extra))
         return self
 
     def to_dict(self) -> dict[str, Any]:
