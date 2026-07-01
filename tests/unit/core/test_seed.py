@@ -507,6 +507,22 @@ class TestSeed:
 
         assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
 
+    def test_seed_plugin_extra_fields_use_standard_pydantic_serialization(
+        self, full_seed: Seed
+    ) -> None:
+        """Seed extras remain safe through the public Pydantic JSON API."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {
+            "plugin": "example",
+            "candidate_sequence": [{"name": "baseline"}],
+        }
+        reconstructed = Seed.from_dict(seed_dict)
+
+        assert (
+            reconstructed.model_dump(mode="json")["plugin_contract"] == seed_dict["plugin_contract"]
+        )
+        assert '"plugin_contract"' in reconstructed.model_dump_json()
+
     def test_seed_rejects_non_serializable_plugin_extra_fields(self, full_seed: Seed) -> None:
         """Seed extras fail early when plugin data cannot be persisted."""
         seed_dict = full_seed.to_dict()

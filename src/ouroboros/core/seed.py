@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import math
-from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
@@ -372,13 +371,27 @@ def _freeze_seed_extra_value(value: Any, *, path: str) -> Any:
             if not isinstance(key, str):
                 raise ValueError(f"Seed extra field {path!r} dict keys must be strings")
             frozen[key] = _freeze_seed_extra_value(item, path=f"{path}.{key}")
-        return MappingProxyType(frozen)
+        return _FrozenDict(frozen)
     raise ValueError(f"Seed extra field {path!r} must be JSON/YAML-serializable structured data")
 
 
 def _thaw_seed_extra_value(value: Any) -> Any:
-    if isinstance(value, MappingProxyType):
+    if isinstance(value, _FrozenDict):
         return {key: _thaw_seed_extra_value(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return [_thaw_seed_extra_value(item) for item in value]
     return value
+
+
+class _FrozenDict(dict[str, Any]):
+    def _readonly(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("Seed extra fields are immutable")
+
+    __setitem__ = _readonly
+    __delitem__ = _readonly
+    clear = _readonly
+    pop = _readonly
+    popitem = _readonly
+    setdefault = _readonly
+    update = _readonly
+    __ior__ = _readonly
