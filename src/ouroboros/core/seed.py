@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import math
+from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
@@ -321,10 +322,12 @@ class Seed(BaseModel, frozen=True):
     @model_validator(mode="after")
     def _validate_plugin_extra_fields(self) -> Seed:
         """Keep plugin-owned extra fields safe for Seed persistence paths."""
+        frozen_extra: dict[str, Any] = {}
         for key, value in (self.model_extra or {}).items():
             if not isinstance(key, str):
                 raise ValueError("Seed extra field keys must be strings")
-            _validate_seed_extra_value(value, path=key)
+            frozen_extra[key] = _freeze_seed_extra_value(value, path=key)
+        object.__setattr__(self, "__pydantic_extra__", frozen_extra)
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -333,7 +336,10 @@ class Seed(BaseModel, frozen=True):
         Returns:
             Dictionary representation of the seed.
         """
-        return self.model_dump(mode="json", by_alias=True)
+        extra = self.model_extra or {}
+        data = self.model_dump(mode="json", by_alias=True, exclude=set(extra))
+        data.update({key: _thaw_seed_extra_value(value) for key, value in extra.items()})
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Seed:
@@ -348,21 +354,31 @@ class Seed(BaseModel, frozen=True):
         return cls.model_validate(data)
 
 
-def _validate_seed_extra_value(value: Any, *, path: str) -> None:
+def _freeze_seed_extra_value(value: Any, *, path: str) -> Any:
     if value is None or isinstance(value, str | bool | int):
-        return
+        return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"Seed extra field {path!r} must be a finite float")
-        return
+        return value
     if isinstance(value, list):
-        for index, item in enumerate(value):
-            _validate_seed_extra_value(item, path=f"{path}[{index}]")
-        return
+        return tuple(
+            _freeze_seed_extra_value(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
     if isinstance(value, dict):
+        frozen: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"Seed extra field {path!r} dict keys must be strings")
-            _validate_seed_extra_value(item, path=f"{path}.{key}")
-        return
+            frozen[key] = _freeze_seed_extra_value(item, path=f"{path}.{key}")
+        return MappingProxyType(frozen)
     raise ValueError(f"Seed extra field {path!r} must be JSON/YAML-serializable structured data")
+
+
+def _thaw_seed_extra_value(value: Any) -> Any:
+    if isinstance(value, MappingProxyType):
+        return {key: _thaw_seed_extra_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_seed_extra_value(item) for item in value]
+    return value

@@ -491,6 +491,22 @@ class TestSeed:
 
         assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
 
+    def test_seed_plugin_extra_fields_are_deeply_immutable(self, full_seed: Seed) -> None:
+        """Seed extras cannot drift through nested container mutation."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {
+            "plugin": "example",
+            "candidate_sequence": [{"name": "baseline"}],
+        }
+        reconstructed = Seed.from_dict(seed_dict)
+
+        with pytest.raises(TypeError):
+            reconstructed.plugin_contract["plugin"] = "mutated"
+        with pytest.raises(TypeError):
+            reconstructed.plugin_contract["candidate_sequence"][0]["name"] = "mutated"
+
+        assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
+
     def test_seed_rejects_non_serializable_plugin_extra_fields(self, full_seed: Seed) -> None:
         """Seed extras fail early when plugin data cannot be persisted."""
         seed_dict = full_seed.to_dict()
