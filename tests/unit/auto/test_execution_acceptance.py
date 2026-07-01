@@ -385,3 +385,71 @@ def test_normalize_execution_acceptance_preserves_library_defaults_for_api_goal(
     ).model_copy(update={"goal": "Build an importable SDK package with a public API"})
 
     assert normalize_execution_acceptance(seed) is seed
+
+
+def test_normalize_execution_acceptance_canonicalizes_autoresearch_contract() -> None:
+    seed = _seed(
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Seed preserves explicit Runtime Context, Non-Goals, and Acceptance Criteria as first-class content for the autoresearch contract.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Seed requires up to two post-baseline experiments to selected sequentially from the current best state, with improvements kept and all non-improvements reverted before the next attempt.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Seed requires every baseline and experiment ledger entry to report command, changed files, diff summary, observed val_bpb, memory, status, and keep/discard conclusion.",
+        "A command/API check returns stable observable output or artifacts proving the original requirement for Seed requires final kept changes to limited to train.py unless explicit scope widening recorded in the ledger.",
+        "Seed defines discard behavior for ties, regressions, invalid runs, missing val_bpb, missing memory, timeouts, memory-heavy behavior, nonzero exits, and unauthorized file changes.",
+    ).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop.\n"
+                "Repository: /tmp/autoresearch-demo\n"
+                "Treat program.md as instructions, edit only "
+                "train.py, use val_bpb as the primary metric, and verify with uv run train.py."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py and prepare.py.",
+                "Non-Goals: do not edit prepare.py.",
+                "Run at most 2 experiments.",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "The experiment ledger artifact contains a baseline entry written before any edit; it includes measured command `/usr/bin/time -l uv run train.py`, inner command, exit status, val_bpb, maximum resident set size bytes, and baseline status.",
+        "The experiment ledger artifact contains at most two train.py-only experiment entries, each evaluated with the same measured command and timeout budget.",
+        "The experiment ledger artifact contains sequential decision entries; each entry includes keep/revert status from the current best state, keeping strict val_bpb improvements and reverting ties, regressions, invalid runs, timeouts, crashes, missing metrics, missing memory, and unauthorized scope changes before the next attempt.",
+        "Every baseline and experiment ledger artifact entry includes command, changed files, diff summary, observed val_bpb, memory, status, and keep/discard conclusion.",
+        "The final git diff artifact contains only train.py changes unless scope_widening_ledger contains an explicit justification for a wider edit.",
+        "The final report artifact includes baseline val_bpb, each attempted experiment result, final best val_bpb, and the keep/discard reason for every candidate.",
+    )
+    assert normalized.to_dict()["runtime_context"] == {
+        "repository_path": "/tmp/autoresearch-demo",
+        "research_program": "program.md",
+        "editable_files": ["train.py"],
+        "fixed_files": ["prepare.py"],
+        "verification_command": "uv run train.py",
+        "measurement_command": "/usr/bin/time -l uv run train.py",
+        "experiment_budget": 2,
+        "timeout_seconds": 60,
+        "primary_metric": "val_bpb",
+        "metric_direction": "lower_is_better",
+        "memory_source": "maximum resident set size from /usr/bin/time -l stderr, recorded as bytes.",
+        "memory_heavy_threshold": "discard if experiment memory exceeds baseline by more than max(10% of baseline, 67108864 bytes).",
+    }
+    assert normalized.to_dict()["non_goals"] == [
+        "Do not edit prepare.py.",
+        "Do not edit files outside train.py unless scope_widening_ledger explicitly widens scope.",
+        "Do not install dependencies, change package metadata, or modify the evaluation harness.",
+        "Do not run training during Seed creation.",
+    ]
+
+
+def test_normalize_execution_acceptance_leaves_non_autoresearch_train_metric_seed_alone() -> None:
+    seed = _seed(
+        "A command/API check returns stable observable output or artifacts proving the task goal.",
+    ).model_copy(
+        update={
+            "goal": "Build a training dashboard that can display a val_bpb column for train.py runs."
+        }
+    )
+
+    assert normalize_execution_acceptance(seed) is seed

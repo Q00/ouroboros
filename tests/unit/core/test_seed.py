@@ -521,6 +521,21 @@ class TestSeed:
         assert reconstructed.to_dict()["plugin_contract"] == seed_dict["plugin_contract"]
         assert "bad" not in reconstructed.to_dict()
 
+    def test_seed_model_copy_preserves_immutable_plugin_extra_fields(self, full_seed: Seed) -> None:
+        """Pydantic model_copy works after plugin extras are frozen."""
+        seed_dict = full_seed.to_dict()
+        seed_dict["plugin_contract"] = {"plugin": "example"}
+        reconstructed = Seed.from_dict(seed_dict)
+
+        copied = reconstructed.model_copy(
+            update={"acceptance_criteria": ("Updated observable criterion.",)}
+        )
+
+        assert copied.acceptance_criteria == ("Updated observable criterion.",)
+        assert copied.to_dict()["plugin_contract"] == {"plugin": "example"}
+        with pytest.raises(TypeError):
+            copied.model_extra["plugin_contract"] = {"plugin": "mutated"}  # type: ignore[index]
+
     def test_seed_plugin_extra_fields_use_standard_pydantic_serialization(
         self, full_seed: Seed
     ) -> None:

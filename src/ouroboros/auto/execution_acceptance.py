@@ -142,6 +142,28 @@ _FILE_ARTIFACT_SIGNALS = (
     " exact",
 )
 
+_AUTORESEARCH_CONTEXT_SIGNALS = (
+    "autoresearch",
+    "train.py",
+    "val_bpb",
+)
+
+_AUTORESEARCH_CANONICAL_AC = (
+    "The experiment ledger artifact contains a baseline entry written before any edit; it includes measured command `/usr/bin/time -l uv run train.py`, inner command, exit status, val_bpb, maximum resident set size bytes, and baseline status.",
+    "The experiment ledger artifact contains at most two train.py-only experiment entries, each evaluated with the same measured command and timeout budget.",
+    "The experiment ledger artifact contains sequential decision entries; each entry includes keep/revert status from the current best state, keeping strict val_bpb improvements and reverting ties, regressions, invalid runs, timeouts, crashes, missing metrics, missing memory, and unauthorized scope changes before the next attempt.",
+    "Every baseline and experiment ledger artifact entry includes command, changed files, diff summary, observed val_bpb, memory, status, and keep/discard conclusion.",
+    "The final git diff artifact contains only train.py changes unless scope_widening_ledger contains an explicit justification for a wider edit.",
+    "The final report artifact includes baseline val_bpb, each attempted experiment result, final best val_bpb, and the keep/discard reason for every candidate.",
+)
+
+_AUTORESEARCH_NON_GOALS = (
+    "Do not edit prepare.py.",
+    "Do not edit files outside train.py unless scope_widening_ledger explicitly widens scope.",
+    "Do not install dependencies, change package metadata, or modify the evaluation harness.",
+    "Do not run training during Seed creation.",
+)
+
 
 def normalize_execution_acceptance(seed: Seed) -> Seed:
     """Remove auto-observation/reporting criteria from execution Seeds.
@@ -166,9 +188,20 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
         filtered,
         context_text=direction_context,
     )
-    if not filtered or filtered == criteria:
+    normalized_seed = seed
+    if _has_autoresearch_context(direction_context, filtered):
+        filtered = normalize_autoresearch_execution_criteria(
+            filtered,
+            context_text=direction_context,
+        )
+        normalized_seed = _with_autoresearch_seed_extras(normalized_seed, direction_context)
+    if not filtered or (filtered == criteria and normalized_seed is seed):
         return seed
-    return seed.model_copy(update={"acceptance_criteria": filtered})
+    if filtered != criteria:
+        data = normalized_seed.to_dict()
+        data["acceptance_criteria"] = list(filtered)
+        normalized_seed = Seed.from_dict(data)
+    return normalized_seed
 
 
 def normalize_observation_execution_criteria(
@@ -242,6 +275,33 @@ def normalize_file_artifact_execution_criteria(
     return filtered or criteria
 
 
+def normalize_autoresearch_execution_criteria(
+    criteria: tuple[str, ...],
+    *,
+    context_text: str = "",
+) -> tuple[str, ...]:
+    """Return direct observable ACs for Karpathy-style autoresearch handoffs.
+
+    The generic Seed repairer wraps vague ACs with
+    ``A command/API check returns ...``. That wrapper is useful as a fallback
+    for unknown tasks, but it violates the autoresearch plugin contract: the
+    executor needs an experiment ledger contract, not a placeholder proof
+    phrase. Keep this scoped to the plugin's distinctive train.py/val_bpb
+    surface.
+    """
+    if not _has_autoresearch_context(context_text, criteria):
+        return criteria
+    passthrough: list[str] = []
+    for criterion in criteria:
+        subject = _unwrap_seed_repairer_original_requirement(criterion).strip()
+        if not subject:
+            continue
+        if _is_autoresearch_generic_or_covered(subject):
+            continue
+        passthrough.append(subject)
+    return tuple(dict.fromkeys((*_AUTORESEARCH_CANONICAL_AC, *passthrough)))
+
+
 def has_auto_wrapper_context(text: str) -> bool:
     """Return true only for the known hello_auto observation prompt shape."""
     lowered = text.casefold()
@@ -264,6 +324,85 @@ def _has_file_artifact_context(context_text: str, criteria: tuple[str, ...]) -> 
         marker in criterion.casefold() for criterion in criteria for marker in ("content", "line")
     )
     return has_file_path and (has_file_check or has_content_check)
+
+
+def _has_autoresearch_context(context_text: str, criteria: tuple[str, ...]) -> bool:
+    text = "\n".join((context_text, *criteria)).casefold()
+    return all(signal in text for signal in _AUTORESEARCH_CONTEXT_SIGNALS)
+
+
+def _with_autoresearch_seed_extras(seed: Seed, context_text: str) -> Seed:
+    data = seed.to_dict()
+    runtime_context = data.get("runtime_context")
+    if not isinstance(runtime_context, dict):
+        runtime_context = {}
+    data["runtime_context"] = {
+        **runtime_context,
+        "repository_path": runtime_context.get("repository_path")
+        or _extract_autoresearch_repository_path(context_text),
+        "research_program": "program.md",
+        "editable_files": ["train.py"],
+        "fixed_files": ["prepare.py"],
+        "verification_command": "uv run train.py",
+        "measurement_command": "/usr/bin/time -l uv run train.py",
+        "experiment_budget": 2,
+        "timeout_seconds": 60,
+        "primary_metric": "val_bpb",
+        "metric_direction": "lower_is_better",
+        "memory_source": "maximum resident set size from /usr/bin/time -l stderr, recorded as bytes.",
+        "memory_heavy_threshold": "discard if experiment memory exceeds baseline by more than max(10% of baseline, 67108864 bytes).",
+    }
+    data.setdefault("non_goals", list(_AUTORESEARCH_NON_GOALS))
+    data.setdefault(
+        "candidate_sequence",
+        {
+            "baseline_first": True,
+            "sequential_from_current_best": True,
+            "keep_rule": "keep only strict val_bpb improvements",
+            "revert_rule": "revert discarded candidates before the next attempt",
+        },
+    )
+    return Seed.from_dict(data)
+
+
+def _extract_autoresearch_repository_path(context_text: str) -> str:
+    for pattern in (
+        r"repository(?: root)?:\s*([^\n]+)",
+        r"work in repository:?\s*([^\n]+)",
+    ):
+        match = re.search(pattern, context_text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip().strip("`")
+    return ""
+
+
+def _is_autoresearch_generic_or_covered(criterion: str) -> bool:
+    key = _criterion_key(criterion)
+    if key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
+        return True
+    if "command/api check returns stable observable output" in key:
+        return True
+    covered_markers = (
+        "seed has explicit runtime context",
+        "seed preserves explicit runtime context",
+        "runtime context and non-goals",
+        "first-class content",
+        "baseline",
+        "uv run train.py",
+        "sequential",
+        "current best",
+        "at most 2",
+        "at most two",
+        "diff summary",
+        "changed files",
+        "val_bpb",
+        "memory",
+        "train.py",
+        "scope widening",
+        "discard",
+        "keep/discard",
+    )
+    return any(marker in key for marker in covered_markers)
 
 
 def _is_library_default_acceptance(criterion: str) -> bool:

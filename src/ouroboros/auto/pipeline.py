@@ -4674,6 +4674,7 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     return (
         lowered.startswith("[seed qa repair attempt")
         or lowered.startswith("[seed qa lateral repair attempt")
+        or lowered.startswith("adopt this concrete implementation decision before execution:")
         or "# lateral thinking:" in lowered
         or "qa differences:" in lowered
         or "qa suggestions:" in lowered
@@ -4695,11 +4696,23 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
     """
     summary = _clean_seed_qa_repair_text(lateral_result.approach_summary or "", limit=320)
     decision = _clean_seed_qa_repair_text(lateral_result.text, limit=1600)
+    persona_prefix = (lateral_result.persona or "").casefold()
     repairs: list[str] = []
-    if summary and not _is_seed_qa_recovery_transcript(summary):
+    if (
+        summary
+        and not _is_seed_qa_recovery_transcript(summary)
+        and not (persona_prefix and summary.casefold().startswith(f"{persona_prefix}:"))
+    ):
         repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {summary}")
-    if decision and not _is_seed_qa_recovery_transcript(decision):
-        repairs.append(f"Adopt this concrete implementation decision before execution: {decision}")
+    # Seed QA lateral output often includes the persona prompt and full problem
+    # context in ``text``. Preserve only short explicit Decision lines; raw
+    # bodies are too likely to be diagnostic transcript material.
+    if (
+        decision
+        and decision.casefold().startswith("decision:")
+        and not _is_seed_qa_recovery_transcript(decision)
+    ):
+        repairs.append(f"Use this bounded implementation approach to resolve Seed QA: {decision}")
     if not repairs:
         repairs.append(
             "Resolve Seed QA feedback before execution without copying recovery persona prompts, failed-run transcripts, or diagnostic prose."
@@ -4709,8 +4722,6 @@ def _normalized_seed_qa_lateral_feedback(lateral_result: LateralResult) -> tuple
 
 def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
     text = _SEED_QA_DIAGNOSTIC_PREFIX_RE.sub("", text.strip())
-    if _is_seed_qa_recovery_transcript(text):
-        return ""
     cleaned_lines: list[str] = []
     skipping_diagnostic_block = False
     for raw_line in text.splitlines():
@@ -4718,7 +4729,9 @@ def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
         lowered = line.casefold()
         if not line:
             continue
-        if _is_seed_qa_recovery_transcript(line):
+        if _starts_seed_qa_recovery_context_block(line):
+            break
+        if _is_seed_qa_recovery_transcript_line(line):
             skipping_diagnostic_block = True
             continue
         if lowered.startswith("# lateral thinking:"):
@@ -4733,12 +4746,14 @@ def _clean_seed_qa_repair_text(text: str, *, limit: int) -> str:
         cleaned_lines.append(line)
     cleaned = " ".join(cleaned_lines)
     cleaned = cleaned.replace("# Lateral Thinking:", "").replace("# lateral thinking:", "")
-    if _is_seed_qa_recovery_transcript(cleaned):
-        return ""
     return cleaned[:limit].strip()
 
 
 def _is_seed_qa_recovery_transcript(text: str) -> bool:
+    return any(_is_seed_qa_recovery_transcript_line(line) for line in text.splitlines())
+
+
+def _is_seed_qa_recovery_transcript_line(text: str) -> bool:
     lowered = text.casefold()
     return any(
         marker in lowered
@@ -4746,16 +4761,21 @@ def _is_seed_qa_recovery_transcript(text: str) -> bool:
             "## persona:",
             "# persona:",
             "persona:",
-            "hacker:",
-            "contrarian:",
             "current approach (not working)",
             "most recent run artifact",
+            "problem context",
+            "concrete constraints for the generated ouroboros seed",
             "evaluate failed",
             "failed-run transcript",
             "repair transcript",
             "diagnostic recovery text",
         )
     )
+
+
+def _starts_seed_qa_recovery_context_block(text: str) -> bool:
+    lowered = text.casefold()
+    return lowered.startswith("## problem context") or lowered.startswith("# problem context")
 
 
 def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:

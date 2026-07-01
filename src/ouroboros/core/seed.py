@@ -384,6 +384,12 @@ def _thaw_seed_extra_value(value: Any) -> Any:
 
 
 class _FrozenDict(dict[str, Any]):
+    def __copy__(self) -> _FrozenDict:
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> _FrozenDict:
+        return self
+
     def _readonly(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError("Seed extra fields are immutable")
 
