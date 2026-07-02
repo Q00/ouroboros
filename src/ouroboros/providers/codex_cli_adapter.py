@@ -32,6 +32,7 @@ from ouroboros.codex_permissions import (
 )
 from ouroboros.config import get_codex_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -47,7 +48,6 @@ from ouroboros.providers.codex_cli_stream import (
     terminate_process,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
-from ouroboros.providers.retry import TRANSIENT_ERROR_PATTERNS
 
 log = structlog.get_logger()
 
@@ -58,7 +58,7 @@ _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 # (rate/temporarily/timeout/overloaded/try-again/connection) was a strict subset,
 # so adopting the shared tuple only *adds* the missing common signals
 # (concurrency, 429, 5xx, bare "connection") without dropping any prior match.
-_RETRYABLE_ERROR_PATTERNS = TRANSIENT_ERROR_PATTERNS
+_RETRYABLE_ERROR_PATTERNS = BASE_TRANSIENT_PATTERNS
 
 _CODEX_AUTH_FAILURE_PATTERNS = (
     "missing bearer or basic authentication",
@@ -801,8 +801,7 @@ class CodexCliLLMAdapter:
 
     def _is_retryable_error(self, message: str) -> bool:
         """Check whether an error looks transient."""
-        lowered = message.lower()
-        return any(pattern in lowered for pattern in _RETRYABLE_ERROR_PATTERNS)
+        return is_transient_error(message)
 
     async def _collect_legacy_process_output(
         self,

@@ -38,6 +38,7 @@ from typing import Any
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -55,14 +56,13 @@ log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 
-_RETRYABLE_ERROR_PATTERNS = (
-    "rate limit",
-    "temporarily unavailable",
-    "timeout",
-    "overloaded",
-    "try again",
+_GEMINI_RETRYABLE_EXTRA_PATTERNS = (
     "quota",
     "resource exhausted",
+)
+_RETRYABLE_ERROR_PATTERNS = (
+    *BASE_TRANSIENT_PATTERNS,
+    *_GEMINI_RETRYABLE_EXTRA_PATTERNS,
 )
 
 # Gemini CLI exit codes
@@ -667,8 +667,10 @@ class GeminiCLIAdapter:
         Returns:
             Whether the error is worth retrying.
         """
-        lower = error_msg.lower()
-        return any(pattern in lower for pattern in _RETRYABLE_ERROR_PATTERNS)
+        return is_transient_error(
+            error_msg,
+            extra_patterns=_GEMINI_RETRYABLE_EXTRA_PATTERNS,
+        )
 
     @staticmethod
     def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:
