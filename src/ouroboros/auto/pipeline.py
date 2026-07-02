@@ -40,6 +40,7 @@ from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import AssumptionRecord, SeedDraftLedger
 from ouroboros.auto.ledger_seed import (
     PARTIAL_SEED_GENERATION_MODE,
+    brownfield_context_from_cwd,
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
 )
@@ -856,7 +857,9 @@ class AutoPipeline:
                     and ledger.is_seed_ready()
                 ):
                     seed = synthesize_seed_from_ledger(
-                        ledger, interview_id=state.interview_session_id
+                        ledger,
+                        interview_id=state.interview_session_id,
+                        brownfield_context=brownfield_context_from_cwd(state.cwd),
                     )
                     seed = self._record_generated_seed(state, ledger, seed)
                     state.mark_progress(
@@ -878,7 +881,10 @@ class AutoPipeline:
                         )
                         self._save(state)
                         return self._result(state, ledger, blocker=state.last_error)
-                    seed = synthesize_seed_from_ledger(ledger)
+                    seed = synthesize_seed_from_ledger(
+                        ledger,
+                        brownfield_context=brownfield_context_from_cwd(state.cwd),
+                    )
                     seed = self._record_generated_seed(state, ledger, seed)
                     state.mark_progress(
                         "Seed generated from completed ledger", tool_name="ledger_seed_generator"
@@ -930,7 +936,9 @@ class AutoPipeline:
                         return self._result(state, ledger, blocker=state.last_error)
                     if ledger.is_seed_ready():
                         seed = synthesize_seed_from_ledger(
-                            ledger, interview_id=state.interview_session_id
+                            ledger,
+                            interview_id=state.interview_session_id,
+                            brownfield_context=brownfield_context_from_cwd(state.cwd),
                         )
                         seed = self._record_generated_seed(state, ledger, seed)
                         state.mark_progress(
@@ -954,7 +962,9 @@ class AutoPipeline:
                 except Exception as exc:
                     if ledger.is_seed_ready() and _is_authoring_backend_unavailable(exc):
                         seed = synthesize_seed_from_ledger(
-                            ledger, interview_id=state.interview_session_id
+                            ledger,
+                            interview_id=state.interview_session_id,
+                            brownfield_context=brownfield_context_from_cwd(state.cwd),
                         )
                         seed = self._record_generated_seed(state, ledger, seed)
                         state.mark_progress(
@@ -2025,6 +2035,7 @@ class AutoPipeline:
                 ledger,
                 interview_id=state.interview_session_id,
                 recovery_reason="interview_phase_deadline",
+                brownfield_context=brownfield_context_from_cwd(state.cwd),
             )
             progress_message = (
                 "Interview phase deadline fired; closed via complete-ledger Seed synthesis "
