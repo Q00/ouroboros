@@ -642,6 +642,40 @@ class AutoPipeline:
             self._save(state)
 
         review: SeedReview | None = None
+        interview_result = await self._run_interview_phase(state, ledger)
+        if interview_result is not None:
+            return interview_result
+
+        seed_result = await self._run_seed_phase(
+            state,
+            ledger,
+            resume_tool_name=resume_tool_name,
+        )
+        if isinstance(seed_result, AutoPipelineResult):
+            return seed_result
+        seed = seed_result
+
+        terminal_resume_result = await self._run_terminal_resume_phase(
+            state,
+            ledger,
+            seed,
+            review=review,
+        )
+        if terminal_resume_result is not None:
+            return terminal_resume_result
+
+        review_result = await self._run_review_phase(state, ledger, seed, review=review)
+        if isinstance(review_result, AutoPipelineResult):
+            return review_result
+        seed, review = review_result
+
+        return await self._run_execution_phase(state, ledger, seed, review=review)
+
+    async def _run_interview_phase(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+    ) -> AutoPipelineResult | None:
         # Q00/ouroboros#782 review-12 BLOCKING #1: same exception as the
         # early-return above — let RALPH_HANDOFF resume reach
         # ``_resume_ralph_handoff`` so an already-terminal Ralph job can be
@@ -787,6 +821,15 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
+        return None
+
+    async def _run_seed_phase(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        resume_tool_name: str | None,
+    ) -> AutoPipelineResult | Seed:
         # Q00/ouroboros#782 review-12 BLOCKING #1: same exception — let
         # ``RALPH_HANDOFF`` resume reach ``_resume_ralph_handoff`` so the
         # poller can reconcile an already-terminal Ralph job.
@@ -971,6 +1014,16 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
+        return seed
+
+    async def _run_terminal_resume_phase(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult | None:
         if state.phase == AutoPhase.RALPH_HANDOFF:
             if (
                 state.run_handoff_status == "ralph_retry_after_blocker"
@@ -1050,6 +1103,16 @@ class AutoPipeline:
                 run_subagent=None,
             )
 
+        return None
+
+    async def _run_review_phase(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult | tuple[Seed, SeedReview | None]:
         if self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.REVIEW:
@@ -1177,6 +1240,16 @@ class AutoPipeline:
                 self._save(state)
                 return self._result(state, ledger, review=review)
 
+        return seed, review
+
+    async def _run_execution_phase(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult:
         if self._enforce_deadline(state):
             return self._result(state, ledger, review=review, blocker=state.last_error)
         if state.phase == AutoPhase.RUN:
