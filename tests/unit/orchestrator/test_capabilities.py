@@ -44,6 +44,7 @@ from ouroboros.orchestrator.capabilities import (
     stable_code_investigation_question_identity,
     validate_capability_tool_metadata,
 )
+import ouroboros.orchestrator.capabilities.tool_specs as tool_specs_module
 from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 from ouroboros.orchestrator.policy import (
     PolicyContext,
@@ -98,6 +99,39 @@ _VALID_OUROBOROS_TOOL_EXECUTION_MODES = frozenset(
     {"blocking", "background", "status", "cancel", "subagent_orchestration"}
 )
 
+_PRIVATE_TOOL_SPEC_COMPATIBILITY_ATTRIBUTES = (
+    "_OuroborosToolCapabilitySpec",
+    "_OUROBOROS_COMPANION_FAMILIES",
+    "_OUROBOROS_BACKGROUND_TOOLS",
+    "_OUROBOROS_STATUS_TOOLS",
+    "_OUROBOROS_CANCEL_TOOLS",
+    "_OUROBOROS_WORKSPACE_WRITE_TOOLS",
+    "_OUROBOROS_SUBAGENT_TOOLS",
+    "_OUROBOROS_DEFAULT_EXECUTION_MODE",
+    "_OUROBOROS_DEFAULT_RETRY_METADATA",
+    "_OUROBOROS_JOB_POLL_RETRY_METADATA",
+    "_OUROBOROS_UNSUPPORTED_RETRY_METADATA",
+    "_OUROBOROS_DEFAULT_INTERRUPT_METADATA",
+    "_OUROBOROS_BLOCKING_INTERRUPT_METADATA",
+    "_OUROBOROS_BACKGROUND_INTERRUPT_METADATA",
+    "_OUROBOROS_TERMINAL_CONTROL_INTERRUPT_METADATA_BY_TOOL",
+    "_OUROBOROS_UNSUPPORTED_INTERRUPT_METADATA",
+    "_OUROBOROS_READ_ONLY_INTERRUPT_METADATA",
+    "_OUROBOROS_UNSUPPORTED_CANCEL_METADATA",
+    "_OUROBOROS_SIDE_EFFECT_FREE_METADATA",
+    "_OUROBOROS_MUTATION_TARGETS_BY_SIDE_EFFECT",
+    "_OUROBOROS_STATE_MUTATIONS_BY_TOOL",
+    "_OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA",
+    "_OUROBOROS_EXECUTION_SESSION_CANCEL_METADATA",
+    "_OUROBOROS_BACKGROUND_JOB_CANCEL_CONTROL_METADATA",
+    "_OUROBOROS_EXECUTION_SESSION_CANCEL_CONTROL_METADATA",
+    "_OUROBOROS_TOOL_CAPABILITY_SPECS",
+    "_OUROBOROS_CANCEL_METADATA",
+    "_OUROBOROS_BACKGROUND_BLOCKING_COMPANIONS",
+    "_OUROBOROS_BACKGROUND_LIFECYCLE_ROLE_TOOLS",
+    "_OUROBOROS_JOB_LIFECYCLE_SIBLING_ORDER",
+)
+
 _REQUIRED_OUROBOROS_TOOL_METADATA_FIELDS = frozenset(
     {
         "input_schema",
@@ -110,6 +144,14 @@ _REQUIRED_OUROBOROS_TOOL_METADATA_FIELDS = frozenset(
         "cancel",
     }
 )
+
+
+def test_private_tool_spec_attributes_remain_importable_from_capabilities_root() -> None:
+    for attribute_name in _PRIVATE_TOOL_SPEC_COMPATIBILITY_ATTRIBUTES:
+        assert getattr(capabilities_module, attribute_name) is getattr(
+            tool_specs_module, attribute_name
+        )
+
 
 _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_ac_tree_hud": ("session_id", "cursor"),
