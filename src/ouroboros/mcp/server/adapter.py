@@ -1471,6 +1471,7 @@ def create_ouroboros_server(
         *,
         parallel: bool = True,
         execution_id: str | None = None,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         await _ensure_evolution_store_initialized()
         task_cwd = evolutionary_loop.get_project_dir()
@@ -1500,6 +1501,7 @@ def create_ouroboros_server(
             seed=seed,
             execution_id=execution_id,
             parallel=parallel,
+            externally_satisfied_acs=externally_satisfied_acs,
         )
 
     def _evaluate_mechanically(artifact: str, seed: Any) -> EvaluationSummary | None:
@@ -1766,9 +1768,14 @@ def create_ouroboros_server(
             f"Remaining: {', '.join(remaining[:5])}"
         )
 
+    _scoped_reexecution_env = os.environ.get("OUROBOROS_SCOPED_REEXECUTION", "").strip().lower()
+    _scoped_reexecution = _scoped_reexecution_env not in ("0", "false")
     evolutionary_loop = EvolutionaryLoop(
         event_store=event_store,
-        config=EvolutionaryLoopConfig(runtime_controls=get_runtime_controls_config()),
+        config=EvolutionaryLoopConfig(
+            runtime_controls=get_runtime_controls_config(),
+            scoped_reexecution=_scoped_reexecution,
+        ),
         wonder_engine=wonder_engine,
         reflect_engine=reflect_engine,
         seed_generator=seed_generator,

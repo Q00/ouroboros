@@ -10,10 +10,12 @@ The WonderEngine asks: "Given what we learned, what do we still not know?"
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 import json
 import logging
+import re
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +41,56 @@ def get_wonder_model(backend: str | None = None) -> str:
     return get_llm_model_for_role("wonder", backend=backend)
 
 
+# Deterministic fallback for grounding free-floating question strings to ACs.
+# Matches "AC 2", "AC#2", "ac 3" — the 1-based AC number the question challenges.
+_AC_REF_PATTERN = re.compile(r"\bAC\s*#?(\d+)\b", re.IGNORECASE)
+
+
+class GroundedQuestion(BaseModel, frozen=True):
+    """A Wonder question tied to what it challenges.
+
+    A grounded elenchus refutes a *specific* claim: either it challenges named
+    acceptance criteria (``kind="challenge"`` with 0-based ``ac_indices``) or it
+    names a gap the goal requires but no AC covers (``kind="gap"``).
+    """
+
+    question: str
+    kind: Literal["challenge", "gap"] = "gap"
+    ac_indices: tuple[int, ...] = ()
+
+
+def _ground_ac_indices(refs: Iterable[object], total_acs: int | None) -> tuple[int, ...]:
+    """Convert 1-based AC refs to deduped, in-range 0-based indices."""
+    seen: list[int] = []
+    for ref in refs:
+        try:
+            idx = int(ref) - 1  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            continue
+        if idx < 0:
+            continue
+        if total_acs is not None and idx >= total_acs:
+            continue
+        if idx not in seen:
+            seen.append(idx)
+    return tuple(seen)
+
+
+def ground_question_text(text: str, total_acs: int | None) -> GroundedQuestion:
+    """Ground a plain question string via the deterministic AC-ref regex."""
+    indices = _ground_ac_indices(_AC_REF_PATTERN.findall(text), total_acs)
+    if indices:
+        return GroundedQuestion(question=text, kind="challenge", ac_indices=indices)
+    return GroundedQuestion(question=text, kind="gap")
+
+
+def ground_questions(
+    questions: Iterable[str], total_acs: int | None
+) -> tuple[GroundedQuestion, ...]:
+    """Ground a sequence of plain question strings (legacy/partial-state path)."""
+    return tuple(ground_question_text(q, total_acs) for q in questions)
+
+
 class WonderOutput(BaseModel, frozen=True):
     """Output of the Wonder phase.
 
@@ -47,6 +99,7 @@ class WonderOutput(BaseModel, frozen=True):
     """
 
     questions: tuple[str, ...] = Field(default_factory=tuple)
+    grounded_questions: tuple[GroundedQuestion, ...] = Field(default_factory=tuple)
     ontology_tensions: tuple[str, ...] = Field(default_factory=tuple)
     should_continue: bool = True
     reasoning: str = ""
@@ -213,11 +266,24 @@ not just asking "what went wrong" but "what assumptions are we making?"
 
 You must respond with a JSON object (no markdown, no code fences):
 {
-    "questions": ["question 1", "question 2", ...],
+    "questions": [
+        {"question": "Why does the OAuth flow assume a single provider?", "ac_refs": [2]},
+        {"question": "What handles token refresh — no AC covers it?", "kind": "gap"}
+    ],
     "ontology_tensions": ["tension 1", "tension 2", ...],
     "should_continue": true/false,
     "reasoning": "explanation of your analysis"
 }
+
+GROUNDED ELENCHUS — every question must name what it challenges:
+- A question that challenges existing acceptance criteria MUST cite them with
+  "ac_refs": [<1-based AC number(s)>]. A challenge is the only licensed way to
+  reopen a settled (passing) claim, so only challenge a PASSING AC when you have
+  concrete evidence from the evaluation or execution output that it is wrong.
+- A question about something the goal requires but NO AC covers MUST declare
+  "kind": "gap" (no ac_refs). Gaps may become new ACs downstream.
+- A question that is neither grounded in an AC nor a real gap is not a question —
+  it is a mood. Do not emit it.
 
 Guidelines:
 - questions: What gaps remain? What assumptions haven't been tested?
@@ -335,6 +401,7 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
 
     def _parse_response(self, content: str, seed: Seed | None = None) -> WonderOutput:
         """Parse LLM response into WonderOutput."""
+        total_acs = len(seed.acceptance_criteria) if seed else None
         try:
             # Strip markdown fences if present
             cleaned = content.strip()
@@ -343,8 +410,12 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                 cleaned = "\n".join(lines[1:-1])
 
             data = json.loads(cleaned)
+            grounded = self._parse_grounded_questions(data.get("questions", []), total_acs)
             return WonderOutput(
-                questions=tuple(data.get("questions", [])),
+                # ``questions`` stays a flat string tuple for events, lineage, and
+                # the repetitive-feedback convergence check (unchanged contract).
+                questions=tuple(gq.question for gq in grounded),
+                grounded_questions=grounded,
                 ontology_tensions=tuple(data.get("ontology_tensions", [])),
                 should_continue=data.get("should_continue", True),
                 reasoning=data.get("reasoning", ""),
@@ -352,12 +423,47 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning("Failed to parse WonderEngine response: %s", e)
             scope_hint = f" for goal: {seed.goal}" if seed else ""
+            fallback = f"What assumptions remain untested{scope_hint}?"
             return WonderOutput(
-                questions=(f"What assumptions remain untested{scope_hint}?",),
+                questions=(fallback,),
+                grounded_questions=(GroundedQuestion(question=fallback, kind="gap"),),
                 ontology_tensions=(),
                 should_continue=True,
                 reasoning=f"Parse error, using seed-scoped fallback: {e}",
             )
+
+    @staticmethod
+    def _parse_grounded_questions(
+        raw_questions: object, total_acs: int | None
+    ) -> tuple[GroundedQuestion, ...]:
+        """Parse the ``questions`` payload, tolerating new and legacy shapes.
+
+        New shape: list of objects carrying ``ac_refs`` (1-based) or
+        ``kind="gap"``. Legacy shape: list of plain strings, grounded via the
+        deterministic AC-ref regex.
+        """
+        if not isinstance(raw_questions, list):
+            return ()
+        grounded: list[GroundedQuestion] = []
+        for item in raw_questions:
+            if isinstance(item, str):
+                grounded.append(ground_question_text(item, total_acs))
+            elif isinstance(item, dict):
+                text = item.get("question") or item.get("text")
+                if not isinstance(text, str) or not text:
+                    continue
+                refs = item.get("ac_refs")
+                if isinstance(refs, (list, tuple)) and refs:
+                    indices = _ground_ac_indices(refs, total_acs)
+                    if indices:
+                        grounded.append(
+                            GroundedQuestion(question=text, kind="challenge", ac_indices=indices)
+                        )
+                        continue
+                # No usable refs (or all out of range): fall back to regex on the
+                # text, then treat as a gap.
+                grounded.append(ground_question_text(text, total_acs))
+        return tuple(grounded)
 
     def _degraded_output(
         self,
@@ -395,6 +501,8 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
 
         return WonderOutput(
             questions=tuple(questions),
+            # Heuristic questions have no AC evidence to challenge, so they are gaps.
+            grounded_questions=tuple(GroundedQuestion(question=q, kind="gap") for q in questions),
             ontology_tensions=tuple(tensions),
             should_continue=should_continue,
             reasoning="Degraded mode: LLM unavailable, using heuristic questions"
