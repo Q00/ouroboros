@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import structlog
 
 from ouroboros.backends import resolve_llm_backend_name, soft_tool_enforcement_backends
+from ouroboros.backends.factory_registry import get_backend_factory_spec
 from ouroboros.config import (
     get_codex_cli_path,
     get_gemini_cli_path,
@@ -71,6 +73,22 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 _BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = soft_tool_enforcement_backends()
 
 
+@dataclass(frozen=True, slots=True)
+class _LLMAdapterRequest:
+    permission_mode: str
+    cli_path: str | Path | None
+    cwd: str | Path | None
+    allowed_tools: list[str] | None
+    max_turns: int
+    on_message: Callable[[str, str], None] | None
+    api_key: str | None
+    api_base: str | None
+    timeout: float | None
+    max_retries: int
+    io_recorder: IOJournalRecorder | None
+    strict_mcp_config: bool
+
+
 def resolve_llm_backend(backend: str | None = None) -> str:
     """Resolve and validate the LLM adapter backend name."""
     candidate = (backend or get_llm_backend()).strip().lower()
@@ -114,6 +132,194 @@ def resolve_llm_permission_mode(
         # CLI sandbox modes block LLM output entirely. Must bypass.
         return "bypassPermissions"
     return get_llm_permission_mode(backend=resolved)
+
+
+def _create_claude_code_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return ClaudeCodeAdapter(
+        permission_mode=request.permission_mode,
+        cli_path=request.cli_path,
+        cwd=request.cwd,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        # Forwarded as-is.  The factory does NOT auto-derive
+        # ``strict_mcp_config`` from ``use_case`` because non-MCP
+        # interview entrypoints (CLI ``ooo init`` / ``ooo pm``) need
+        # to keep plugin and project ``.mcp.json`` servers reachable.
+        # Only the nested MCP-tool entrypoint
+        # (``InterviewHandler.handle`` in
+        # ``mcp/tools/authoring_handlers.py``) opts in.
+        strict_mcp_config=request.strict_mcp_config,
+    )
+
+
+def _create_codex_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return CodexCliLLMAdapter(
+        cli_path=request.cli_path or get_codex_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+        runtime_profile=get_runtime_profile(),
+    )
+
+
+def _create_copilot_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.config import get_copilot_cli_path
+
+    return CopilotCliLLMAdapter(
+        cli_path=request.cli_path or get_copilot_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+        runtime_profile=get_runtime_profile(),
+    )
+
+
+def _create_gemini_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return GeminiCLIAdapter(
+        cli_path=request.cli_path or get_gemini_cli_path(),
+        cwd=request.cwd,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+        allowed_tools=request.allowed_tools,
+    )
+
+
+def _create_opencode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return OpenCodeLLMAdapter(
+        cli_path=request.cli_path,
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
+def _create_hermes_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
+
+    return HermesCliLLMAdapter(
+        cli_path=request.cli_path or get_hermes_cli_path(),
+        cwd=request.cwd,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
+def _create_goose_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return GooseCliLLMAdapter(
+        cli_path=request.cli_path or get_goose_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
+def _create_pi_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return PiLLMAdapter(
+        cli_path=request.cli_path or get_pi_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
+def _create_gjc_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return GjcLLMAdapter(
+        cli_path=request.cli_path or get_gjc_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
+def _create_ourocode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    return OurocodeLLMAdapter(
+        cli_path=request.cli_path or get_ourocode_cli_path(),
+        cwd=request.cwd,
+        timeout=request.timeout,
+        io_recorder=request.io_recorder,
+    )
+
+
+def _create_kiro_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.config import get_kiro_cli_path
+    from ouroboros.providers.kiro_adapter import KiroCodeAdapter
+
+    return KiroCodeAdapter(
+        cli_path=request.cli_path or get_kiro_cli_path(),
+        cwd=request.cwd,
+        allowed_tools=request.allowed_tools,
+        permission_mode=request.permission_mode,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+    )
+
+
+def _create_litellm_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    try:
+        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    except ImportError as exc:
+        msg = (
+            "litellm backend requested but litellm is not installed. "
+            "Install with: pip install 'ouroboros-ai[litellm]'"
+        )
+        raise RuntimeError(msg) from exc
+
+    return LiteLLMAdapter(
+        api_key=request.api_key,
+        api_base=request.api_base,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+        io_recorder=request.io_recorder,
+    )
+
+
+_LLM_ADAPTER_FACTORIES: dict[str, Callable[[_LLMAdapterRequest], LLMAdapter]] = {
+    "_create_claude_code_adapter": _create_claude_code_adapter,
+    "_create_codex_adapter": _create_codex_adapter,
+    "_create_copilot_adapter": _create_copilot_adapter,
+    "_create_gemini_adapter": _create_gemini_adapter,
+    "_create_opencode_adapter": _create_opencode_adapter,
+    "_create_hermes_adapter": _create_hermes_adapter,
+    "_create_goose_adapter": _create_goose_adapter,
+    "_create_pi_adapter": _create_pi_adapter,
+    "_create_gjc_adapter": _create_gjc_adapter,
+    "_create_ourocode_adapter": _create_ourocode_adapter,
+    "_create_kiro_adapter": _create_kiro_adapter,
+    "_create_litellm_adapter": _create_litellm_adapter,
+}
 
 
 def create_llm_adapter(
@@ -165,153 +371,26 @@ def create_llm_adapter(
             backend=resolved_backend,
             hint="Only LiteLLM and ourocode accept adapter-level IOJournalRecorder wiring.",
         )
-    if resolved_backend == "claude_code":
-        return ClaudeCodeAdapter(
+    spec = get_backend_factory_spec(resolved_backend, kind="llm")
+    if spec is None or spec.llm_adapter_factory is None:
+        msg = f"Unsupported LLM backend: {resolved_backend}"
+        raise ValueError(msg)
+    builder = _LLM_ADAPTER_FACTORIES[spec.llm_adapter_factory]
+    return builder(
+        _LLMAdapterRequest(
             permission_mode=resolved_permission_mode,
             cli_path=cli_path,
             cwd=cwd,
             allowed_tools=allowed_tools,
             max_turns=max_turns,
             on_message=on_message,
+            api_key=api_key,
+            api_base=api_base,
             timeout=timeout,
-            # Forwarded as-is.  The factory does NOT auto-derive
-            # ``strict_mcp_config`` from ``use_case`` because non-MCP
-            # interview entrypoints (CLI ``ooo init`` / ``ooo pm``) need
-            # to keep plugin and project ``.mcp.json`` servers reachable.
-            # Only the nested MCP-tool entrypoint
-            # (``InterviewHandler.handle`` in
-            # ``mcp/tools/authoring_handlers.py``) opts in.
+            max_retries=max_retries,
+            io_recorder=io_recorder,
             strict_mcp_config=strict_mcp_config,
         )
-    if resolved_backend == "codex":
-        return CodexCliLLMAdapter(
-            cli_path=cli_path or get_codex_cli_path(),
-            cwd=cwd,
-            permission_mode=resolved_permission_mode,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-            runtime_profile=get_runtime_profile(),
-        )
-    if resolved_backend == "copilot":
-        from ouroboros.config import get_copilot_cli_path
-
-        return CopilotCliLLMAdapter(
-            cli_path=cli_path or get_copilot_cli_path(),
-            cwd=cwd,
-            permission_mode=resolved_permission_mode,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-            runtime_profile=get_runtime_profile(),
-        )
-    if resolved_backend == "gemini":
-        return GeminiCLIAdapter(
-            cli_path=cli_path or get_gemini_cli_path(),
-            cwd=cwd,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-            allowed_tools=allowed_tools,
-        )
-    if resolved_backend == "opencode":
-        return OpenCodeLLMAdapter(
-            cli_path=cli_path,
-            cwd=cwd,
-            permission_mode=resolved_permission_mode,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
-    if resolved_backend == "hermes":
-        from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
-
-        return HermesCliLLMAdapter(
-            cli_path=cli_path or get_hermes_cli_path(),
-            cwd=cwd,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
-    if resolved_backend == "goose":
-        return GooseCliLLMAdapter(
-            cli_path=cli_path or get_goose_cli_path(),
-            cwd=cwd,
-            permission_mode=resolved_permission_mode,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
-    if resolved_backend == "pi":
-        return PiLLMAdapter(
-            cli_path=cli_path or get_pi_cli_path(),
-            cwd=cwd,
-            permission_mode=resolved_permission_mode,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
-    if resolved_backend == "gjc":
-        return GjcLLMAdapter(
-            cli_path=cli_path or get_gjc_cli_path(),
-            cwd=cwd,
-            permission_mode=resolved_permission_mode,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
-    if resolved_backend == "ourocode":
-        return OurocodeLLMAdapter(
-            cli_path=cli_path or get_ourocode_cli_path(),
-            cwd=cwd,
-            timeout=timeout,
-            io_recorder=io_recorder,
-        )
-    if resolved_backend == "kiro":
-        from ouroboros.config import get_kiro_cli_path
-        from ouroboros.providers.kiro_adapter import KiroCodeAdapter
-
-        return KiroCodeAdapter(
-            cli_path=cli_path or get_kiro_cli_path(),
-            cwd=cwd,
-            allowed_tools=allowed_tools,
-            permission_mode=resolved_permission_mode,
-            max_turns=max_turns,
-            on_message=on_message,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
-    # litellm is the fallback
-    try:
-        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
-    except ImportError as exc:
-        msg = (
-            "litellm backend requested but litellm is not installed. "
-            "Install with: pip install 'ouroboros-ai[litellm]'"
-        )
-        raise RuntimeError(msg) from exc
-
-    return LiteLLMAdapter(
-        api_key=api_key,
-        api_base=api_base,
-        timeout=timeout,
-        max_retries=max_retries,
-        io_recorder=io_recorder,
     )
 
 

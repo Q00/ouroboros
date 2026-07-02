@@ -23,17 +23,25 @@ from ouroboros.backends.capabilities import (
     runtime_backend_choices,
     soft_tool_enforcement_backends,
 )
+from ouroboros.backends.factory_registry import (
+    BackendFactorySpec,
+    backend_factory_specs,
+    get_backend_factory_spec,
+)
 
 __all__ = [
     "BackendCapability",
+    "BackendFactorySpec",
     "RuntimeSubagentOrchestrationContract",
     "SkillExecutionCapability",
     "SubagentDispatchMode",
     "SubagentSpawnTriggerMechanism",
     "ToolDiscoveryMechanism",
     "backend_supports_tool_envelope",
+    "backend_factory_specs",
     "build_runtime_subagent_orchestration_contract",
     "get_backend_capability",
+    "get_backend_factory_spec",
     "interview_driver_backend_choices",
     "llm_backend_choices",
     "resolve_backend_alias",
