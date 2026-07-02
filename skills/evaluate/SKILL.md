@@ -74,12 +74,26 @@ fallback instead of retrying the failing call.
    - If recent execution output exists in conversation: Use that
    - Ask user if unclear what to evaluate
 
+2.5. Acting verification — reproduce and OBSERVE (do not skip for behaviour-bearing work):
+   Stage 1 already runs mechanical checks (build/test). Go further when the runtime
+   exposes acting tools — **computer-use / browser, `Bash`/shell, file reads**: don't
+   just reason over the diff, **run the result and observe the real effect** (the
+   command's output, the endpoint's response, the rendered UI via a screenshot). Do
+   it via a dedicated verification sub-agent to keep the main session lean — or
+   inline in the main session where the runtime restricts sub-agent spawning (the
+   observation is what matters; the delegation is only an optimization). Probe the
+   acceptance criteria against the ACTUAL observable behaviour and the adversarial
+   classes (`misleading_output`, `hung_command`, `stale_state`, `dirty_worktree`, …).
+   Feed the captured evidence (commands, outputs, artifact paths) into the evaluate
+   call as part of the `artifact`. If acting tools are unavailable, note that
+   behaviour was not observed and evaluate on the text alone.
+
 3. Call the `ouroboros_evaluate` MCP tool:
    ```
    Tool: ouroboros_evaluate
    Arguments:
      session_id: <session ID>
-     artifact: <the code/output to evaluate>
+     artifact: <the code/output to evaluate, plus observed-behaviour evidence from 2.5>
      seed_content: <original seed YAML, if available>
      acceptance_criterion: <specific AC to check, optional>
      artifact_type: "code"  (or "docs", "config")

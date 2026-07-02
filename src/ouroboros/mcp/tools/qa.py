@@ -143,6 +143,10 @@ def _build_qa_user_prompt(
 ```
 """
 
+    from ouroboros.evaluation.adversarial import render_adversarial_section
+
+    adversarial_section = "\n" + render_adversarial_section(artifact_type)
+
     return f"""## Quality Bar
 {quality_bar}
 
@@ -156,7 +160,7 @@ def _build_qa_user_prompt(
 ```
 {artifact}
 ```
-{reference_section}{history_section}{seed_section}
+{reference_section}{history_section}{seed_section}{adversarial_section}
 Provide your evaluation as a JSON object."""
 
 

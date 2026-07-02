@@ -1074,6 +1074,10 @@ def build_qa_subagent(
     if seed_content:
         seed_section = f"\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
+    from ouroboros.evaluation.adversarial import render_adversarial_section
+
+    adversarial_section = "\n" + render_adversarial_section(artifact_type)
+
     prompt = f"""{system_prompt}
 
 ---
@@ -1102,7 +1106,7 @@ as a JSON object with these exact fields:
 ```
 {artifact}
 ```
-{reference_section}{history_section}{seed_section}
+{reference_section}{history_section}{seed_section}{adversarial_section}
 Return ONLY the JSON verdict object. No other text."""
 
     context: dict[str, Any] = {

@@ -59,6 +59,21 @@ class TestQAHandlerSubagentDispatch:
         assert "_subagent" in mcp_result.meta
         assert mcp_result.meta["_subagent"]["tool_name"] == "ouroboros_qa"
 
+    async def test_subagent_prompt_includes_adversarial_probes(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "artifact": "def foo(): pass",
+                "quality_bar": "All functions have docstrings",
+            }
+        )
+        assert result.is_ok
+        prompt = result.value.meta["_subagent"]["prompt"]
+        assert "Adversarial Probes" in prompt
+        assert "malformed_input" in prompt
+        assert "prompt_injection" in prompt
+        assert "evidence gap" in prompt
+        assert "instead of implying you ran it" in prompt
+
     async def test_still_validates_missing_artifact(self, handler) -> None:
         result = await handler.handle({"quality_bar": "good"})
         assert result.is_err

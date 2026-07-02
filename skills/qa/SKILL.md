@@ -71,6 +71,24 @@ This skill works in two modes. Determine which one **before** attempting any too
    - `screenshot` — visual artifacts
    - `custom` — anything else
 
+3.5. **Acting verification — reproduce and OBSERVE before judging (do not skip for behaviour-bearing artifacts):**
+   A text judge can be fooled by a hopeful log line. When the artifact actually
+   *does* something (code, an app, an API, a UI) and the runtime exposes acting
+   tools — **computer-use / browser, `Bash`/shell, file reads** — gather real
+   evidence first, ideally via a dedicated verification sub-agent so the main
+   session stays lean:
+   - **Run it** — execute the command / start the app / hit the endpoint.
+   - **Observe the actual effect** — the file written, the endpoint's response,
+     the rendered UI (screenshot via computer-use) — NOT just exit text.
+   - **Probe the applicable adversarial classes** (the QA tool lists them):
+     `misleading_output` (claimed success vs. real effect), `hung_command`
+     (bounded timeout?), `malformed_input`, `stale_state`, `dirty_worktree`, etc.
+   - Capture commands run, outputs, and artifact paths as **evidence**.
+   Pass that evidence into the judge as `reference` (and prefer the observed
+   behaviour over the source text as the `artifact` when they disagree). If no
+   acting tools are available, say so and judge on the text alone — but flag that
+   behaviour was not observed.
+
 4. **Call the `ouroboros_qa` MCP tool:**
    ```
    Tool: ouroboros_qa
@@ -78,7 +96,7 @@ This skill works in two modes. Determine which one **before** attempting any too
      artifact: <the content to evaluate>
      quality_bar: <what 'pass' means>
      artifact_type: "code"  (or other type)
-     reference: <optional reference for comparison>
+     reference: <observed-behaviour evidence from step 3.5, plus any reference>
      pass_threshold: 0.80  (adjustable)
      seed_content: <seed YAML if available>
    ```
