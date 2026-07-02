@@ -21,7 +21,7 @@ from ouroboros.backends import build_runtime_subagent_orchestration_contract
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
@@ -60,7 +60,11 @@ log = structlog.get_logger(__name__)
 
 
 def _seed_acceptance_criteria(seed: Seed) -> tuple[str, ...]:
-    return tuple(text.strip() for text in seed.acceptance_criteria if text and text.strip())
+    return tuple(
+        stripped
+        for criterion in seed.acceptance_criteria
+        if (stripped := ac_text(criterion).strip())
+    )
 
 
 async def _default_brownfield_project_dir() -> Path | None:
@@ -1236,7 +1240,7 @@ class ChecklistVerifyHandler:
             )
 
         acceptance_criteria = tuple(
-            text.strip() for text in seed.acceptance_criteria if text and text.strip()
+            text for criterion in seed.acceptance_criteria if (text := ac_text(criterion).strip())
         )
         if not acceptance_criteria:
             return Result.err(

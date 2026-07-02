@@ -10,6 +10,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.seed import AcceptanceCriterionInput, ac_text
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
@@ -385,7 +386,7 @@ class DependencyAnalyzer:
 
     async def analyze(
         self,
-        acceptance_criteria: Sequence[str] | Sequence[ACDependencySpec],
+        acceptance_criteria: Sequence[AcceptanceCriterionInput] | Sequence[ACDependencySpec],
     ) -> Result[DependencyGraph, DependencyAnalysisError]:
         """Analyze AC dependencies and return a graph with execution levels."""
         specs = self._normalize_specs(acceptance_criteria)
@@ -437,7 +438,7 @@ class DependencyAnalyzer:
 
     def _normalize_specs(
         self,
-        acceptance_criteria: Sequence[str] | Sequence[ACDependencySpec],
+        acceptance_criteria: Sequence[AcceptanceCriterionInput] | Sequence[ACDependencySpec],
     ) -> tuple[ACDependencySpec, ...]:
         specs: list[ACDependencySpec] = []
         for index, item in enumerate(acceptance_criteria):
@@ -453,7 +454,7 @@ class DependencyAnalyzer:
                     )
                 )
             else:
-                specs.append(ACDependencySpec(index=index, content=str(item)))
+                specs.append(ACDependencySpec(index=index, content=ac_text(item)))
         return tuple(specs)
 
     def _analyze_structured_dependencies(

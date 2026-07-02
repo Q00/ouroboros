@@ -14,7 +14,7 @@ from uuid import uuid4
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
 
 
 def _review_accepts_closure_mode(review_callable: Callable[..., Any]) -> bool:
@@ -128,7 +128,7 @@ class SeedRepairer:
             )
 
         constraints = list(seed.constraints)
-        acceptance = list(seed.acceptance_criteria)
+        acceptance: list[AcceptanceCriterionInput] = list(seed.acceptance_criteria)
         goal = seed.goal
         applied: list[str] = []
         unresolved: list[ReviewFinding] = []
@@ -143,12 +143,16 @@ class SeedRepairer:
         for finding in review.findings:
             if finding.code in repairable_blocker_codes:
                 continue
-            if finding.code in {"vague_acceptance_criteria", "untestable_acceptance_criteria"}:
+            if finding.code in {
+                "missing_success_contract",
+                "vague_acceptance_criteria",
+                "untestable_acceptance_criteria",
+            }:
                 index = _target_index(finding.target)
                 if index is not None and index < len(acceptance):
                     if index not in repaired_acceptance_indices:
                         acceptance[index] = _observable_preserving_replacement(
-                            acceptance[index], index=index
+                            ac_text(acceptance[index]), index=index
                         )
                         repaired_acceptance_indices.add(index)
                 else:
@@ -185,8 +189,9 @@ class SeedRepairer:
         changed = bool(applied)
         updated_seed = seed
         if changed:
-            updated_seed = seed.model_copy(
-                update={
+            seed_data = seed.to_dict()
+            seed_data.update(
+                {
                     "goal": goal,
                     "constraints": tuple(dict.fromkeys(constraints)),
                     "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
@@ -196,9 +201,10 @@ class SeedRepairer:
                             "created_at": datetime.now(UTC),
                             "parent_seed_id": seed.metadata.seed_id,
                         }
-                    ),
+                    ).model_dump(mode="json"),
                 }
             )
+            updated_seed = Seed.from_dict(seed_data)
         return RepairResult(
             changed=changed,
             seed=updated_seed,

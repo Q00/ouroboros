@@ -410,6 +410,10 @@ class TestWorkflowIRCommands:
                     "acceptance_criteria:",
                     "  - First criterion",
                     "  - criterion: Second criterion",
+                    "  - description: Structured criterion",
+                    "    verify_command: uv run pytest tests/unit/test_example.py",
+                    "    expected_artifacts:",
+                    "      - artifacts/example.txt",
                     "ontology_schema:",
                     "  name: WorkflowIR",
                     "  description: Workflow IR ontology",
@@ -438,7 +442,7 @@ class TestWorkflowIRCommands:
         assert result.exit_code == 0
         assert '"spec_id": "wfspec_seed_cli_ir"' in result.output
         assert '"ok": true' in result.output
-        assert '"acceptance_criteria_count": 2' in result.output
+        assert '"acceptance_criteria_count": 3' in result.output
 
     def test_workflow_ir_inspect_plain_text_reports_valid_projection(self, tmp_path: Path) -> None:
         seed_file = tmp_path / "seed.yaml"

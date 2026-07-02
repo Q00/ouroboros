@@ -9,7 +9,7 @@ from typing import Any
 
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import REQUIRED_SECTIONS, LedgerSource, LedgerStatus, SeedDraftLedger
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 
 
 class SeedGrade(StrEnum):
@@ -241,7 +241,8 @@ class GradeGate:
                     "Add observable acceptance criteria.",
                 )
             )
-        for index, criterion in enumerate(seed.acceptance_criteria):
+        for index, criterion_spec in enumerate(seed.acceptance_criteria):
+            criterion = ac_text(criterion_spec)
             if _is_vague(criterion):
                 findings.append(
                     GradeFinding(
@@ -252,14 +253,25 @@ class GradeGate:
                         "Replace with observable behavior or artifact.",
                     )
                 )
-            if not _is_observable(criterion):
+            if not _is_observable(criterion_spec):
                 findings.append(
                     GradeFinding(
-                        "untestable_acceptance_criteria",
-                        "high",
+                        (
+                            "missing_success_contract"
+                            if isinstance(criterion_spec, AcceptanceCriterionSpec)
+                            else "untestable_acceptance_criteria"
+                        ),
+                        (
+                            "medium"
+                            if isinstance(criterion_spec, AcceptanceCriterionSpec)
+                            else "high"
+                        ),
                         f"Acceptance criterion is not clearly observable: {criterion}",
                         f"acceptance_criteria[{index}]",
-                        "Mention command output, file/artifact, API response, or test result.",
+                        (
+                            "Add verify_command or expected_artifacts, or mention command "
+                            "output, file/artifact, API response, or test result."
+                        ),
                     )
                 )
 
@@ -476,7 +488,11 @@ def _is_vague(value: str) -> bool:
     return any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in VAGUE_TERMS)
 
 
-def _is_observable(value: str) -> bool:
+def _is_observable(value: str | AcceptanceCriterionSpec) -> bool:
+    if isinstance(value, AcceptanceCriterionSpec):
+        if value.verify_command or value.expected_artifacts:
+            return True
+        value = value.description
     lowered = value.lower()
     if not any(hint in lowered for hint in _OBSERVABLE_HINTS):
         return False

@@ -2,6 +2,7 @@
 
 import pytest
 
+from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
 from ouroboros.orchestrator.workflow_state import (
@@ -161,6 +162,23 @@ class TestWorkflowStateTracker:
         assert state.acceptance_criteria[0].content == "Users can create tasks"
         assert state.acceptance_criteria[0].index == 1
         assert all(ac.status == ACStatus.PENDING for ac in state.acceptance_criteria)
+
+    def test_init_preserves_acceptance_criterion_spec(self) -> None:
+        """Tracker stores display text and keeps the structured AC contract."""
+        spec = AcceptanceCriterionSpec(
+            description="Tests pass",
+            verify_command="uv run pytest tests/unit/test_app.py",
+        )
+
+        tracker = WorkflowStateTracker(
+            acceptance_criteria=[spec],
+            goal="Build a task manager",
+            session_id="test_session",
+        )
+
+        ac = tracker.state.acceptance_criteria[0]
+        assert ac.content == "Tests pass"
+        assert ac.spec == spec
 
     def test_process_message_updates_count(self, tracker: WorkflowStateTracker) -> None:
         """Test processing messages increments count."""

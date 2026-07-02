@@ -25,6 +25,7 @@ from ouroboros.core.seed import (
     OntologySchema,
     Seed,
     SeedMetadata,
+    ac_text,
 )
 
 # The unsafe-context matcher / safe-default blocking machinery exercised here
@@ -1266,7 +1267,7 @@ def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
     result = SeedRepairer().repair_once(seed, review, ledger=ledger)
 
     assert result.changed
-    repaired_acceptance = result.seed.acceptance_criteria[0]
+    repaired_acceptance = ac_text(result.seed.acceptance_criteria[0])
     assert repaired_acceptance.count("original requirement for") == 1
     assert "The CLI" in repaired_acceptance
     assert "original requirement for A command/API check" not in repaired_acceptance
@@ -5635,7 +5636,7 @@ async def test_pipeline_normalizes_persisted_seed_artifact_on_resume(tmp_path) -
 
     assert result.status == "complete"
     resumed_seed = Seed.from_dict(state.seed_artifact)
-    criteria_text = "\n".join(resumed_seed.acceptance_criteria)
+    criteria_text = "\n".join(ac_text(item) for item in resumed_seed.acceptance_criteria)
     assert "Final report includes auto session id" not in criteria_text
     assert "CLI exits 2 on invalid flags" in criteria_text
 

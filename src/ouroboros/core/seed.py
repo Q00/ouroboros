@@ -21,7 +21,7 @@ import math
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -180,6 +180,81 @@ class SeedMetadata(BaseModel, frozen=True):
     recovery_reason: str | None = Field(default=None)
 
 
+class AcceptanceCriterionSpec(BaseModel, frozen=True):
+    """Structured success contract for one acceptance criterion."""
+
+    description: str
+    verify_command: str | None = Field(default=None)
+    expected_artifacts: tuple[str, ...] = Field(default_factory=tuple)
+    output_assertion: str | None = Field(default=None)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _strip_description(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("verify_command", "output_assertion", mode="before")
+    @classmethod
+    def _strip_optional_text(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or stripped.upper() == "NONE":
+                return None
+            return stripped
+        return value
+
+    @field_validator("expected_artifacts", mode="before")
+    @classmethod
+    def _coerce_expected_artifacts(cls, value: Any) -> Any:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            if not value.strip() or value.strip().upper() == "NONE":
+                return ()
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        if isinstance(value, list | tuple | set):
+            return tuple(str(item).strip() for item in value if str(item).strip())
+        return value
+
+    @property
+    def has_success_contract(self) -> bool:
+        """Return True when explicit evidence fields are populated."""
+        return bool(self.verify_command or self.expected_artifacts or self.output_assertion)
+
+    def to_seed_value(self) -> str | dict[str, Any]:
+        """Return the stable persisted representation for this AC."""
+        if not self.has_success_contract:
+            return self.description
+        data: dict[str, Any] = {"description": self.description}
+        if self.verify_command:
+            data["verify_command"] = self.verify_command
+        if self.expected_artifacts:
+            data["expected_artifacts"] = list(self.expected_artifacts)
+        if self.output_assertion:
+            data["output_assertion"] = self.output_assertion
+        return data
+
+    def __str__(self) -> str:
+        return self.description
+
+
+AcceptanceCriterionInput = str | AcceptanceCriterionSpec
+
+
+def ac_text(criterion: AcceptanceCriterionInput) -> str:
+    """Return the human-readable description for an acceptance criterion."""
+    if isinstance(criterion, AcceptanceCriterionSpec):
+        return criterion.description
+    return str(criterion)
+
+
+def ac_texts(criteria: Any) -> tuple[str, ...]:
+    """Return AC descriptions while tolerating legacy string iterables."""
+    return tuple(ac_text(criterion) for criterion in criteria)
+
+
 class Seed(BaseModel, frozen=True):
     """Immutable specification for workflow execution.
 
@@ -253,7 +328,7 @@ class Seed(BaseModel, frozen=True):
         default_factory=tuple,
         description="Hard constraints that must be satisfied",
     )
-    acceptance_criteria: tuple[str, ...] = Field(
+    acceptance_criteria: tuple[AcceptanceCriterionSpec, ...] = Field(
         default_factory=tuple,
         description="Specific criteria for success evaluation",
     )
@@ -317,6 +392,42 @@ class Seed(BaseModel, frozen=True):
                 for index, item in enumerate(value, start=1)
             )
         return value
+
+    @field_validator("acceptance_criteria", mode="before")
+    @classmethod
+    def _coerce_acceptance_criteria(cls, value: Any) -> Any:
+        """Accept legacy string ACs and structured AC contracts."""
+        if value is None:
+            return ()
+        if isinstance(value, list | tuple):
+            normalized: list[Any] = []
+            for item in value:
+                if isinstance(item, str):
+                    normalized.append({"description": item})
+                    continue
+                if isinstance(item, dict) and "description" not in item:
+                    if isinstance(item.get("criterion"), str):
+                        normalized.append({**item, "description": item["criterion"]})
+                        continue
+                    if isinstance(item.get("content"), str):
+                        normalized.append({**item, "description": item["content"]})
+                        continue
+                normalized.append(item)
+            return tuple(normalized)
+        return value
+
+    @field_serializer("acceptance_criteria")
+    def _serialize_acceptance_criteria(
+        self,
+        value: tuple[AcceptanceCriterionInput, ...],
+    ) -> tuple[str | dict[str, Any], ...]:
+        """Persist description-only ACs in the legacy bare-string form."""
+        return tuple(
+            criterion.to_seed_value()
+            if isinstance(criterion, AcceptanceCriterionSpec)
+            else ac_text(criterion)
+            for criterion in value
+        )
 
     @model_validator(mode="after")
     def _validate_plugin_extra_fields(self) -> Seed:

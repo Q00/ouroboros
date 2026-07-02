@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ouroboros.core.seed import BrownfieldContext, EvaluationPrinciple, ExitCondition, Seed
+from ouroboros.core.seed import (
+    BrownfieldContext,
+    EvaluationPrinciple,
+    ExitCondition,
+    Seed,
+    ac_texts,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +62,7 @@ class SeedContract:
         return cls(
             goal=seed.goal,
             task_type=seed.task_type,
-            acceptance_criteria=seed.acceptance_criteria,
+            acceptance_criteria=ac_texts(seed.acceptance_criteria),
             constraints=seed.constraints,
             ontology_lens=OntologyLens(
                 name=seed.ontology_schema.name,

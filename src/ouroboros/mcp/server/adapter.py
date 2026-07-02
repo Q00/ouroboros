@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
+from ouroboros.core.seed import ac_text, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.events.io import new_call_id
 from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
@@ -298,7 +299,9 @@ def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None
     task_results: list[TaskResult] = []
     for ac_num_str, status, description in task_line_matches:
         task_idx = int(ac_num_str) - 1
-        task_content = seed_acs[task_idx] if task_idx < len(seed_acs) else description.strip()
+        task_content = (
+            ac_text(seed_acs[task_idx]) if task_idx < len(seed_acs) else description.strip()
+        )
         completed = status in {"COMPLETED", "PASS"}
         task_results.append(
             TaskResult(
@@ -1564,7 +1567,7 @@ def create_ouroboros_server(
             return None
 
         # Extract assertions from ACs (cached by seed_id)
-        extract_result = await spec_extractor.extract(seed_id, seed_acs)
+        extract_result = await spec_extractor.extract(seed_id, ac_texts(seed_acs))
         if extract_result.is_err:
             log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
             return None
@@ -1615,7 +1618,7 @@ def create_ouroboros_server(
         # Fallback: LLM-based evaluation when no structured AC results
         acs = getattr(seed, "acceptance_criteria", None)
         if acs:
-            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(acs))
+            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(ac_texts(acs)))
         else:
             current_ac = "Verify execution output meets requirements"
 

@@ -4,17 +4,21 @@ Tests the immutable Seed schema and related types.
 """
 
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 
 from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
     OntologySchema,
     Seed,
     SeedMetadata,
+    ac_texts,
 )
 
 
@@ -349,9 +353,115 @@ class TestSeed:
         assert full_seed.goal.startswith("Build a CLI task management")
         assert len(full_seed.constraints) == 3
         assert len(full_seed.acceptance_criteria) == 4
+        assert ac_texts(full_seed.acceptance_criteria) == (
+            "Tasks can be created",
+            "Tasks can be listed",
+            "Tasks can be marked complete",
+            "Tasks can be grouped by project",
+        )
         assert len(full_seed.ontology_schema.fields) == 2
         assert len(full_seed.evaluation_principles) == 2
         assert len(full_seed.exit_conditions) == 1
+
+    def test_seed_coerces_string_acceptance_criteria(self) -> None:
+        """Legacy string ACs are lifted into structured specs."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            acceptance_criteria=("Tasks can be created",),
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert isinstance(seed.acceptance_criteria[0], AcceptanceCriterionSpec)
+        assert seed.acceptance_criteria[0].description == "Tasks can be created"
+        assert seed.acceptance_criteria[0].verify_command is None
+        assert seed.acceptance_criteria[0].expected_artifacts == ()
+
+    def test_seed_acceptance_criterion_spec_fields_are_optional(self) -> None:
+        """Structured ACs can carry any subset of success-contract fields."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            acceptance_criteria=(
+                {
+                    "description": "Task list command exits 0",
+                    "verify_command": "uv run task list",
+                    "expected_artifacts": "tasks.json, logs/task.log",
+                    "output_assertion": "No tasks",
+                },
+                {"description": "Tasks can be created"},
+            ),
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        first, second = seed.acceptance_criteria
+        assert first.verify_command == "uv run task list"
+        assert first.expected_artifacts == ("tasks.json", "logs/task.log")
+        assert first.output_assertion == "No tasks"
+        assert second.description == "Tasks can be created"
+        assert second.verify_command is None
+
+    def test_seed_acceptance_criteria_serialize_legacy_strings_stably(self) -> None:
+        """Description-only ACs dump back to bare strings."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            acceptance_criteria=(
+                "Tasks can be created",
+                AcceptanceCriterionSpec(description="Tasks can be listed"),
+            ),
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert seed.to_dict()["acceptance_criteria"] == [
+            "Tasks can be created",
+            "Tasks can be listed",
+        ]
+
+    def test_seed_acceptance_criteria_serialize_structured_contract(self) -> None:
+        """Contract-bearing ACs dump only populated fields."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Task list command exits 0",
+                    verify_command="uv run task list",
+                    expected_artifacts=("tasks.json",),
+                ),
+            ),
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        assert seed.to_dict()["acceptance_criteria"] == [
+            {
+                "description": "Task list command exits 0",
+                "expected_artifacts": ["tasks.json"],
+                "verify_command": "uv run task list",
+            }
+        ]
+
+    def test_legacy_seed_json_round_trips_byte_identically(self) -> None:
+        """An old bare-string seed fixture keeps identical JSON bytes after dump."""
+        fixture = Path(__file__).parents[2] / "fixtures" / "seeds" / "legacy-seed-minimal.json"
+        original = fixture.read_text()
+        seed = Seed.from_dict(json.loads(original))
+
+        round_tripped = json.dumps(seed.to_dict(), indent=2, sort_keys=True) + "\n"
+
+        assert round_tripped == original
 
     def test_seed_coerces_string_evaluation_principles(self) -> None:
         """Hand-written seed principle string lists are lifted into objects."""
@@ -430,7 +540,7 @@ class TestSeed:
         assert isinstance(seed_dict, dict)
         assert seed_dict["goal"] == full_seed.goal
         assert seed_dict["constraints"] == list(full_seed.constraints)
-        assert seed_dict["acceptance_criteria"] == list(full_seed.acceptance_criteria)
+        assert seed_dict["acceptance_criteria"] == list(ac_texts(full_seed.acceptance_criteria))
         assert seed_dict["ontology_schema"]["name"] == full_seed.ontology_schema.name
         assert seed_dict["metadata"]["ambiguity_score"] == full_seed.metadata.ambiguity_score
 

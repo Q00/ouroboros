@@ -15,6 +15,7 @@ import json
 import logging
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.seed import AcceptanceCriterionInput, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -85,7 +86,7 @@ class AssertionExtractor:
     async def extract(
         self,
         seed_id: str,
-        acceptance_criteria: tuple[str, ...] | list[str],
+        acceptance_criteria: tuple[AcceptanceCriterionInput, ...] | list[AcceptanceCriterionInput],
     ) -> Result[tuple[SpecAssertion, ...], str]:
         """Extract assertions from ACs.
 
@@ -100,11 +101,12 @@ class AssertionExtractor:
             logger.debug("AssertionExtractor cache hit: %s", seed_id)
             return Result.ok(self._cache[seed_id])
 
-        if not acceptance_criteria:
+        acceptance_texts = ac_texts(acceptance_criteria)
+        if not acceptance_texts:
             return Result.ok(())
 
         prompt = "Extract verifiable assertions from these acceptance criteria:\n\n"
-        for i, ac in enumerate(acceptance_criteria):
+        for i, ac in enumerate(acceptance_texts):
             prompt += f"AC {i} (index {i}): {ac}\n"
 
         messages = [
@@ -126,7 +128,7 @@ class AssertionExtractor:
             logger.warning("AssertionExtractor LLM failed: %s", result.error)
             return Result.err(f"Extraction failed: {result.error}")
 
-        assertions = self._parse_response(result.value.content, acceptance_criteria)
+        assertions = self._parse_response(result.value.content, acceptance_texts)
         self._cache[seed_id] = assertions
         # LRU eviction: remove oldest entry if cache exceeds max size
         while len(self._cache) > self.max_cache_size:
@@ -136,7 +138,7 @@ class AssertionExtractor:
     def _parse_response(
         self,
         content: str,
-        acceptance_criteria: tuple[str, ...] | list[str],
+        acceptance_criteria: tuple[str, ...],
     ) -> tuple[SpecAssertion, ...]:
         """Parse LLM response into SpecAssertions."""
         try:

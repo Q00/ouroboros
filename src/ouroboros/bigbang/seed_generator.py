@@ -29,6 +29,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     BrownfieldContext,
     ContextReference,
     EvaluationPrinciple,
@@ -45,6 +46,63 @@ log = structlog.get_logger()
 
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
+_AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
+
+
+def _parse_acceptance_criteria_contracts(
+    raw_value: object,
+) -> tuple[AcceptanceCriterionSpec | str, ...]:
+    """Parse legacy AC prose or structured AC success-contract lines."""
+    if isinstance(raw_value, list | tuple):
+        entries = tuple(str(item).strip() for item in raw_value if str(item).strip())
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return ()
+        if "\nAC:" in text or text.startswith("AC:"):
+            entries = tuple(line.strip() for line in text.splitlines() if line.strip())
+        else:
+            entries = tuple(item.strip() for item in text.split("|") if item.strip())
+    else:
+        return ()
+
+    parsed: list[AcceptanceCriterionSpec | str] = []
+    for entry in entries:
+        if not entry.startswith("AC:"):
+            parsed.append(entry)
+            continue
+        spec = _parse_acceptance_criterion_contract(entry)
+        parsed.append(spec if spec is not None else entry.removeprefix("AC:").strip())
+    return tuple(parsed)
+
+
+def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec | None:
+    """Parse one structured AC line, falling back to description-only on gaps."""
+    if not line.startswith("AC:"):
+        return None
+    body = line.removeprefix("AC:").strip()
+    matches = tuple(_AC_CONTRACT_FIELD_RE.finditer(body))
+    description_end = matches[0].start() if matches else len(body)
+    description = body[:description_end].strip()
+    if not description:
+        return None
+    fields: dict[str, object] = {"description": description}
+    for index, match in enumerate(matches):
+        normalized_key = match.group(1).lower()
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        normalized_value = body[value_start:value_end].strip()
+        if not normalized_value or normalized_value.upper() == "NONE":
+            continue
+        if normalized_key == "verify":
+            fields["verify_command"] = normalized_value
+        elif normalized_key == "artifacts":
+            fields["expected_artifacts"] = tuple(
+                item.strip() for item in normalized_value.split(",") if item.strip()
+            )
+        elif normalized_key == "expect":
+            fields["output_assertion"] = normalized_value
+    return AcceptanceCriterionSpec.model_validate(fields)
 
 
 @dataclass
@@ -435,7 +493,9 @@ ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one indepe
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
-ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
+ACCEPTANCE_CRITERIA:
+AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
@@ -494,7 +554,9 @@ ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one indepe
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
-ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
+ACCEPTANCE_CRITERIA:
+AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
@@ -560,17 +622,34 @@ PROJECT_TYPE: greenfield"""
         lines = cleaned.strip().split("\n")
         requirements: dict[str, Any] = {}
 
+        current_multiline_key: str | None = None
+        multiline_values: dict[str, list[str]] = {}
+
         for line in lines:
             line = line.strip()
             if not line:
                 continue
 
+            matched_prefix = False
             for prefix in self._KNOWN_PREFIXES:
                 if line.startswith(prefix):
                     key = prefix[:-1].lower()  # Remove colon and lowercase
                     value = line[len(prefix) :].strip()
-                    requirements[key] = value
+                    if key == "acceptance_criteria" and not value:
+                        current_multiline_key = key
+                        multiline_values.setdefault(key, [])
+                    else:
+                        requirements[key] = value
+                        current_multiline_key = None
+                    matched_prefix = True
                     break
+            if matched_prefix:
+                continue
+            if current_multiline_key == "acceptance_criteria" and line.startswith("AC:"):
+                multiline_values.setdefault(current_multiline_key, []).append(line)
+
+        if multiline_values.get("acceptance_criteria"):
+            requirements["acceptance_criteria"] = multiline_values["acceptance_criteria"]
 
         # Validate required fields
         required_fields = [
@@ -607,10 +686,10 @@ PROJECT_TYPE: greenfield"""
             )
 
         # Parse acceptance criteria
-        acceptance_criteria: tuple[str, ...] = ()
+        acceptance_criteria: tuple[AcceptanceCriterionSpec | str, ...] = ()
         if "acceptance_criteria" in requirements and requirements["acceptance_criteria"]:
-            acceptance_criteria = tuple(
-                c.strip() for c in requirements["acceptance_criteria"].split("|") if c.strip()
+            acceptance_criteria = _parse_acceptance_criteria_contracts(
+                requirements["acceptance_criteria"]
             )
 
         # Parse ontology fields

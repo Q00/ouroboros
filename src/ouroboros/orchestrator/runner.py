@@ -37,6 +37,7 @@ from rich.text import Text
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import OuroborosError
+from ouroboros.core.seed import ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     render_auto_recursion_guard,
@@ -339,7 +340,7 @@ def build_task_prompt(
     if strategy is None:
         strategy = get_strategy(seed.task_type)
 
-    ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(seed.acceptance_criteria))
+    ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(ac_texts(seed.acceptance_criteria)))
     suffix = strategy.get_task_prompt_suffix()
 
     return f"""Execute the following task according to the acceptance criteria:
@@ -2265,7 +2266,7 @@ class OrchestratorRunner:
             from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
             state_tracker = WorkflowStateTracker(
-                acceptance_criteria=seed.acceptance_criteria,
+                acceptance_criteria=list(seed.acceptance_criteria),
                 goal=seed.goal,
                 session_id=tracker.session_id,
                 activity_map=strategy.get_activity_map(),
@@ -2840,7 +2841,7 @@ class OrchestratorRunner:
             self._console.print("\n[cyan]Preparing sequential AC execution plan...[/cyan]")
             dependency_graph = DependencyGraph(
                 nodes=tuple(
-                    ACNode(index=i, content=ac, depends_on=tuple(range(i)))
+                    ACNode(index=i, content=ac_text(ac), depends_on=tuple(range(i)))
                     for i, ac in enumerate(seed.acceptance_criteria)
                 ),
                 execution_levels=tuple((i,) for i in range(len(seed.acceptance_criteria))),
@@ -2861,7 +2862,7 @@ class OrchestratorRunner:
                 all_indices = tuple(range(len(seed.acceptance_criteria)))
                 dependency_graph = DependencyGraph(
                     nodes=tuple(
-                        ACNode(index=i, content=ac, depends_on=())
+                        ACNode(index=i, content=ac_text(ac), depends_on=())
                         for i, ac in enumerate(seed.acceptance_criteria)
                     ),
                     execution_levels=(all_indices,) if all_indices else (),
@@ -3261,7 +3262,7 @@ Note: This is a resumed session. Please continue from where execution was interr
 
             resume_strategy = get_strategy(seed.task_type)
             state_tracker = WorkflowStateTracker(
-                acceptance_criteria=seed.acceptance_criteria,
+                acceptance_criteria=list(seed.acceptance_criteria),
                 goal=seed.goal,
                 session_id=session_id,
                 activity_map=resume_strategy.get_activity_map(),

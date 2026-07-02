@@ -25,6 +25,7 @@ from enum import Enum
 import re
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.core.seed import AcceptanceCriterionInput, AcceptanceCriterionSpec, ac_text
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.mcp_tools import serialize_tool_result
 from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
@@ -341,6 +342,7 @@ class AcceptanceCriterion:
 
     index: int
     content: str
+    spec: AcceptanceCriterionSpec | None = None
     status: ACStatus = ACStatus.PENDING
     retry_attempt: int = 0
     started_at: datetime | None = None
@@ -612,7 +614,7 @@ class WorkflowStateTracker:
 
     def __init__(
         self,
-        acceptance_criteria: list[str],
+        acceptance_criteria: list[AcceptanceCriterionInput],
         goal: str = "",
         session_id: str = "",
         activity_map: dict[str, ActivityType] | None = None,
@@ -631,7 +633,11 @@ class WorkflowStateTracker:
             session_id=session_id,
             goal=goal,
             acceptance_criteria=[
-                AcceptanceCriterion(index=i + 1, content=ac)
+                AcceptanceCriterion(
+                    index=i + 1,
+                    content=ac_text(ac),
+                    spec=ac if isinstance(ac, AcceptanceCriterionSpec) else None,
+                )
                 for i, ac in enumerate(acceptance_criteria)
             ],
         )

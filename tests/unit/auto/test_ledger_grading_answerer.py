@@ -5,6 +5,7 @@ from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
@@ -39,7 +40,11 @@ def _fill_minimal_ready_ledger(ledger: SeedDraftLedger) -> None:
         )
 
 
-def _seed(*, ac: tuple[str, ...], goal: str = "Build a habit tracker") -> Seed:
+def _seed(
+    *,
+    ac: tuple[str | AcceptanceCriterionSpec, ...],
+    goal: str = "Build a habit tracker",
+) -> Seed:
     return Seed(
         goal=goal,
         constraints=("Use existing project patterns",),
@@ -291,9 +296,11 @@ def test_grade_gate_requires_observable_acceptance_behavior_not_keywords() -> No
 
     assert result.grade == SeedGrade.B
     assert not result.may_run
-    assert (
-        sum(1 for finding in result.findings if finding.code == "untestable_acceptance_criteria")
-        == 2
+    assert sum(1 for finding in result.findings if finding.code == "missing_success_contract") == 2
+    assert all(
+        finding.severity == "medium"
+        for finding in result.findings
+        if finding.code == "missing_success_contract"
     )
 
 
@@ -317,6 +324,47 @@ def test_grade_gate_accepts_coding_observation_run_acceptance_criteria() -> None
 
     assert result.grade == SeedGrade.A
     assert not any(finding.code == "untestable_acceptance_criteria" for finding in result.findings)
+    assert not any(finding.code == "missing_success_contract" for finding in result.findings)
+
+
+def test_grade_gate_accepts_verify_command_success_contract() -> None:
+    """A declared command contract is observable without prose heuristics."""
+    ledger = SeedDraftLedger.from_goal("Create hello_auto.py and verify it with pytest")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create hello_auto.py and verify it with pytest",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Hello behavior works",
+                verify_command="uv run pytest tests/test_hello_auto.py",
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert not any(finding.code == "missing_success_contract" for finding in result.findings)
+
+
+def test_grade_gate_accepts_expected_artifacts_success_contract() -> None:
+    """A declared artifact contract is observable without prose heuristics."""
+    ledger = SeedDraftLedger.from_goal("Create hello_auto.py")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create hello_auto.py",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Hello script exists",
+                expected_artifacts=("hello_auto.py",),
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert not any(finding.code == "missing_success_contract" for finding in result.findings)
 
 
 def test_grade_gate_rejects_vacuous_coding_command_acceptance_criteria() -> None:
@@ -336,10 +384,11 @@ def test_grade_gate_rejects_vacuous_coding_command_acceptance_criteria() -> None
 
     assert result.grade == SeedGrade.B
     assert not result.may_run
-    untestable = [
-        finding for finding in result.findings if finding.code == "untestable_acceptance_criteria"
+    missing_contract = [
+        finding for finding in result.findings if finding.code == "missing_success_contract"
     ]
-    assert [finding.target for finding in untestable] == [
+    assert [finding.severity for finding in missing_contract] == ["medium", "medium", "medium"]
+    assert [finding.target for finding in missing_contract] == [
         "acceptance_criteria[0]",
         "acceptance_criteria[1]",
         "acceptance_criteria[2]",
@@ -368,9 +417,7 @@ def test_grade_gate_rejects_vacuous_report_acceptance_criteria() -> None:
     assert result.grade == SeedGrade.B
     assert not result.may_run
     assert [
-        finding.target
-        for finding in result.findings
-        if finding.code == "untestable_acceptance_criteria"
+        finding.target for finding in result.findings if finding.code == "missing_success_contract"
     ] == [
         "acceptance_criteria[0]",
         "acceptance_criteria[1]",

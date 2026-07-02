@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ouroboros.auto.task_classes import TASK_CLASS_CATALOG, TaskClass
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_texts
 
 __all__ = [
     "AppliedTaskClassDefaults",
@@ -86,19 +86,21 @@ def apply_default_ac_template(seed: Seed, task_class: TaskClass) -> AppliedTaskC
     if _has_autoresearch_execution_contract(seed):
         return AppliedTaskClassDefaults(seed=seed, injected_ac=(), task_class=task_class)
 
-    existing = set(seed.acceptance_criteria)
+    existing = set(ac_texts(seed.acceptance_criteria))
     new_entries = tuple(item for item in template if item not in existing)
     if not new_entries:
         return AppliedTaskClassDefaults(seed=seed, injected_ac=(), task_class=task_class)
 
-    updated_ac = new_entries + tuple(seed.acceptance_criteria)
-    new_seed = seed.model_copy(update={"acceptance_criteria": updated_ac})
+    updated_ac = new_entries + seed.acceptance_criteria
+    seed_data = seed.to_dict()
+    seed_data["acceptance_criteria"] = updated_ac
+    new_seed = Seed.from_dict(seed_data)
     return AppliedTaskClassDefaults(seed=new_seed, injected_ac=new_entries, task_class=task_class)
 
 
 def _has_autoresearch_execution_contract(seed: Seed) -> bool:
     """Return True when an autoresearch plugin Seed already owns its AC surface."""
-    haystack = "\n".join((*seed.constraints, *seed.acceptance_criteria)).casefold()
+    haystack = "\n".join((*seed.constraints, *ac_texts(seed.acceptance_criteria))).casefold()
     return (
         "autoresearch" in haystack
         and "val_bpb" in haystack

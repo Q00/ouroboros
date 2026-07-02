@@ -29,7 +29,7 @@ from ouroboros.auto.ledger_seed import (
     partial_seed_from_evidence,
     synthesize_seed_from_ledger,
 )
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_texts
 
 
 def _populate_complete_ledger(goal: str = "Build a CLI tool that prints hello.") -> SeedDraftLedger:
@@ -296,7 +296,7 @@ class TestAcceptanceCriteriaNotExplodedOnSemicolons:
             "Tasks persist to a file; the data survives a process restart"
         )
         seed = synthesize_seed_from_ledger(ledger, interview_id="iv-semicolon")
-        assert seed.acceptance_criteria == (
+        assert ac_texts(seed.acceptance_criteria) == (
             "Tasks persist to a file; the data survives a process restart",
         )
 
@@ -305,7 +305,7 @@ class TestAcceptanceCriteriaNotExplodedOnSemicolons:
             "- Tasks can be created\n- Tasks can be listed\n- Tasks persist"
         )
         seed = synthesize_seed_from_ledger(ledger, interview_id="iv-bullets")
-        assert seed.acceptance_criteria == (
+        assert ac_texts(seed.acceptance_criteria) == (
             "Tasks can be created",
             "Tasks can be listed",
             "Tasks persist",
@@ -324,4 +324,4 @@ class TestAcceptanceCriteriaNotExplodedOnSemicolons:
             ),
         )
         seed = partial_seed_from_evidence(ledger, reason="interview_phase_deadline")
-        assert "API returns 200; payload is valid JSON" in seed.acceptance_criteria
+        assert "API returns 200; payload is valid JSON" in ac_texts(seed.acceptance_criteria)

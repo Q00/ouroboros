@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_text
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.runner import (
     OrchestratorRunner,
@@ -98,7 +98,7 @@ class TestPromptBuilding:
         prompt = build_task_prompt(sample_seed)
 
         for criterion in sample_seed.acceptance_criteria:
-            assert criterion in prompt
+            assert ac_text(criterion) in prompt
 
     def test_task_prompt_numbers_criteria(self, sample_seed: Seed) -> None:
         """Test that task prompt numbers acceptance criteria."""

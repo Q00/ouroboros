@@ -19,8 +19,8 @@ Example: "Python >= 3.12 | No external database | Must work offline"
 
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
-Format: pipe-separated list
-Example: "Tasks can be created | Tasks can be listed | Tasks persist to file"
+Format: one `AC:` line per criterion
+Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.py | artifacts: NONE | expect: created task"
 
 **Granularity contract (read carefully):**
 - Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.
@@ -58,7 +58,9 @@ Provide your analysis in this exact structure:
 ```
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
-ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
+ACCEPTANCE_CRITERIA:
+AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
@@ -75,3 +77,11 @@ Weights should be between 0.0 and 1.0
 
 Be specific and concrete. Extract actual requirements from the conversation, not generic placeholders.
 For brownfield projects, ensure context references and patterns are extracted from the interview.
+
+Few-shot examples:
+
+```
+ACCEPTANCE_CRITERIA:
+AC: `python -m pytest tests/test_tasks.py` passes for task create/list flows | verify: python -m pytest tests/test_tasks.py | artifacts: NONE | expect: passed
+AC: README documents the CLI usage examples | verify: NONE | artifacts: README.md | expect: NONE
+```

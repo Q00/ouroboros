@@ -26,6 +26,7 @@ from ouroboros.config.loader import get_config_dir, get_max_parallel_workers, lo
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.security import InputValidator
+from ouroboros.core.seed import ac_texts
 from ouroboros.core.worktree import (
     TaskWorkspace,
     WorktreeError,
@@ -128,7 +129,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
 def _derive_quality_bar(seed: "Seed") -> str:
     """Derive a quality bar string from seed acceptance criteria."""
-    ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
+    ac_lines = [f"- {ac}" for ac in ac_texts(seed.acceptance_criteria)]
     return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
 
 

@@ -19,6 +19,7 @@ from ouroboros.core.seed import (
     OntologySchema,
     Seed,
     SeedMetadata,
+    ac_texts,
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace
@@ -127,7 +128,7 @@ class TestBuildSystemPrompt:
         task_prompt = build_task_prompt(sample_seed)
 
         assert "## Acceptance Criteria" not in system_prompt
-        for criterion in sample_seed.acceptance_criteria:
+        for criterion in ac_texts(sample_seed.acceptance_criteria):
             assert criterion not in system_prompt
             assert criterion in task_prompt
 

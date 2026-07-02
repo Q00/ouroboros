@@ -27,12 +27,14 @@ from ouroboros.bigbang.seed_generator import (
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
     OntologySchema,
     Seed,
     SeedMetadata,
+    ac_texts,
 )
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionResponse, UsageInfo
@@ -498,6 +500,51 @@ class TestSeedGeneratorExtraction:
 
             assert result.is_ok
             assert len(result.value.acceptance_criteria) == 2
+            assert ac_texts(result.value.acceptance_criteria) == (
+                "Tasks can be created",
+                "Tasks can be listed",
+            )
+
+    @pytest.mark.asyncio
+    async def test_generate_extracts_structured_acceptance_criteria_contracts(self) -> None:
+        """SeedGenerator extracts AC success contracts from multiline architect output."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                'AC: CLI lists tasks | verify: bash -lc "pytest -q | tee out.log" | '
+                "artifacts: tasks.json, logs/task.log | expect: No tasks\n"
+                "AC: Docs explain usage | verify: NONE | artifacts: README.md | expect: NONE\n"
+                "AC: Legacy line without contract"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            first, second, third = result.value.acceptance_criteria
+            assert isinstance(first, AcceptanceCriterionSpec)
+            assert first.description == "CLI lists tasks"
+            assert first.verify_command == 'bash -lc "pytest -q | tee out.log"'
+            assert first.expected_artifacts == ("tasks.json", "logs/task.log")
+            assert first.output_assertion == "No tasks"
+            assert second.description == "Docs explain usage"
+            assert second.verify_command is None
+            assert second.expected_artifacts == ("README.md",)
+            assert third.description == "Legacy line without contract"
+            assert third.verify_command is None
 
     @pytest.mark.asyncio
     async def test_generate_extracts_ontology_schema(self) -> None:
@@ -1066,6 +1113,19 @@ class TestAcceptanceCriteriaGranularityContract:
 
         assert "3-7" in prompt
         assert "implementation step" in prompt.lower()
+
+    def test_extraction_user_prompt_requests_structured_ac_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=AsyncMock(),
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
+
+        assert "ACCEPTANCE_CRITERIA:\nAC:" in prompt
+        assert "verify: <command or NONE>" in prompt
+        assert "artifacts: <comma-list or NONE>" in prompt
+        assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt

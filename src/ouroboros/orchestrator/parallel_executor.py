@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from rich.console import Console
 
+from ouroboros.core.seed import ac_text
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
@@ -1606,7 +1607,7 @@ class ParallelACExecutor:
         """Execute one batch of stage-ready ACs using the shared worker pool."""
         batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
         sibling_acs: list[_SiblingACRef] = (
-            [(i, seed.acceptance_criteria[i]) for i in batch_indices]
+            [(i, ac_text(seed.acceptance_criteria[i])) for i in batch_indices]
             if len(batch_indices) > 1
             else []
         )
@@ -1616,7 +1617,7 @@ class ParallelACExecutor:
                 try:
                     batch_results[idx] = await self._execute_single_ac(
                         ac_index=ac_idx,
-                        ac_content=seed.acceptance_criteria[ac_idx],
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                         session_id=session_id,
                         tools=tools,
                         tool_catalog=tool_catalog,
@@ -1746,7 +1747,7 @@ class ParallelACExecutor:
                                 all_results.append(
                                     ACExecutionResult(
                                         ac_index=ac_idx,
-                                        ac_content=seed.acceptance_criteria[ac_idx],
+                                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                                         success=is_completed,
                                         final_message=(
                                             "[Restored from checkpoint]" if is_completed else ""
@@ -1791,7 +1792,7 @@ class ParallelACExecutor:
                 all_results.append(
                     ACExecutionResult(
                         ac_index=idx,
-                        ac_content=seed.acceptance_criteria[idx],
+                        ac_content=ac_text(seed.acceptance_criteria[idx]),
                         success=False,
                         error="Not included in dependency graph",
                         retry_attempt=ac_retry_attempts[idx],
@@ -1920,7 +1921,7 @@ class ParallelACExecutor:
 
                     satisfied_result = ACExecutionResult(
                         ac_index=ac_idx,
-                        ac_content=seed.acceptance_criteria[ac_idx],
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                         success=True,
                         final_message="\n".join(notes),
                         retry_attempt=ac_retry_attempts[ac_idx],
@@ -1943,7 +1944,7 @@ class ParallelACExecutor:
                 for ac_idx in blocked:
                     blocked_result = ACExecutionResult(
                         ac_index=ac_idx,
-                        ac_content=seed.acceptance_criteria[ac_idx],
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                         success=False,
                         error="Skipped: dependency failed",
                         retry_attempt=ac_retry_attempts[ac_idx],
@@ -2050,7 +2051,7 @@ class ParallelACExecutor:
                             error_msg = str(result)
                             ac_result = ACExecutionResult(
                                 ac_index=ac_idx,
-                                ac_content=seed.acceptance_criteria[ac_idx],
+                                ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                                 success=False,
                                 error=error_msg,
                                 retry_attempt=ac_retry_attempts[ac_idx],
@@ -2085,7 +2086,7 @@ class ParallelACExecutor:
                             )
                             ac_result = ACExecutionResult(
                                 ac_index=ac_idx,
-                                ac_content=seed.acceptance_criteria[ac_idx],
+                                ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                                 success=False,
                                 error=(f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)"),
                                 retry_attempt=ac_retry_attempts[ac_idx],
@@ -4383,7 +4384,7 @@ Files present:
 
         # Build AC list for TUI
         acceptance_criteria = []
-        for i, ac_content in enumerate(seed.acceptance_criteria):
+        for i, ac_content in enumerate(ac_text(seed_ac) for seed_ac in seed.acceptance_criteria):
             status = ac_statuses.get(i, "pending")
             retry_attempt = (ac_retry_attempts or {}).get(i, 0)
             node_identity = ExecutionNodeIdentity.root(

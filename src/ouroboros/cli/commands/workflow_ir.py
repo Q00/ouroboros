@@ -74,12 +74,18 @@ def _normalize_seed_payload(raw: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _normalize_criterion(item: Any) -> str:
-    if isinstance(item, dict) and isinstance(item.get("criterion"), str):
-        return item["criterion"]
+def _normalize_criterion(item: Any) -> str | dict[str, Any]:
+    if isinstance(item, dict):
+        if isinstance(item.get("criterion"), str):
+            return item["criterion"]
+        if isinstance(item.get("description"), str) or isinstance(item.get("content"), str):
+            return item
     if isinstance(item, str):
         return item
-    msg = "acceptance_criteria entries must be strings or {criterion: <text>} mappings"
+    msg = (
+        "acceptance_criteria entries must be strings or mappings with "
+        "description, content, or criterion text"
+    )
     raise ValueError(msg)
 
 

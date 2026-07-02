@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
 
 _AUTO_WRAPPER_CRITERIA = frozenset(
     {
@@ -174,7 +174,10 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     product requirements, only normalize the known hello_auto observation
     context.
     """
-    criteria = tuple(ac for ac in seed.acceptance_criteria if ac and ac.strip())
+    criteria_with_specs = tuple(
+        (ac, text) for ac in seed.acceptance_criteria if (text := ac_text(ac).strip())
+    )
+    criteria = tuple(text for _ac, text in criteria_with_specs)
     direction_context = "\n".join((seed.goal, *seed.constraints))
     if not criteria:
         return seed
@@ -199,9 +202,30 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
         return seed
     if filtered != criteria:
         data = normalized_seed.to_dict()
-        data["acceptance_criteria"] = list(filtered)
+        data["acceptance_criteria"] = list(
+            _restore_surviving_acceptance_specs(filtered, criteria_with_specs)
+        )
         normalized_seed = Seed.from_dict(data)
     return normalized_seed
+
+
+def _restore_surviving_acceptance_specs(
+    filtered: tuple[str, ...],
+    original: tuple[tuple[AcceptanceCriterionInput, str], ...],
+) -> tuple[AcceptanceCriterionInput, ...]:
+    """Keep structured contracts for criteria that survive normalization unchanged."""
+    original_by_text: dict[str, list[AcceptanceCriterionInput]] = {}
+    for criterion, text in original:
+        original_by_text.setdefault(text, []).append(criterion)
+
+    restored: list[AcceptanceCriterionInput] = []
+    for text in filtered:
+        matches = original_by_text.get(text)
+        if matches:
+            restored.append(matches.pop(0))
+        else:
+            restored.append(text)
+    return tuple(restored)
 
 
 def normalize_observation_execution_criteria(

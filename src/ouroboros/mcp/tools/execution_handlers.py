@@ -23,7 +23,7 @@ from ouroboros.config.loader import get_auto_evaluate_enabled, get_max_parallel_
 from ouroboros.core.errors import ConfigError, ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import (
     TaskWorkspace,
@@ -1158,7 +1158,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     @staticmethod
     def _derive_quality_bar(seed: Seed) -> str:
         """Derive a quality bar string from seed acceptance criteria."""
-        ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
+        ac_lines = [f"- {ac}" for ac in ac_texts(seed.acceptance_criteria)]
         return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
 
     @staticmethod
@@ -1343,7 +1343,9 @@ class StartExecuteSeedHandler:
             if isinstance(seed_dict, dict):
                 seed = Seed.from_dict(seed_dict)
                 acceptance_criteria = [
-                    text.strip() for text in seed.acceptance_criteria if text and text.strip()
+                    stripped
+                    for text in ac_texts(seed.acceptance_criteria)
+                    if (stripped := text.strip())
                 ]
                 if acceptance_criteria:
                     evaluation_arguments["acceptance_criteria"] = acceptance_criteria

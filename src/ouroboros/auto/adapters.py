@@ -15,7 +15,7 @@ from uuid import uuid4
 import yaml
 
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import (
@@ -734,7 +734,7 @@ class HandlerEvaluator:
             )
 
         if seed.acceptance_criteria:
-            ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
+            ac_lines = [f"- {ac}" for ac in ac_texts(seed.acceptance_criteria)]
             quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
                 ac_lines
             )

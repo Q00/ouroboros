@@ -19,7 +19,7 @@ from ouroboros.auto.checkpoint_commits import checkpoint_passed_ac
 from ouroboros.auto.state import AutoCommitPolicy, AutoPipelineState
 from ouroboros.config import get_runtime_controls_config
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import (
@@ -490,7 +490,7 @@ class EvolveStepHandler(BridgeAwareMixin):
             qa_handler = QAHandler()
             quality_bar = "Generation must improve upon previous generation."
             if initial_seed:
-                ac_lines = [f"- {ac}" for ac in initial_seed.acceptance_criteria]
+                ac_lines = [f"- {ac}" for ac in ac_texts(initial_seed.acceptance_criteria)]
                 quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
                     ac_lines
                 )

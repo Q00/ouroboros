@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
 from ouroboros.orchestrator.workflow_ir import (
     EdgeKind,
     NodeKind,
@@ -419,17 +419,12 @@ def _identifier_segment(value: str) -> str:
     return "u" + value.encode("utf-8").hex()
 
 
-def _normalize_acceptance_criteria(criteria: tuple[str, ...]) -> tuple[str, ...]:
+def _normalize_acceptance_criteria(
+    criteria: tuple[AcceptanceCriterionInput, ...],
+) -> tuple[str, ...]:
     normalized: list[str] = []
     for zero_based_index, criterion in enumerate(criteria):
-        if not isinstance(criterion, str):
-            msg = (
-                "Seed acceptance_criteria must contain only strings before the "
-                f"PlannedAC migration; item {zero_based_index + 1} is "
-                f"{type(criterion).__name__}"
-            )
-            raise ValueError(msg)
-        stripped = criterion.strip()
+        stripped = ac_text(criterion).strip()
         if not stripped:
             msg = f"Seed acceptance criterion {zero_based_index + 1} must be non-blank"
             raise ValueError(msg)

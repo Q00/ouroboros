@@ -18,12 +18,12 @@ import json
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
@@ -82,6 +82,13 @@ class ReflectOutput(BaseModel, frozen=True):
     settled_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     ontology_mutations: tuple[OntologyMutation, ...] = Field(default_factory=tuple)
     reasoning: str = ""
+
+    @field_validator("refined_acs", mode="before")
+    @classmethod
+    def _coerce_refined_acs(cls, value: object) -> object:
+        if isinstance(value, list | tuple):
+            return ac_texts(value)
+        return value
 
 
 def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
@@ -473,7 +480,7 @@ Guidelines:
         parts = ["## Current Seed"]
         parts.append(f"Goal: {seed.goal}")
         parts.append(f"Constraints: {list(seed.constraints)}")
-        parts.append(f"Acceptance Criteria: {list(seed.acceptance_criteria)}")
+        parts.append(f"Acceptance Criteria: {list(ac_texts(seed.acceptance_criteria))}")
 
         parts.append(f"\n## Ontology: {seed.ontology_schema.name}")
         parts.append(f"Description: {seed.ontology_schema.description}")
@@ -625,7 +632,7 @@ Guidelines:
                     )
                 )
 
-            parent_acs = tuple(current_seed.acceptance_criteria)
+            parent_acs = ac_texts(current_seed.acceptance_criteria)
             refined_acs, ac_patches, settled = self._compose_acs(
                 data,
                 parent_acs,
