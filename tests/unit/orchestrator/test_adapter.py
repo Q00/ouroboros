@@ -262,6 +262,12 @@ class TestRuntimeHandle:
             ("claude_code", "claude"),
             ("codex", "codex_cli"),
             ("opencode_cli", "opencode"),
+            ("gemini", "gemini_cli"),
+            ("gemini_cli", "gemini_cli"),
+            ("grok", "grok_cli"),
+            ("grok_cli", "grok_cli"),
+            ("antigravity", "antigravity_cli"),
+            ("antigravity_cli", "antigravity_cli"),
         ],
     )
     def test_init_normalizes_legacy_backend_aliases(
@@ -282,6 +288,47 @@ class TestRuntimeHandle:
             native_session_id="sess_123",
             cwd="/tmp/project",
         )
+
+    def test_runtime_only_backends_register_in_handle_contract(self) -> None:
+        """Regression for #1483 review (ouroboros-agent CHANGES_REQUESTED).
+
+        The gemini/grok/antigravity runtimes declare ``_runtime_handle_backend``
+        values that must be accepted by the shared RuntimeHandle contract. They
+        inherit Codex's ``_build_runtime_handle``, which constructs a
+        ``RuntimeHandle(backend=<cli>)`` on every execute/resume/control
+        iteration -- if the selector is unregistered, those generic paths crash
+        with ``ValueError`` before producing a typed runtime error.
+        """
+        from types import SimpleNamespace
+
+        from ouroboros.orchestrator.antigravity_cli_runtime import (
+            AntigravityCLIRuntime,
+        )
+        from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+        from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
+
+        for runtime_cls, expected in (
+            (GeminiCLIRuntime, "gemini_cli"),
+            (GrokCliRuntime, "grok_cli"),
+            (AntigravityCLIRuntime, "antigravity_cli"),
+        ):
+            handle = RuntimeHandle(
+                backend=runtime_cls._runtime_handle_backend,
+                native_session_id="sess_123",
+                cwd="/tmp/project",
+            )
+            assert handle.backend == expected
+
+        # Exercise Grok's inherited Codex handle builder against the real method.
+        stub = SimpleNamespace(
+            _runtime_handle_backend="grok_cli",
+            _cwd="/tmp/project",
+            _permission_mode=None,
+        )
+        built = GrokCliRuntime._build_runtime_handle(stub, "sess_123")
+        assert built is not None
+        assert built.backend == "grok_cli"
+        assert built.native_session_id == "sess_123"
 
     def test_non_dict_payload_returns_none(self) -> None:
         """Missing runtime payloads still deserialize to None."""
@@ -329,6 +376,47 @@ class TestRuntimeHandle:
                     native_session_id="oc-session-123",
                 ),
                 id="matching-backend-provider-aliases",
+            ),
+            pytest.param(
+                {
+                    "provider": "grok",
+                    "kind": "agent_runtime",
+                    "native_session_id": "grok-session-123",
+                    "cwd": "/tmp/project",
+                },
+                RuntimeHandle(
+                    backend="grok_cli",
+                    kind="agent_runtime",
+                    native_session_id="grok-session-123",
+                    cwd="/tmp/project",
+                ),
+                id="grok-provider-only-alias",
+            ),
+            pytest.param(
+                {
+                    "backend": "antigravity",
+                    "native_session_id": "agy-session-123",
+                    "cwd": "/tmp/project",
+                },
+                RuntimeHandle(
+                    backend="antigravity_cli",
+                    native_session_id="agy-session-123",
+                    cwd="/tmp/project",
+                ),
+                id="antigravity-backend-alias",
+            ),
+            pytest.param(
+                {
+                    "backend": "gemini",
+                    "native_session_id": "gemini-session-123",
+                    "cwd": "/tmp/project",
+                },
+                RuntimeHandle(
+                    backend="gemini_cli",
+                    native_session_id="gemini-session-123",
+                    cwd="/tmp/project",
+                ),
+                id="gemini-backend-alias",
             ),
         ],
     )

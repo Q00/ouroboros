@@ -266,6 +266,12 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "pi_cli": "pi",
     "gjc": "gjc",
     "gjc_cli": "gjc",
+    "gemini": "gemini_cli",
+    "gemini_cli": "gemini_cli",
+    "grok": "grok_cli",
+    "grok_cli": "grok_cli",
+    "antigravity": "antigravity_cli",
+    "antigravity_cli": "antigravity_cli",
 }
 
 
