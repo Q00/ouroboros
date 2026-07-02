@@ -56,10 +56,7 @@ from ouroboros.orchestrator.decomposition_params import (
     params_from_profile,
 )
 from ouroboros.orchestrator.effort_routing import resolve_execute_effort
-from ouroboros.orchestrator.events import (
-    create_ac_stall_detected_event,
-    create_heartbeat_event,
-)
+from ouroboros.orchestrator.events import create_ac_stall_detected_event
 from ouroboros.orchestrator.evidence.ac_classification import (  # noqa: F401
     _CODE_IMPLEMENTATION_ACTION_RE,
     _CODE_MUTATION_ACTION_RE,
@@ -205,12 +202,11 @@ from ouroboros.orchestrator.evidence_schema import (
     extract_evidence,
     validate_evidence,
 )
+from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
     ExecutionNodeIdentity,
     build_ac_runtime_identity,
-    build_ac_runtime_scope,
-    build_level_coordinator_runtime_scope,
 )
 from ouroboros.orchestrator.level_context import (
     LevelContext,
@@ -455,6 +451,10 @@ class ParallelACExecutor:
             task_cwd=task_cwd,
         )
         self._ac_runtime_handles = self._ac_runtime_handle_manager.runtime_handles
+        self._event_emitter = ExecutionEventEmitter(
+            event_store,
+            safe_emit_event=self._safe_emit_event,
+        )
         self._checkpoint_store = checkpoint_store
         self._execution_counters_lock = asyncio.Lock()
         self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
@@ -2332,44 +2332,25 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         if self._execution_profile is None or context_audit is None:
             return
 
-        from ouroboros.events.base import BaseEvent
-
-        await self._safe_emit_event(
-            BaseEvent(
-                type="execution.ac.context_governed",
-                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
-                aggregate_id=runtime_identity.session_scope_id,
-                data={
-                    **runtime_identity.to_metadata(),
-                    **self._decomposition_profile_metadata(),
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "acceptance_criterion": ac_content,
-                    "profile": self._execution_profile.profile,
-                    **context_audit,
-                },
-            )
+        await self._event_emitter.emit_atomic_context_governed(
+            runtime_identity=runtime_identity,
+            execution_id=execution_id,
+            session_id=session_id,
+            ac_content=ac_content,
+            profile=self._execution_profile.profile,
+            decomposition_profile_metadata=self._decomposition_profile_metadata(),
+            context_audit=context_audit,
         )
 
     @staticmethod
     def _runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
         """Serialize shared runtime/tool metadata for execution-scoped events."""
-        projected = project_runtime_message(message)
-        return dict(projected.runtime_metadata)
+        return ExecutionEventEmitter.runtime_event_metadata(message)
 
     @staticmethod
     def _message_tool_input_preview(tool_input: dict[str, Any]) -> str | None:
         """Build a compact preview string for shared session tool-call events."""
-        if not tool_input:
-            return None
-
-        parts: list[str] = []
-        for key, value in tool_input.items():
-            rendered = str(value).strip()
-            if rendered:
-                parts.append(f"{key}: {rendered}")
-        preview = ", ".join(parts)
-        return preview[:100] if preview else None
+        return ExecutionEventEmitter.message_tool_input_preview(tool_input)
 
     @staticmethod
     def _should_emit_session_progress_event(
@@ -2398,43 +2379,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         projected: Any,
     ):
         """Create a shared session progress event from an AC runtime message."""
-        from ouroboros.orchestrator.events import create_progress_event
-        from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
-
-        message_type = projected.message_type
-        event = create_progress_event(
-            session_id=session_id,
-            message_type=message_type,
-            content_preview=projected.content,
-            tool_name=projected.tool_name if message_type in {"tool", "tool_result"} else None,
+        return self._event_emitter.build_session_progress_event(
+            session_id,
+            message,
+            projected=projected,
         )
-        event_data = {
-            **event.data,
-            **projected.runtime_metadata,
-            "progress": {
-                "last_message_type": message_type,
-                "last_content_preview": projected.content[:200],
-            },
-        }
-        runtime = event_data.get("runtime")
-        if isinstance(runtime, dict):
-            event_data["progress"]["runtime"] = runtime
-        runtime_event_type = event_data.get("runtime_event_type")
-        if isinstance(runtime_event_type, str) and runtime_event_type:
-            event_data["progress"]["runtime_event_type"] = runtime_event_type
-        runtime_signal = event_data.get("runtime_signal")
-        if isinstance(runtime_signal, str) and runtime_signal:
-            event_data["progress"]["runtime_signal"] = runtime_signal
-        runtime_status = event_data.get("runtime_status")
-        if isinstance(runtime_status, str) and runtime_status:
-            event_data["progress"]["runtime_status"] = runtime_status
-        thinking = event_data.get("thinking")
-        if isinstance(thinking, str) and thinking:
-            event_data["progress"]["thinking"] = thinking
-        ac_tracking = coerce_ac_marker_update(event_data.get("ac_tracking"))
-        if not ac_tracking.is_empty:
-            event_data["progress"]["ac_tracking"] = ac_tracking.to_dict()
-        return event.model_copy(update={"data": event_data})
 
     def _build_session_tool_called_event(
         self,
@@ -2443,26 +2392,15 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         projected: Any,
     ):
         """Create a shared session tool-call event from an AC runtime message."""
-        from ouroboros.orchestrator.events import create_tool_called_event
-
-        if projected.tool_name is None:
-            return None
-
-        event = create_tool_called_event(
-            session_id=session_id,
-            tool_name=projected.tool_name,
-            tool_input_preview=self._message_tool_input_preview(projected.tool_input),
+        return self._event_emitter.build_session_tool_called_event(
+            session_id,
+            projected=projected,
         )
-        event_data = {
-            **event.data,
-            **projected.runtime_metadata,
-        }
-        return event.model_copy(update={"data": event_data})
 
     @staticmethod
     def _coordinator_aggregate_id(execution_id: str, level: int) -> str:
         """Build a deterministic level-scoped aggregate ID for coordinator work."""
-        return f"{execution_id}:l{level - 1}:coord"
+        return ExecutionEventEmitter.coordinator_aggregate_id(execution_id, level)
 
     async def _emit_coordinator_started(
         self,
@@ -2472,33 +2410,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         conflicts: list[Any],
     ) -> None:
         """Emit a level-scoped event when coordinator reconciliation starts."""
-        from ouroboros.events.base import BaseEvent
-
-        runtime_scope = build_level_coordinator_runtime_scope(execution_id, level)
-        event = BaseEvent(
-            type="execution.coordinator.started",
-            aggregate_type="execution",
-            aggregate_id=self._coordinator_aggregate_id(execution_id, level),
-            data={
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "scope": "level",
-                "session_role": "coordinator",
-                "stage_index": level - 1,
-                "level_number": level,
-                "session_scope_id": runtime_scope.aggregate_id,
-                "session_state_path": runtime_scope.state_path,
-                "conflict_count": len(conflicts),
-                "conflicts": [
-                    {
-                        "file_path": conflict.file_path,
-                        "ac_indices": list(conflict.ac_indices),
-                    }
-                    for conflict in conflicts
-                ],
-            },
+        await self._event_emitter.emit_coordinator_started(
+            execution_id,
+            session_id,
+            level,
+            conflicts,
         )
-        await self._event_store.append(event)
 
     async def _emit_coordinator_runtime_events(
         self,
@@ -2507,66 +2424,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         review: CoordinatorReview,
     ) -> None:
         """Persist normalized coordinator runtime audit events at level scope."""
-        from ouroboros.events.base import BaseEvent
-
-        aggregate_id = self._coordinator_aggregate_id(execution_id, review.level_number)
-        base_data = {
-            "execution_id": execution_id,
-            "session_id": session_id,
-            "coordinator_session_id": review.session_id,
-            "scope": review.scope,
-            "session_role": review.session_role,
-            "stage_index": review.stage_index,
-            "level_number": review.level_number,
-            "session_scope_id": review.artifact_owner_id,
-            "session_state_path": review.artifact_state_path,
-        }
-
-        for message in review.messages:
-            projected = project_runtime_message(message)
-
-            if projected.is_tool_call and projected.tool_name is not None:
-                tool_input = projected.tool_input
-                tool_event = BaseEvent(
-                    type="execution.coordinator.tool.started",
-                    aggregate_type="execution",
-                    aggregate_id=aggregate_id,
-                    data={
-                        **base_data,
-                        "tool_name": projected.tool_name,
-                        "tool_detail": self._format_tool_detail(projected.tool_name, tool_input),
-                        "tool_input": tool_input,
-                        **self._runtime_event_metadata(message),
-                    },
-                )
-                await self._event_store.append(tool_event)
-
-            if projected.is_tool_result and projected.tool_name is not None:
-                tool_result_event = BaseEvent(
-                    type="execution.coordinator.tool.completed",
-                    aggregate_type="execution",
-                    aggregate_id=aggregate_id,
-                    data={
-                        **base_data,
-                        "tool_name": projected.tool_name,
-                        "tool_result_text": projected.content,
-                        **self._runtime_event_metadata(message),
-                    },
-                )
-                await self._event_store.append(tool_result_event)
-
-            if projected.thinking:
-                thinking_event = BaseEvent(
-                    type="execution.coordinator.thinking",
-                    aggregate_type="execution",
-                    aggregate_id=aggregate_id,
-                    data={
-                        **base_data,
-                        "thinking_text": projected.thinking,
-                        **self._runtime_event_metadata(message),
-                    },
-                )
-                await self._event_store.append(thinking_event)
+        await self._event_emitter.emit_coordinator_runtime_events(
+            execution_id,
+            session_id,
+            review,
+            format_tool_detail=self._format_tool_detail,
+        )
 
     async def _emit_coordinator_completed(
         self,
@@ -2575,33 +2438,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         review: CoordinatorReview,
     ) -> None:
         """Persist the coordinator reconciliation result as a level-scoped artifact."""
-        from ouroboros.events.base import BaseEvent
-
-        event = BaseEvent(
-            type="execution.coordinator.completed",
-            aggregate_type="execution",
-            aggregate_id=self._coordinator_aggregate_id(execution_id, review.level_number),
-            data={
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "coordinator_session_id": review.session_id,
-                **review.to_artifact_payload(),
-                "conflicts_detected": [
-                    {
-                        "file_path": conflict.file_path,
-                        "ac_indices": list(conflict.ac_indices),
-                        "resolved": conflict.resolved,
-                        "resolution_description": conflict.resolution_description,
-                    }
-                    for conflict in review.conflicts_detected
-                ],
-                "review_summary": review.review_summary,
-                "fixes_applied": list(review.fixes_applied),
-                "warnings_for_next_level": list(review.warnings_for_next_level),
-                "duration_seconds": review.duration_seconds,
-            },
+        await self._event_emitter.emit_coordinator_completed(
+            execution_id,
+            session_id,
+            review,
         )
-        await self._event_store.append(event)
 
     async def _execute_atomic_ac(
         self,
@@ -2909,26 +2750,16 @@ Files present:
             # aborting the AC before runtime dispatch. ``execution_context_id``
             # (execution_id or session_id) keeps the payload scope aligned with the
             # aggregate id even on direct/fallback callers that pass no execution_id.
-            from ouroboros.events.base import BaseEvent
-
-            await self._safe_emit_event(
-                BaseEvent(
-                    type="execution.ac.effort_routed",
-                    aggregate_type=runtime_identity.runtime_scope.aggregate_type,
-                    aggregate_id=runtime_identity.session_scope_id,
-                    data={
-                        **runtime_identity.to_metadata(),
-                        "ac_id": runtime_identity.ac_id,
-                        "execution_id": execution_context_id,
-                        "session_id": session_id,
-                        "ac_index": ac_index,
-                        "is_decomposed_child": is_sub_ac,
-                        "effort_level": effort_decision.level,
-                        "effort_mode": effort_decision.mode,
-                        "base_reasoning_effort": self._reasoning_effort,
-                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-                    },
-                )
+            await self._event_emitter.emit_effort_routed(
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                ac_index=ac_index,
+                is_sub_ac=is_sub_ac,
+                effort_level=effort_decision.level,
+                effort_mode=effort_decision.mode,
+                base_reasoning_effort=self._reasoning_effort,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
             )
         # execute_effort_kwargs (from resolve_execute_effort) carries
         # reasoning_effort ONLY for runtimes that enforce it; advised runtimes that
@@ -2999,17 +2830,14 @@ Files present:
                     # RC1: Emit heartbeat piggybacking on message flow
                     now = time.monotonic()
                     if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
-                        ac_id = runtime_identity.ac_id
-                        heartbeat_event = create_heartbeat_event(
+                        await self._event_emitter.emit_heartbeat(
                             session_id=session_id,
                             ac_index=ac_index,
-                            ac_id=ac_id,
+                            ac_id=runtime_identity.ac_id,
                             elapsed_seconds=now - exec_start,
                             message_count=message_count,
+                            node_identity=node_identity,
                         )
-                        if node_identity is not None:
-                            heartbeat_event.data.update(node_identity.to_event_metadata())
-                        await self._safe_emit_event(heartbeat_event)
                         last_heartbeat = now
 
                     projected = project_runtime_message(message)
@@ -3070,53 +2898,28 @@ Files present:
                         self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
                         self._flush_console()
 
-                        # Emit tool started event for TUI
-                        from ouroboros.events.base import BaseEvent as _BaseEvent
-
-                        tool_event = _BaseEvent(
-                            type="execution.tool.started",
-                            aggregate_type=runtime_identity.runtime_scope.aggregate_type,
-                            aggregate_id=runtime_identity.session_scope_id,
-                            data={
-                                **runtime_identity.to_metadata(),
-                                "tool_name": projected.tool_name,
-                                "tool_detail": tool_detail,
-                                "tool_input": tool_input,
-                                **self._runtime_event_metadata(message),
-                            },
+                        await self._event_emitter.emit_atomic_tool_started(
+                            runtime_identity=runtime_identity,
+                            tool_name=projected.tool_name,
+                            tool_detail=tool_detail,
+                            tool_input=tool_input,
+                            runtime_metadata=self._runtime_event_metadata(message),
                         )
-                        await self._event_store.append(tool_event)
 
                     if projected.is_tool_result and projected.tool_name is not None:
-                        from ouroboros.events.base import BaseEvent as _BaseEvent
-
-                        tool_result_event = _BaseEvent(
-                            type="execution.tool.completed",
-                            aggregate_type=runtime_identity.runtime_scope.aggregate_type,
-                            aggregate_id=runtime_identity.session_scope_id,
-                            data={
-                                **runtime_identity.to_metadata(),
-                                "tool_name": projected.tool_name,
-                                "tool_result_text": projected.content,
-                                **self._runtime_event_metadata(message),
-                            },
+                        await self._event_emitter.emit_atomic_tool_completed(
+                            runtime_identity=runtime_identity,
+                            tool_name=projected.tool_name,
+                            tool_result_text=projected.content,
+                            runtime_metadata=self._runtime_event_metadata(message),
                         )
-                        await self._event_store.append(tool_result_event)
 
                     if projected.thinking:
-                        from ouroboros.events.base import BaseEvent as _BaseEvent
-
-                        thinking_event = _BaseEvent(
-                            type="execution.agent.thinking",
-                            aggregate_type=runtime_identity.runtime_scope.aggregate_type,
-                            aggregate_id=runtime_identity.session_scope_id,
-                            data={
-                                **runtime_identity.to_metadata(),
-                                "thinking_text": projected.thinking,
-                                **self._runtime_event_metadata(message),
-                            },
+                        await self._event_emitter.emit_atomic_thinking(
+                            runtime_identity=runtime_identity,
+                            thinking_text=projected.thinking,
+                            runtime_metadata=self._runtime_event_metadata(message),
                         )
-                        await self._event_store.append(thinking_event)
 
                     if message.is_final:
                         final_message = message.content
@@ -3502,8 +3305,6 @@ Files present:
         if self._execution_profile is None:
             return
 
-        from ouroboros.events.base import BaseEvent
-
         data: dict[str, Any] = {
             **runtime_identity.to_metadata(),
             **self._decomposition_profile_metadata(),
@@ -3551,13 +3352,9 @@ Files present:
                 typed_validation.blocker.summary() if typed_validation.blocker is not None else None
             )
 
-        await self._safe_emit_event(
-            BaseEvent(
-                type="execution.ac.typed_evidence.observed",
-                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
-                aggregate_id=runtime_identity.session_scope_id,
-                data=data,
-            )
+        await self._event_emitter.emit_atomic_typed_evidence_observed(
+            runtime_identity=runtime_identity,
+            data=data,
         )
 
     async def _emit_subtask_event(
@@ -3574,47 +3371,16 @@ Files present:
         ``ac_index`` arrives 0-based from the executor loop but the TUI
         tree keys AC nodes as ``ac_{1-based}``, so we convert here.
         """
-        from ouroboros.events.base import BaseEvent
-
-        ac_index_1 = ac_index + 1  # 0-based → 1-based for TUI node keys
         label = _subtask_event_label(sub_task_content)
-        node_metadata = node_identity.to_event_metadata() if node_identity is not None else {}
-        node_event_type = (
-            "execution.node.created" if status == "pending" else "execution.node.updated"
+        await self._event_emitter.emit_subtask_event(
+            execution_id,
+            ac_index,
+            sub_task_index,
+            sub_task_content,
+            status,
+            node_identity,
+            label=label,
         )
-        if node_identity is not None:
-            node_event = BaseEvent(
-                type=node_event_type,
-                aggregate_type="execution",
-                aggregate_id=execution_id,
-                data={
-                    **node_metadata,
-                    "node_kind": "sub_ac",
-                    "content": sub_task_content,
-                    "label": label,
-                    "status": status,
-                    "legacy_ac_index": ac_index_1,
-                    "legacy_sub_task_index": sub_task_index,
-                    "legacy_sub_task_id": f"ac_{ac_index_1}_sub_{sub_task_index}",
-                },
-            )
-            await self._event_store.append(node_event)
-
-        event = BaseEvent(
-            type="execution.subtask.updated",
-            aggregate_type="execution",
-            aggregate_id=execution_id,
-            data={
-                **node_metadata,
-                "ac_index": ac_index_1,
-                "sub_task_index": sub_task_index,
-                "sub_task_id": f"ac_{ac_index_1}_sub_{sub_task_index}",
-                "content": sub_task_content,
-                "label": label,
-                "status": status,
-            },
-        )
-        await self._event_store.append(event)
 
     async def _emit_level_started(
         self,
@@ -3624,21 +3390,13 @@ Files present:
         total_levels: int,
     ) -> None:
         """Emit event when a parallel level starts."""
-        from ouroboros.events.base import BaseEvent
-
-        event = BaseEvent(
-            type="execution.decomposition.level_started",
-            aggregate_type="execution",
-            aggregate_id=session_id,
-            data={
-                "level": level - 1,  # TUI expects 0-based index
-                "total_levels": total_levels,
-                "child_indices": ac_indices,  # TUI expects this field name
-                "ac_count": len(ac_indices),
-                **self._decomposition_profile_metadata(),
-            },
+        await self._event_emitter.emit_level_started(
+            session_id,
+            level,
+            ac_indices,
+            total_levels,
+            decomposition_profile_metadata=self._decomposition_profile_metadata(),
         )
-        await self._event_store.append(event)
 
     async def _emit_level_completed(
         self,
@@ -3651,23 +3409,15 @@ Files present:
         outcome: str | None = None,
     ) -> None:
         """Emit event when a parallel level completes."""
-        from ouroboros.events.base import BaseEvent
-
-        event = BaseEvent(
-            type="execution.decomposition.level_completed",
-            aggregate_type="execution",
-            aggregate_id=session_id,
-            data={
-                "level": level - 1,  # TUI expects 0-based index
-                "successful": success_count,
-                "failed": failure_count,
-                "blocked": blocked_count,
-                "started": started,
-                "outcome": outcome or StageExecutionOutcome.SUCCEEDED.value,
-                "total": success_count + failure_count + blocked_count,
-            },
+        await self._event_emitter.emit_level_completed(
+            session_id,
+            level,
+            success_count,
+            failure_count,
+            blocked_count=blocked_count,
+            started=started,
+            outcome=outcome,
         )
-        await self._event_store.append(event)
 
     async def _resilient_progress_emitter(
         self,
@@ -3766,62 +3516,20 @@ Files present:
             total_levels: Total execution levels.
             activity: Current activity description.
         """
-        from ouroboros.orchestrator.events import create_workflow_progress_event
-
-        # Build AC list for TUI
-        acceptance_criteria = []
-        for i, ac_content in enumerate(ac_text(seed_ac) for seed_ac in seed.acceptance_criteria):
-            status = ac_statuses.get(i, "pending")
-            retry_attempt = (ac_retry_attempts or {}).get(i, 0)
-            node_identity = ExecutionNodeIdentity.root(
-                execution_context_id=execution_id or session_id,
-                ac_index=i,
-            )
-            runtime_scope = build_ac_runtime_scope(
-                i,
-                execution_context_id=execution_id or session_id,
-                retry_attempt=retry_attempt,
-                node_id=node_identity.node_id,
-                node_path=node_identity.path,
-            )
-            acceptance_criteria.append(
-                {
-                    **node_identity.to_event_metadata(),
-                    "index": i + 1,
-                    "ac_id": runtime_scope.aggregate_id,
-                    "content": ac_content,
-                    "status": status,
-                    "retry_attempt": retry_attempt,
-                    "attempt_number": runtime_scope.attempt_number,
-                    "elapsed": "",
-                }
-            )
-
-        # Determine current AC index (first executing one, or None)
-        current_ac_index = executing_indices[0] if executing_indices else None
-
-        # Build activity detail
-        if executing_indices:
-            activity_detail = (
-                f"Level {current_level}/{total_levels}: ACs {[i + 1 for i in executing_indices]}"
-            )
-        else:
-            activity_detail = f"Level {current_level}/{total_levels}"
-
-        event = create_workflow_progress_event(
-            execution_id=execution_id,
-            session_id=session_id,
-            acceptance_criteria=acceptance_criteria,
-            completed_count=completed_count,
-            total_count=len(seed.acceptance_criteria),
-            current_ac_index=current_ac_index,
-            current_phase="Deliver",  # Parallel execution is in Deliver phase
+        await self._event_emitter.emit_workflow_progress(
+            session_id,
+            execution_id,
+            seed,
+            ac_statuses,
+            ac_retry_attempts,
+            executing_indices,
+            completed_count,
+            current_level,
+            total_levels,
             activity=activity,
-            activity_detail=activity_detail,
             messages_count=messages_count,
             tool_calls_count=tool_calls_count,
         )
-        await self._event_store.append(event)
 
 
 __all__ = [

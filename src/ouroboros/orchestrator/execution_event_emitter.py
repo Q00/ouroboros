@@ -1,0 +1,611 @@
+"""Typed execution-event emission helpers for the parallel executor."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
+
+from ouroboros.core.seed import ac_text
+from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.events import (
+    create_heartbeat_event,
+    create_progress_event,
+    create_tool_called_event,
+    create_workflow_progress_event,
+)
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ACRuntimeIdentity,
+    ExecutionNodeIdentity,
+    build_ac_runtime_scope,
+    build_level_coordinator_runtime_scope,
+)
+from ouroboros.orchestrator.parallel_executor_models import StageExecutionOutcome
+from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
+from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
+
+if TYPE_CHECKING:
+    from ouroboros.core.seed import Seed
+    from ouroboros.orchestrator.adapter import AgentMessage
+    from ouroboros.orchestrator.coordinator import CoordinatorReview
+    from ouroboros.persistence.event_store import EventStore
+
+
+SafeEmitEvent = Callable[[Any], Awaitable[bool]]
+ToolDetailFormatter = Callable[[str, dict[str, Any]], str]
+
+
+class ExecutionEventEmitter:
+    """Build and persist executor events without owning execution decisions."""
+
+    def __init__(
+        self,
+        event_store: EventStore,
+        *,
+        safe_emit_event: SafeEmitEvent,
+    ) -> None:
+        self._event_store = event_store
+        self._safe_emit_event = safe_emit_event
+
+    @staticmethod
+    def runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
+        """Serialize shared runtime/tool metadata for execution-scoped events."""
+        projected = project_runtime_message(message)
+        return dict(projected.runtime_metadata)
+
+    @staticmethod
+    def message_tool_input_preview(tool_input: dict[str, Any]) -> str | None:
+        """Build a compact preview string for shared session tool-call events."""
+        if not tool_input:
+            return None
+
+        parts: list[str] = []
+        for key, value in tool_input.items():
+            rendered = str(value).strip()
+            if rendered:
+                parts.append(f"{key}: {rendered}")
+        preview = ", ".join(parts)
+        return preview[:100] if preview else None
+
+    @staticmethod
+    def coordinator_aggregate_id(execution_id: str, level: int) -> str:
+        """Build a deterministic level-scoped aggregate ID for coordinator work."""
+        return f"{execution_id}:l{level - 1}:coord"
+
+    async def emit_atomic_context_governed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str,
+        session_id: str | None,
+        ac_content: str,
+        profile: str,
+        decomposition_profile_metadata: dict[str, Any],
+        context_audit: dict[str, Any],
+    ) -> None:
+        """Persist observe-only context-governor metadata for profile-backed leaves."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.context_governed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    **decomposition_profile_metadata,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "acceptance_criterion": ac_content,
+                    "profile": profile,
+                    **context_audit,
+                },
+            )
+        )
+
+    def build_session_progress_event(
+        self,
+        session_id: str,
+        message: AgentMessage,
+        *,
+        projected: Any,
+    ) -> Any:
+        """Create a shared session progress event from an AC runtime message."""
+        message_type = projected.message_type
+        event = create_progress_event(
+            session_id=session_id,
+            message_type=message_type,
+            content_preview=projected.content,
+            tool_name=projected.tool_name if message_type in {"tool", "tool_result"} else None,
+        )
+        event_data = {
+            **event.data,
+            **projected.runtime_metadata,
+            "progress": {
+                "last_message_type": message_type,
+                "last_content_preview": projected.content[:200],
+            },
+        }
+        runtime = event_data.get("runtime")
+        if isinstance(runtime, dict):
+            event_data["progress"]["runtime"] = runtime
+        runtime_event_type = event_data.get("runtime_event_type")
+        if isinstance(runtime_event_type, str) and runtime_event_type:
+            event_data["progress"]["runtime_event_type"] = runtime_event_type
+        runtime_signal = event_data.get("runtime_signal")
+        if isinstance(runtime_signal, str) and runtime_signal:
+            event_data["progress"]["runtime_signal"] = runtime_signal
+        runtime_status = event_data.get("runtime_status")
+        if isinstance(runtime_status, str) and runtime_status:
+            event_data["progress"]["runtime_status"] = runtime_status
+        thinking = event_data.get("thinking")
+        if isinstance(thinking, str) and thinking:
+            event_data["progress"]["thinking"] = thinking
+        ac_tracking = coerce_ac_marker_update(event_data.get("ac_tracking"))
+        if not ac_tracking.is_empty:
+            event_data["progress"]["ac_tracking"] = ac_tracking.to_dict()
+        return event.model_copy(update={"data": event_data})
+
+    def build_session_tool_called_event(
+        self,
+        session_id: str,
+        *,
+        projected: Any,
+    ) -> Any:
+        """Create a shared session tool-call event from an AC runtime message."""
+        if projected.tool_name is None:
+            return None
+
+        event = create_tool_called_event(
+            session_id=session_id,
+            tool_name=projected.tool_name,
+            tool_input_preview=self.message_tool_input_preview(projected.tool_input),
+        )
+        event_data = {
+            **event.data,
+            **projected.runtime_metadata,
+        }
+        return event.model_copy(update={"data": event_data})
+
+    async def emit_coordinator_started(
+        self,
+        execution_id: str,
+        session_id: str,
+        level: int,
+        conflicts: list[Any],
+    ) -> None:
+        """Emit a level-scoped event when coordinator reconciliation starts."""
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, level)
+        event = BaseEvent(
+            type="execution.coordinator.started",
+            aggregate_type="execution",
+            aggregate_id=self.coordinator_aggregate_id(execution_id, level),
+            data={
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "scope": "level",
+                "session_role": "coordinator",
+                "stage_index": level - 1,
+                "level_number": level,
+                "session_scope_id": runtime_scope.aggregate_id,
+                "session_state_path": runtime_scope.state_path,
+                "conflict_count": len(conflicts),
+                "conflicts": [
+                    {
+                        "file_path": conflict.file_path,
+                        "ac_indices": list(conflict.ac_indices),
+                    }
+                    for conflict in conflicts
+                ],
+            },
+        )
+        await self._event_store.append(event)
+
+    async def emit_coordinator_runtime_events(
+        self,
+        execution_id: str,
+        session_id: str,
+        review: CoordinatorReview,
+        *,
+        format_tool_detail: ToolDetailFormatter,
+    ) -> None:
+        """Persist normalized coordinator runtime audit events at level scope."""
+        aggregate_id = self.coordinator_aggregate_id(execution_id, review.level_number)
+        base_data = {
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "coordinator_session_id": review.session_id,
+            "scope": review.scope,
+            "session_role": review.session_role,
+            "stage_index": review.stage_index,
+            "level_number": review.level_number,
+            "session_scope_id": review.artifact_owner_id,
+            "session_state_path": review.artifact_state_path,
+        }
+
+        for message in review.messages:
+            projected = project_runtime_message(message)
+
+            if projected.is_tool_call and projected.tool_name is not None:
+                tool_input = projected.tool_input
+                tool_event = BaseEvent(
+                    type="execution.coordinator.tool.started",
+                    aggregate_type="execution",
+                    aggregate_id=aggregate_id,
+                    data={
+                        **base_data,
+                        "tool_name": projected.tool_name,
+                        "tool_detail": format_tool_detail(projected.tool_name, tool_input),
+                        "tool_input": tool_input,
+                        **self.runtime_event_metadata(message),
+                    },
+                )
+                await self._event_store.append(tool_event)
+
+            if projected.is_tool_result and projected.tool_name is not None:
+                tool_result_event = BaseEvent(
+                    type="execution.coordinator.tool.completed",
+                    aggregate_type="execution",
+                    aggregate_id=aggregate_id,
+                    data={
+                        **base_data,
+                        "tool_name": projected.tool_name,
+                        "tool_result_text": projected.content,
+                        **self.runtime_event_metadata(message),
+                    },
+                )
+                await self._event_store.append(tool_result_event)
+
+            if projected.thinking:
+                thinking_event = BaseEvent(
+                    type="execution.coordinator.thinking",
+                    aggregate_type="execution",
+                    aggregate_id=aggregate_id,
+                    data={
+                        **base_data,
+                        "thinking_text": projected.thinking,
+                        **self.runtime_event_metadata(message),
+                    },
+                )
+                await self._event_store.append(thinking_event)
+
+    async def emit_coordinator_completed(
+        self,
+        execution_id: str,
+        session_id: str,
+        review: CoordinatorReview,
+    ) -> None:
+        """Persist the coordinator reconciliation result as a level-scoped artifact."""
+        event = BaseEvent(
+            type="execution.coordinator.completed",
+            aggregate_type="execution",
+            aggregate_id=self.coordinator_aggregate_id(execution_id, review.level_number),
+            data={
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "coordinator_session_id": review.session_id,
+                **review.to_artifact_payload(),
+                "conflicts_detected": [
+                    {
+                        "file_path": conflict.file_path,
+                        "ac_indices": list(conflict.ac_indices),
+                        "resolved": conflict.resolved,
+                        "resolution_description": conflict.resolution_description,
+                    }
+                    for conflict in review.conflicts_detected
+                ],
+                "review_summary": review.review_summary,
+                "fixes_applied": list(review.fixes_applied),
+                "warnings_for_next_level": list(review.warnings_for_next_level),
+                "duration_seconds": review.duration_seconds,
+            },
+        )
+        await self._event_store.append(event)
+
+    async def emit_effort_routed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str | None,
+        session_id: str,
+        ac_index: int,
+        is_sub_ac: bool,
+        effort_level: str,
+        effort_mode: str,
+        base_reasoning_effort: str | None,
+        runtime_backend: str | None,
+    ) -> None:
+        """Persist per-AC effort-routing telemetry."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.effort_routed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_id": runtime_identity.ac_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_index": ac_index,
+                    "is_decomposed_child": is_sub_ac,
+                    "effort_level": effort_level,
+                    "effort_mode": effort_mode,
+                    "base_reasoning_effort": base_reasoning_effort,
+                    "runtime_backend": runtime_backend,
+                },
+            )
+        )
+
+    async def emit_heartbeat(
+        self,
+        *,
+        session_id: str,
+        ac_index: int,
+        ac_id: str,
+        elapsed_seconds: float,
+        message_count: int,
+        node_identity: ExecutionNodeIdentity | None,
+    ) -> None:
+        """Emit liveness heartbeat with optional node identity metadata."""
+        heartbeat_event = create_heartbeat_event(
+            session_id=session_id,
+            ac_index=ac_index,
+            ac_id=ac_id,
+            elapsed_seconds=elapsed_seconds,
+            message_count=message_count,
+        )
+        if node_identity is not None:
+            heartbeat_event.data.update(node_identity.to_event_metadata())
+        await self._safe_emit_event(heartbeat_event)
+
+    async def emit_atomic_tool_started(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        tool_name: str,
+        tool_detail: str,
+        tool_input: dict[str, Any],
+        runtime_metadata: dict[str, Any],
+    ) -> None:
+        """Emit AC-scoped tool start event for TUI consumers."""
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.tool.started",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "tool_name": tool_name,
+                    "tool_detail": tool_detail,
+                    "tool_input": tool_input,
+                    **runtime_metadata,
+                },
+            )
+        )
+
+    async def emit_atomic_tool_completed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        tool_name: str,
+        tool_result_text: str,
+        runtime_metadata: dict[str, Any],
+    ) -> None:
+        """Emit AC-scoped tool completion event for TUI consumers."""
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.tool.completed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "tool_name": tool_name,
+                    "tool_result_text": tool_result_text,
+                    **runtime_metadata,
+                },
+            )
+        )
+
+    async def emit_atomic_thinking(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        thinking_text: str,
+        runtime_metadata: dict[str, Any],
+    ) -> None:
+        """Emit AC-scoped thinking event for TUI consumers."""
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.agent.thinking",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "thinking_text": thinking_text,
+                    **runtime_metadata,
+                },
+            )
+        )
+
+    async def emit_atomic_typed_evidence_observed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        data: dict[str, Any],
+    ) -> None:
+        """Persist typed-evidence metadata for atomic AC completion."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.typed_evidence.observed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data=data,
+            )
+        )
+
+    async def emit_subtask_event(
+        self,
+        execution_id: str,
+        ac_index: int,
+        sub_task_index: int,
+        sub_task_content: str,
+        status: str,
+        node_identity: ExecutionNodeIdentity | None,
+        *,
+        label: str,
+    ) -> None:
+        """Emit sub-task event for TUI tree updates."""
+        ac_index_1 = ac_index + 1
+        node_metadata = node_identity.to_event_metadata() if node_identity is not None else {}
+        node_event_type = (
+            "execution.node.created" if status == "pending" else "execution.node.updated"
+        )
+        if node_identity is not None:
+            node_event = BaseEvent(
+                type=node_event_type,
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    **node_metadata,
+                    "node_kind": "sub_ac",
+                    "content": sub_task_content,
+                    "label": label,
+                    "status": status,
+                    "legacy_ac_index": ac_index_1,
+                    "legacy_sub_task_index": sub_task_index,
+                    "legacy_sub_task_id": f"ac_{ac_index_1}_sub_{sub_task_index}",
+                },
+            )
+            await self._event_store.append(node_event)
+
+        event = BaseEvent(
+            type="execution.subtask.updated",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                **node_metadata,
+                "ac_index": ac_index_1,
+                "sub_task_index": sub_task_index,
+                "sub_task_id": f"ac_{ac_index_1}_sub_{sub_task_index}",
+                "content": sub_task_content,
+                "label": label,
+                "status": status,
+            },
+        )
+        await self._event_store.append(event)
+
+    async def emit_level_started(
+        self,
+        session_id: str,
+        level: int,
+        ac_indices: list[int],
+        total_levels: int,
+        *,
+        decomposition_profile_metadata: dict[str, Any],
+    ) -> None:
+        """Emit event when a parallel level starts."""
+        event = BaseEvent(
+            type="execution.decomposition.level_started",
+            aggregate_type="execution",
+            aggregate_id=session_id,
+            data={
+                "level": level - 1,
+                "total_levels": total_levels,
+                "child_indices": ac_indices,
+                "ac_count": len(ac_indices),
+                **decomposition_profile_metadata,
+            },
+        )
+        await self._event_store.append(event)
+
+    async def emit_level_completed(
+        self,
+        session_id: str,
+        level: int,
+        success_count: int,
+        failure_count: int,
+        blocked_count: int = 0,
+        started: bool = True,
+        outcome: str | None = None,
+    ) -> None:
+        """Emit event when a parallel level completes."""
+        event = BaseEvent(
+            type="execution.decomposition.level_completed",
+            aggregate_type="execution",
+            aggregate_id=session_id,
+            data={
+                "level": level - 1,
+                "successful": success_count,
+                "failed": failure_count,
+                "blocked": blocked_count,
+                "started": started,
+                "outcome": outcome or StageExecutionOutcome.SUCCEEDED.value,
+                "total": success_count + failure_count + blocked_count,
+            },
+        )
+        await self._event_store.append(event)
+
+    async def emit_workflow_progress(
+        self,
+        session_id: str,
+        execution_id: str,
+        seed: Seed,
+        ac_statuses: dict[int, str],
+        ac_retry_attempts: dict[int, int] | None,
+        executing_indices: list[int],
+        completed_count: int,
+        current_level: int,
+        total_levels: int,
+        activity: str = "Executing",
+        messages_count: int = 0,
+        tool_calls_count: int = 0,
+    ) -> None:
+        """Emit workflow progress event for TUI updates."""
+        acceptance_criteria = []
+        for i, ac_content in enumerate(ac_text(seed_ac) for seed_ac in seed.acceptance_criteria):
+            status = ac_statuses.get(i, "pending")
+            retry_attempt = (ac_retry_attempts or {}).get(i, 0)
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id or session_id,
+                ac_index=i,
+            )
+            runtime_scope = build_ac_runtime_scope(
+                i,
+                execution_context_id=execution_id or session_id,
+                retry_attempt=retry_attempt,
+                node_id=node_identity.node_id,
+                node_path=node_identity.path,
+            )
+            acceptance_criteria.append(
+                {
+                    **node_identity.to_event_metadata(),
+                    "index": i + 1,
+                    "ac_id": runtime_scope.aggregate_id,
+                    "content": ac_content,
+                    "status": status,
+                    "retry_attempt": retry_attempt,
+                    "attempt_number": runtime_scope.attempt_number,
+                    "elapsed": "",
+                }
+            )
+
+        current_ac_index = executing_indices[0] if executing_indices else None
+
+        if executing_indices:
+            activity_detail = (
+                f"Level {current_level}/{total_levels}: ACs {[i + 1 for i in executing_indices]}"
+            )
+        else:
+            activity_detail = f"Level {current_level}/{total_levels}"
+
+        event = create_workflow_progress_event(
+            execution_id=execution_id,
+            session_id=session_id,
+            acceptance_criteria=acceptance_criteria,
+            completed_count=completed_count,
+            total_count=len(seed.acceptance_criteria),
+            current_ac_index=current_ac_index,
+            current_phase="Deliver",
+            activity=activity,
+            activity_detail=activity_detail,
+            messages_count=messages_count,
+            tool_calls_count=tool_calls_count,
+        )
+        await self._event_store.append(event)
