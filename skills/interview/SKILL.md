@@ -18,7 +18,6 @@ Socratic interview to crystallize vague requirements into clear specifications.
 - `ask_user` — ask human-judgment questions through the active runtime's user-question surface.
 - `inspect_code` — answer repo-local factual questions from exact local files before asking the user.
 - `call_mcp` — use Ouroboros MCP tools for persistent interview state and seed generation.
-- `dispatch_research` — when the runtime exposes native sub-agents (e.g. the Task/Agent tool, codex `spawn_agent`), continuously fan out parallel research/exploration sub-agents (codebase-explorer to ground questions in real repo facts, researcher to gather external facts) so grounding is broad and visible, not single-threaded. Falls back to `inspect_code` / `web_research` when native sub-agents are unavailable.
 - `run_lateral_review` — invoke lateral thinking subagents before milestone turns and direct-answer synthesis.
 - `web_research` — fetch current external facts only when the interview genuinely depends on them.
 - `run_shell` — run bounded local commands for version checks and repository inspection.
@@ -135,36 +134,6 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 - **MCP**: Generates Socratic questions, manages interview state, scores ambiguity. Does NOT read code.
 - **You (main session)**: Receives MCP questions, answers them by reading code through the active runtime's `inspect_code` capability, or routes to the user when human judgment is needed.
 - **User**: Only answers questions that require human decisions (goals, acceptance criteria, business logic, preferences).
-
-#### Native Research Fan-Out (use throughout, not just at milestones)
-
-The interview runs in the MAIN session, so — unlike background execution workers —
-you can spawn **native sub-agents that the human SEES inline**. Use this generously:
-the interview is where ouroboros earns its keep (grounding hidden assumptions in
-real facts before any code), and parallel research makes that both deeper and visible.
-
-Whenever the runtime exposes native sub-agents (the Task/Agent tool, codex
-`spawn_agent`, etc.) **and its policy allows spawning them without a per-spawn
-user request**, prefer fanning out over answering single-threaded — where a
-runtime restricts spawning, do the same research inline in the main session
-(the grounding is what matters; the fan-out is only an optimization):
-
-- **Ground every factual MCP question in the real repo** — dispatch one or more
-  `codebase-explorer` sub-agents (in a single parallel burst) instead of a lone
-  `inspect_code` pass. Different explorers can chase different angles (where a thing
-  is defined, how it's wired, what already exists) concurrently.
-- **Gather external facts** the interview genuinely depends on with a `researcher`
-  sub-agent, in parallel with the codebase explorers.
-- **Keep each assignment lean and self-contained** (the assignment carries the
-  exact question + scope; do NOT fork full parent history) — same discipline as the
-  execution worker pool's TASK/DELIVERABLE/SCOPE/VERIFY messages.
-- **Fold only concrete, user-safe findings** back into the answer or the next user
-  question. Do not dump raw sub-agent reports at the user.
-
-This is additive to `run_lateral_review` (multi-persona milestone checks): research
-sub-agents establish FACTS, lateral sub-agents stress hidden ASSUMPTIONS — run both.
-If native sub-agents are unavailable, degrade to `inspect_code` / `web_research`
-without restarting the interview.
 
 #### Interview Flow
 

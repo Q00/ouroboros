@@ -1074,17 +1074,9 @@ def build_qa_subagent(
     if seed_content:
         seed_section = f"\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
-    from ouroboros.evaluation.adversarial import render_checklist
+    from ouroboros.evaluation.adversarial import render_adversarial_section
 
-    adversarial_section = f"""
-## Adversarial Probes
-{render_checklist()}
-A "done" claim is only as strong as the probes it survives. Use supplied
-artifact/reference/history/seed evidence only; if an applicable probe requires
-execution or observation that is not present, report that as an evidence gap in
-``differences`` (with a matching ``suggestion``) instead of implying you ran it.
-Let any real failure or unverified applicable probe lower ``correctness``.
-"""
+    adversarial_section = "\n" + render_adversarial_section(artifact_type)
 
     prompt = f"""{system_prompt}
 

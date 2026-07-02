@@ -123,10 +123,51 @@ def render_checklist(classes: tuple[AdversarialClass, ...] = ADVERSARIAL_CLASSES
     return "\n".join(lines)
 
 
+_EXECUTABLE_EVIDENCE_CONTRACT = (
+    'A "done" claim is only as strong as the probes it survives. Use supplied '
+    "artifact/reference/history/seed evidence only; if an applicable probe requires "
+    "execution or observation that is not present, report that as an evidence gap in "
+    "``differences`` (with a matching ``suggestion``) instead of implying you ran it. "
+    "Let any real failure or unverified applicable probe lower ``correctness``."
+)
+
+# A document (e.g. a seed specification) describes FUTURE behaviour and cannot be
+# executed; treating that inability as an evidence gap would penalize every
+# behavioural spec regardless of substance.
+_DOCUMENT_EVIDENCE_CONTRACT = (
+    "This artifact is a document describing future behaviour — it cannot be executed, "
+    "and that is not a defect. Never report an unrunnable probe as an evidence gap and "
+    "never lower any dimension because a probe could not be executed. Instead, use the "
+    "applicable classes as a completeness lens over the document's substance: if it "
+    "clearly triggers a class yet fails to address it (e.g. it shells out but never "
+    "bounds the command), report that omission as a difference with a matching "
+    "``suggestion``. Judge the document's substance only."
+)
+
+
+def render_adversarial_section(artifact_type: str = "code") -> str:
+    """Render the full prompt section: header, checklist, and evidence contract.
+
+    The evidence contract is artifact-kind-aware: executable artifacts are judged
+    on whether the evidence shows they survive the probes; ``document`` artifacts
+    get the completeness-lens contract instead.
+    """
+    contract = (
+        _DOCUMENT_EVIDENCE_CONTRACT
+        if artifact_type == "document"
+        else _EXECUTABLE_EVIDENCE_CONTRACT
+    )
+    return (
+        f"## Adversarial Probes (schema v{ADVERSARIAL_SCHEMA_VERSION})\n"
+        f"{render_checklist()}\n{contract}\n"
+    )
+
+
 __all__ = [
     "ADVERSARIAL_CLASSES",
     "ADVERSARIAL_SCHEMA_VERSION",
     "AdversarialClass",
     "get_class",
+    "render_adversarial_section",
     "render_checklist",
 ]

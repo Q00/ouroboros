@@ -53,6 +53,33 @@ class TestRender:
         assert ADVERSARIAL_CLASSES[0].id in text
         assert ADVERSARIAL_CLASSES[1].id not in text
 
+    def test_section_stamps_schema_version(self) -> None:
+        from ouroboros.evaluation.adversarial import (
+            ADVERSARIAL_SCHEMA_VERSION,
+            render_adversarial_section,
+        )
+
+        assert f"schema v{ADVERSARIAL_SCHEMA_VERSION}" in render_adversarial_section()
+
+    def test_section_code_mode_keeps_evidence_gap_contract(self) -> None:
+        from ouroboros.evaluation.adversarial import render_adversarial_section
+
+        text = render_adversarial_section("code")
+        assert "evidence gap" in text
+        assert "instead of implying you ran it" in text
+
+    def test_section_document_mode_never_penalizes_unrunnable(self) -> None:
+        from ouroboros.evaluation.adversarial import render_adversarial_section
+
+        text = render_adversarial_section("document")
+        # A spec cannot be executed; that must never be scored as missing evidence
+        # (the seed-QA gate feeds artifact_type="document" on every auto run).
+        assert "Never report an unrunnable probe as an evidence gap" in text
+        assert "never lower any dimension" in text
+        assert "completeness lens" in text
+        assert "unverified applicable probe lower" not in text
+        assert "instead of implying you ran it" not in text
+
 
 class TestPromptWiring:
     def test_qa_user_prompt_includes_adversarial_section(self) -> None:
@@ -68,3 +95,16 @@ class TestPromptWiring:
         assert "prompt_injection" in prompt
         assert "evidence gap" in prompt
         assert "instead of implying you ran it" in prompt
+
+    def test_qa_user_prompt_document_mode_uses_completeness_contract(self) -> None:
+        from ouroboros.mcp.tools.qa import _build_qa_user_prompt
+
+        prompt = _build_qa_user_prompt(
+            artifact="goal: ship\nacceptance_criteria: [works]",
+            artifact_type="document",
+            quality_bar="clear spec",
+        )
+        assert "Adversarial Probes" in prompt
+        assert "completeness lens" in prompt
+        assert "unverified applicable probe lower" not in prompt
+        assert "instead of implying you ran it" not in prompt
