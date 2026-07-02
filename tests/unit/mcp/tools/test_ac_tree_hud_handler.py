@@ -77,6 +77,23 @@ class TestRenderACTreeHUDMarkdown:
         ) in markdown
         assert "└─ ○ AC 3: Third criterion" in markdown
 
+    def test_renders_failed_status_icon(self) -> None:
+        """Failed ACs should keep their compact HUD status glyph."""
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_failed",
+            execution_id="exec_failed",
+            session_status="failed",
+            progress_data={
+                "completed_count": 0,
+                "total_count": 1,
+                "acceptance_criteria": [
+                    {"index": 1, "content": "Failed criterion", "status": "failed"},
+                ],
+            },
+        )
+
+        assert "└─ ✖ AC 1: Failed criterion" in markdown
+
     def test_renders_sub_ac_progress_without_changing_top_level_progress(self) -> None:
         """HUD should expose Sub-AC progress when top-level ACs have not rolled up."""
         markdown = render_ac_tree_hud_markdown(
