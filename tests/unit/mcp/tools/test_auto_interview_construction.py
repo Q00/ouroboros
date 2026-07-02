@@ -1408,13 +1408,15 @@ def test_auto_sub_interview_spy_adapter_fails_on_any_tool_request(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Auto's nested interviewer must fail closed on a tool request.
+    """Auto's nested interviewer salvages text past a phantom tool request.
 
     This starts at ``AutoHandler`` and exercises the constructed
     ``HandlerInterviewBackend``.  The fake SDK emits a ``ToolUseBlock`` before
-    a valid text result; the spy assertion is that the auto sub-interview
-    treats the tool request as the failure, not as a recoverable prelude to the
-    later question text.
+    a valid text result. Under the sealed envelope the tool catalog is
+    emptied via ``tools=[]`` (``--tools ""``), so the request can never
+    execute — the sub-interview surfaces the streamed question instead of
+    failing (#1537), while the envelope assertions below keep the seal
+    itself locked.
     """
     from ouroboros.providers import claude_code_adapter as adapter_mod
 
@@ -1526,9 +1528,14 @@ def test_auto_sub_interview_spy_adapter_fails_on_any_tool_request(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"] is None
-    assert captured["error_type"] == "HandlerError"
-    assert "What is the primary user goal?" not in captured["error"]
+    # Sealed-envelope contract (#1537): the phantom tool request cannot
+    # execute (catalog emptied via ``tools=[]``), so the streamed question
+    # is salvaged instead of discarded — the incident stays observable via
+    # the adapter's structured warning and ``raw_response`` marker.
+    turn = captured["turn"]
+    assert turn is not None, captured.get("error")
+    assert turn.question == "What is the primary user goal?"
+    assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
     assert factory_kwargs["max_turns"] == 1
@@ -1550,8 +1557,10 @@ def test_auto_sub_interview_isolates_parent_skill_invocations(
 
     The parent execution context can expose Claude Code skills for the main
     agentic session.  The auto sub-interviewer is a pure question generator,
-    so its SDK envelope must explicitly clear ``skills`` and fail closed if a
-    ``Skill`` tool request is still emitted before text.
+    so its SDK envelope must explicitly clear ``skills``. A ``Skill`` tool
+    request emitted anyway is a phantom call (the sealed catalog cannot
+    execute it) — the streamed question is salvaged and the seal itself is
+    asserted below (#1537).
     """
     from ouroboros.providers import claude_code_adapter as adapter_mod
 
@@ -1670,9 +1679,14 @@ def test_auto_sub_interview_isolates_parent_skill_invocations(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"] is None
-    assert captured["error_type"] == "HandlerError"
-    assert "What should the first auto interview question clarify?" not in captured["error"]
+    # Sealed-envelope contract (#1537): the phantom tool request cannot
+    # execute (catalog emptied via ``tools=[]``), so the streamed question
+    # is salvaged instead of discarded. Isolation is enforced by the
+    # envelope assertions below, not by failing the question.
+    turn = captured["turn"]
+    assert turn is not None, captured.get("error")
+    assert turn.question == "What should the first auto interview question clarify?"
+    assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
     assert factory_kwargs["max_turns"] == 1
@@ -1696,9 +1710,10 @@ def test_auto_sub_interview_isolates_parent_agent_invocations(
 
     The parent execution context can expose sub-agents for the main agentic
     workflow.  The auto sub-interviewer is constrained to one turn and must
-    generate text only, so its SDK envelope must explicitly clear ``agents``
-    and fail closed if a sub-agent ``Task`` request is still emitted before
-    the question text.
+    generate text only, so its SDK envelope must explicitly clear ``agents``.
+    A sub-agent ``Task`` request emitted anyway is a phantom call (the sealed
+    catalog cannot execute it) — the streamed question is salvaged and the
+    seal itself is asserted below (#1537).
     """
     from ouroboros.providers import claude_code_adapter as adapter_mod
 
@@ -1821,9 +1836,14 @@ def test_auto_sub_interview_isolates_parent_agent_invocations(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"] is None
-    assert captured["error_type"] == "HandlerError"
-    assert "What should the first auto interview question clarify?" not in captured["error"]
+    # Sealed-envelope contract (#1537): the phantom tool request cannot
+    # execute (catalog emptied via ``tools=[]``), so the streamed question
+    # is salvaged instead of discarded. Isolation is enforced by the
+    # envelope assertions below, not by failing the question.
+    turn = captured["turn"]
+    assert turn is not None, captured.get("error")
+    assert turn.question == "What should the first auto interview question clarify?"
+    assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
     assert factory_kwargs["max_turns"] == 1
@@ -1846,9 +1866,10 @@ def test_auto_sub_interview_isolates_parent_plugin_invocations(
     """Auto's nested interviewer must not inherit parent Claude plugins.
 
     Parent plugin contexts can register additional tool surfaces for the main
-    agentic run.  The auto sub-interviewer must clear that plugin list and
-    fail closed if a plugin-sourced tool request is still emitted before the
-    single text question.
+    agentic run.  The auto sub-interviewer must clear that plugin list. A
+    plugin-sourced tool request emitted anyway is a phantom call (the sealed
+    catalog cannot execute it) — the streamed question is salvaged and the
+    seal itself is asserted below (#1537).
     """
     from ouroboros.providers import claude_code_adapter as adapter_mod
 
@@ -1967,9 +1988,14 @@ def test_auto_sub_interview_isolates_parent_plugin_invocations(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"] is None
-    assert captured["error_type"] == "HandlerError"
-    assert "What should the first auto interview question clarify?" not in captured["error"]
+    # Sealed-envelope contract (#1537): the phantom tool request cannot
+    # execute (catalog emptied via ``tools=[]``), so the streamed question
+    # is salvaged instead of discarded. Isolation is enforced by the
+    # envelope assertions below, not by failing the question.
+    turn = captured["turn"]
+    assert turn is not None, captured.get("error")
+    assert turn.question == "What should the first auto interview question clarify?"
+    assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
     assert factory_kwargs["max_turns"] == 1
@@ -1991,9 +2017,11 @@ def test_auto_sub_interview_isolates_parent_hook_context(
     """Auto's nested interviewer must not inherit parent Claude hooks.
 
     Parent Claude sessions can attach hooks that run commands around tool and
-    prompt events.  The auto sub-interviewer must clear those hooks, suppress
-    hook event streaming, and fail closed if any hook-adjacent tool request is
-    still emitted before the single text question.
+    prompt events.  The auto sub-interviewer must clear those hooks and
+    suppress hook event streaming. A hook-adjacent tool request emitted
+    anyway is a phantom call (the sealed catalog cannot execute it) — the
+    streamed question is salvaged and the seal itself is asserted below
+    (#1537).
     """
     from ouroboros.providers import claude_code_adapter as adapter_mod
 
@@ -2124,9 +2152,14 @@ def test_auto_sub_interview_isolates_parent_hook_context(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"] is None
-    assert captured["error_type"] == "HandlerError"
-    assert "What should the first auto interview question clarify?" not in captured["error"]
+    # Sealed-envelope contract (#1537): the phantom tool request cannot
+    # execute (catalog emptied via ``tools=[]``), so the streamed question
+    # is salvaged instead of discarded. Isolation is enforced by the
+    # envelope assertions below, not by failing the question.
+    turn = captured["turn"]
+    assert turn is not None, captured.get("error")
+    assert turn.question == "What should the first auto interview question clarify?"
+    assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
     assert factory_kwargs["max_turns"] == 1

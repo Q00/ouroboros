@@ -2236,6 +2236,17 @@ class InterviewHandler:
             ),
             strict_mcp_config=True,
         )
+        # A sealed no-tools envelope must pair with the tool-less prompt
+        # variant: the full socratic-interviewer prompt advertises tool use,
+        # and a subprocess whose catalog is emptied (``--tools ""``) has
+        # nothing to answer that temptation with — tool-happy models then
+        # emit phantom tool calls that burn the single turn (#1537). Only
+        # applies when this handler constructed the sealed adapter itself;
+        # injected adapters (tests, custom wiring) keep the caller's mode.
+        suppress_question_tool_cues = self.suppress_tool_use_prompt_cues or (
+            self.llm_adapter is None
+            and backend_supports_tool_envelope(resolve_llm_backend(backend))
+        )
         # Build a per-call InterviewEngine when a real engine is supplied, to
         # avoid mutating shared engine state in place. Mutating a shared
         # engine's llm_adapter and suppress_tool_use_prompt_cues is race-prone:
@@ -2272,7 +2283,7 @@ class InterviewHandler:
                 llm_adapter=llm_adapter,
                 state_dir=template.state_dir,
                 model=template.model or get_llm_model_for_role("interview", backend=backend),
-                suppress_tool_use_prompt_cues=self.suppress_tool_use_prompt_cues,
+                suppress_tool_use_prompt_cues=suppress_question_tool_cues,
             )
             engine.temperature = template.temperature
             engine.max_tokens = template.max_tokens
@@ -2283,7 +2294,7 @@ class InterviewHandler:
                 llm_adapter=llm_adapter,
                 state_dir=self.data_dir or _DATA_DIR,
                 model=get_llm_model_for_role("interview", backend=backend),
-                suppress_tool_use_prompt_cues=self.suppress_tool_use_prompt_cues,
+                suppress_tool_use_prompt_cues=suppress_question_tool_cues,
             )
 
         _interview_id: str | None = None  # Track for error event emission

@@ -724,15 +724,16 @@ class TestJsonSchemaHandling:
         assert "Read" in options_call_kwargs["disallowed_tools"]
 
     @pytest.mark.asyncio
-    async def test_empty_allowed_tools_spy_fails_on_tool_use_block(
+    async def test_empty_allowed_tools_phantom_tool_use_salvages_streamed_text(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Spy regression: a no-tools request must fail on any ToolUseBlock.
+        """A phantom tool call under the sealed envelope must not discard text.
 
-        The ``ooo auto`` sub-interview path runs with ``max_turns=1`` and
-        ``allowed_tools=[]``.  If Claude emits a tool block anyway, accepting a
-        later text result would hide the turn-stealing leak this path is meant
-        to prevent.
+        With ``allowed_tools=[]`` the visible catalog is emptied via
+        ``tools=[]`` (``--tools ""``), so an emitted ToolUseBlock can never
+        execute — it is model noise (#1537), not an envelope leak. When a
+        usable final text still streams, surface it and keep the incident
+        observable through the ``raw_response`` marker instead of failing.
         """
         from ouroboros.providers import claude_code_adapter as adapter_mod
 
@@ -774,11 +775,174 @@ class TestJsonSchemaHandling:
         ):
             result = await adapter._execute_single_request("test prompt", config)
 
+        assert result.is_ok
+        assert result.value.content == "What is the primary user goal?"
+        assert result.value.raw_response["phantom_tool_use"] is True
+        assert result.value.raw_response["phantom_tool_name"] == "Read"
+
+    @pytest.mark.asyncio
+    async def test_empty_allowed_tools_phantom_tool_use_without_text_fails_loud(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-loud is preserved when a phantom tool call yields no text.
+
+        Salvage only applies when a usable final text streamed. A tool block
+        with no recoverable content must still surface the structured
+        ``ToolUseBlockViolation`` so the recovery/retry layer (and ultimately
+        the caller) sees the real failure instead of an empty success.
+        """
+        from ouroboros.providers import claude_code_adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod,
+            "_claude_options_field_names",
+            lambda: frozenset({"extra_args", "allowed_tools", "tools"}),
+        )
+
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6", max_turns=1)
+
+        class ToolUseBlock:
+            name = "Read"
+            input = {"file_path": "README.md"}
+
+        class AssistantMessage:
+            content = [ToolUseBlock()]
+
+        class ResultMessage:
+            structured_output = None
+            result = ""
+            is_error = False
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            yield AssistantMessage()
+            yield ResultMessage()
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
         assert result.is_err
         assert result.error.details["error_type"] == "ToolUseBlockViolation"
         assert result.error.details["tool_name"] == "Read"
         assert result.error.details["allowed_tools"] == []
         assert result.error.details["max_turns"] == 1
+
+    @pytest.mark.asyncio
+    async def test_phantom_tool_use_error_grants_one_recovery_with_no_tools_cue(self) -> None:
+        """The retry loop grants exactly one hardened retry for phantom failures.
+
+        First attempt fails with ``ToolUseBlockViolation`` under the sealed
+        envelope; the second attempt must carry the plain-text-only recovery
+        cue in its system prompt. A second phantom failure is terminal.
+        """
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6", max_turns=1)
+
+        phantom_error = ProviderError(
+            message="Claude Agent SDK emitted a ToolUseBlock despite allowed_tools=[]",
+            details={"error_type": "ToolUseBlockViolation", "tool_name": "Read"},
+        )
+        success = CompletionResponse(
+            content="What is the primary user goal?",
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            finish_reason="stop",
+            raw_response={},
+        )
+        seen_system_prompts: list[str | None] = []
+
+        async def fake_execute(prompt, cfg, system_prompt=None):
+            seen_system_prompts.append(system_prompt)
+            if len(seen_system_prompts) == 1:
+                return Result.err(phantom_error)
+            return Result.ok(success)
+
+        with patch.object(adapter, "_execute_single_request", side_effect=fake_execute):
+            result = await adapter._complete_with_transient_retry(
+                "test prompt", config, "Ask a Socratic question."
+            )
+
+        assert result.is_ok
+        assert len(seen_system_prompts) == 2
+        assert seen_system_prompts[0] == "Ask a Socratic question."
+        assert "Respond with plain text only" in (seen_system_prompts[1] or "")
+        assert seen_system_prompts[1].startswith("Ask a Socratic question.")
+
+    @pytest.mark.asyncio
+    async def test_phantom_recovery_not_granted_without_sealed_envelope(self) -> None:
+        """Phantom recovery is scoped to ``allowed_tools=[]`` adapters only.
+
+        For permissive adapters (``allowed_tools=None``) a tool-use max-turns
+        failure is a genuine turn-budget problem, not phantom noise, and must
+        not be masked by a hardened retry.
+        """
+        adapter = ClaudeCodeAdapter(allowed_tools=None)
+        config = CompletionConfig(model="claude-sonnet-4-6", max_turns=1)
+
+        max_turns_error = ProviderError(
+            message="Claude Code returned an error result: Reached maximum number of turns (1)",
+            details={"error_type": "Exception"},
+        )
+        calls: list[str | None] = []
+
+        async def fake_execute(prompt, cfg, system_prompt=None):
+            calls.append(system_prompt)
+            return Result.err(max_turns_error)
+
+        with patch.object(adapter, "_execute_single_request", side_effect=fake_execute):
+            result = await adapter._complete_with_transient_retry("test prompt", config, None)
+
+        assert result.is_err
+        assert len(calls) == 1
+        assert calls[0] is None
+
+    @pytest.mark.asyncio
+    async def test_phantom_recovery_covers_sdk_max_turns_exception_shape(self) -> None:
+        """#1537's observed failure shape triggers recovery under the seal.
+
+        The SDK surfaces the phantom-consumed turn as a bare exception
+        (``Claude Code returned an error result: ...``) rather than the spy's
+        structured violation; the sealed-envelope predicate must catch that
+        shape too.
+        """
+        adapter = ClaudeCodeAdapter(allowed_tools=[], strict_mcp_config=True)
+        config = CompletionConfig(model="claude-sonnet-4-6", max_turns=1)
+
+        sdk_error = ProviderError(
+            message="Claude Agent SDK request failed: Claude Code returned an error result: success",
+            details={"error_type": "Exception"},
+        )
+        success = CompletionResponse(
+            content="What is the primary user goal?",
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            finish_reason="stop",
+            raw_response={},
+        )
+        calls: list[str | None] = []
+
+        async def fake_execute(prompt, cfg, system_prompt=None):
+            calls.append(system_prompt)
+            if len(calls) == 1:
+                return Result.err(sdk_error)
+            return Result.ok(success)
+
+        with patch.object(adapter, "_execute_single_request", side_effect=fake_execute):
+            result = await adapter._complete_with_transient_retry("test prompt", config, None)
+
+        assert result.is_ok
+        assert len(calls) == 2
+        assert "Respond with plain text only" in (calls[1] or "")
 
     @pytest.mark.asyncio
     async def test_explicit_allowed_tools_sets_visible_sdk_tools(self) -> None:
