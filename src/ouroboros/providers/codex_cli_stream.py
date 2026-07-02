@@ -389,7 +389,52 @@ async def terminate_process(
         await asyncio.wait_for(process.wait(), timeout=shutdown_timeout)
 
 
+class RuntimeStreamMixin:
+    """Shared stream/process helpers for CLI-backed completion adapters."""
+
+    _provider_name: str
+    _process_shutdown_timeout_seconds: float
+
+    def _stream_line_reader(self) -> Callable[..., AsyncIterator[str]]:
+        return iter_stream_lines
+
+    def _stream_line_collector(self) -> Callable[..., Awaitable[list[str]]]:
+        return collect_stream_lines
+
+    def _process_terminator(self) -> Callable[..., Awaitable[None]]:
+        return terminate_process
+
+    def _stream_provider_name(self) -> str:
+        return self._provider_name
+
+    async def _iter_stream_lines(
+        self,
+        stream: asyncio.StreamReader | None,
+        *,
+        chunk_size: int = 16384,
+    ) -> AsyncIterator[str]:
+        async for line in self._stream_line_reader()(
+            stream,
+            chunk_size=chunk_size,
+            provider=self._stream_provider_name(),
+        ):
+            yield line
+
+    async def _collect_stream_lines(
+        self,
+        stream: asyncio.StreamReader | None,
+    ) -> list[str]:
+        return await self._stream_line_collector()(stream, provider=self._stream_provider_name())
+
+    async def _terminate_process(self, process: Any) -> None:
+        await self._process_terminator()(
+            process,
+            shutdown_timeout=self._process_shutdown_timeout_seconds,
+        )
+
+
 __all__ = [
+    "RuntimeStreamMixin",
     "collect_stream_lines",
     "iter_runtime_stream_lines",
     "iter_stream_lines",

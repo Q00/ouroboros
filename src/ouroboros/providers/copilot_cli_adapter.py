@@ -21,7 +21,7 @@ subprocess teardown. Differences from Codex:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 import contextlib
 import json
 import os
@@ -54,11 +54,7 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
-from ouroboros.providers.codex_cli_stream import (
-    collect_stream_lines,
-    iter_stream_lines,
-    terminate_process,
-)
+from ouroboros.providers.codex_cli_stream import RuntimeStreamMixin
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
@@ -139,7 +135,7 @@ _JSON_SCHEMA_DIRECTIVE_TEMPLATE = (
 )
 
 
-class CopilotCliLLMAdapter:
+class CopilotCliLLMAdapter(RuntimeStreamMixin):
     """LLM adapter backed by local GitHub Copilot CLI execution."""
 
     _provider_name = "copilot_cli"
@@ -567,29 +563,6 @@ class CopilotCliLLMAdapter:
                     continue
             content_lines.append(line)
         return "\n".join(content_lines or raw_json_content_lines)
-
-    # ------------------------------------------------------ stream/process io
-
-    async def _iter_stream_lines(
-        self,
-        stream: asyncio.StreamReader | None,
-        *,
-        chunk_size: int = 16384,
-    ) -> AsyncIterator[str]:
-        async for line in iter_stream_lines(stream, chunk_size=chunk_size, provider="copilot_cli"):
-            yield line
-
-    async def _collect_stream_lines(
-        self,
-        stream: asyncio.StreamReader | None,
-    ) -> list[str]:
-        return await collect_stream_lines(stream, provider="copilot_cli")
-
-    async def _terminate_process(self, process: Any) -> None:
-        await terminate_process(
-            process,
-            shutdown_timeout=self._process_shutdown_timeout_seconds,
-        )
 
     @staticmethod
     def _truncate_if_oversized(content: str, model: str) -> str:
