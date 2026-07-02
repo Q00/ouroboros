@@ -60,6 +60,12 @@ class RecoveryAction(StrEnum):
     ESCALATE_MODEL = "ESCALATE_MODEL"  # rerun on a higher model tier.
     REDISPATCH = "REDISPATCH"  # discard and split the AC again.
     ESCALATE_HUMAN = "ESCALATE_HUMAN"  # surface to the operator.
+    # Cross-harness recovery (PR-X): re-dispatch the SAME AC on a *different*
+    # runtime backend. Unlike ESCALATE_MODEL (higher tier, same runtime) or
+    # REDISPATCH (re-split, same runtime), this is the meta-harness move no
+    # single-vendor harness can make — it swaps the vendor, not the tier or the
+    # decomposition. Wired via the runtime picker + parallel-executor hook.
+    REDISPATCH_ALT_HARNESS = "REDISPATCH_ALT_HARNESS"
 
 
 @dataclass(frozen=True)
@@ -179,6 +185,63 @@ def _policy_for_retry_admission(
     return None
 
 
+_ALT_HARNESS_STALL_RATIONALE = (
+    "Same-runtime stall retries are exhausted; the failure looks runtime-specific "
+    "(the leaf keeps stalling on this backend), so hand the same AC to a different "
+    "harness before abandoning it."
+)
+_ALT_HARNESS_FABRICATION_RATIONALE = (
+    "This backend produced fabricated references; a different harness with different "
+    "grounding is more likely to succeed on the same AC than another same-runtime try."
+)
+_ALT_HARNESS_TRANSIENT_RATIONALE = (
+    "Provider transient retries (sustained 429/529) are exhausted on this backend; "
+    "a different harness sidesteps the overloaded provider entirely."
+)
+
+
+def alt_harness_policy(
+    failure: FailureClass | None,
+    *,
+    stall_retries_exhausted: bool = False,
+    transient_exhausted: bool = False,
+) -> RecoveryPolicy | None:
+    """Return a cross-harness redispatch policy when the failure warrants it.
+
+    This is the PR-X extension of the recovery vocabulary. It is intentionally a
+    *separate* decision layer rather than a mutation of :data:`_POLICY_TABLE`:
+    the class→policy table stays the canonical same-runtime routing (fabrication
+    still escalates the model tier on the same runtime by default), and this
+    function is consulted only at the terminal AC-failure site, once the
+    same-runtime recovery budget is spent.
+
+    ``REDISPATCH_ALT_HARNESS`` is returned for the three conditions PR-X targets:
+
+    * ``FABRICATION_SUSPECTED`` — a different harness's grounding may not fabricate.
+    * ``STALL`` once ``stall_retries_exhausted`` — the stall looks runtime-specific.
+    * ``transient_exhausted`` — sustained 429/529 after providers-retry gives up,
+      regardless of failure class, since another harness avoids that provider.
+
+    Returns ``None`` when none apply, so the caller keeps today's failure path.
+    """
+    if transient_exhausted:
+        return RecoveryPolicy(
+            action=RecoveryAction.REDISPATCH_ALT_HARNESS,
+            rationale=_ALT_HARNESS_TRANSIENT_RATIONALE,
+        )
+    if failure is FailureClass.FABRICATION_SUSPECTED:
+        return RecoveryPolicy(
+            action=RecoveryAction.REDISPATCH_ALT_HARNESS,
+            rationale=_ALT_HARNESS_FABRICATION_RATIONALE,
+        )
+    if failure is FailureClass.STALL and stall_retries_exhausted:
+        return RecoveryPolicy(
+            action=RecoveryAction.REDISPATCH_ALT_HARNESS,
+            rationale=_ALT_HARNESS_STALL_RATIONALE,
+        )
+    return None
+
+
 def classify(attempt: Attempt) -> FailureClass | None:
     """Classify a single Attempt from the verifier loop.
 
@@ -220,6 +283,7 @@ __all__ = [
     "FailureClass",
     "RecoveryAction",
     "RecoveryPolicy",
+    "alt_harness_policy",
     "classify",
     "policy_for",
     "policy_for_attempt",

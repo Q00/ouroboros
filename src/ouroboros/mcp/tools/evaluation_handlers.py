@@ -141,6 +141,34 @@ async def _resolve_evaluate_working_dir(
     return stable_base
 
 
+async def _resolve_executor_backend(store: EventStore | None, session_id: str) -> str | None:
+    """Best-effort: which runtime backend executed this session (PR-X X2).
+
+    Read from the ``execution.session.completed`` / ``.started`` lifecycle events,
+    whose payload carries ``runtime_backend`` per node. Lets formal evaluation
+    keep the executor's own vendor out of the reviewer jury. Any failure returns
+    ``None`` — evaluation then behaves exactly as before.
+    """
+    if store is None or not session_id:
+        return None
+    try:
+        for event_type in (
+            "execution.session.completed",
+            "execution.session.started",
+        ):
+            events = await store.query_session_related_events(
+                session_id, event_type=event_type, limit=50
+            )
+            for event in events:
+                data = event.data if isinstance(event.data, dict) else {}
+                backend = data.get("runtime_backend")
+                if isinstance(backend, str) and backend.strip():
+                    return backend.strip()
+    except Exception:
+        return None
+    return None
+
+
 def _evaluation_allowed_tools(runtime_backend: str | None) -> list[str]:
     """Return the policy-derived read-only tool envelope for evaluation."""
     return allowed_runtime_builtin_tool_names(
@@ -585,6 +613,11 @@ class EvaluateHandler:
                 except Exception:
                     pass  # Best-effort enrichment
 
+            # PR-X X2: resolve which runtime backend executed this session so
+            # consensus can keep that vendor out of the reviewer jury. Best-effort
+            # — None leaves today's behavior untouched.
+            executor_backend = await _resolve_executor_backend(store, session_id)
+
             # Derive current_ac from the unified acceptance_criteria tuple.
             # The tuple already incorporates both the plural and singular params,
             # so we only need to index or fall back to a default.
@@ -685,6 +718,7 @@ class EvaluateHandler:
                     artifact_bundle=artifact_bundle,
                     pipeline=pipeline,
                     working_dir=working_dir,
+                    executor_backend=executor_backend,
                 )
 
             context = EvaluationContext(
@@ -697,6 +731,7 @@ class EvaluateHandler:
                 constraints=constraints,
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
+                executor_backend=executor_backend,
             )
             result = await pipeline.evaluate(context)
 
@@ -793,6 +828,7 @@ class EvaluateHandler:
         artifact_bundle: object | None,
         pipeline: object,  # EvaluationPipeline — typed as object to avoid import cycle
         working_dir: Path,
+        executor_backend: str | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
@@ -834,6 +870,7 @@ class EvaluateHandler:
             constraints=constraints,
             trigger_consensus=trigger_consensus,
             artifact_bundle=artifact_bundle,
+            executor_backend=executor_backend,
         )
         first_result = await pipeline.evaluate(first_context)  # type: ignore[attr-defined]
         if first_result.is_err:
@@ -861,6 +898,7 @@ class EvaluateHandler:
                 constraints=constraints,
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
+                executor_backend=executor_backend,
             )
             return await pipeline.evaluate(  # type: ignore[attr-defined]
                 context,

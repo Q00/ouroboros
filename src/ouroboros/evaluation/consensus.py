@@ -324,6 +324,25 @@ class ConsensusEvaluator:
         assert self._config.models is not None
         models = list(self._config.models)
 
+        # PR-X X2: keep the executor's own vendor out of the jury when an
+        # independent alternative is actually configured. A no-op when the
+        # executor backend is unknown or only one vendor is installed.
+        reviewer_independence: str | None = None
+        if context.executor_backend:
+            from ouroboros.evaluation.reviewer_independence import (
+                resolve_reviewer_independence,
+            )
+            from ouroboros.orchestrator.runtime_picker import available_runtime_backends
+
+            independence = resolve_reviewer_independence(
+                context.executor_backend,
+                models,
+                available_runtime_backends(),
+            )
+            reviewer_independence = independence.status
+            if independence.filtered_voters:
+                models = list(independence.filtered_voters)
+
         events.append(
             create_stage3_started_event(
                 execution_id=context.execution_id,
@@ -360,7 +379,13 @@ class ConsensusEvaluator:
                 )
             )
 
-        return self._build_consensus(context, votes, events, is_single_model=False)
+        return self._build_consensus(
+            context,
+            votes,
+            events,
+            is_single_model=False,
+            reviewer_independence=reviewer_independence,
+        )
 
     async def _evaluate_single_model(
         self,
@@ -411,7 +436,17 @@ class ConsensusEvaluator:
                 )
             )
 
-        return self._build_consensus(context, votes, events, is_single_model=True)
+        # Single-model perspectives are the same vendor by construction, so there
+        # is no independent reviewer to claim (PR-X X2).
+        from ouroboros.evaluation.reviewer_independence import UNAVAILABLE
+
+        return self._build_consensus(
+            context,
+            votes,
+            events,
+            is_single_model=True,
+            reviewer_independence=UNAVAILABLE,
+        )
 
     async def _get_perspective_vote(
         self,
@@ -464,6 +499,7 @@ class ConsensusEvaluator:
         events: list[BaseEvent],
         *,
         is_single_model: bool,
+        reviewer_independence: str | None = None,
     ) -> Result[tuple[ConsensusResult, list[BaseEvent]], ProviderError | ValidationError]:
         """Build ConsensusResult from collected votes."""
         approving = sum(1 for v in votes if v.approved)
@@ -477,6 +513,7 @@ class ConsensusEvaluator:
             majority_ratio=majority_ratio,
             disagreements=disagreements,
             is_single_model=is_single_model,
+            reviewer_independence=reviewer_independence,
         )
 
         events.append(

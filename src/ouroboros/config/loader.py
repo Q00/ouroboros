@@ -763,6 +763,51 @@ def get_native_session_index_enabled() -> bool:
     )
 
 
+def _env_flag(name: str) -> bool | None:
+    """Parse a boolean env override; None when unset so config can decide."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    if raw in ("0", "false", "off", "no"):
+        return False
+    return None
+
+
+def get_cross_harness_redispatch_enabled() -> bool:
+    """Whether a terminally failing AC may redispatch onto an alternative harness.
+
+    Priority:
+        1. OUROBOROS_CROSS_HARNESS_REDISPATCH environment variable
+        2. config.yaml execution.cross_harness_redispatch
+        3. True (default: meta-harness recovery is on, but a no-op unless a
+           second runtime backend is actually installed)
+    """
+    env = _env_flag("OUROBOROS_CROSS_HARNESS_REDISPATCH")
+    if env is not None:
+        return env
+    try:
+        return load_config().execution.cross_harness_redispatch
+    except ConfigError:
+        return True
+
+
+def get_n_version_tournament_enabled() -> bool:
+    """Whether an alt-harness-exhausted AC may fan out to an N-version tournament.
+
+    Priority:
+        1. OUROBOROS_N_VERSION_TOURNAMENT environment variable
+        2. config.yaml execution.n_version_tournament
+        3. False (default: opt-in only)
+    """
+    env = _env_flag("OUROBOROS_N_VERSION_TOURNAMENT")
+    if env is not None:
+        return env
+    try:
+        return load_config().execution.n_version_tournament
+    except ConfigError:
+        return False
+
+
 def _uses_opencode_backend(backend: str | None) -> bool:
     """Return True when a backend name resolves to an OpenCode runtime."""
     return (backend or "").strip().lower() in _OPENCODE_BACKENDS

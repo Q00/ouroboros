@@ -210,6 +210,12 @@ class ExecutionConfig(BaseModel, frozen=True):
         verify_command_timeout_seconds: Timeout for an AC verify command.
         ac_retry_attempts: How many times a failed AC is re-dispatched before
             it is marked FAILED (per-AC, excludes stall retries).
+        cross_harness_redispatch: Whether a terminally failing AC may be
+            re-dispatched once onto a different (installed, capable) runtime
+            backend before being marked FAILED (PR-X cross-harness recovery).
+        n_version_tournament: Whether an AC that has already exhausted its
+            alt-harness redispatch may fan out to multiple runtimes in parallel,
+            first-passing-verification wins (PR-X N-version tournament, opt-in).
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -219,6 +225,8 @@ class ExecutionConfig(BaseModel, frozen=True):
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
     ac_retry_attempts: int = Field(default=2, ge=0)
+    cross_harness_redispatch: bool = True
+    n_version_tournament: bool = False
 
 
 class ResilienceConfig(BaseModel, frozen=True):
