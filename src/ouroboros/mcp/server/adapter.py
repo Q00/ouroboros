@@ -1356,6 +1356,17 @@ def create_ouroboros_server(
     evaluation_llm_adapter = shared_stage_llm_adapter(evaluate_llm_backend)
     reflect_llm_adapter = shared_stage_llm_adapter(reflect_llm_backend)
 
+    # The shared interview adapter above is catalog-sealed for
+    # envelope-capable backends (``allowed_tools=[]`` → ``--tools ""``), so
+    # everything it is injected into must pair it with the tool-less prompt
+    # variant: the full socratic-interviewer prompt advertises tool use the
+    # subprocess cannot answer, which tempts phantom tool calls (#1537).
+    # The gate inside ``InterviewHandler`` only covers adapters the handler
+    # constructs itself — injected adapters need this wiring here.
+    interview_envelope_sealed = backend_supports_tool_envelope(
+        resolve_llm_backend(interview_llm_backend)
+    )
+
     # Create or use provided EventStore
     if event_store is None:
         from ouroboros.persistence.event_store import EventStore
@@ -1373,6 +1384,7 @@ def create_ouroboros_server(
         llm_adapter=llm_adapter,
         state_dir=state_dir_path,
         model=get_llm_model_for_role("interview", backend=interview_llm_backend),
+        suppress_tool_use_prompt_cues=interview_envelope_sealed,
     )
 
     seed_generator = SeedGenerator(
@@ -1823,6 +1835,7 @@ def create_ouroboros_server(
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
+        suppress_tool_use_prompt_cues=interview_envelope_sealed,
     )
     generate_seed = GenerateSeedHandler(
         event_store=event_store,
@@ -1904,6 +1917,7 @@ def create_ouroboros_server(
             llm_backend=interview_llm_backend,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
+            suppress_tool_use_prompt_cues=interview_envelope_sealed,
         ),
         PMInterviewHandler(
             data_dir=state_dir_path,
