@@ -199,20 +199,6 @@ def _resolve_raw_metadata_project_dir(
     return resolved
 
 
-def _resolve_brownfield_target_dir(seed_data: dict[str, Any]) -> Path | None:
-    """Return an existing brownfield target_dir from raw seed data, if present."""
-    brownfield_context = seed_data.get("brownfield_context")
-    if not isinstance(brownfield_context, dict):
-        return None
-
-    raw_target_dir = brownfield_context.get("target_dir")
-    if not isinstance(raw_target_dir, str) or not raw_target_dir.strip():
-        return None
-
-    target_dir = Path(raw_target_dir).expanduser().resolve()
-    return target_dir if target_dir.is_dir() else None
-
-
 def _directory_for_runtime(path: Path) -> Path:
     """Normalize a resolved project candidate into a runtime cwd."""
     return path.parent if path.is_file() else path
@@ -280,8 +266,7 @@ def _resolve_cli_project_dir(
     if metadata_project_dir is not None:
         return _directory_for_runtime(metadata_project_dir)
 
-    target_dir = _resolve_brownfield_target_dir(seed_data)
-    stable_base = target_dir or seed_base
+    stable_base = seed_base
     resolution = resolve_seed_project_path(seed, stable_base=stable_base)
     if resolution.rejected:
         print_error(
@@ -291,7 +276,7 @@ def _resolve_cli_project_dir(
             "with --project-dir pointing at the target project."
         )
         raise typer.Exit(1)
-    if detected_root is not None and target_dir is None:
+    if detected_root is not None:
         # Central seed: the detected root *is* the project root.
         # context_references are documentation pointers — collapsing an
         # existing-file reference (e.g. ``src/.../foo.py``) to its parent
