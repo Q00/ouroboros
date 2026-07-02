@@ -421,33 +421,28 @@ def _load_skip_completed_markers(
 def _resolve_fat_harness_mode(seed_data: dict[str, Any]) -> bool:
     """Resolve the fresh-run fat-harness selector.
 
-    Fat-harness acceptance is opt-in until the shipped authoring/QA pipeline can
-    reliably produce profile-compatible typed evidence for every AC. Seeds that
-    request ``seed.orchestrator.execution_mode: fat_harness`` keep the stricter
-    verifier-gated path; missing/blank selectors use the legacy runner.
+    Verify-by-default: ``ooo run`` enforces typed evidence plus a verifier PASS
+    at AC acceptance unless the seed explicitly opts out with
+    ``seed.orchestrator.execution_mode: legacy``. Missing/blank selectors and an
+    explicit ``fat_harness`` selector both enable the stricter path.
     """
     orchestrator_config = seed_data.get("orchestrator")
     if not isinstance(orchestrator_config, dict):
-        return False
+        return True
 
     execution_mode = orchestrator_config.get("execution_mode")
+    if execution_mode in (None, "", "fat_harness"):
+        return True
     if execution_mode == "legacy":
-        print_error(
-            "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
-            "omit the selector for the default runner or set execution_mode='fat_harness' "
-            "to opt in to typed evidence plus verifier PASS acceptance."
-        )
-        raise typer.Exit(1)
-    if execution_mode in (None, ""):
+        # Explicit opt-out of verify-by-default: fall back to the self-report
+        # runner. This is the supported escape hatch, not an error.
         return False
-    if execution_mode != "fat_harness":
-        print_error(
-            "seed.orchestrator.execution_mode must be 'fat_harness' when set "
-            f"(got {execution_mode!r})."
-        )
-        raise typer.Exit(1)
 
-    return True
+    print_error(
+        "seed.orchestrator.execution_mode must be 'fat_harness' or 'legacy' when set "
+        f"(got {execution_mode!r})."
+    )
+    raise typer.Exit(1)
 
 
 def _resolve_resume_fat_harness_mode(
@@ -456,19 +451,19 @@ def _resolve_resume_fat_harness_mode(
 ) -> bool:
     """Resolve resume acceptance mode from persisted contract with safe migration.
 
-    New sessions persist ``fat_harness_mode`` at prepare time. Historical
-    sessions may not have that field, so only an explicit ``fat_harness``
-    selector resumes with verifier-gated typed-evidence enforcement;
-    unknown/missing state falls back to the default runner.
+    New sessions persist ``fat_harness_mode`` at prepare time and that durable
+    value always wins. Sessions without a persisted contract resume with
+    verify-by-default enabled unless the seed explicitly opts out with
+    ``execution_mode: legacy``.
     """
     persisted = progress.get("fat_harness_mode")
     if isinstance(persisted, bool):
         return persisted
 
     orchestrator_config = seed_data.get("orchestrator")
-    return (
+    return not (
         isinstance(orchestrator_config, dict)
-        and orchestrator_config.get("execution_mode") == "fat_harness"
+        and orchestrator_config.get("execution_mode") == "legacy"
     )
 
 
