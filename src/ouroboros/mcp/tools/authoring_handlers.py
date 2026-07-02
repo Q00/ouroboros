@@ -17,7 +17,10 @@ import structlog
 import yaml
 
 from ouroboros.auto.intent_guard import IntentGuardReport, IntentGuardStatus, guard_interview_turn
-from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.backends import (
+    backend_supports_tool_envelope,
+    build_runtime_subagent_orchestration_contract,
+)
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     AUTO_COMPLETE_STREAK_REQUIRED,
@@ -506,6 +509,7 @@ def _build_interview_lateral_review_orchestration(
             "panel_id": str(panel.get("panel_id") or "lateral_persona_panel.v1"),
             "mcp_tool": mcp_tool,
             "dispatch_modes": list(panel.get("dispatch_modes", [])),
+            "legacy_dispatch_modes": list(panel.get("legacy_dispatch_modes", [])),
             "parallel_preference": str(
                 panel.get("parallel_preference") or "parallel_when_runtime_supports_subagents"
             ),
@@ -699,6 +703,8 @@ def _attach_question_assist_requests(
     score: AmbiguityScore | None,
     last_question: str | None = None,
     dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
 ) -> None:
     """Attach code-fact and advisory fanout requests for a question turn.
 
@@ -735,11 +741,30 @@ def _attach_question_assist_requests(
         return
     meta["question_advisory_subagents"] = [payload.to_dict() for payload in advisory_payloads]
     meta["question_advisory_preserve_content"] = True
+    contract_backend = runtime_backend
+    if not contract_backend:
+        contract_backend = (
+            "codex"
+            if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN
+            else "opencode"
+            if dispatch_mode is SubagentDispatchMode.PLUGIN_PASSIVE
+            else "gemini"
+        )
+    contract = build_runtime_subagent_orchestration_contract(
+        contract_backend,
+        directive_metadata=advisory_request,
+        opencode_mode=opencode_mode,
+    )
+    meta["subagent_orchestration_instruction"] = contract.runtime_instruction_handling
     if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
         meta["question_advisory_dispatch_mode"] = "host_driven"
         meta["question_advisory_host_action"] = "spawn_subagents"
         # Advisory lanes are keyed by lane_id; their persona is absent on some
         # lanes (code_context, web_context), so correlate by lane_id, not persona.
+        meta["question_advisory_result_correlation_key"] = "context.lane_id"
+    elif dispatch_mode is SubagentDispatchMode.SEQUENTIAL:
+        meta["question_advisory_dispatch_mode"] = "sequential"
+        meta["question_advisory_host_action"] = "process_payloads_sequentially"
         meta["question_advisory_result_correlation_key"] = "context.lane_id"
 
 
@@ -2526,6 +2551,8 @@ class InterviewHandler:
                         dispatch_mode=resolve_subagent_dispatch(
                             self.agent_runtime_backend, self.opencode_mode
                         ),
+                        runtime_backend=self.agent_runtime_backend,
+                        opencode_mode=self.opencode_mode,
                     )
 
                 start_response_text = (
@@ -2621,6 +2648,8 @@ class InterviewHandler:
                             dispatch_mode=resolve_subagent_dispatch(
                                 self.agent_runtime_backend, self.opencode_mode
                             ),
+                            runtime_backend=self.agent_runtime_backend,
+                            opencode_mode=self.opencode_mode,
                         )
 
                     resume_response_text = f"Session {session_id}\n\n{display_question}"
@@ -3173,6 +3202,8 @@ class InterviewHandler:
                         dispatch_mode=resolve_subagent_dispatch(
                             self.agent_runtime_backend, self.opencode_mode
                         ),
+                        runtime_backend=self.agent_runtime_backend,
+                        opencode_mode=self.opencode_mode,
                     )
 
                 if lateral_review_dispatch_meta is not None:

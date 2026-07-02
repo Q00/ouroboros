@@ -16,6 +16,7 @@ from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
+from ouroboros.backends import build_runtime_subagent_orchestration_contract
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
@@ -1307,7 +1308,8 @@ class LateralThinkHandler(BridgeAwareMixin):
       ``dispatch_mode=host_driven`` / ``host_action=spawn_subagents`` so the
       host fans out via its native primitive.
     - ``SEQUENTIAL`` (subprocess / runtimes without a parallel primitive): fall
-      back to a plain inline multi-persona ``inline_fallback`` text response.
+      back to a plain inline multi-persona ``sequential`` text response
+      (`inline_fallback` is preserved as a legacy alias in metadata).
 
     Attributes:
         agent_runtime_backend: Configured runtime (e.g. ``"opencode"``).
@@ -1464,6 +1466,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                 SubagentDispatchMode,
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
+                lateral_persona_panel_metadata_from_capability_definitions,
                 resolve_subagent_dispatch,
             )
 
@@ -1539,7 +1542,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                     },
                 )
 
-            # --- Inline fallback: concatenate persona prompts ---
+            # --- Inline/sequential fallback: concatenate persona prompts ---
             thinker = LateralThinker()
             sections: list[str] = []
             for p_str in personas_list:
@@ -1586,25 +1589,33 @@ class LateralThinkHandler(BridgeAwareMixin):
             #   2. Base64 has no significant whitespace, so line wrapping
             #      and trimming can't corrupt the encoded body.
             # HOST_DRIVEN runtimes (e.g. Codex) have no passive bridge but can
-            # spawn subagents themselves. Stamp the response with an explicit
-            # ``dispatch_mode=host_driven`` / ``host_action=spawn_subagents``
-            # signal — in structured ``meta`` (primary) and a visible banner
-            # (so meta-dropping transports still get a deterministic cue) — so
-            # the host's capability guide fans out instead of reading inline.
-            # SEQUENTIAL runtimes keep the byte-identical ``inline_fallback``
-            # output they emitted before.
+            # spawn subagents themselves. SEQUENTIAL runtimes now get the same
+            # machine-readable contract vocabulary, while preserving
+            # ``inline_fallback`` as a legacy alias for older skill prose.
             host_driven = dispatch is SubagentDispatchMode.HOST_DRIVEN
-            dispatch_mode_value = "host_driven" if host_driven else "inline_fallback"
+            dispatch_mode_value = "host_driven" if host_driven else "sequential"
             payload_dicts = [p.to_dict() for p in payloads]
+            panel_metadata = lateral_persona_panel_metadata_from_capability_definitions()
+            contract_backend = self.agent_runtime_backend
+            if not contract_backend:
+                contract_backend = "codex" if host_driven else "gemini"
+            contract = build_runtime_subagent_orchestration_contract(
+                contract_backend,
+                directive_metadata=panel_metadata,
+                opencode_mode=self.opencode_mode,
+            )
             dispatch_record: dict[str, Any] = {
                 "dispatch_mode": dispatch_mode_value,
                 "persona_count": len(sections),
                 "payloads": payload_dicts,
+                "result_correlation_key": "context.persona",
+                "subagent_orchestration_instruction": contract.runtime_instruction_handling,
             }
             if host_driven:
                 dispatch_record["host_action"] = "spawn_subagents"
-                # Lateral payloads are keyed by persona (always set, one per lane).
-                dispatch_record["result_correlation_key"] = "context.persona"
+            else:
+                dispatch_record["host_action"] = "process_payloads_sequentially"
+                dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (

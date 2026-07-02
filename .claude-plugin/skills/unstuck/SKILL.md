@@ -110,7 +110,7 @@ Two pieces matter:
 Decoded, the body is JSON:
 
 ```json
-{"dispatch_mode": "inline_fallback", "persona_count": N, "payloads": [...]}
+{"dispatch_mode": "sequential", "legacy_dispatch_mode": "inline_fallback", "persona_count": N, "payloads": [...]}
 ```
 
 To recover: locate the substring between `<!-- ouroboros-lateral-inline-dispatch-v1 base64\n` and `\n-->` at the end of `content`, base64-decode it, then `JSON.parse`. (See `tests/unit/mcp/tools/test_lateral_think_handler.py::_extract_inline_dispatch` for the canonical extraction helper.)
@@ -134,7 +134,7 @@ If you expected plugin mode but the response is inline text (neither `_subagent`
 The handler ran the prompt builder internally and returned ready-to-use markdown:
 
 - Solo response: a single `# Lateral Thinking: <approach>` block followed by the reframing prompt.
-- Debate response (`dispatch_mode = "inline_fallback"`): N such blocks concatenated with `\n\n---\n\n` separators.
+- Debate response (`dispatch_mode = "sequential"`; `legacy_dispatch_mode = "inline_fallback"` may also be present): N such blocks concatenated with `\n\n---\n\n` separators.
 
 ##### Solo (any runtime)
 
@@ -158,6 +158,14 @@ Driving fan-out from this dispatch block — instead of from the joined human-di
 4. Wait for all N to return.
 5. (Optional) **Round 2 cross-attack** — only if Round 1 answers diverge meaningfully. Dispatch a second N-fan-out where each persona receives short summaries of the other answers and is asked: "Identify one weakness in each. ≤200 words." Skip if Round 1 already converges.
 6. Synthesize per the **Synthesize** block below.
+
+##### Debate, constrained runtime without sub-agent dispatch
+
+If the response is stamped with `dispatch_mode="sequential"` and the host has no
+native parallel primitive, process each payload in order. Correlate every result
+by `result_correlation_key` (normally `context.persona`), then synthesize after
+the last payload. Treat `legacy_dispatch_mode="inline_fallback"` as compatibility
+metadata only; do not use it to override the canonical sequential contract.
 
 ##### Debate, runtime cannot dispatch sub-agents (constrained subprocess, no Task surface)
 

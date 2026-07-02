@@ -307,10 +307,24 @@ _GENERIC_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
         name="restate_goal",
         guidance="Restate the goal and require explicit approval before irreversible workflow transitions such as seed generation.",
     ),
+    SkillExecutionCapability(
+        name="orchestrate_subagents",
+        guidance=(
+            "Process each payload in order. Correlate results by the key named "
+            "in `result_correlation_key`. Synthesize after the last payload."
+        ),
+    ),
+)
+_GENERIC_SKILL_EXECUTION_CAPABILITIES_WITHOUT_SUBAGENTS: tuple[SkillExecutionCapability, ...] = (
+    tuple(
+        capability
+        for capability in _GENERIC_SKILL_EXECUTION_CAPABILITIES
+        if capability.name != "orchestrate_subagents"
+    )
 )
 
 _CLAUDE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
-    *_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    *_GENERIC_SKILL_EXECUTION_CAPABILITIES_WITHOUT_SUBAGENTS,
     SkillExecutionCapability(
         name="orchestrate_subagents",
         guidance=(
@@ -329,7 +343,7 @@ _CLAUDE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
 )
 
 _OPENCODE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
-    *_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+    *_GENERIC_SKILL_EXECUTION_CAPABILITIES_WITHOUT_SUBAGENTS,
     SkillExecutionCapability(
         name="orchestrate_subagents",
         guidance=(
@@ -466,6 +480,7 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_name="goose",
         cli_config_key="goose_cli_path",
         soft_tool_enforcement=True,
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
     ),
     BackendCapability(
         name="pi",
@@ -647,10 +662,10 @@ def build_runtime_subagent_orchestration_contract(
     determines whether native parallel subagent dispatch can be used or whether
     the declared sequential fallback must be followed.
     """
-    capability = get_backend_capability(name)
+    normalized_name = name.strip().lower()
+    capability = get_backend_capability(normalized_name)
     if capability is None:
-        msg = f"Unsupported backend: {name.strip().lower()}"
-        raise ValueError(msg)
+        capability = BackendCapability(name=normalized_name or "unknown")
 
     sequential_fallback = directive_metadata.get("sequential_fallback", {})
     if not isinstance(sequential_fallback, Mapping):

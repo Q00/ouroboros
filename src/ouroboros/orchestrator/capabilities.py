@@ -153,6 +153,7 @@ class LateralPersonaPanelMetadata:
     request_model_schema: Mapping[str, Any]
     response_payload_refs: Mapping[str, Any]
     runtime_instruction: str
+    legacy_dispatch_modes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-safe capability metadata."""
@@ -160,6 +161,7 @@ class LateralPersonaPanelMetadata:
             "panel_id": self.panel_id,
             "mcp_tool": self.mcp_tool,
             "dispatch_modes": list(self.dispatch_modes),
+            "legacy_dispatch_modes": list(self.legacy_dispatch_modes),
             "parallel_preference": self.parallel_preference,
             "sequential_fallback": dict(self.sequential_fallback),
             "personas": [persona.to_dict() for persona in self.personas],
@@ -2752,7 +2754,8 @@ def _lateral_persona_panel_metadata() -> LateralPersonaPanelMetadata:
     return LateralPersonaPanelMetadata(
         panel_id="lateral_persona_panel.v1",
         mcp_tool="ouroboros_lateral_think",
-        dispatch_modes=("plugin", "inline_fallback"),
+        dispatch_modes=("plugin", "sequential"),
+        legacy_dispatch_modes=("inline_fallback",),
         parallel_preference="parallel_when_runtime_supports_subagents",
         sequential_fallback={
             "supported": True,
@@ -2789,10 +2792,11 @@ def _lateral_persona_panel_metadata() -> LateralPersonaPanelMetadata:
         },
         runtime_instruction=(
             "Call ouroboros_lateral_think first. If the response delegates via "
-            "_subagents, consume those payloads. If it returns inline_fallback "
-            "and the runtime has a native subagent primitive, dispatch each "
-            "structured payload by context.persona; otherwise process those "
-            "payloads sequentially."
+            "_subagents, consume those payloads. If it returns sequential "
+            "payload metadata and the runtime has a native subagent primitive, "
+            "dispatch each structured payload by context.persona; otherwise "
+            "process those payloads sequentially. Treat inline_fallback as a "
+            "legacy alias for sequential."
         ),
     )
 

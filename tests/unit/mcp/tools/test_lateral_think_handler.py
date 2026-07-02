@@ -404,7 +404,7 @@ async def test_inline_lateral_content_converts_to_sequential_persona_panel_entri
     assert panel["execution_mode"] == "sequential_persona_payload_dispatch"
     assert panel["requires_prose_parsing"] is False
     assert [entry["persona_id"] for entry in entries] == ["researcher", "simplifier"]
-    assert {entry["dispatch_mode"] for entry in entries} == {"inline_fallback"}
+    assert {entry["dispatch_mode"] for entry in entries} == {"sequential"}
     assert {entry["response_payload_source"] for entry in entries} == {"inline_content"}
     assert {entry["execution_mode"] for entry in entries} == {"sequential_persona_payload_dispatch"}
     assert all(entry["sequential_fallback_used"] is True for entry in entries)
@@ -685,7 +685,10 @@ async def test_multi_persona_subprocess_mode_falls_back_inline() -> None:
     assert payload.meta is not None
     # No envelope in the subprocess fallback path.
     assert "_subagents" not in (payload.meta or {})
-    assert payload.meta.get("dispatch_mode") == "inline_fallback"
+    assert payload.meta.get("dispatch_mode") == "sequential"
+    assert payload.meta.get("legacy_dispatch_mode") == "inline_fallback"
+    assert payload.meta.get("host_action") == "process_payloads_sequentially"
+    assert payload.meta.get("result_correlation_key") == "context.persona"
     assert payload.meta.get("persona_count") == 2
     text = payload.content[0].text
     # Each persona section is separated by the canonical delimiter.
@@ -712,7 +715,10 @@ async def test_multi_persona_non_opencode_runtime_falls_back_inline() -> None:
     assert result.is_ok, result
     payload = result.unwrap()
     assert "_subagents" not in (payload.meta or {})
-    assert payload.meta.get("dispatch_mode") == "inline_fallback"
+    assert payload.meta.get("dispatch_mode") == "sequential"
+    assert payload.meta.get("legacy_dispatch_mode") == "inline_fallback"
+    assert payload.meta.get("host_action") == "process_payloads_sequentially"
+    assert payload.meta.get("result_correlation_key") == "context.persona"
     # persona='all' expands to every ThinkingPersona (5).
     assert payload.meta.get("persona_count") == 5
 
@@ -802,7 +808,8 @@ async def test_personas_list_takes_precedence_over_blank_persona() -> None:
 
     assert result.is_ok, result
     payload = result.unwrap()
-    assert payload.meta.get("dispatch_mode") == "inline_fallback"
+    assert payload.meta.get("dispatch_mode") == "sequential"
+    assert payload.meta.get("legacy_dispatch_mode") == "inline_fallback"
     assert payload.meta.get("persona_count") == 2
 
 
@@ -891,7 +898,7 @@ def _extract_inline_dispatch(content_text: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_inline_fallback_carries_dispatch_block_in_content() -> None:
+async def test_sequential_dispatch_carries_dispatch_block_in_content() -> None:
     """Non-plugin debate response embeds canonical payloads in ``content``."""
     handler = LateralThinkHandler(
         agent_runtime_backend="gemini",
@@ -917,7 +924,10 @@ async def test_inline_fallback_carries_dispatch_block_in_content() -> None:
     # The dispatch block survives transport and decodes to canonical
     # structured payloads (one per requested persona).
     dispatch = _extract_inline_dispatch(text)
-    assert dispatch["dispatch_mode"] == "inline_fallback"
+    assert dispatch["dispatch_mode"] == "sequential"
+    assert dispatch["legacy_dispatch_mode"] == "inline_fallback"
+    assert dispatch["host_action"] == "process_payloads_sequentially"
+    assert dispatch["result_correlation_key"] == "context.persona"
     assert dispatch["persona_count"] == 2
     payloads = dispatch["payloads"]
     assert len(payloads) == 2
@@ -934,7 +944,7 @@ async def test_inline_fallback_carries_dispatch_block_in_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inline_fallback_dispatch_survives_html_close_in_user_context() -> None:
+async def test_sequential_dispatch_survives_html_close_in_user_context() -> None:
     """User context containing ``-->`` cannot prematurely close the comment.
 
     The dispatch JSON is base64-encoded inside the HTML comment exactly so
@@ -985,7 +995,8 @@ async def test_inline_fallback_dispatch_survives_html_close_in_user_context() ->
     # adversarial `problem_context`/`current_approach` verbatim — no
     # corruption from the encoding round-trip.
     dispatch = _extract_inline_dispatch(text)
-    assert dispatch["dispatch_mode"] == "inline_fallback"
+    assert dispatch["dispatch_mode"] == "sequential"
+    assert dispatch["legacy_dispatch_mode"] == "inline_fallback"
     assert dispatch["persona_count"] == 2
     for persona_payload in dispatch["payloads"]:
         ctx = persona_payload["context"]

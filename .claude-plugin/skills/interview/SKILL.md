@@ -172,14 +172,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    parent-session assist layer. The advisory exists to help the human answer;
    it must not hide, replace, or delay the question itself.
 
-   Run the advisory lanes in parallel using your host's native subagent
-   mechanism. In Claude Code that mechanism is the **Task/Agent tool** — spawn
-   one subagent per lane in a single batch so they run concurrently. In Codex,
-   explicitly start a native subagent workflow in natural language: spawn one
-   Codex subagent per lane, pass that lane's payload prompt, wait for all
-   agents, then synthesize. Only fall back to the request's
-   `sequential_fallback` semantics when the host has no subagent mechanism at
-   all. The standard lanes are:
+   Run the advisory lanes through your runtime's native subagent mechanism when
+   one exists. For Claude Code this is the Task/Agent tool; for Codex, explicitly
+   start a native subagent workflow in natural language. Spawn one subagent per
+   lane, pass that lane's payload prompt, wait for all agents, then synthesize.
+   If the runtime has no parallel primitive, process payloads sequentially per
+   `dispatch_mode="sequential"` and the request's `sequential_fallback`
+   semantics. The standard lanes are:
    - `code_context` — inspect repo-local facts and reuse
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
@@ -200,7 +199,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    and `context`, and dispatch every payload through your host's native subagent
    mechanism (Claude Code → one Task/Agent call per payload in one parallel
    batch; Codex → explicitly spawn one Codex subagent per payload, wait for all
-   results, then synthesize) instead of reconstructing prompts from prose. This
+   results, then synthesize; runtimes without a parallel primitive → process
+   payloads sequentially per `dispatch_mode="sequential"`) instead of
+   reconstructing prompts from prose. This
    is required regardless of dispatch mode: the payloads themselves are the
    spawn signal.
    Treat `meta.question_advisory_host_action=spawn_subagents`, when present, as

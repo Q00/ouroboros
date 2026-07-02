@@ -8,9 +8,11 @@ from ouroboros.core.types import Result
 from ouroboros.events.interview import interview_lateral_review_recommended
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
+    _attach_question_assist_requests,
     _build_interview_lateral_review_orchestration,
     _maybe_record_lateral_review_advisory,
 )
+from ouroboros.mcp.tools.subagent import SubagentDispatchMode
 
 
 def _score(value: float) -> AmbiguityScore:
@@ -208,7 +210,8 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     panel = orchestration["panel"]
     assert panel["panel_id"] == "lateral_persona_panel.v1"
     assert panel["mcp_tool"] == "ouroboros_lateral_think"
-    assert panel["dispatch_modes"] == ["plugin", "inline_fallback"]
+    assert panel["dispatch_modes"] == ["plugin", "sequential"]
+    assert panel["legacy_dispatch_modes"] == ["inline_fallback"]
     assert panel["parallel_preference"] == "parallel_when_runtime_supports_subagents"
     assert panel["sequential_fallback"] == {
         "supported": True,
@@ -222,6 +225,7 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     ]
     assert panel["response_payload_refs"]["requires_prose_parsing"] is False
     assert "structured payload" in panel["runtime_instruction"]
+    assert "legacy alias" in panel["runtime_instruction"]
 
     runtime_handling = orchestration["runtime_handling"]
     assert runtime_handling == {
@@ -323,6 +327,30 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
     assert meta["question_advisory_host_action"] == "spawn_subagents"
     # Advisory lanes correlate by lane_id (persona is None on some lanes).
     assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
+    assert "subagent_orchestration_instruction" in meta
+
+
+def test_question_advisory_sequential_runtime_emits_processing_contract() -> None:
+    meta: dict[str, object] = {}
+
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-sequential",
+        question="What constraint remains?",
+        phase="answer",
+        score=_score(0.35),
+        dispatch_mode=SubagentDispatchMode.SEQUENTIAL,
+        runtime_backend="gemini",
+    )
+
+    assert len(meta["question_advisory_subagents"]) == 5
+    assert meta["question_advisory_dispatch_mode"] == "sequential"
+    assert meta["question_advisory_host_action"] == "process_payloads_sequentially"
+    assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
+    assert (
+        "process each structured subagent payload sequentially"
+        in (meta["subagent_orchestration_instruction"])
+    )
 
 
 def test_lateral_orchestration_falls_back_to_skill_prose_when_panel_metadata_absent() -> None:

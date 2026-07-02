@@ -190,6 +190,7 @@ def test_claude_host_driven_subagent_orchestration_is_registry_owned() -> None:
 
     guide = render_backend_skill_capability_guide("claude")
     assert "### When a skill requires `orchestrate_subagents`" in guide
+    assert guide.count("### When a skill requires `orchestrate_subagents`") == 1
     assert "Task/Agent" in guide
     assert "host_action=spawn_subagents" in guide
     assert "question_advisory_subagents" in guide
@@ -205,6 +206,7 @@ def test_native_parallel_subagent_runtime_exposes_orchestrate_subagents() -> Non
 
     guide = render_backend_skill_capability_guide("opencode")
     assert "### When a skill requires `orchestrate_subagents`" in guide
+    assert guide.count("### When a skill requires `orchestrate_subagents`") == 1
     assert "native task/subagent primitive" in guide
     assert "`_subagents` MCP directive payloads" in guide
     assert "sequential fallback" in guide
@@ -234,6 +236,21 @@ def test_unsupported_parallel_subagent_runtime_gets_sequential_fallback_contract
     assert contract.to_dict()["sequential_fallback"] == dict(
         _LATERAL_PANEL_DIRECTIVE_METADATA["sequential_fallback"]
     )
+
+
+def test_unknown_subagent_runtime_gets_sequential_fallback_contract() -> None:
+    contract = build_runtime_subagent_orchestration_contract(
+        "custom-runtime",
+        directive_metadata=_LATERAL_PANEL_DIRECTIVE_METADATA,
+    )
+
+    assert contract.backend_name == "custom-runtime"
+    assert contract.supports_native_parallel_subagents is False
+    assert contract.dispatch_mode == "sequential"
+    assert (
+        contract.spawn_trigger_mechanism == SubagentSpawnTriggerMechanism.SEQUENTIAL_FALLBACK.value
+    )
+    assert "no native parallel subagent primitive" in contract.runtime_instruction_handling
 
 
 @pytest.mark.parametrize(
@@ -406,12 +423,31 @@ def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
 
 
 def test_renders_generic_skill_capability_guides_for_runtime_backends() -> None:
-    for backend_name in ("hermes", "claude", "opencode", "gemini", "kiro", "copilot", "pi", "gjc"):
+    for backend_name in (
+        "hermes",
+        "claude",
+        "opencode",
+        "gemini",
+        "kiro",
+        "copilot",
+        "goose",
+        "pi",
+        "gjc",
+    ):
+        capability = get_backend_capability(backend_name)
+        assert capability is not None
+        names = [item.name for item in capability.skill_execution_capabilities]
+        assert len(names) == len(set(names))
+
         guide = render_backend_skill_capability_guide(backend_name)
 
         assert guide.startswith(f"## Ouroboros Skill Capability Guide: {backend_name.title()}\n")
         for capability_name in REQUIRED_SKILL_CAPABILITY_NAMES:
             assert f"### When a skill requires `{capability_name}`" in guide
+        assert "### When a skill requires `orchestrate_subagents`" in guide
+        assert guide.count("### When a skill requires `orchestrate_subagents`") == 1
+        if backend_name not in {"claude", "opencode"}:
+            assert "Process each payload in order" in guide
 
 
 def test_resolve_tool_discovery_maps_each_runtime_to_its_mechanism() -> None:
