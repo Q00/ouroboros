@@ -746,6 +746,26 @@ def get_runtime() -> str:
     return get_agent_runtime_backend()
 
 
+def get_context_pack_enabled() -> bool:
+    """Whether run worker prompts get a deterministic repo context pack.
+
+    Priority:
+        1. ``OUROBOROS_CONTEXT_PACK`` environment variable (1|true|on|yes /
+           0|false|off|no)
+        2. config.yaml ``execution.context_pack``
+        3. True (default on — a best-effort, deterministic priming block)
+    """
+    env = os.environ.get("OUROBOROS_CONTEXT_PACK", "").strip().lower()
+    if env in ("1", "true", "on", "yes"):
+        return True
+    if env in ("0", "false", "off", "no"):
+        return False
+    try:
+        return load_config().execution.context_pack
+    except ConfigError:
+        return True
+
+
 def get_native_session_index_enabled() -> bool:
     """Whether to register worker sessions in the host tool's native session list.
 

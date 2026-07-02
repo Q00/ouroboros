@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import inspect
 import math
+from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import uuid4
@@ -293,6 +294,8 @@ def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> Executi
 def build_system_prompt(
     seed: Seed,
     strategy: ExecutionStrategy | None = None,
+    *,
+    repo_root: str | Path | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -300,6 +303,11 @@ def build_system_prompt(
         seed: Seed to extract system prompt from.
         strategy: Execution strategy for prompt customization.
             If None, uses strategy from seed.task_type.
+        repo_root: Working directory for the run. When it (or the seed's first
+            resolvable ``context_references`` path) is an existing repo, a
+            deterministic context pack (stack, verify commands, layout) is
+            appended so workers are not primed blind. Best-effort — a scan
+            failure or a non-project directory simply omits the pack.
 
     Returns:
         System prompt string.
@@ -314,13 +322,77 @@ def build_system_prompt(
     recovery_protocol = get_run_recovery_protocol_prompt()
     seed_contract = render_seed_contract_for_execution(SeedContract.from_seed(seed))
 
-    return f"""{strategy_fragment}
+    prompt = f"""{strategy_fragment}
 
 {seed_contract}
 
 {ac_tracking}
 
 {recovery_protocol}"""
+
+    context_pack_fragment = _context_pack_fragment(seed, repo_root)
+    if context_pack_fragment:
+        prompt = f"{prompt}\n\n{context_pack_fragment}"
+    return prompt
+
+
+def _resolve_context_pack_root(
+    seed: Seed,
+    repo_root: str | Path | None,
+) -> Path | None:
+    """Resolve the repo the context pack should describe, or ``None``.
+
+    Prefers the run's explicit working directory; falls back to the seed's
+    first resolvable ``context_references`` path (files collapse to their
+    parent directory). Returns ``None`` when nothing points at an existing
+    directory.
+    """
+    if repo_root:
+        candidate = Path(repo_root)
+        if candidate.is_dir():
+            return candidate
+    brownfield = getattr(seed, "brownfield_context", None)
+    references = getattr(brownfield, "context_references", ()) if brownfield else ()
+    for reference in references:
+        raw = getattr(reference, "path", "")
+        if not raw:
+            continue
+        try:
+            path = Path(raw).expanduser()
+        except (TypeError, ValueError):
+            continue
+        if path.is_file():
+            return path.parent
+        if path.is_dir():
+            return path
+    return None
+
+
+def _context_pack_fragment(
+    seed: Seed,
+    repo_root: str | Path | None,
+) -> str:
+    """Render the deterministic context pack fragment, or empty string.
+
+    Root resolution happens before the config lookup so the common
+    no-repo path (unit tests, greenfield seeds) never loads config and
+    never touches the filesystem scanner.
+    """
+    root = _resolve_context_pack_root(seed, repo_root)
+    if root is None:
+        return ""
+
+    from ouroboros.config import get_context_pack_enabled
+
+    if not get_context_pack_enabled():
+        return ""
+
+    from ouroboros.orchestrator.context_pack import build_context_pack, render_context_pack
+
+    pack = build_context_pack(root)
+    if pack is None:
+        return ""
+    return render_context_pack(pack)
 
 
 def build_task_prompt(
@@ -2260,7 +2332,9 @@ class OrchestratorRunner:
             # the profile-backed prompt contract so leaf agents are told to emit
             # schema-valid evidence before the acceptance gate parses it.
             strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
-            system_prompt = build_system_prompt(seed, strategy=strategy)
+            system_prompt = build_system_prompt(
+                seed, strategy=strategy, repo_root=self._effective_cwd()
+            )
             task_prompt = build_task_prompt(seed, strategy=strategy)
 
             # Get merged tools (strategy tools + MCP tools if configured)
@@ -3245,7 +3319,7 @@ class OrchestratorRunner:
             )
 
             # Build resume prompt
-            system_prompt = build_system_prompt(seed)
+            system_prompt = build_system_prompt(seed, repo_root=self._effective_cwd())
             resume_prompt = f"""Continue executing the task from where you left off.
 
 {build_task_prompt(seed)}
