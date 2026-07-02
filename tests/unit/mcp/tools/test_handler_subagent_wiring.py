@@ -344,11 +344,13 @@ class TestExecuteSeedHandlerSubagentDispatch:
                 "seed_content": "goal: test",
                 "max_iterations": 5,
                 "skip_qa": True,
+                "auto_evaluate": False,
             }
         )
         ctx = result.value.meta["_subagent"]["context"]
         assert ctx["max_iterations"] == 5
         assert ctx["skip_qa"] is True
+        assert ctx["auto_evaluate"] is False
 
     async def test_plugin_payload_includes_resolved_worker_cap(self, handler) -> None:
         """Plugin dispatch must propagate the configured worker cap (#489)."""
@@ -361,6 +363,14 @@ class TestExecuteSeedHandlerSubagentDispatch:
             result = await handler.handle({"seed_content": "goal: test"})
         ctx = result.value.meta["_subagent"]["context"]
         assert ctx["max_parallel_workers"] == 7
+
+    async def test_plugin_payload_includes_formal_evaluation_contract(self, handler) -> None:
+        result = await handler.handle({"seed_content": "goal: test"})
+        ctx = result.value.meta["_subagent"]["context"]
+        prompt = result.value.meta["_subagent"]["prompt"]
+        assert ctx["auto_evaluate"] is True
+        assert "ouroboros_start_evaluate" in prompt
+        assert "formal 3-stage evaluation" in prompt
 
     async def test_plugin_path_surfaces_worker_cap_config_error(self, handler) -> None:
         """Plugin dispatch must fail clearly on invalid worker-cap config (#489)."""
@@ -427,6 +437,29 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         assert result.is_ok
         assert result.value.meta["job_id"] is None
         assert result.value.meta["status"] == "delegated_to_plugin"
+
+    async def test_plugin_mode_delegates_formal_evaluation_to_child(self, handler) -> None:
+        result = await handler.handle({"seed_content": "goal: test"})
+        assert result.is_ok
+        assert result.value.meta["verification_status"] == "evaluation_delegated"
+        assert result.value.meta["evaluation_status"] == "delegated_to_plugin"
+        assert result.value.meta["formal_evaluation_delegated"] is True
+        assert result.value.meta["next_step"] == (
+            "wait for delegated plugin task to complete formal evaluation"
+        )
+        assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
+        assert result.value.meta["_subagent"]["context"]["auto_evaluate"] is True
+
+    async def test_plugin_mode_auto_evaluate_false_keeps_legacy_manual_path(self, handler) -> None:
+        result = await handler.handle({"seed_content": "goal: test", "auto_evaluate": False})
+        assert result.is_ok
+        assert result.value.meta["verification_status"] == "delegated_unverified"
+        assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
+        assert "evaluation_status" not in result.value.meta
+        assert result.value.meta["_subagent"]["context"]["auto_evaluate"] is False
+        assert (
+            "Formal evaluation auto-chain is disabled" in result.value.meta["_subagent"]["prompt"]
+        )
 
     async def test_plugin_payload_includes_resolved_worker_cap(self, handler) -> None:
         """Plugin dispatch must propagate the configured worker cap (#489)."""

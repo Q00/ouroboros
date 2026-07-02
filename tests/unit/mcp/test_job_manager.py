@@ -292,6 +292,69 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_execution_terminal_completion_preserves_success_result_meta(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            cancelled = False
+
+            async def _runner() -> MCPToolResult:
+                nonlocal cancelled
+                await store.append(
+                    BaseEvent(
+                        type="execution.terminal",
+                        aggregate_type="execution",
+                        aggregate_id="exec_chain_meta",
+                        data={"session_id": "orch_chain_meta", "status": "completed"},
+                    )
+                )
+                try:
+                    await asyncio.sleep(1.2)
+                    return MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="run complete"),),
+                        is_error=False,
+                        meta={
+                            "success": True,
+                            "verification_status": "evaluation_enqueued",
+                            "chained_evaluate_job_id": "job_eval_123",
+                            "evaluation_status": "enqueued",
+                            "next_step": "ouroboros_job_wait job_eval_123",
+                        },
+                    )
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(
+                    session_id="orch_chain_meta",
+                    execution_id="exec_chain_meta",
+                    preserve_runner_result=True,
+                ),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.COMPLETED, timeout=2.0
+            )
+
+            assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.result_meta["verification_status"] == "evaluation_enqueued"
+            assert snapshot.result_meta["chained_evaluate_job_id"] == "job_eval_123"
+            assert snapshot.result_meta["evaluation_status"] == "enqueued"
+            assert snapshot.result_meta["next_step"] == "ouroboros_job_wait job_eval_123"
+            assert snapshot.message == "Execution complete; formal evaluation enqueued"
+            assert cancelled is False
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_monitor_completion_does_not_mask_cancel_cleanup_error_result(
         self, tmp_path
     ) -> None:

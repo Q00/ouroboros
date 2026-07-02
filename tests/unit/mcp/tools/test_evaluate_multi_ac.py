@@ -406,6 +406,48 @@ class TestMultiACRoutingBoundary:
         assert all(item["passed"] for item in meta["checklist"])
         assert "ALL PASSED" in result.value.text_content
 
+    async def test_seed_acceptance_criteria_used_when_explicit_ac_absent(self) -> None:
+        mock_pipeline = self._install_pipeline_mock(
+            [_passing_eval("s_seed"), _passing_eval("s_seed")]
+        )
+        seed_content = (
+            "goal: Build a CLI task manager\n"
+            "acceptance_criteria:\n"
+            "  - Tasks can be created\n"
+            "  - Tasks can be listed\n"
+            "ontology_schema:\n"
+            "  name: TaskManager\n"
+            "  description: Task management domain\n"
+            "metadata:\n"
+            "  ambiguity_score: 0.15\n"
+        )
+
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+        ):
+            MockPipeline.return_value = mock_pipeline
+            handler = EvaluateHandler()
+            result = await handler.handle(
+                {
+                    "session_id": "s_seed",
+                    "artifact": "def f(): pass",
+                    "seed_content": seed_content,
+                }
+            )
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["multi_ac"] is True
+        assert meta["ac_count"] == 2
+        assert [item["ac_text"] for item in meta["checklist"]] == [
+            "Tasks can be created",
+            "Tasks can be listed",
+        ]
+
     async def test_mixed_outcomes_produce_incomplete_checklist(self) -> None:
         """One passing + one failing AC → run_feedback lists the failure."""
         mock_pipeline = self._install_pipeline_mock(

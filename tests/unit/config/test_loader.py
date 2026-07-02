@@ -333,6 +333,7 @@ class TestLoadConfig:
         assert config.clarification.ambiguity_threshold == 0.2
         assert config.execution.max_iterations_per_ac == 10
         assert config.execution.tui_autolaunch is False
+        assert config.execution.auto_evaluate is True
 
     def test_load_config_execution_tui_autolaunch(self, tmp_path: Path) -> None:
         """load_config accepts the execution TUI auto-launch toggle."""
@@ -347,6 +348,20 @@ class TestLoadConfig:
 
         config = load_config(config_path)
         assert config.execution.tui_autolaunch is True
+
+    def test_load_config_execution_auto_evaluate(self, tmp_path: Path) -> None:
+        """load_config accepts the execution formal-evaluation auto-chain toggle."""
+        config_path = tmp_path / "config.yaml"
+        config_content = {
+            "execution": {
+                "auto_evaluate": False,
+            }
+        }
+        with config_path.open("w") as f:
+            yaml.dump(config_content, f)
+
+        config = load_config(config_path)
+        assert config.execution.auto_evaluate is False
 
 
 class TestLoadCredentials:

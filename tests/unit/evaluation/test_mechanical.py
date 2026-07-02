@@ -1,5 +1,6 @@
 """Tests for Stage 1 mechanical verification."""
 
+import asyncio
 import sys
 from unittest.mock import AsyncMock, patch
 
@@ -122,6 +123,47 @@ class TestRunCommand:
         assert result.return_code == 0
         assert "hello" in result.stdout
         assert result.timed_out is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_command_kills_child_process(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Outer evaluation deadlines must not leave mechanical subprocesses alive."""
+
+        class FakeProcess:
+            returncode: int | None = None
+
+            def __init__(self) -> None:
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self):
+                await asyncio.Event().wait()
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self) -> int:
+                self.waited = True
+                return self.returncode or 0
+
+        fake_process = FakeProcess()
+
+        async def fake_create_subprocess_exec(*_args, **_kwargs):
+            return fake_process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        task = asyncio.create_task(run_command(("long-running",), timeout=999))
+        await asyncio.sleep(0)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert fake_process.killed is True
+        assert fake_process.waited is True
 
     @pytest.mark.asyncio
     async def test_failed_command(self) -> None:

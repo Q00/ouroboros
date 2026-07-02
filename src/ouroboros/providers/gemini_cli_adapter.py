@@ -301,6 +301,12 @@ class GeminiCLIAdapter:
                     details={"timeout_seconds": self._timeout},
                 )
             )
+        except asyncio.CancelledError:
+            await terminate_process(
+                process,
+                shutdown_timeout=self._process_shutdown_timeout_seconds,
+            )
+            raise
 
     async def _collect_response(
         self,

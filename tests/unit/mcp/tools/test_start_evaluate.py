@@ -199,6 +199,69 @@ class TestPluginModeDispatch:
         assert "Third AC" in forwarded
 
     @pytest.mark.asyncio
+    async def test_seed_acceptance_criteria_preserved_in_plugin_payload(self, handler) -> None:
+        seed_content = (
+            "goal: Build a CLI task manager\n"
+            "acceptance_criteria:\n"
+            "  - Tasks can be created\n"
+            "  - Tasks can be listed\n"
+            "ontology_schema:\n"
+            "  name: TaskManager\n"
+            "  description: Task management domain\n"
+            "metadata:\n"
+            "  ambiguity_score: 0.15\n"
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": "orch_xyz",
+                "artifact": "code",
+                "seed_content": seed_content,
+            }
+        )
+
+        assert result.is_ok
+        payload_context = result.value.meta["_subagent"]["context"]
+        forwarded = payload_context["acceptance_criterion"] or ""
+        assert "Tasks can be created" in forwarded
+        assert "Tasks can be listed" in forwarded
+
+    @pytest.mark.asyncio
+    async def test_evaluate_handler_seed_acceptance_criteria_preserved_in_plugin_payload(
+        self, event_store
+    ) -> None:
+        seed_content = (
+            "goal: Build a CLI task manager\n"
+            "acceptance_criteria:\n"
+            "  - Tasks can be created\n"
+            "  - Tasks can be listed\n"
+            "ontology_schema:\n"
+            "  name: TaskManager\n"
+            "  description: Task management domain\n"
+            "metadata:\n"
+            "  ambiguity_score: 0.15\n"
+        )
+        handler = EvaluateHandler(
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": "orch_xyz",
+                "artifact": "code",
+                "seed_content": seed_content,
+            }
+        )
+
+        assert result.is_ok
+        payload_context = result.value.meta["_subagent"]["context"]
+        forwarded = payload_context["acceptance_criterion"] or ""
+        assert "Tasks can be created" in forwarded
+        assert "Tasks can be listed" in forwarded
+
+    @pytest.mark.asyncio
     async def test_singular_acceptance_criterion_still_forwarded(self, handler) -> None:
         result = await handler.handle(
             {

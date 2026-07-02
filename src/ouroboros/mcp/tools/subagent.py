@@ -1559,6 +1559,7 @@ def build_execute_subagent(
     cwd: str | None = None,
     max_iterations: int = 10,
     skip_qa: bool = False,
+    auto_evaluate: bool = True,
     model_tier: str | None = "medium",
     max_parallel_workers: int | None = None,
 ) -> SubagentPayload:
@@ -1585,6 +1586,21 @@ def build_execute_subagent(
         qa_verify = "QA is skipped for this run — still confirm every acceptance criterion is met."
     else:
         qa_verify = "Run QA evaluation after execution completes and confirm it passes."
+    if auto_evaluate:
+        formal_evaluation_verify = (
+            "After successful execution, run formal 3-stage evaluation without host "
+            "involvement: call ouroboros_start_evaluate with the session_id, execution "
+            "artifact, seed_content, and working directory; poll the returned job with "
+            "ouroboros_job_wait/status and include the final APPROVED/not-approved "
+            "verdict in your report. If the evaluation job fails or times out, keep "
+            "the run success intact and report the manual retry command "
+            "`ooo evaluate <session_id>`."
+        )
+    else:
+        formal_evaluation_verify = (
+            "Formal evaluation auto-chain is disabled for this run; preserve the "
+            "legacy manual next step `ooo evaluate <session_id>`."
+        )
 
     seed_body = (
         "## Seed Specification\n"
@@ -1608,6 +1624,7 @@ def build_execute_subagent(
         verify=(
             "Every acceptance criterion in the seed is satisfied.",
             qa_verify,
+            formal_evaluation_verify,
         ),
         body=seed_body,
     ).render()
@@ -1619,6 +1636,7 @@ def build_execute_subagent(
         "cwd": cwd,
         "max_iterations": max_iterations,
         "skip_qa": skip_qa,
+        "auto_evaluate": auto_evaluate,
         "model_tier": model_tier,
         "max_parallel_workers": max_parallel_workers,
     }

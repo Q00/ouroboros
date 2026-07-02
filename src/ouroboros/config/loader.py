@@ -1034,6 +1034,14 @@ def get_max_parallel_workers() -> int:
     )
 
 
+def get_auto_evaluate_enabled() -> bool:
+    """Return whether successful execute_seed runs should enqueue formal evaluation."""
+    try:
+        return load_config().execution.auto_evaluate
+    except ConfigError:
+        return True
+
+
 def get_runtime_profile() -> str | None:
     """Get the orchestrator backend profile from env var or config file.
 

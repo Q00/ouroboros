@@ -144,6 +144,10 @@ class KiroCodeAdapter:
                 last_error = ProviderError("Kiro CLI timed out", details={"attempt": attempt + 1})
                 log.warning("kiro_adapter.timeout", attempt=attempt + 1)
                 continue
+            except asyncio.CancelledError:
+                if proc:
+                    await _kill_process(proc)
+                raise
             except FileNotFoundError:
                 return Result.err(
                     ProviderError(

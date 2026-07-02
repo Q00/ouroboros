@@ -168,6 +168,12 @@ class HermesCliLLMAdapter:
                     details={"timeout_seconds": self._timeout},
                 )
             )
+        except asyncio.CancelledError:
+            await terminate_process(
+                process,
+                shutdown_timeout=self._process_shutdown_timeout_seconds,
+            )
+            raise
 
         stdout_text = self._decode(stdout)
         stderr_text = self._decode(stderr)

@@ -270,14 +270,21 @@ fallback instead of retrying the failing call.
    - Show session ID (for later status checks)
    - Show execution summary
 
-10. **Post-execution QA** (automatic):
+10. **Post-execution QA and formal evaluation** (automatic):
    `ouroboros_start_execute_seed` automatically runs QA after successful execution.
    The QA verdict is included in the final job result text. This QA check is
-   **not** the formal 3-stage evaluator, so the run result remains
-   `executed_unverified` and `evaluated: false` until `ooo evaluate` runs.
+   **not** the formal 3-stage evaluator. On servers that return
+   `chained_evaluate_job_id`, the successful run has already enqueued the formal
+   evaluator as a separate bounded background job.
    To skip: pass `skip_qa: true` to the tool.
 
-   Present QA verdict with next step:
+   If the final run result meta contains `chained_evaluate_job_id`:
+   - Poll that job with `ouroboros_job_wait` / `ouroboros_job_status`
+   - Fetch its verdict with `ouroboros_job_result`
+   - Render **APPROVED** when `final_approved: true`; otherwise render not approved and list failed ACs or the failure reason from the evaluation result
+   - If the evaluate job failed or timed out, keep the run success intact and show `Next: ooo evaluate <session_id>` as the manual retry
+
+   If `chained_evaluate_job_id` is absent, keep the legacy path verbatim:
    - **PASS**: `Next: ooo evaluate <session_id> for formal 3-stage verification`
    - **REVISE**: Show differences/suggestions, then `Next: Fix the issues above, then ooo run to retry -- or ooo unstuck if blocked`
    - **FAIL/ESCALATE**: `Next: Review failures above, then ooo run to retry -- or ooo unstuck if blocked`
@@ -329,6 +336,12 @@ Result:
   Formal Evaluation: NOT evaluated by the 3-stage evaluator
 
   Next: `ooo evaluate orch_x1y2z3` for formal 3-stage verification
+
+  # Newer server path:
+  Verification Status: evaluation_enqueued
+  Chained Evaluation Job ID: job_eval987
+  [Poll ouroboros_job_wait/job_status, then fetch ouroboros_job_result]
+  Formal Evaluation Verdict: APPROVED
 ```
 
 ## RFC #1392 State Breadcrumb Footer

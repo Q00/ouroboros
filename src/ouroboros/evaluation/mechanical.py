@@ -138,6 +138,11 @@ async def run_command(
                 stderr="Command timed out",
                 timed_out=True,
             )
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
     except FileNotFoundError as e:
         return CommandResult(
             return_code=-1,

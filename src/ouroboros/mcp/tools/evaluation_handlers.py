@@ -6,6 +6,7 @@ Contains handlers for drift measurement, evaluation, and lateral thinking tools:
 - LateralThinkHandler: Generates alternative thinking approaches via personas.
 """
 
+import asyncio
 import base64
 from dataclasses import dataclass, field
 import json
@@ -55,6 +56,10 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+
+def _seed_acceptance_criteria(seed: Seed) -> tuple[str, ...]:
+    return tuple(text.strip() for text in seed.acceptance_criteria if text and text.strip())
 
 
 async def _default_brownfield_project_dir() -> Path | None:
@@ -490,14 +495,6 @@ class EvaluateHandler:
         if not acceptance_criteria and acceptance_criterion and str(acceptance_criterion).strip():
             acceptance_criteria = (str(acceptance_criterion).strip(),)
 
-        log.info(
-            "mcp.tool.evaluate",
-            session_id=session_id,
-            has_seed=seed_content is not None,
-            multi_ac_count=len(acceptance_criteria),
-            trigger_consensus=trigger_consensus,
-        )
-
         # Parse seed before dispatch so working_dir fallback is available for
         # both plugin/subagent and in-process evaluation paths.
         goal = ""
@@ -512,19 +509,37 @@ class EvaluateHandler:
                 goal = seed.goal
                 constraints = tuple(seed.constraints)
                 seed_id = seed.metadata.seed_id
+                if not acceptance_criteria:
+                    acceptance_criteria = _seed_acceptance_criteria(seed)
             except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
                 log.warning("mcp.tool.evaluate.seed_parse_warning", error=str(e))
                 # Continue without seed data - not fatal
 
+        log.info(
+            "mcp.tool.evaluate",
+            session_id=session_id,
+            has_seed=seed_content is not None,
+            multi_ac_count=len(acceptance_criteria),
+            trigger_consensus=trigger_consensus,
+        )
+
         working_dir = await _resolve_evaluate_working_dir(arguments.get("working_dir"), seed)
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        if len(acceptance_criteria) > 1:
+            ac_for_payload: str | None = "\n".join(
+                f"{i + 1}. {ac}" for i, ac in enumerate(acceptance_criteria)
+            )
+        elif acceptance_criteria:
+            ac_for_payload = acceptance_criteria[0]
+        else:
+            ac_for_payload = None
         payload = build_evaluate_subagent(
             session_id=session_id,
             artifact=artifact,
             artifact_type=artifact_type,
             seed_content=seed_content,
-            acceptance_criterion=acceptance_criterion,
+            acceptance_criterion=ac_for_payload,
             working_dir=str(working_dir),
             trigger_consensus=trigger_consensus,
         )
@@ -1806,6 +1821,7 @@ class StartEvaluateHandler:
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    deadline_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -1882,6 +1898,17 @@ class StartEvaluateHandler:
             if not acceptance_criteria and ac_singular_raw and str(ac_singular_raw).strip():
                 acceptance_criteria = (str(ac_singular_raw).strip(),)
 
+            seed: Seed | None = None
+            seed_content = arguments.get("seed_content")
+            if seed_content:
+                try:
+                    seed_dict = yaml.safe_load(seed_content)
+                    seed = Seed.from_dict(seed_dict)
+                    if not acceptance_criteria:
+                        acceptance_criteria = _seed_acceptance_criteria(seed)
+                except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
+                    log.warning("mcp.tool.start_evaluate.seed_parse_warning", error=str(e))
+
             if len(acceptance_criteria) > 1:
                 ac_for_payload: str | None = "\n".join(
                     f"{i + 1}. {ac}" for i, ac in enumerate(acceptance_criteria)
@@ -1890,15 +1917,6 @@ class StartEvaluateHandler:
                 ac_for_payload = acceptance_criteria[0]
             else:
                 ac_for_payload = None
-
-            seed: Seed | None = None
-            seed_content = arguments.get("seed_content")
-            if seed_content:
-                try:
-                    seed_dict = yaml.safe_load(seed_content)
-                    seed = Seed.from_dict(seed_dict)
-                except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
-                    log.warning("mcp.tool.start_evaluate.seed_parse_warning", error=str(e))
 
             working_dir = await _resolve_evaluate_working_dir(
                 arguments.get("working_dir"),
@@ -1938,7 +1956,34 @@ class StartEvaluateHandler:
         # ``JobManager.cancel_job`` was never observable by the evaluate
         # agent process — a restart-visible cancel was silently dropped.
         async def _runner(_handle) -> MCPToolResult:
-            result = await self._evaluate_handler.handle(arguments)
+            try:
+                if self.deadline_seconds > 0:
+                    result = await asyncio.wait_for(
+                        self._evaluate_handler.handle(arguments),
+                        timeout=self.deadline_seconds,
+                    )
+                else:
+                    result = await self._evaluate_handler.handle(arguments)
+            except TimeoutError:
+                retry_step = f"ooo evaluate {session_id}"
+                return MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                "Evaluation timed out before the formal verdict completed.\n"
+                                f"Retry: {retry_step}"
+                            ),
+                        ),
+                    ),
+                    is_error=True,
+                    meta={
+                        "session_id": session_id,
+                        "status": "timed_out",
+                        "evaluation_status": "timed_out",
+                        "next_step": retry_step,
+                    },
+                )
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value

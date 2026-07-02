@@ -106,6 +106,7 @@ class TestExecuteSeedHandler:
         assert "session_id" in param_names
         assert "model_tier" in param_names
         assert "max_iterations" in param_names
+        assert "auto_evaluate" in param_names
 
     def test_definition_excludes_internal_delegation_parameters(self) -> None:
         """Internal parent-session propagation must not change the public tool schema."""
@@ -438,9 +439,14 @@ class TestExecuteSeedHandler:
         assert result.value.meta["status"] == "delegated_to_subagent"
         assert result.value.meta["dispatch_mode"] == "plugin"
         assert result.value.meta["evaluated"] is False
-        assert result.value.meta["verification_status"] == "delegated_unverified"
+        assert result.value.meta["verification_status"] == "evaluation_delegated"
         assert result.value.meta["formal_evaluation_required"] is True
-        assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
+        assert result.value.meta["evaluation_status"] == "delegated_to_plugin"
+        assert result.value.meta["formal_evaluation_delegated"] is True
+        assert result.value.meta["next_step"] == (
+            "wait for delegated plugin task to complete formal evaluation"
+        )
+        assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
 
     async def test_handle_plugin_rejects_removed_legacy_execution_mode(
         self,
@@ -1942,9 +1948,14 @@ class TestAsyncJobHandlers:
         assert result.value.meta["job_id"] is None
         assert result.value.meta["status"] == "delegated_to_plugin"
         assert result.value.meta["evaluated"] is False
-        assert result.value.meta["verification_status"] == "delegated_unverified"
+        assert result.value.meta["verification_status"] == "evaluation_delegated"
         assert result.value.meta["formal_evaluation_required"] is True
-        assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
+        assert result.value.meta["evaluation_status"] == "delegated_to_plugin"
+        assert result.value.meta["formal_evaluation_delegated"] is True
+        assert result.value.meta["next_step"] == (
+            "wait for delegated plugin task to complete formal evaluation"
+        )
+        assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
 
     async def test_start_execute_seed_plugin_rejects_removed_legacy_execution_mode(
         self,

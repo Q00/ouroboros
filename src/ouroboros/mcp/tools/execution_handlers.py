@@ -19,7 +19,7 @@ import structlog
 import yaml
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_max_parallel_workers
+from ouroboros.config.loader import get_auto_evaluate_enabled, get_max_parallel_workers
 from ouroboros.core.errors import ConfigError, ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -263,6 +263,134 @@ def _run_only_verification_text(
     )
 
 
+def resolve_auto_evaluate(config_flag: bool, per_call_override: bool | None) -> bool:
+    """Resolve execute_seed auto-evaluation from config plus per-call override."""
+    if isinstance(per_call_override, bool):
+        return per_call_override
+    return config_flag
+
+
+def _run_succeeded(result: MCPToolResult) -> bool:
+    """Return True when a synchronous execute_seed result reached successful completion."""
+    if result.is_error:
+        return False
+    return result.meta.get("success") is True
+
+
+def _result_session_id(result: MCPToolResult, fallback: str | None) -> str | None:
+    session_id = result.meta.get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else fallback
+
+
+def _result_evaluation_working_dir(result: MCPToolResult, fallback: Path) -> Path:
+    worktree_path = result.meta.get("worktree_path")
+    if isinstance(worktree_path, str) and worktree_path:
+        return Path(worktree_path)
+    return fallback
+
+
+def _append_result_text(
+    result: MCPToolResult,
+    text: str,
+    *,
+    meta: dict[str, Any],
+) -> MCPToolResult:
+    return MCPToolResult(
+        content=(
+            *result.content,
+            MCPContentItem(type=ContentType.TEXT, text=text),
+        ),
+        is_error=result.is_error,
+        meta=meta,
+        structured_content=result.structured_content,
+    )
+
+
+def _evaluation_enqueued_meta(
+    run_result: MCPToolResult,
+    *,
+    session_id: str | None,
+    evaluation_job_id: str,
+) -> dict[str, Any]:
+    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return {
+        **run_result.meta,
+        **_run_only_verification_meta(
+            session_id,
+            verification_status="evaluation_enqueued",
+        ),
+        "chained_evaluate_job_id": evaluation_job_id,
+        "evaluation_status": "enqueued",
+        "next_step": (
+            f"ouroboros_job_wait {evaluation_job_id}, then ouroboros_job_result {evaluation_job_id}"
+        ),
+        "manual_retry_next_step": retry_step,
+    }
+
+
+def _evaluation_enqueued_text(session_id: str | None, evaluation_job_id: str) -> str:
+    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return (
+        "\nFormal Evaluation: queued as a bounded background job\n"
+        f"Chained Evaluation Job ID: {evaluation_job_id}\n"
+        f"Next: poll ouroboros_job_wait(job_id={evaluation_job_id}) and "
+        f"then ouroboros_job_result(job_id={evaluation_job_id}).\n"
+        f"Manual Retry: {retry_step}\n"
+    )
+
+
+def _evaluation_enqueue_failed_meta(
+    run_result: MCPToolResult,
+    *,
+    session_id: str | None,
+    error: str,
+) -> dict[str, Any]:
+    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    meta = dict(run_result.meta)
+    if "verification_status" not in meta:
+        meta.update(_run_only_verification_meta(session_id))
+    meta.update(
+        {
+            "evaluation_status": "enqueue_failed",
+            "evaluation_error": error[:1000],
+            "next_step": retry_step,
+        }
+    )
+    return meta
+
+
+def _evaluation_enqueue_failed_text(session_id: str | None, error: str) -> str:
+    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return (
+        "\nFormal Evaluation: enqueue failed; run result remains successful.\n"
+        f"Evaluation Error: {error[:1000]}\n"
+        f"Next: {retry_step}\n"
+    )
+
+
+def _plugin_verification_meta(
+    session_id: str | None,
+    *,
+    auto_evaluate: bool,
+) -> dict[str, Any]:
+    if not auto_evaluate:
+        return _run_only_verification_meta(
+            session_id,
+            verification_status="delegated_unverified",
+        )
+    retry_step = f"ooo evaluate {session_id}" if session_id else "ooo evaluate <session_id>"
+    return {
+        **_run_only_verification_meta(
+            session_id,
+            verification_status="evaluation_delegated",
+        ),
+        "evaluation_status": "delegated_to_plugin",
+        "formal_evaluation_delegated": True,
+        "next_step": "wait for delegated plugin task to complete formal evaluation",
+        "manual_retry_next_step": retry_step,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Delegation context extraction
 # ---------------------------------------------------------------------------
@@ -378,6 +506,16 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    name="auto_evaluate",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Override execution.auto_evaluate for this call. When true, "
+                        "a successful background execute_seed run enqueues formal "
+                        "3-stage evaluation as a separate bounded background job."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -486,6 +624,10 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             if plugin_mode_result.is_err:
                 return plugin_mode_result
             # --- Subagent dispatch: gate on runtime + opencode_mode ---
+            auto_evaluate = resolve_auto_evaluate(
+                get_auto_evaluate_enabled(),
+                arguments.get("auto_evaluate"),
+            )
             payload = build_execute_subagent(
                 seed_content=seed_content,
                 session_id=session_id,
@@ -493,6 +635,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 cwd=str(resolved_cwd),
                 max_iterations=max_iterations,
                 skip_qa=arguments.get("skip_qa", False),
+                auto_evaluate=auto_evaluate,
                 model_tier=model_tier,
                 max_parallel_workers=max_parallel_workers,
             )
@@ -508,8 +651,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
                     "model_tier": model_tier,
-                    **_run_only_verification_meta(
-                        session_id, verification_status="delegated_unverified"
+                    **_plugin_verification_meta(
+                        session_id,
+                        auto_evaluate=auto_evaluate,
                     ),
                 },
             )
@@ -1176,6 +1320,106 @@ class StartExecuteSeedHandler:
             ),
         )
 
+    async def _enqueue_chained_evaluation(
+        self,
+        run_result: MCPToolResult,
+        *,
+        session_id: str | None,
+        seed_content: str,
+        working_dir: Path,
+    ) -> MCPToolResult:
+        from ouroboros.mcp.tools.evaluation_handlers import StartEvaluateHandler
+
+        artifact = run_result.text_content or "Execution completed successfully."
+        evaluation_arguments: dict[str, Any] = {
+            "session_id": session_id,
+            "artifact": artifact,
+            "artifact_type": "code",
+            "seed_content": seed_content,
+            "working_dir": str(working_dir),
+        }
+        try:
+            seed_dict = yaml.safe_load(seed_content)
+            if isinstance(seed_dict, dict):
+                seed = Seed.from_dict(seed_dict)
+                acceptance_criteria = [
+                    text.strip() for text in seed.acceptance_criteria if text and text.strip()
+                ]
+                if acceptance_criteria:
+                    evaluation_arguments["acceptance_criteria"] = acceptance_criteria
+            else:
+                log.warning(
+                    "mcp.tool.start_execute_seed.chained_evaluate.seed_not_mapping",
+                    session_id=session_id,
+                )
+        except yaml.YAMLError as exc:
+            log.warning(
+                "mcp.tool.start_execute_seed.chained_evaluate.yaml_error",
+                session_id=session_id,
+                error=str(exc),
+            )
+        except (ValidationError, PydanticValidationError) as exc:
+            log.warning(
+                "mcp.tool.start_execute_seed.chained_evaluate.seed_validation_error",
+                session_id=session_id,
+                error=str(exc),
+            )
+        try:
+            start_evaluate = StartEvaluateHandler(
+                event_store=self._event_store,
+                job_manager=self._job_manager,
+                llm_backend=self._execute_handler.llm_backend,
+                agent_runtime_backend=self.agent_runtime_backend,
+                opencode_mode=self.opencode_mode,
+            )
+            evaluate_result = await start_evaluate.handle(evaluation_arguments)
+        except Exception as exc:  # noqa: BLE001 - evaluation must never flip run success.
+            error = str(exc)
+            return _append_result_text(
+                run_result,
+                _evaluation_enqueue_failed_text(session_id, error),
+                meta=_evaluation_enqueue_failed_meta(
+                    run_result,
+                    session_id=session_id,
+                    error=error,
+                ),
+            )
+
+        if evaluate_result.is_err:
+            error = evaluate_result.error.message
+            return _append_result_text(
+                run_result,
+                _evaluation_enqueue_failed_text(session_id, error),
+                meta=_evaluation_enqueue_failed_meta(
+                    run_result,
+                    session_id=session_id,
+                    error=error,
+                ),
+            )
+
+        evaluation_job_id = evaluate_result.value.meta.get("job_id")
+        if not isinstance(evaluation_job_id, str) or not evaluation_job_id:
+            error = "StartEvaluateHandler did not return a pollable evaluation job_id"
+            return _append_result_text(
+                run_result,
+                _evaluation_enqueue_failed_text(session_id, error),
+                meta=_evaluation_enqueue_failed_meta(
+                    run_result,
+                    session_id=session_id,
+                    error=error,
+                ),
+            )
+
+        return _append_result_text(
+            run_result,
+            _evaluation_enqueued_text(session_id, evaluation_job_id),
+            meta=_evaluation_enqueued_meta(
+                run_result,
+                session_id=session_id,
+                evaluation_job_id=evaluation_job_id,
+            ),
+        )
+
     async def handle(
         self,
         arguments: dict[str, Any],
@@ -1307,6 +1551,10 @@ class StartExecuteSeedHandler:
             if not plugin_session_id:
                 plugin_session_id = f"orch_{uuid4().hex[:12]}"
 
+            auto_evaluate = resolve_auto_evaluate(
+                get_auto_evaluate_enabled(),
+                arguments.get("auto_evaluate"),
+            )
             payload = build_execute_subagent(
                 seed_content=seed_content,
                 session_id=plugin_session_id,
@@ -1314,6 +1562,7 @@ class StartExecuteSeedHandler:
                 cwd=arguments.get("cwd"),
                 max_iterations=arguments.get("max_iterations", 10),
                 skip_qa=arguments.get("skip_qa", False),
+                auto_evaluate=auto_evaluate,
                 model_tier=arguments.get("model_tier", "medium"),
                 max_parallel_workers=max_parallel_workers,
             )
@@ -1331,9 +1580,9 @@ class StartExecuteSeedHandler:
                 "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
-                **_run_only_verification_meta(
+                **_plugin_verification_meta(
                     plugin_session_id,
-                    verification_status="delegated_unverified",
+                    auto_evaluate=auto_evaluate,
                 ),
             }
             # Cache for idempotent replay: a second handle() with the same
@@ -1396,6 +1645,11 @@ class StartExecuteSeedHandler:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
 
+        auto_evaluate_enabled = resolve_auto_evaluate(
+            get_auto_evaluate_enabled(),
+            arguments.get("auto_evaluate"),
+        )
+
         # The shared pipeline owns the ``should_cancel()`` pre-work guard.
         async def _runner(_handle) -> MCPToolResult:
             result = await self._execute_handler.handle(
@@ -1406,7 +1660,22 @@ class StartExecuteSeedHandler:
             )
             if result.is_err:
                 raise RuntimeError(str(result.error))
-            return result.value
+            run_result = result.value
+            run_session_id = _result_session_id(
+                run_result,
+                session_id or new_session_id,
+            )
+            if auto_evaluate_enabled and run_session_id and _run_succeeded(run_result):
+                return await self._enqueue_chained_evaluation(
+                    run_result,
+                    session_id=run_session_id,
+                    seed_content=seed_content,
+                    working_dir=_result_evaluation_working_dir(
+                        run_result,
+                        resolved_cwd,
+                    ),
+                )
+            return run_result
 
         snapshot = await start_background_tool_job(
             job_manager=self._job_manager,
@@ -1418,6 +1687,7 @@ class StartExecuteSeedHandler:
             links=JobLinks(
                 session_id=session_id or new_session_id,
                 execution_id=execution_id,
+                preserve_runner_result=auto_evaluate_enabled,
             ),
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",

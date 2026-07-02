@@ -47,6 +47,7 @@ class JobLinks:
     session_id: str | None = None
     execution_id: str | None = None
     lineage_id: str | None = None
+    preserve_runner_result: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +364,7 @@ class JobManager:
                     "session_id": job_links.session_id,
                     "execution_id": job_links.execution_id,
                     "lineage_id": job_links.lineage_id,
+                    "preserve_runner_result": job_links.preserve_runner_result,
                 },
                 # Owning-process identity for authoritative zombie reconciliation:
                 # if this process dies before writing a terminal event, a later
@@ -488,12 +490,20 @@ class JobManager:
             elif job_id in self._monitor_terminalized_jobs:
                 completed_result = await self._derive_completed_execution_result(snapshot)
                 if completed_result is not None:
-                    await self._append_execution_completed_event(job_id, completed_result)
+                    await self._append_execution_completed_event(
+                        job_id,
+                        completed_result,
+                        result_meta=result_meta if isinstance(result_meta, dict) else None,
+                    )
                     return
             else:
                 completed_result = await self._derive_completed_execution_result(snapshot)
                 if completed_result is not None:
-                    await self._append_execution_completed_event(job_id, completed_result)
+                    await self._append_execution_completed_event(
+                        job_id,
+                        completed_result,
+                        result_meta=result_meta if isinstance(result_meta, dict) else None,
+                    )
                     return
             await self._append_event(
                 terminal_type,
@@ -541,6 +551,22 @@ class JobManager:
                 if completed_result is not None:
                     runner = self._runner_tasks.get(job_id)
                     if runner is None or runner.done():
+                        return
+                    if snapshot.links.preserve_runner_result:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(runner),
+                                timeout=_COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS,
+                            )
+                        except TimeoutError:
+                            # execute_seed has post-terminal work (QA and chained
+                            # formal evaluation). Keep the live runner authoritative
+                            # so its returned metadata is not lost.
+                            continue
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            return
                         return
                     self._monitor_terminalized_jobs.add(job_id)
                     runner.cancel()
@@ -627,6 +653,7 @@ class JobManager:
         result_text: str,
         *,
         session_id: str | None = None,
+        result_meta: dict[str, Any] | None = None,
         check_current: bool = True,
         event_id: str | None = None,
     ) -> bool:
@@ -635,19 +662,28 @@ class JobManager:
             snapshot = await self.get_snapshot(job_id)
             if snapshot.is_terminal or snapshot.status == JobStatus.CANCEL_REQUESTED:
                 return False
+        merged_meta = {
+            "completed_from_execution_terminal": True,
+            **_run_only_verification_meta(
+                session_id or snapshot.links.session_id if check_current else session_id
+            ),
+        }
+        if result_meta:
+            merged_meta.update(_safe_meta(result_meta))
+            merged_meta["completed_from_execution_terminal"] = True
+        message = "Execution complete; formal evaluation not run"
+        if merged_meta.get("evaluation_status") == "enqueued":
+            message = "Execution complete; formal evaluation enqueued"
+        elif merged_meta.get("evaluation_status") == "enqueue_failed":
+            message = "Execution complete; formal evaluation enqueue failed"
         await self._append_event(
             "mcp.job.completed",
             job_id,
             {
                 "status": JobStatus.COMPLETED.value,
-                "message": "Execution complete; formal evaluation not run",
+                "message": message,
                 "result_text": result_text,
-                "result_meta": {
-                    "completed_from_execution_terminal": True,
-                    **_run_only_verification_meta(
-                        session_id or snapshot.links.session_id if check_current else session_id
-                    ),
-                },
+                "result_meta": merged_meta,
                 "is_error": False,
             },
             event_id=event_id,
@@ -909,6 +945,7 @@ class JobManager:
                     "session_id": links.session_id if links else None,
                     "execution_id": links.execution_id if links else None,
                     "lineage_id": links.lineage_id if links else None,
+                    "preserve_runner_result": links.preserve_runner_result if links else None,
                 },
             },
         )
@@ -929,6 +966,7 @@ class JobManager:
             session_id=created_links.get("session_id"),
             execution_id=created_links.get("execution_id"),
             lineage_id=created_links.get("lineage_id"),
+            preserve_runner_result=created_links.get("preserve_runner_result") is True,
         )
         result_text: str | None = None
         result_meta: dict[str, Any] = {}
@@ -942,6 +980,11 @@ class JobManager:
                 session_id=link_data.get("session_id") or links.session_id,
                 execution_id=link_data.get("execution_id") or links.execution_id,
                 lineage_id=link_data.get("lineage_id") or links.lineage_id,
+                preserve_runner_result=(
+                    link_data.get("preserve_runner_result")
+                    if isinstance(link_data.get("preserve_runner_result"), bool)
+                    else links.preserve_runner_result
+                ),
             )
 
             if "status" in data:
