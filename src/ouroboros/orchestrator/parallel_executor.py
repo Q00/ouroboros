@@ -28,7 +28,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
 import os
@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from rich.console import Console
 
-from ouroboros.core.seed import ac_text
+from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
@@ -266,6 +266,17 @@ MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
+_VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
+
+
+@dataclass(frozen=True)
+class _VerifyGateOutcome:
+    """Outcome of the orchestrator-run AC verify-command gate (PR-V V1)."""
+
+    passed: bool
+    reason: str | None
+    output_tail: str
+
 
 
 def _collect_decomposition_depth_warning_paths(
@@ -406,6 +417,9 @@ class ParallelACExecutor:
         fat_harness_mode: bool = False,
         atomic_verifier: Verifier | None = None,
         reasoning_effort: str | None = None,
+        run_verify_commands: bool = True,
+        verify_command_timeout_seconds: int = 600,
+        ac_retry_attempts: int = 0,
     ):
         """Initialize executor.
 
@@ -427,6 +441,15 @@ class ParallelACExecutor:
             atomic_verifier: Optional verifier callable for the separate
                 atomic evidence PASS gate. Defaults to the harness-owned
                 structural verifier.
+            run_verify_commands: When True (default), the orchestrator runs an
+                AC's ``spec.verify_command`` itself and requires exit code 0
+                (plus any ``output_assertion``) before accepting the AC.
+            verify_command_timeout_seconds: Timeout for an AC verify command.
+            ac_retry_attempts: How many times a failed AC is re-dispatched
+                before it is marked FAILED (excludes stall retries). The
+                low-level constructor default is 0 so direct/test callers keep
+                today's single-dispatch behavior; real run paths (CLI `ooo run`
+                via the runner) pass the config value (default 2).
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -437,6 +460,9 @@ class ParallelACExecutor:
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        self._run_verify_commands = run_verify_commands
+        self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
+        self._ac_retry_attempts = max(0, ac_retry_attempts)
         # Effort-first investment dial (RFC #1405). Base level for full-strength
         # units; decomposed children run one notch lower. ``None`` leaves effort
         # routing dormant (execute_task receives no level → no behavior change),
@@ -989,6 +1015,7 @@ class ParallelACExecutor:
         level_contexts: list[LevelContext],
         ac_retry_attempts: dict[int, int],
         execution_counters: dict[str, int] | None = None,
+        retry_prompts: dict[int, str] | None = None,
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool."""
         batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
@@ -1015,6 +1042,7 @@ class ParallelACExecutor:
                         sibling_acs=sibling_acs,
                         retry_attempt=ac_retry_attempts[ac_idx],
                         execution_counters=execution_counters,
+                        retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
                     )
                 except BaseException as e:
                     # Never suppress anyio Cancelled — doing so breaks
@@ -1297,6 +1325,30 @@ class ParallelACExecutor:
                     metadata = external_completed.get(ac_idx, {})
                     reason = metadata.get("reason")
                     commit = metadata.get("commit")
+
+                    # PR-V V4: --skip-completed trusts working-tree state. When the
+                    # AC carries a verify_command, prove it with the gate before
+                    # skipping; on gate failure, execute the AC normally instead.
+                    spec = seed.acceptance_criteria[ac_idx]
+                    verification_status = "assumed"
+                    if (
+                        self._run_verify_commands
+                        and isinstance(spec, AcceptanceCriterionSpec)
+                        and spec.verify_command
+                    ):
+                        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+                        gate = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                        if not gate.passed:
+                            executable.append(ac_idx)
+                            log.info(
+                                "parallel_executor.ac.skip_completed_gate_failed",
+                                session_id=session_id,
+                                ac_index=ac_idx,
+                                reason=gate.reason,
+                            )
+                            continue
+                        verification_status = "verified"
+
                     notes: list[str] = [
                         "Skipped via --skip-completed; existing working tree state is treated as satisfied."
                     ]
@@ -1304,6 +1356,7 @@ class ParallelACExecutor:
                         notes.append(f"Reason: {reason.strip()}")
                     if isinstance(commit, str) and commit.strip():
                         notes.append(f"Commit: {commit.strip()}")
+                    notes.append(f"verification_status={verification_status}")
 
                     satisfied_result = ACExecutionResult(
                         ac_index=ac_idx,
@@ -1418,9 +1471,9 @@ class ParallelACExecutor:
                         tool_calls_count=execution_counters["tool_calls_count"],
                     )
 
-                    batch_results = await self._execute_ac_batch(
+                    batch_results = await self._run_batch_with_verify_and_retry(
                         seed=seed,
-                        batch_indices=batch_executable,
+                        batch_executable=batch_executable,
                         session_id=session_id,
                         execution_id=execution_id,
                         tools=tools,
@@ -1503,6 +1556,12 @@ class ParallelACExecutor:
                         all_results.append(ac_result)
                         stage_ac_results.append(ac_result)
 
+                flip_gated_out = await self._compute_sibling_flip_gated_out(
+                    seed=seed,
+                    level_results=stage_ac_results,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
                 (
                     completed_count,
                     level_success,
@@ -1515,6 +1574,7 @@ class ParallelACExecutor:
                     completed_count=completed_count,
                     level_success=level_success,
                     level_failed=level_failed,
+                    flip_gated_out=flip_gated_out,
                 )
 
                 reconciled_by_index = {result.ac_index: result for result in stage_ac_results}
@@ -1738,6 +1798,7 @@ class ParallelACExecutor:
         parent_ac_index: int | None = None,
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
+        retry_prompt_extra: str = "",
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -1961,6 +2022,7 @@ class ParallelACExecutor:
                 sibling_acs=sibling_acs,
                 retry_attempt=atomic_retry_attempt,
                 execution_counters=execution_counters,
+                retry_prompt_extra=retry_prompt_extra,
                 is_sub_ac=is_sub_ac,
                 parent_ac_index=parent_ac_index,
                 sub_ac_index=sub_ac_index,
@@ -2623,6 +2685,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         retry_attempt: int = 0,
         tool_catalog: tuple[MCPToolDefinition, ...] | None = None,
         execution_counters: dict[str, int] | None = None,
+        retry_prompt_extra: str = "",
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -2668,6 +2731,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "Resume from the current shared workspace state, including any "
                 "coordinator-reconciled changes already applied.\n"
             )
+        if retry_prompt_extra:
+            # Verify-by-default retry enrichment (failure taxonomy, error tail,
+            # verify-command output, and — on the final attempt — a lateral
+            # change-of-approach directive) built by the batch retry loop.
+            retry_section += "\n" + retry_prompt_extra + "\n"
 
         # Build parallel awareness section
         parallel_section = ""
@@ -3375,6 +3443,359 @@ Files present:
         except EvidenceError as exc:
             return None, None, str(exc)
         return record, validation, None
+
+    async def _run_ac_verify_gate(
+        self, *, spec: AcceptanceCriterionSpec, cwd: str
+    ) -> _VerifyGateOutcome:
+        """Run an AC's ``verify_command`` and judge the outcome (PR-V V1).
+
+        The orchestrator — not the worker — runs the command so a failing check
+        cannot be self-reported away. Success requires exit code 0 and, when
+        ``output_assertion`` is set, that substring in the combined output.
+        """
+        import contextlib
+
+        command = spec.verify_command
+        if not command:
+            return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as exc:  # pragma: no cover - spawn failure is environmental
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=f"verify_command could not start: {exc}",
+                output_tail="",
+            )
+        try:
+            stdout_bytes, _ = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=self._verify_command_timeout_seconds,
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
+                output_tail="",
+            )
+
+        combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
+        tail = combined[-_VERIFY_OUTPUT_TAIL_CHARS:]
+        returncode = proc.returncode
+        if returncode != 0:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=f"verify_command exited with status {returncode}",
+                output_tail=tail,
+            )
+        if spec.output_assertion and spec.output_assertion not in combined:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=(
+                    f"output_assertion {spec.output_assertion!r} not found in verify_command output"
+                ),
+                output_tail=tail,
+            )
+        return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
+
+    async def _apply_verify_gate(
+        self,
+        *,
+        seed: Seed,
+        ac_index: int,
+        result: ACExecutionResult,
+        session_id: str,
+        execution_id: str,
+    ) -> ACExecutionResult:
+        """Gate a successful AC on its ``verify_command`` (PR-V V1).
+
+        Contract-less ACs (no spec / no verify_command) and ACs that already
+        failed are returned untouched, so contract-less behavior — and the
+        single fat-harness failure event for an already-failed AC — is
+        preserved (no double-fail for one root cause).
+        """
+        if not self._run_verify_commands or not result.success:
+            return result
+        if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
+            return result
+        spec = seed.acceptance_criteria[ac_index]
+        if not isinstance(spec, AcceptanceCriterionSpec) or not spec.verify_command:
+            return result
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+        if outcome.passed:
+            return result
+
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        reason = f"Verify gate failed: {outcome.reason}"
+        detail = reason
+        if outcome.output_tail:
+            detail = f"{reason}\n--- verify_command output (tail) ---\n{outcome.output_tail}"
+        verdict = VerifierVerdict(
+            passed=False,
+            reasons=(reason,),
+            failure_class=FailureClass.EVIDENCE_MISSING.value,
+        )
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.verify.failed",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "ac_index": ac_index,
+                    "ac_content": ac_text(spec),
+                    "verify_command": spec.verify_command,
+                    "reason": outcome.reason,
+                    "failure_class": FailureClass.EVIDENCE_MISSING.value,
+                    "output_tail": outcome.output_tail,
+                },
+            )
+        )
+        log.warning(
+            "parallel_executor.ac.verify_gate_failed",
+            session_id=session_id,
+            ac_index=ac_index,
+            reason=outcome.reason,
+        )
+        return replace(
+            result,
+            success=False,
+            error=detail,
+            final_message=detail,
+            outcome=ACExecutionOutcome.FAILED,
+            atomic_verifier_verdict=verdict,
+        )
+
+    async def _compute_sibling_flip_gated_out(
+        self,
+        *,
+        seed: Seed,
+        level_results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+    ) -> frozenset[int]:
+        """Gate sibling-evidence flips for FAILED contract ACs (PR-V V4).
+
+        A FAILED AC whose spec carries a ``verify_command`` may only be flipped
+        to satisfied by sibling evidence if its own verify command passes the
+        orchestrator gate now. ACs without a verify contract are never gated out.
+        """
+        if not self._run_verify_commands:
+            return frozenset()
+        gated_out: set[int] = set()
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        for result in level_results:
+            if result.success or result.outcome != ACExecutionOutcome.FAILED:
+                continue
+            ac_idx = result.ac_index
+            if ac_idx < 0 or ac_idx >= len(seed.acceptance_criteria):
+                continue
+            spec = seed.acceptance_criteria[ac_idx]
+            if not isinstance(spec, AcceptanceCriterionSpec) or not spec.verify_command:
+                continue
+            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+            if not outcome.passed:
+                gated_out.add(ac_idx)
+        return frozenset(gated_out)
+
+    def _failure_class_for_result(self, result: ACExecutionResult) -> str | None:
+        """Best-effort failure taxonomy label for a failed AC result."""
+        verdict = result.atomic_verifier_verdict
+        if verdict is not None and verdict.failure_class:
+            return verdict.failure_class
+        if result.error == _STALL_SENTINEL:
+            from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+            return FailureClass.STALL.value
+        return None
+
+    def _is_retryable_failure(self, result: ACExecutionResult | BaseException) -> bool:
+        """Whether a batch result is a non-stall, non-blocked AC failure (PR-V V3)."""
+        if not isinstance(result, ACExecutionResult):
+            return False
+        if result.success or result.is_blocked:
+            return False
+        # Stall retries are handled separately by the atomic leaf loop.
+        return result.error != _STALL_SENTINEL
+
+    def _build_ac_retry_prompt(
+        self,
+        *,
+        result: ACExecutionResult,
+        ac_content: str,
+        is_final_attempt: bool,
+    ) -> str:
+        """Build the enriched retry prompt section for a re-dispatched AC (PR-V V3/V4)."""
+        parts: list[str] = []
+        failure_class = self._failure_class_for_result(result)
+        if failure_class:
+            parts.append(f"### Prior failure classification\n{failure_class}")
+        last_error = result.error or result.final_message or ""
+        if last_error and last_error != _STALL_SENTINEL:
+            parts.append("### Last error (tail)\n" + last_error[-500:])
+        if is_final_attempt:
+            from ouroboros.resilience.lateral import (
+                build_lateral_change_of_approach_directive,
+            )
+
+            parts.append(
+                build_lateral_change_of_approach_directive(
+                    problem_context=ac_content,
+                    current_approach=(
+                        "The previous attempts failed as described above; the same "
+                        "approach is not working."
+                    ),
+                    failed_attempts=(failure_class,) if failure_class else (),
+                )
+            )
+        return "\n\n".join(parts)
+
+    async def _run_batch_with_verify_and_retry(
+        self,
+        *,
+        seed: Seed,
+        batch_executable: list[int],
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        ac_retry_attempts: dict[int, int],
+        execution_counters: dict[str, int] | None,
+    ) -> list[ACExecutionResult | BaseException]:
+        """Dispatch a batch, apply the V1 verify gate, and retry failures (PR-V V1/V3/V4).
+
+        Contract-less ACs with the verify gate off/absent and zero configured
+        retries reduce to a single ``_execute_ac_batch`` call plus the identity
+        gate, so today's behavior is preserved.
+        """
+        results = await self._execute_ac_batch(
+            seed=seed,
+            batch_indices=batch_executable,
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            level_contexts=level_contexts,
+            ac_retry_attempts=ac_retry_attempts,
+            execution_counters=execution_counters,
+        )
+        # V1 gate on freshly-successful ACs.
+        for position, ac_idx in enumerate(batch_executable):
+            result = results[position]
+            if isinstance(result, ACExecutionResult):
+                results[position] = await self._apply_verify_gate(
+                    seed=seed,
+                    ac_index=ac_idx,
+                    result=result,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+
+        if self._ac_retry_attempts <= 0:
+            return results
+
+        # V3 retry loop: re-dispatch non-stall failures up to the configured
+        # attempts. Kill criterion: stop early when the failure class repeats.
+        position_by_idx = {ac_idx: position for position, ac_idx in enumerate(batch_executable)}
+        pending = {
+            ac_idx
+            for position, ac_idx in enumerate(batch_executable)
+            if self._is_retryable_failure(results[position])
+        }
+        last_failure_class = {
+            ac_idx: self._failure_class_for_result(results[position_by_idx[ac_idx]])
+            for ac_idx in pending
+        }
+
+        while pending:
+            retry_idxs = [
+                ac_idx for ac_idx in pending if ac_retry_attempts[ac_idx] < self._ac_retry_attempts
+            ]
+            if not retry_idxs:
+                break
+
+            retry_prompts: dict[int, str] = {}
+            for ac_idx in retry_idxs:
+                ac_retry_attempts[ac_idx] += 1
+                is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
+                prior = results[position_by_idx[ac_idx]]
+                if isinstance(prior, ACExecutionResult):
+                    retry_prompts[ac_idx] = self._build_ac_retry_prompt(
+                        result=prior,
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        is_final_attempt=is_final,
+                    )
+
+            retry_results = await self._execute_ac_batch(
+                seed=seed,
+                batch_indices=retry_idxs,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+                retry_prompts=retry_prompts,
+            )
+
+            for retry_position, ac_idx in enumerate(retry_idxs):
+                gated = retry_results[retry_position]
+                if isinstance(gated, ACExecutionResult):
+                    gated = await self._apply_verify_gate(
+                        seed=seed,
+                        ac_index=ac_idx,
+                        result=gated,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                results[position_by_idx[ac_idx]] = gated
+
+                if not self._is_retryable_failure(gated):
+                    pending.discard(ac_idx)
+                    continue
+                new_class = (
+                    self._failure_class_for_result(gated)
+                    if isinstance(gated, ACExecutionResult)
+                    else None
+                )
+                if (
+                    new_class is not None
+                    and last_failure_class.get(ac_idx) is not None
+                    and new_class == last_failure_class[ac_idx]
+                ):
+                    # Identical failure class on every attempt: stop early
+                    # rather than burning the last attempt.
+                    log.info(
+                        "parallel_executor.ac.retry_early_stop",
+                        session_id=session_id,
+                        ac_index=ac_idx,
+                        failure_class=new_class,
+                    )
+                    pending.discard(ac_idx)
+                    continue
+                last_failure_class[ac_idx] = new_class
+                if ac_retry_attempts[ac_idx] >= self._ac_retry_attempts:
+                    pending.discard(ac_idx)
+
+        return results
 
     def _fat_harness_acceptance_error(
         self,

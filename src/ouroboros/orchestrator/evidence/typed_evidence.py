@@ -203,6 +203,7 @@ def _complete_sibling_acs_from_evidence(
     completed_count: int,
     level_success: int,
     level_failed: int,
+    flip_gated_out: frozenset[int] = frozenset(),
 ) -> tuple[int, int, int, list[ACExecutionResult]]:
     """Mark sibling ACs satisfied when a successful sibling has exact evidence.
 
@@ -210,6 +211,10 @@ def _complete_sibling_acs_from_evidence(
     file exists", and "pytest passes". A single worker can legitimately create
     both files and run the test. This function reconciles those concrete sibling
     ACs from runtime/typed evidence instead of leaving them failed or pending.
+
+    ``flip_gated_out`` names ACs whose own ``verify_command`` did not pass the
+    orchestrator gate; they must not be flipped from evidence alone (PR-V V4).
+    ACs without a verify contract are never gated out, preserving prior behavior.
     """
     replacements: dict[int, ACExecutionResult] = {}
     successful_evidence = [
@@ -222,6 +227,10 @@ def _complete_sibling_acs_from_evidence(
 
     for result in level_results:
         if result.success or result.outcome != ACExecutionOutcome.FAILED:
+            continue
+        if result.ac_index in flip_gated_out:
+            # A contract AC cannot be flipped by sibling evidence unless its own
+            # verify_command passes the orchestrator gate.
             continue
         for source_idx, files, run_commands, passed_commands in successful_evidence:
             if source_idx == result.ac_index:

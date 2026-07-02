@@ -363,6 +363,49 @@ class LateralThinker:
         return tuple(ThinkingPersona)
 
 
+def build_lateral_change_of_approach_directive(
+    *,
+    problem_context: str,
+    current_approach: str,
+    failed_attempts: tuple[str, ...] = (),
+) -> str:
+    """Build a loop-independent "change of approach" directive.
+
+    This is the directive-text core of lateral thinking extracted so callers
+    outside the sequential recovery loop (for example the parallel executor's
+    final AC retry) can inject a lateral nudge without pulling in the sequential
+    machinery or an LLM/persona-file round trip. It borrows the SIMPLIFIER
+    persona's intent: abandon the repeatedly-failing approach and try a
+    fundamentally simpler, different one.
+
+    Args:
+        problem_context: What the unit is trying to achieve.
+        current_approach: The approach that has repeatedly failed.
+        failed_attempts: Short summaries of what already failed.
+
+    Returns:
+        A markdown directive suitable for appending to a retry prompt.
+    """
+    lines = [
+        "## Change of Approach (Lateral Thinking)",
+        "Previous attempts on this acceptance criterion have failed the same "
+        "way. Do NOT simply repeat the same approach with minor tweaks. Step "
+        "back and take a fundamentally different, simpler route to the same "
+        "outcome:",
+        "- Challenge an assumption the earlier attempts took for granted.",
+        "- Prefer the smallest change that makes the verification pass over a broad refactor.",
+        "- If a tool, path, or command kept failing, reach the same outcome a different way.",
+    ]
+    if problem_context.strip():
+        lines += ["", "### Outcome to achieve", problem_context.strip()]
+    if current_approach.strip():
+        lines += ["", "### Approach that is NOT working", current_approach.strip()]
+    if failed_attempts:
+        lines += ["", "### What already failed"]
+        lines += [f"- {attempt}" for attempt in failed_attempts if attempt]
+    return "\n".join(lines)
+
+
 # =============================================================================
 # Event Classes
 # =============================================================================
