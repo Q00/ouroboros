@@ -54,3 +54,29 @@ class TestStaticSnapshot:
         )
         assert "</script> b" not in html
         assert "<\\/script>" in html
+
+    def test_snapshot_run_id_cannot_break_out_of_script(self) -> None:
+        # The ?run= label is caller-controlled; quotes, backslashes and </script>
+        # must never escape the inline JS string / innerHTML sink.
+        payloads = [
+            "x';alert(1);//",
+            'x";alert(1);//',
+            "x\\';alert(1);//",
+            "x</script><script>alert(1)</script>",
+        ]
+        for run_id in payloads:
+            html = static_html(_BOARD, run_id=run_id)
+            # The raw payload must not survive into the page verbatim.
+            assert run_id not in html
+            # The template's own closing tag stays the ONLY </script>.
+            assert html.count("</script>") == 1
+            assert "<script>alert(1)" not in html
+            # The page still bootstraps.
+            assert "render(" in html
+
+    def test_snapshot_quote_label_is_html_escaped_not_dropped(self) -> None:
+        html = static_html(_BOARD, run_id="x';alert(1);//")
+        # Single quote is HTML-escaped (innerHTML sink), so the quote cannot
+        # terminate the surrounding JS string literal either.
+        assert "&#x27;" in html
+        assert "';alert(1);//" not in html

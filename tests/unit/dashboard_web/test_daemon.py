@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import http.client
+import json
 import os
+import sqlite3
 import time
 
 import pytest
@@ -21,12 +24,13 @@ def _isolated_paths(tmp_path, monkeypatch):
 
 class TestState:
     def test_write_then_read_roundtrip(self) -> None:
-        daemon.write_state(host="127.0.0.1", port=12345, pid=999)
+        daemon.write_state(host="127.0.0.1", port=12345, pid=999, db_path="/tmp/one.db")
         state = daemon.read_state()
         assert state is not None
         assert state["port"] == 12345
         assert state["pid"] == 999
         assert state["host"] == "127.0.0.1"
+        assert state["db_path"] == "/tmp/one.db"
 
     def test_read_missing_state_is_none(self) -> None:
         assert daemon.read_state() is None
@@ -98,5 +102,85 @@ class TestHealthz:
         assert daemon.healthz("127.0.0.1", 1, timeout=0.2) is False
 
     def test_state_alive_false_without_server(self) -> None:
-        daemon.write_state(host="127.0.0.1", port=9, pid=1)
+        daemon.write_state(host="127.0.0.1", port=9, pid=1, db_path="/tmp/one.db")
         assert daemon._state_alive(daemon.read_state()) is False
+
+
+class TestDbIdentity:
+    """A live daemon for a DIFFERENT EventStore must never be reused."""
+
+    @staticmethod
+    def _make_events_db(path, execution_id: str) -> None:
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            conn.execute(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                (
+                    f"orch_{execution_id}",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": execution_id}),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _get_runs(port: int) -> list[dict]:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        try:
+            conn.request("GET", "/api/runs")
+            body = conn.getresponse().read()
+        finally:
+            conn.close()
+        return json.loads(body)["runs"]
+
+    def test_ensure_spawns_fresh_daemon_for_a_different_db(self, tmp_path, monkeypatch) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        one_db = tmp_path / "one.db"
+        two_db = tmp_path / "two.db"
+        self._make_events_db(one_db, "exec_one")
+        self._make_events_db(two_db, "exec_two")
+
+        # In-process stand-in for the detached daemon: real HTTP server (healthz,
+        # /api/runs) + the same state publish run_daemon performs.
+        servers = []
+
+        def _fake_spawn(*, db_path: str, host: str) -> None:
+            port = daemon._free_port(host)
+            server, _thread = serve_background(db_path=db_path, host=host, port=port)
+            servers.append(server)
+            daemon.write_state(host=host, port=port, pid=os.getpid(), db_path=db_path)
+
+        monkeypatch.setattr(daemon, "_spawn_detached", _fake_spawn)
+        try:
+            first = daemon.ensure_dashboard(db_path=str(one_db))
+            assert first is not None
+            assert first.reused is False
+
+            # Same DB again → reuse (singleton behaviour unchanged).
+            again = daemon.ensure_dashboard(db_path=str(one_db))
+            assert again is not None
+            assert again.reused is True
+            assert again.port == first.port
+
+            # DIFFERENT DB → must NOT reuse: fresh daemon, new port.
+            second = daemon.ensure_dashboard(db_path=str(two_db))
+            assert second is not None
+            assert second.reused is False
+            assert second.port != first.port
+
+            # The new daemon actually serves two.db's runs.
+            runs = self._get_runs(second.port)
+            ids = {r["execution_id"] for r in runs}
+            assert ids == {"exec_two"}
+
+            # State now records two.db — one.db's daemon was replaced, not reused.
+            state = daemon.read_state()
+            assert state is not None
+            assert state["db_path"] == daemon._resolve_db(str(two_db))
+        finally:
+            for server in servers:
+                server.shutdown()

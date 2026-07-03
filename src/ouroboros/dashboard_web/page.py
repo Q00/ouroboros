@@ -163,17 +163,23 @@ def static_html(board: dict, *, run_id: str | None = None) -> str:
     network-idle at once — shareable as a single file and friendly to headless
     screenshot capture (which a live SSE page never settles for).
     """
+    import html as _html
     import json as _json
 
     # Escape ``</`` so the inlined JSON can't terminate the <script> element.
     board_json = _json.dumps(board, default=str).replace("</", "<\\/")
-    label = (run_id or "").replace("</", "")
+    # The run id is caller-controlled and lands in innerHTML via an inline JS
+    # string, so it needs BOTH treatments: HTML-escape the label (innerHTML sink),
+    # then embed the whole status line as a JSON string literal (valid JS string,
+    # no quote/backslash breakout). ``</`` is escaped like the board JSON above so
+    # the payload can never terminate the surrounding <script> element.
+    label = _html.escape(run_id or "")
+    status_html = '<span class="dot" style="background:var(--muted)"></span>snapshot'
+    if label:
+        status_html += f" · {label}"
+    status_js = _json.dumps(status_html).replace("</", "<\\/")
     bootstrap = (
-        'document.getElementById("m-status").innerHTML = '
-        '\'<span class=\\"dot\\" style=\\"background:var(--muted)\\"></span>snapshot'
-        + (f" · {label}" if label else "")
-        + "';\n"
-        f"render({board_json});\n"
+        f'document.getElementById("m-status").innerHTML = {status_js};\nrender({board_json});\n'
     )
     return _PAGE_TEMPLATE.replace("__BOOTSTRAP__", bootstrap)
 
