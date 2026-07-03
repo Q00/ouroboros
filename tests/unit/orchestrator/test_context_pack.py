@@ -187,6 +187,29 @@ class TestCache:
         assert fresh.stack != ("SENTINEL cached stack",)
         assert any("fixture-app" in line for line in fresh.stack)
 
+    def test_cache_miss_on_working_tree_source_change(self, tmp_path: Path) -> None:
+        """Editing a parsed source with HEAD fixed must invalidate the cache.
+
+        Regression for the HEAD-only cache key: the pack is built from mutable
+        working-tree files, so a pyproject.toml edit without a commit used to
+        keep serving the stale cached pack.
+        """
+        _write_fixture_repo(tmp_path)
+        self._init_git(tmp_path)
+        first = build_context_pack(tmp_path)
+        assert first is not None
+        assert any("fixture-app 1.2.3" in line for line in first.stack)
+
+        # Same HEAD, new working-tree manifest content → fresh pack, not cache.
+        (tmp_path / "pyproject.toml").write_text(
+            _PYPROJECT.replace('version = "1.2.3"', 'version = "9.9.9"'),
+            encoding="utf-8",
+        )
+        fresh = build_context_pack(tmp_path)
+        assert fresh is not None
+        assert any("fixture-app 9.9.9" in line for line in fresh.stack)
+        assert not any("1.2.3" in line for line in fresh.stack)
+
     def test_non_git_dir_scans_without_cache(self, tmp_path: Path) -> None:
         _write_fixture_repo(tmp_path)
         pack = build_context_pack(tmp_path)

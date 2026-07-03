@@ -40,6 +40,22 @@ MAX_PACK_CHARS = 6000
 
 _CACHE_RELATIVE_PATH = Path(".ouroboros") / "context_pack.json"
 
+# Working-tree files the scanner parses. The cache key must cover these in
+# addition to git HEAD: HEAD only moves on commit, while the pack is built
+# from mutable working-tree state — editing pyproject.toml (or the detector's
+# mechanical.toml) without committing must invalidate the cache.
+_FINGERPRINT_SOURCES: tuple[str, ...] = (
+    "pyproject.toml",
+    "package.json",
+    "go.mod",
+    "Cargo.toml",
+    ".ouroboros/mechanical.toml",
+)
+
+# Sentinel recorded for a fingerprint source that does not exist, so a file
+# appearing or disappearing also changes the fingerprint.
+_FINGERPRINT_ABSENT = "absent"
+
 # Directories that never carry useful layout signal and would bloat the map.
 _SKIP_DIRS: frozenset[str] = frozenset(
     {
@@ -148,8 +164,10 @@ class ContextPack:
 def build_context_pack(repo_root: Path | str) -> ContextPack | None:
     """Return a deterministic context pack for ``repo_root``, or ``None``.
 
-    Best-effort and side-effect-tolerant: reads a ``HEAD``-keyed sidecar cache
-    at ``.ouroboros/context_pack.json`` when the SHA matches, otherwise scans
+    Best-effort and side-effect-tolerant: reads a sidecar cache at
+    ``.ouroboros/context_pack.json`` keyed by git ``HEAD`` **plus** a
+    fingerprint of every working-tree file the scanner parses (HEAD alone is
+    insufficient — the sources are mutable without a commit), otherwise scans
     and (for git dirs) refreshes the cache. Any failure yields ``None`` so a
     caller can safely fall through to a pack-free prompt.
     """
@@ -158,14 +176,15 @@ def build_context_pack(repo_root: Path | str) -> ContextPack | None:
         if not root.is_dir():
             return None
         head = _git_head(root)
-        cached = _read_cache(root, head)
+        fingerprint = _source_fingerprint(root)
+        cached = _read_cache(root, head, fingerprint)
         if cached is not None:
             return cached
         pack = _scan(root, head)
         if pack is None:
             return None
         if head is not None:
-            _write_cache(root, pack)
+            _write_cache(root, pack, fingerprint)
         return pack
     except Exception as exc:  # never fail a run on a scanner defect
         log.warning("context_pack.build_failed", repo_root=str(repo_root), error=str(exc))
@@ -432,7 +451,29 @@ def _git_head(root: Path) -> str | None:
     return head or None
 
 
-def _read_cache(root: Path, head: str | None) -> ContextPack | None:
+def _source_fingerprint(root: Path) -> dict[str, Any]:
+    """Return a deterministic signature of the scanner's working-tree sources.
+
+    Each source maps to ``[mtime_ns, size]`` (or :data:`_FINGERPRINT_ABSENT`
+    when missing), so any edit, creation, or deletion of a parsed file changes
+    the fingerprint even while git ``HEAD`` stays fixed.
+    """
+    fingerprint: dict[str, Any] = {}
+    for rel in _FINGERPRINT_SOURCES:
+        try:
+            stat = (root / rel).stat()
+        except OSError:
+            fingerprint[rel] = _FINGERPRINT_ABSENT
+            continue
+        fingerprint[rel] = [stat.st_mtime_ns, stat.st_size]
+    return fingerprint
+
+
+def _read_cache(
+    root: Path,
+    head: str | None,
+    fingerprint: dict[str, Any],
+) -> ContextPack | None:
     if head is None:
         return None
     cache_path = root / _CACHE_RELATIVE_PATH
@@ -442,18 +483,24 @@ def _read_cache(root: Path, head: str | None) -> ContextPack | None:
         data = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
     pack = ContextPack.from_json(data)
     if pack is None or pack.head != head:
         return None
     return pack
 
 
-def _write_cache(root: Path, pack: ContextPack) -> None:
+def _write_cache(root: Path, pack: ContextPack, fingerprint: dict[str, Any]) -> None:
     cache_path = root / _CACHE_RELATIVE_PATH
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
-            json.dumps(pack.to_json(), ensure_ascii=False, indent=2),
+            json.dumps(
+                {**pack.to_json(), "fingerprint": fingerprint},
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
     except OSError as exc:
