@@ -8,10 +8,26 @@ vendor out of the jury. This module is the pure, deterministic policy for that.
 Two questions, both answered here without any I/O:
 
 1. Which voter models should we drop because they share the executor's vendor?
-   (:func:`filter_voter_models` — best-effort, never drops below a viable jury.)
+   (:func:`filter_voter_models` — best-effort, never drops below a viable jury.
+   Voters whose vendor cannot be mapped are always kept: an unknown vendor
+   cannot be *proven* same-vendor any more than it can be proven different.)
 2. What honest independence label should the result carry?
-   (:func:`resolve_reviewer_independence` — ``independent`` / ``same_vendor`` /
-   ``unavailable``.)
+   (:func:`resolve_reviewer_independence`.)
+
+The four honest labels, in decision order:
+
+* ``unavailable`` — fewer than two distinct vendors are configured on this
+  machine, so no independent reviewer exists to select. No behavior change.
+* ``independent`` — at least one retained voter has a *known* vendor that
+  differs from the executor's vendor. Unknown vendors are never evidence of
+  independence: sentinel model names like Codex's ``"default"`` mean "the
+  CLI's own default model", which may well be the executor's vendor.
+* ``unverified`` — independence could be neither proven nor disproven: no
+  known-different voter exists, but the roster contains unknown-vendor voters
+  (or the executor's own vendor is unmappable). An honest "we don't know",
+  distinct from a false ``independent`` or a false ``same_vendor`` claim.
+* ``same_vendor`` — every voter's vendor is known and shares the executor's
+  vendor (e.g. filtering would have broken quorum, so the roster was kept).
 
 Single-backend setups are the common case: with only one vendor configured there
 is no independent reviewer to be had, so the label is ``unavailable`` and nothing
@@ -30,9 +46,11 @@ from ouroboros.backends import get_backend_capability
 _MIN_VIABLE_VOTERS = 2
 
 # Honest independence labels stamped onto the evaluation result meta.
+# See the module docstring for the full decision semantics of each label.
 INDEPENDENT = "independent"
 SAME_VENDOR = "same_vendor"
 UNAVAILABLE = "unavailable"
+UNVERIFIED = "unverified"
 
 # Canonical runtime-backend -> vendor family. Backends that share a model vendor
 # collapse to the same family so a claude executor is not "independent" of a
@@ -131,16 +149,21 @@ def filter_voter_models(
     voter_models: Sequence[str],
     executor_backend: str | None,
 ) -> tuple[str, ...]:
-    """Drop voters that share the executor's vendor, preserving a viable jury.
+    """Drop voters *known* to share the executor's vendor, preserving a viable jury.
 
     Best-effort: if excluding same-vendor voters would shrink the jury below
     :data:`_MIN_VIABLE_VOTERS`, the original roster is kept unchanged (a jury
     that can actually vote beats a perfectly-independent one that cannot).
+
+    Unknown-vendor voters are never dropped: an unmappable model (e.g. Codex's
+    ``"default"`` sentinel) cannot be proven same-vendor, so removing it would
+    discard a potentially-independent vote on no evidence.
     """
     executor_vendor = backend_vendor(executor_backend)
     models = tuple(voter_models)
     if executor_vendor is None or not models:
         return models
+    # ``unknown`` vendors survive this comparison by design (see docstring).
     kept = tuple(m for m in models if model_vendor(m) != executor_vendor)
     if len(kept) >= _MIN_VIABLE_VOTERS:
         return kept
@@ -154,12 +177,18 @@ def resolve_reviewer_independence(
 ) -> ReviewerIndependence:
     """Classify reviewer independence and return the (post-filter) voter roster.
 
+    Labels (full semantics in the module docstring):
+
     * ``unavailable`` — fewer than two distinct vendors are configured on this
       machine, so there is no independent reviewer to select. No behavior change.
-    * ``independent`` — at least one retained voter is a different vendor than the
-      executor.
-    * ``same_vendor`` — an alternative was configured but the surviving jury still
-      shares the executor's vendor (e.g. filtering would have broken quorum).
+    * ``independent`` — at least one retained voter has a *known* vendor that
+      differs from the executor's vendor. Unknown vendors provide NO independence
+      evidence: a sentinel like Codex's ``"default"`` resolves to the CLI's own
+      default model, which may be the executor's vendor.
+    * ``unverified`` — independence is unprovable either way: no known-different
+      voter, but the roster carries unknown-vendor voters (or the executor's own
+      vendor is unmappable).
+    * ``same_vendor`` — every voter vendor is known and matches the executor's.
     """
     executor_vendor = backend_vendor(executor_backend)
     configured_vendors = _distinct_configured_vendors(configured_backends)
@@ -175,10 +204,18 @@ def resolve_reviewer_independence(
 
     filtered = filter_voter_models(voter_models, executor_backend)
     filtered_vendors = tuple(sorted({model_vendor(m) for m in filtered}))
-    has_cross_vendor = executor_vendor is None or any(
-        vendor != executor_vendor for vendor in filtered_vendors
+    has_unknown = _UNKNOWN_VENDOR in filtered_vendors
+    # Independence must be POSITIVELY proven: a voter whose vendor is known and
+    # different from the executor's. ``unknown`` never counts as different.
+    has_known_different = executor_vendor is not None and any(
+        vendor != executor_vendor and vendor != _UNKNOWN_VENDOR for vendor in filtered_vendors
     )
-    status = INDEPENDENT if has_cross_vendor else SAME_VENDOR
+    if has_known_different:
+        status = INDEPENDENT
+    elif has_unknown or executor_vendor is None:
+        status = UNVERIFIED
+    else:
+        status = SAME_VENDOR
     return ReviewerIndependence(
         status=status,
         executor_vendor=executor_vendor,
@@ -191,6 +228,7 @@ __all__ = [
     "INDEPENDENT",
     "SAME_VENDOR",
     "UNAVAILABLE",
+    "UNVERIFIED",
     "ReviewerIndependence",
     "backend_vendor",
     "filter_voter_models",

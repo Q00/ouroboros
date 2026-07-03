@@ -190,7 +190,8 @@ class ConsensusResult:
     disagreements: tuple[str, ...] = ()
     is_single_model: bool = False
     # PR-X X2: honest label of executor/reviewer independence
-    # ("independent" | "same_vendor" | "unavailable" | None when not resolved).
+    # ("independent" | "same_vendor" | "unavailable" | "unverified" |
+    # None when not resolved). See evaluation.reviewer_independence.
     reviewer_independence: str | None = None
 
     @property
