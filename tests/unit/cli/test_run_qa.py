@@ -100,6 +100,31 @@ def test_resolve_cli_project_dir_prefers_explicit_project_dir(tmp_path: Path) ->
     )
 
 
+def test_resolve_cli_project_dir_uses_brownfield_target_dir_when_present(
+    tmp_path: Path,
+) -> None:
+    """Seeds in a central library may target an external brownfield repo."""
+    seed_file = tmp_path / "seed-library" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    target_dir = tmp_path / "work" / "myproject"
+    target_dir.mkdir(parents=True)
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "target_dir": str(target_dir),
+            "context_references": [
+                {"path": "main.py", "role": "primary", "summary": "target file"},
+            ],
+        },
+    }
+    (target_dir / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    seed = Seed.from_dict(seed_data)
+
+    assert _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data) == target_dir.resolve()
+
+
 def test_resolve_cli_project_dir_falls_back_to_seed_parent_without_project_hints(
     tmp_path: Path,
 ) -> None:
@@ -159,6 +184,36 @@ def test_resolve_cli_project_dir_rejects_raw_metadata_project_escape(
     assert exc_info.value.exit_code == 1
     assert mock_print.call_count == 1
     assert "escapes" in mock_print.call_args[0][0]
+
+
+def test_resolve_cli_project_dir_uses_parent_when_context_reference_is_file(
+    tmp_path: Path,
+) -> None:
+    """A primary file reference should not become the runtime cwd itself."""
+    seed_file = tmp_path / "seed-library" / "seed.yaml"
+    seed_file.parent.mkdir()
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    target_dir = tmp_path / "work" / "myproject"
+    target_dir.mkdir(parents=True)
+    source_file = target_dir / "src" / "main.py"
+    source_file.parent.mkdir()
+    source_file.write_text("print('hi')\n", encoding="utf-8")
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "target_dir": str(target_dir),
+            "context_references": [
+                {"path": "src/main.py", "role": "primary", "summary": "target file"},
+            ],
+        },
+    }
+    seed = Seed.from_dict(seed_data)
+
+    assert (
+        _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+        == source_file.parent.resolve()
+    )
 
 
 def test_resolve_cli_project_dir_global_seed_store_without_hints_does_not_return_home(
@@ -223,6 +278,36 @@ def test_resolve_cli_project_dir_global_seed_store_still_uses_raw_metadata_proje
         resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
 
     assert resolved == repo_root.resolve()
+
+
+def test_resolve_cli_project_dir_global_seed_store_still_uses_brownfield_target_dir(
+    tmp_path: Path,
+) -> None:
+    """brownfield_context.target_dir remains preferred over global seed fallback."""
+    fake_home = tmp_path / "home"
+    global_seed_dir = fake_home / ".ouroboros" / "seeds" / "demo"
+    global_seed_dir.mkdir(parents=True)
+    seed_file = global_seed_dir / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    target_dir = tmp_path / "actual-project"
+    target_dir.mkdir()
+    seed_data = {
+        **VALID_SEED_DATA,
+        "brownfield_context": {
+            "project_type": "brownfield",
+            "target_dir": str(target_dir),
+            "context_references": [
+                {"path": "main.py", "role": "primary", "summary": "target file"},
+            ],
+        },
+    }
+    (target_dir / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    seed = Seed.from_dict(seed_data)
+
+    with patch.object(Path, "home", return_value=fake_home):
+        resolved = _resolve_cli_project_dir(seed, seed_file, seed_data=seed_data)
+
+    assert resolved == target_dir.resolve()
 
 
 def test_resolve_fat_harness_mode_defaults_to_enabled() -> None:
