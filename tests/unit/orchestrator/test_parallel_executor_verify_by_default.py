@@ -502,3 +502,204 @@ async def test_skip_completed_executes_when_verify_gate_fails(tmp_path: Any) -> 
 
     # The failing verify gate forced normal execution instead of skipping.
     assert dispatched == [[0]]
+
+
+# ---------------------------------------------------------------------------
+# V1 gate — expected_artifacts enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_artifacts_only_gate_passes_when_files_exist(tmp_path: Any) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("guide\n")
+    (tmp_path / "README.md").write_text("readme\n")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(
+        description="docs exist",
+        expected_artifacts=("README.md", "docs/guide.md", "docs"),
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+    assert outcome.missing_artifacts == ()
+
+
+@pytest.mark.asyncio
+async def test_artifacts_only_gate_reports_all_missing(tmp_path: Any) -> None:
+    (tmp_path / "present.md").write_text("here\n")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(
+        description="docs exist",
+        expected_artifacts=("present.md", "absent-one.md", "absent/two.md"),
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.missing_artifacts == ("absent-one.md", "absent/two.md")
+    assert "absent-one.md" in (outcome.reason or "")
+    assert "absent/two.md" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_artifact_path_escape_is_treated_as_missing(tmp_path: Any) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # The escape target EXISTS outside the workspace — it still must not count.
+    (tmp_path / "outside.md").write_text("outside\n")
+    executor = _make_executor(working_directory=str(workspace))
+    relative_escape = AcceptanceCriterionSpec(
+        description="escape", expected_artifacts=("../outside.md",)
+    )
+    absolute_escape = AcceptanceCriterionSpec(
+        description="escape", expected_artifacts=(str(tmp_path / "outside.md"),)
+    )
+
+    for spec in (relative_escape, absolute_escape):
+        outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(workspace))
+        assert outcome.passed is False
+        assert len(outcome.missing_artifacts) == 1
+        assert "escapes workspace" in outcome.missing_artifacts[0]
+
+
+@pytest.mark.asyncio
+async def test_combined_contract_fails_when_either_leg_fails(tmp_path: Any) -> None:
+    (tmp_path / "artifact.md").write_text("built\n")
+    executor = _make_executor(working_directory=str(tmp_path))
+
+    command_ok_artifact_missing = AcceptanceCriterionSpec(
+        description="combined",
+        verify_command="exit 0",
+        expected_artifacts=("missing.md",),
+    )
+    artifact_ok_command_fails = AcceptanceCriterionSpec(
+        description="combined",
+        verify_command="exit 1",
+        expected_artifacts=("artifact.md",),
+    )
+    both_ok = AcceptanceCriterionSpec(
+        description="combined",
+        verify_command="exit 0",
+        expected_artifacts=("artifact.md",),
+    )
+
+    missing_leg = await executor._run_ac_verify_gate(
+        spec=command_ok_artifact_missing, cwd=str(tmp_path)
+    )
+    assert missing_leg.passed is False
+    assert missing_leg.missing_artifacts == ("missing.md",)
+
+    command_leg = await executor._run_ac_verify_gate(
+        spec=artifact_ok_command_fails, cwd=str(tmp_path)
+    )
+    assert command_leg.passed is False
+    assert "status 1" in (command_leg.reason or "")
+
+    assert (await executor._run_ac_verify_gate(spec=both_ok, cwd=str(tmp_path))).passed is True
+
+
+@pytest.mark.asyncio
+async def test_apply_verify_gate_fails_artifacts_only_ac(tmp_path: Any) -> None:
+    """An artifacts-only contract (verify: NONE) is enforced, not decorative."""
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="docs AC", expected_artifacts=("docs/out.md",))
+    )
+    result = ACExecutionResult(ac_index=0, ac_content="docs AC", success=True)
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated.success is False
+    assert gated.outcome == ACExecutionOutcome.FAILED
+    assert "expected_artifacts missing" in (gated.error or "")
+    assert gated.atomic_verifier_verdict is not None
+    assert gated.atomic_verifier_verdict.failure_class == "EVIDENCE_MISSING"
+
+    # And with the artifact present the same AC passes untouched.
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "out.md").write_text("done\n")
+    passed = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+    assert passed is result
+
+
+@pytest.mark.asyncio
+async def test_sibling_flip_gated_out_by_artifacts_only_contract(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    (tmp_path / "present.md").write_text("here\n")
+    seed = _seed_with_specs(
+        "sibling did work",
+        AcceptanceCriterionSpec(description="missing docs", expected_artifacts=("absent.md",)),
+        AcceptanceCriterionSpec(description="present docs", expected_artifacts=("present.md",)),
+    )
+    level_results = [
+        ACExecutionResult(ac_index=0, ac_content="sibling did work", success=True),
+        ACExecutionResult(
+            ac_index=1, ac_content="missing docs", success=False, outcome=ACExecutionOutcome.FAILED
+        ),
+        ACExecutionResult(
+            ac_index=2, ac_content="present docs", success=False, outcome=ACExecutionOutcome.FAILED
+        ),
+    ]
+
+    gated = await executor._compute_sibling_flip_gated_out(
+        seed=seed, level_results=level_results, session_id="s", execution_id="e"
+    )
+
+    assert gated == frozenset({1})
+
+
+@pytest.mark.asyncio
+async def test_skip_completed_gates_artifacts_only_contract(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="docs AC", expected_artifacts=("out.md",))
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    dispatched: list[list[int]] = []
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        dispatched.append(list(kwargs["batch_indices"]))
+        return [ACExecutionResult(ac_index=0, ac_content="docs AC", success=True)]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    graph = DependencyGraph(
+        nodes=(ACNode(index=0, content="docs AC", depends_on=()),),
+        execution_levels=((0,),),
+    )
+
+    # Missing artifact → the skip is refused and the AC executes normally.
+    await executor.execute_parallel(
+        seed=seed,
+        execution_plan=graph.to_execution_plan(),
+        session_id="s1",
+        execution_id="e1",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="sys",
+        externally_satisfied_acs={0: {"reason": "claims done"}},
+    )
+    assert dispatched == [[0]]
+
+    # Present artifact → skipped and stamped verified.
+    (tmp_path / "out.md").write_text("done\n")
+    dispatched.clear()
+    result = await executor.execute_parallel(
+        seed=seed,
+        execution_plan=graph.to_execution_plan(),
+        session_id="s2",
+        execution_id="e2",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="sys",
+        externally_satisfied_acs={0: {"reason": "claims done"}},
+    )
+    assert dispatched == []
+    assert result.externally_satisfied_count == 1
+    assert "verification_status=verified" in result.results[0].final_message

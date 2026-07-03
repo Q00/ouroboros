@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -271,12 +272,32 @@ _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 
 @dataclass(frozen=True)
 class _VerifyGateOutcome:
-    """Outcome of the orchestrator-run AC verify-command gate (PR-V V1)."""
+    """Outcome of the orchestrator-run AC success-contract gate (PR-V V1)."""
 
     passed: bool
     reason: str | None
     output_tail: str
+    missing_artifacts: tuple[str, ...] = ()
 
+
+def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
+    """Return the expected artifacts absent relative to ``cwd``.
+
+    Each entry must resolve to an existing file or directory under ``cwd``.
+    Absolute paths and ``..`` escapes are rejected — treated as missing with the
+    escape named — so a contract cannot be satisfied by files outside the run
+    workspace.
+    """
+    root = Path(cwd).resolve()
+    missing: list[str] = []
+    for artifact in artifacts:
+        candidate = (root / artifact).resolve()
+        if not candidate.is_relative_to(root):
+            missing.append(f"{artifact} (escapes workspace)")
+            continue
+        if not candidate.exists():
+            missing.append(artifact)
+    return tuple(missing)
 
 
 def _collect_decomposition_depth_warning_paths(
@@ -441,9 +462,11 @@ class ParallelACExecutor:
             atomic_verifier: Optional verifier callable for the separate
                 atomic evidence PASS gate. Defaults to the harness-owned
                 structural verifier.
-            run_verify_commands: When True (default), the orchestrator runs an
-                AC's ``spec.verify_command`` itself and requires exit code 0
-                (plus any ``output_assertion``) before accepting the AC.
+            run_verify_commands: When True (default), the orchestrator checks
+                an AC's success contract itself before accepting the AC: all
+                ``spec.expected_artifacts`` must exist under the run workspace
+                and ``spec.verify_command`` must exit 0 (plus any
+                ``output_assertion``).
             verify_command_timeout_seconds: Timeout for an AC verify command.
             ac_retry_attempts: How many times a failed AC is re-dispatched
                 before it is marked FAILED (excludes stall retries). The
@@ -1327,14 +1350,15 @@ class ParallelACExecutor:
                     commit = metadata.get("commit")
 
                     # PR-V V4: --skip-completed trusts working-tree state. When the
-                    # AC carries a verify_command, prove it with the gate before
-                    # skipping; on gate failure, execute the AC normally instead.
+                    # AC carries a success contract (verify_command OR expected
+                    # artifacts), prove it with the gate before skipping; on gate
+                    # failure, execute the AC normally instead.
                     spec = seed.acceptance_criteria[ac_idx]
                     verification_status = "assumed"
                     if (
                         self._run_verify_commands
                         and isinstance(spec, AcceptanceCriterionSpec)
-                        and spec.verify_command
+                        and (spec.verify_command or spec.expected_artifacts)
                     ):
                         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
                         gate = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
@@ -3447,13 +3471,25 @@ Files present:
     async def _run_ac_verify_gate(
         self, *, spec: AcceptanceCriterionSpec, cwd: str
     ) -> _VerifyGateOutcome:
-        """Run an AC's ``verify_command`` and judge the outcome (PR-V V1).
+        """Judge an AC's success contract: expected artifacts + verify command.
 
-        The orchestrator — not the worker — runs the command so a failing check
-        cannot be self-reported away. Success requires exit code 0 and, when
-        ``output_assertion`` is set, that substring in the combined output.
+        The orchestrator — not the worker — checks the contract so a failing
+        check cannot be self-reported away. All ``expected_artifacts`` must
+        exist under ``cwd`` (checked first — it is cheap — and every missing
+        entry is reported in one failure). ``verify_command``, when set, must
+        then exit 0 and, when ``output_assertion`` is set, print that substring
+        in the combined output.
         """
         import contextlib
+
+        missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+        if missing_artifacts:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
+                output_tail="",
+                missing_artifacts=missing_artifacts,
+            )
 
         command = spec.verify_command
         if not command:
@@ -3515,9 +3551,10 @@ Files present:
         session_id: str,
         execution_id: str,
     ) -> ACExecutionResult:
-        """Gate a successful AC on its ``verify_command`` (PR-V V1).
+        """Gate a successful AC on its success contract (PR-V V1).
 
-        Contract-less ACs (no spec / no verify_command) and ACs that already
+        The contract gate applies when the spec carries a ``verify_command`` OR
+        non-empty ``expected_artifacts``. Contract-less ACs and ACs that already
         failed are returned untouched, so contract-less behavior — and the
         single fat-harness failure event for an already-failed AC — is
         preserved (no double-fail for one root cause).
@@ -3527,7 +3564,9 @@ Files present:
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
         spec = seed.acceptance_criteria[ac_index]
-        if not isinstance(spec, AcceptanceCriterionSpec) or not spec.verify_command:
+        if not isinstance(spec, AcceptanceCriterionSpec) or not (
+            spec.verify_command or spec.expected_artifacts
+        ):
             return result
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
@@ -3558,6 +3597,8 @@ Files present:
                     "ac_index": ac_index,
                     "ac_content": ac_text(spec),
                     "verify_command": spec.verify_command,
+                    "expected_artifacts": list(spec.expected_artifacts),
+                    "missing_artifacts": list(outcome.missing_artifacts),
                     "reason": outcome.reason,
                     "failure_class": FailureClass.EVIDENCE_MISSING.value,
                     "output_tail": outcome.output_tail,
@@ -3589,9 +3630,10 @@ Files present:
     ) -> frozenset[int]:
         """Gate sibling-evidence flips for FAILED contract ACs (PR-V V4).
 
-        A FAILED AC whose spec carries a ``verify_command`` may only be flipped
-        to satisfied by sibling evidence if its own verify command passes the
-        orchestrator gate now. ACs without a verify contract are never gated out.
+        A FAILED AC whose spec carries a success contract (``verify_command``
+        OR non-empty ``expected_artifacts``) may only be flipped to satisfied by
+        sibling evidence if its own contract passes the orchestrator gate now.
+        ACs without a contract are never gated out.
         """
         if not self._run_verify_commands:
             return frozenset()
@@ -3604,7 +3646,9 @@ Files present:
             if ac_idx < 0 or ac_idx >= len(seed.acceptance_criteria):
                 continue
             spec = seed.acceptance_criteria[ac_idx]
-            if not isinstance(spec, AcceptanceCriterionSpec) or not spec.verify_command:
+            if not isinstance(spec, AcceptanceCriterionSpec) or not (
+                spec.verify_command or spec.expected_artifacts
+            ):
                 continue
             outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
             if not outcome.passed:
