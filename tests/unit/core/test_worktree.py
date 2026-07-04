@@ -373,6 +373,32 @@ class TestWorktreeHardening:
         assert not Path(workspace.lock_path).exists()
         assert not _branch_exists(repo_root, workspace.branch)
 
+    def test_cleanup_prunes_stale_registration_when_directory_deleted_externally(
+        self, tmp_path: Path
+    ) -> None:
+        import shutil as _shutil
+
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "orch_test_stale_reg")
+            release_lock(workspace.lock_path)
+            # Simulate external deletion: directory gone, .git/worktrees
+            # registration (and branch lock) left behind.
+            _shutil.rmtree(workspace.worktree_path)
+
+            removed = cleanup_task_workspace(workspace, policy="prune-merged")
+
+        assert removed is True
+        # Stale registration dropped and merged branch deleted despite the
+        # leftover .git/worktrees metadata.
+        assert workspace.worktree_path not in self._git(
+            repo_root, "worktree", "list", "--porcelain"
+        )
+        assert not _branch_exists(repo_root, workspace.branch)
+
     def test_prune_merged_policy_keeps_unmerged_worktree_branch_but_releases_lock(
         self, tmp_path: Path
     ) -> None:

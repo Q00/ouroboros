@@ -450,6 +450,12 @@ def cleanup_task_workspace(
     require_merged = selected_policy == "prune-merged"
 
     if not worktree_path.exists():
+        if not dry_run:
+            # Drop any stale registration left in .git/worktrees when the
+            # directory was deleted externally; also required before a safe
+            # branch delete (git refuses to delete a branch a registered
+            # worktree still claims).
+            _run_git_process(["worktree", "prune"], repo_root)
         if _branch_exists(repo_root, workspace.branch) and _branch_is_merged(
             repo_root, workspace.branch
         ):
