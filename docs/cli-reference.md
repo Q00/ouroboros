@@ -45,6 +45,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `run` | Execute Ouroboros workflows |
 | `qa` | Evaluate an artifact against a natural-language quality bar |
 | `cancel` | Cancel stuck or orphaned executions |
+| `cleanup` | Prune leftover auto-session worktrees, branches, locks, and state files |
 | `config` | Manage Ouroboros configuration (show, switch backend, set values) |
 | `uninstall` | Cleanly remove all Ouroboros configuration from your system |
 | `status` | Check Ouroboros system status |
@@ -516,6 +517,53 @@ ouroboros cancel execution --all
 # Cancel with a custom reason
 ouroboros cancel execution orch_abc123 --reason "Stuck for 2 hours"
 ```
+
+---
+
+## `ouroboros cleanup`
+
+Prune residue left behind by auto sessions: managed worktrees under the
+configured worktree root (default `~/.ouroboros/worktrees/`), their
+`ooo/auto_*` branches, stale task lock files, and orphaned session state files
+(`~/.ouroboros/data/auto_*.json`).
+
+```bash
+ouroboros cleanup [OPTIONS]
+```
+
+Safety rules:
+
+- Worktrees with a live (non-stale) lock are never touched — running sessions are safe.
+- Dirty worktrees are never removed, even with `--force`.
+- Branches are only deleted via safe `git branch -d` (fully merged); unmerged branches always survive.
+- Without `--force`, only worktrees whose branch is fully merged are removed.
+- State files are pruned only when the session is terminal and its worktree is gone (default: `complete` only).
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Report what would be removed without removing anything |
+| `-f, --force` | Also remove clean worktrees whose branch is not merged yet (branch is kept) |
+| `--state-all` | Prune state files of `blocked`/`failed` sessions too (default: `complete` only) |
+
+**Examples:**
+
+```bash
+# See what would be cleaned up
+ouroboros cleanup --dry-run
+
+# Remove merged-and-clean auto worktrees, stale locks, completed session state
+ouroboros cleanup
+
+# Also drop clean-but-unmerged worktrees (their branches survive)
+ouroboros cleanup --force
+```
+
+Related: the `orchestrator.worktree_cleanup` config field (`keep` | `remove` |
+`prune-merged`, default `keep`) controls automatic cleanup when a session
+releases its worktree; `ooo cleanup` handles residue from sessions that ended
+before this policy existed, were cancelled, or ran with `keep`.
 
 ---
 

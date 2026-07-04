@@ -425,8 +425,17 @@ def release_lock(lock_path: str) -> None:
             path.unlink(missing_ok=True)
 
 
-def cleanup_task_workspace(workspace: TaskWorkspace, *, policy: str | None = None) -> bool:
-    """Remove a managed task worktree according to the configured cleanup policy."""
+def cleanup_task_workspace(
+    workspace: TaskWorkspace,
+    *,
+    policy: str | None = None,
+    dry_run: bool = False,
+) -> bool:
+    """Remove a managed task worktree according to the configured cleanup policy.
+
+    With ``dry_run=True`` all safety checks run but nothing is mutated; the
+    return value still reports whether the workspace would be removed.
+    """
     selected_policy = policy or _worktree_cleanup_policy()
     if selected_policy == "keep":
         return False
@@ -444,13 +453,17 @@ def cleanup_task_workspace(workspace: TaskWorkspace, *, policy: str | None = Non
         if _branch_exists(repo_root, workspace.branch) and _branch_is_merged(
             repo_root, workspace.branch
         ):
-            _run_git(["branch", "-d", workspace.branch], repo_root)
+            if not dry_run:
+                _run_git(["branch", "-d", workspace.branch], repo_root)
         return True
 
     if _checkout_is_dirty(worktree_path):
         return False
     if require_merged and not _branch_is_merged(repo_root, workspace.branch):
         return False
+
+    if dry_run:
+        return True
 
     _run_git(["worktree", "remove", str(worktree_path)], repo_root)
 
@@ -477,6 +490,64 @@ def release_task_workspace(workspace: TaskWorkspace | None) -> None:
         )
     finally:
         release_lock(workspace.lock_path)
+
+
+def managed_worktree_root() -> Path:
+    """Return the configured root directory for managed task worktrees."""
+    return _worktree_root()
+
+
+def lock_file_is_stale(lock_path: str | Path) -> bool:
+    """Return True when a task lock file is stale, corrupt, or unreadable."""
+    path = Path(lock_path)
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return True
+    if not isinstance(payload, dict) or not payload:
+        return True
+    return _is_lock_stale(payload)
+
+
+def discover_managed_workspaces(root: Path | None = None) -> list[TaskWorkspace]:
+    """Enumerate managed task worktrees left on disk under the worktree root.
+
+    Reconstructs a ``TaskWorkspace`` for every ``<repo>/<durable_id>``
+    directory that still resolves to a git repository. Directories whose
+    parent repository has been deleted are skipped.
+    """
+    base = root if root is not None else _worktree_root()
+    workspaces: list[TaskWorkspace] = []
+    if not base.is_dir():
+        return workspaces
+    for repo_dir in sorted(base.iterdir()):
+        if not repo_dir.is_dir() or repo_dir.name == ".locks":
+            continue
+        for worktree_path in sorted(repo_dir.iterdir()):
+            if not worktree_path.is_dir():
+                continue
+            durable_id = worktree_path.name
+            try:
+                repo_root = _resolve_common_repo_root(worktree_path)
+                branch = _managed_branch_name(repo_root, durable_id)
+            except WorktreeError:
+                continue
+            if repo_root == worktree_path.resolve():
+                # Not a linked worktree (e.g. a stray standalone repo).
+                continue
+            workspaces.append(
+                TaskWorkspace(
+                    durable_id=durable_id,
+                    repo_root=str(repo_root),
+                    repo_name=repo_dir.name,
+                    original_cwd=str(repo_root),
+                    effective_cwd=str(worktree_path),
+                    worktree_path=str(worktree_path),
+                    branch=branch,
+                    lock_path=str(base / ".locks" / repo_dir.name / f"{durable_id}.json"),
+                )
+            )
+    return workspaces
 
 
 def prepare_task_workspace(
