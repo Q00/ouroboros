@@ -4,6 +4,7 @@ import subprocess
 
 from ouroboros.auto.state import AutoPipelineState, AutoWorktreePolicy
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
+from ouroboros.core.worktree import TaskWorkspace
 
 
 def _git(repo, *args: str) -> str:
@@ -81,3 +82,22 @@ def test_auto_policy_gracefully_skips_non_repo(tmp_path, monkeypatch) -> None:
     assert ensure_auto_worktree(state) is None
     assert state.managed_worktree is None
     assert state.cwd == str(tmp_path)
+
+
+def test_release_auto_worktree_delegates_to_task_workspace_release(monkeypatch) -> None:
+    workspace = TaskWorkspace(
+        durable_id="auto_test",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/worktrees/repo/auto_test",
+        worktree_path="/tmp/worktrees/repo/auto_test",
+        branch="ooo/auto_test",
+        lock_path="/tmp/worktrees/.locks/repo/auto_test.json",
+    )
+    released = []
+    monkeypatch.setattr("ouroboros.auto.worktree.release_task_workspace", released.append)
+
+    release_auto_worktree(workspace)
+
+    assert released == [workspace]

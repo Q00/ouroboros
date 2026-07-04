@@ -7,7 +7,7 @@ from ouroboros.core.worktree import (
     TaskWorkspace,
     WorktreeError,
     is_git_repo,
-    release_lock,
+    release_task_workspace,
     restore_task_workspace,
 )
 
@@ -46,6 +46,5 @@ def ensure_auto_worktree(state: AutoPipelineState) -> TaskWorkspace | None:
 
 
 def release_auto_worktree(workspace: TaskWorkspace | None) -> None:
-    """Release the auto worktree lock if this process owns one."""
-    if workspace is not None:
-        release_lock(workspace.lock_path)
+    """Release the auto worktree and apply the configured cleanup policy."""
+    release_task_workspace(workspace)

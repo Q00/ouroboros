@@ -506,7 +506,13 @@ class OrchestratorConfig(BaseModel, frozen=True):
         usage_limit_pause_hours: Default pause window for provider usage/quota limits
         use_worktrees: Whether mutating workflows run in dedicated git worktrees
         worktree_root: Root directory for managed task worktrees
-        worktree_cleanup: Cleanup policy for managed task worktrees
+        worktree_cleanup: Cleanup policy for managed task worktrees applied when
+            an auto session completes:
+            - ``keep`` (default): never remove anything (legacy behavior)
+            - ``prune-merged``: remove the worktree + ``ooo/*`` branch only when
+              the branch is fully merged and the worktree checkout is clean
+            - ``remove``: remove clean worktrees; delete the branch only when
+              Git accepts a safe merged-branch deletion
         worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
     """
 
@@ -569,7 +575,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
     use_worktrees: bool = True
     worktree_root: str = "~/.ouroboros/worktrees"
-    worktree_cleanup: Literal["keep"] = "keep"
+    worktree_cleanup: Literal["keep", "remove", "prune-merged"] = "keep"
     worktree_lock_stale_after_minutes: int = Field(default=60, ge=1)
 
     @field_validator(

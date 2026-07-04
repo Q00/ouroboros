@@ -12,10 +12,14 @@ import socket
 import subprocess
 from typing import Any
 
+import structlog
+
 from ouroboros.config.loader import load_config
 from ouroboros.config.models import OrchestratorConfig
 from ouroboros.core.errors import ConfigError, OuroborosError
 from ouroboros.core.file_lock import file_lock
+
+log = structlog.get_logger()
 
 
 class WorktreeError(OuroborosError):
@@ -107,6 +111,11 @@ def _worktrees_enabled() -> bool:
     return getattr(config, "use_worktrees", True)
 
 
+def _worktree_cleanup_policy() -> str:
+    config = _orchestrator_config()
+    return getattr(config, "worktree_cleanup", "keep")
+
+
 def _run_git_process(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -186,6 +195,25 @@ def _ensure_clean_checkout(repo_root: Path) -> None:
 
 def _checkout_is_dirty(repo_root: Path) -> bool:
     return bool(_run_git(["status", "--porcelain"], repo_root))
+
+
+def _branch_is_merged(repo_root: Path, branch: str) -> bool:
+    if not _branch_exists(repo_root, branch):
+        return True
+
+    result = _run_git_process(["merge-base", "--is-ancestor", branch, "HEAD"], repo_root)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise WorktreeError(
+        "Git command failed: merge-base --is-ancestor",
+        details={
+            "branch": branch,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+        },
+    )
 
 
 def _list_worktrees(repo_root: Path) -> dict[str, dict[str, str]]:
@@ -395,6 +423,60 @@ def release_lock(lock_path: str) -> None:
             return
         if payload.get("pid") == os.getpid() and payload.get("host") == socket.gethostname():
             path.unlink(missing_ok=True)
+
+
+def cleanup_task_workspace(workspace: TaskWorkspace, *, policy: str | None = None) -> bool:
+    """Remove a managed task worktree according to the configured cleanup policy."""
+    selected_policy = policy or _worktree_cleanup_policy()
+    if selected_policy == "keep":
+        return False
+    if selected_policy not in {"remove", "prune-merged"}:
+        raise WorktreeError(
+            "Invalid task worktree cleanup policy",
+            details={"policy": selected_policy},
+        )
+
+    repo_root = Path(workspace.repo_root)
+    worktree_path = Path(workspace.worktree_path)
+    require_merged = selected_policy == "prune-merged"
+
+    if not worktree_path.exists():
+        if _branch_exists(repo_root, workspace.branch) and _branch_is_merged(
+            repo_root, workspace.branch
+        ):
+            _run_git(["branch", "-d", workspace.branch], repo_root)
+        return True
+
+    if _checkout_is_dirty(worktree_path):
+        return False
+    if require_merged and not _branch_is_merged(repo_root, workspace.branch):
+        return False
+
+    _run_git(["worktree", "remove", str(worktree_path)], repo_root)
+
+    if _branch_exists(repo_root, workspace.branch) and _branch_is_merged(
+        repo_root, workspace.branch
+    ):
+        _run_git(["branch", "-d", workspace.branch], repo_root)
+    return True
+
+
+def release_task_workspace(workspace: TaskWorkspace | None) -> None:
+    """Release a task workspace lock and best-effort configured cleanup."""
+    if workspace is None:
+        return
+    try:
+        cleanup_task_workspace(workspace)
+    except WorktreeError as exc:
+        log.warning(
+            "worktree.cleanup_failed",
+            durable_id=workspace.durable_id,
+            worktree_path=workspace.worktree_path,
+            branch=workspace.branch,
+            error=str(exc),
+        )
+    finally:
+        release_lock(workspace.lock_path)
 
 
 def prepare_task_workspace(

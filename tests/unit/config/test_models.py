@@ -559,6 +559,17 @@ class TestOrchestratorConfig:
         with pytest.raises(ValidationError):
             OrchestratorConfig(usage_limit_pause_hours=0)
 
+    def test_orchestrator_config_accepts_worktree_cleanup_policies(self) -> None:
+        """Worktree cleanup policy accepts keep, remove, and prune-merged."""
+        for policy in ("keep", "remove", "prune-merged"):
+            config = OrchestratorConfig(worktree_cleanup=policy)
+            assert config.worktree_cleanup == policy
+
+    def test_orchestrator_config_rejects_unknown_worktree_cleanup_policy(self) -> None:
+        """Worktree cleanup policy rejects unknown values."""
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(worktree_cleanup="delete")  # type: ignore[arg-type]
+
     def test_orchestrator_config_expands_codex_cli_path(self) -> None:
         """Expands ~ in codex_cli_path."""
         config = OrchestratorConfig(runtime_backend="codex", codex_cli_path="~/bin/codex")

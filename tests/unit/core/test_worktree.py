@@ -13,10 +13,12 @@ from ouroboros.core.worktree import (
     WorktreeError,
     _acquire_lock,
     _branch_exists,
+    cleanup_task_workspace,
     maybe_prepare_task_workspace,
     maybe_restore_task_workspace,
     prepare_task_workspace,
     release_lock,
+    release_task_workspace,
     restore_task_workspace,
 )
 
@@ -352,3 +354,84 @@ class TestWorktreeHardening:
         finally:
             if workspace is not None:
                 release_lock(workspace.lock_path)
+
+    def test_prune_merged_policy_removes_clean_worktree_branch_and_lock(
+        self, tmp_path: Path
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with (
+            patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+            patch("ouroboros.core.worktree._worktree_cleanup_policy", return_value="prune-merged"),
+        ):
+            workspace = prepare_task_workspace(repo_root, "orch_test_cleanup")
+            release_task_workspace(workspace)
+
+        assert not Path(workspace.worktree_path).exists()
+        assert not Path(workspace.lock_path).exists()
+        assert not _branch_exists(repo_root, workspace.branch)
+
+    def test_prune_merged_policy_keeps_unmerged_worktree_branch_but_releases_lock(
+        self, tmp_path: Path
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with (
+            patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+            patch("ouroboros.core.worktree._worktree_cleanup_policy", return_value="prune-merged"),
+        ):
+            workspace = prepare_task_workspace(repo_root, "orch_test_unmerged")
+            worktree_path = Path(workspace.worktree_path)
+            (worktree_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self._git(worktree_path, "add", "feature.txt")
+            self._git(worktree_path, "commit", "-m", "feature")
+
+            release_task_workspace(workspace)
+
+        assert Path(workspace.worktree_path).exists()
+        assert not Path(workspace.lock_path).exists()
+        assert _branch_exists(repo_root, workspace.branch)
+
+    def test_remove_policy_removes_clean_unmerged_worktree_but_keeps_branch(
+        self, tmp_path: Path
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "orch_test_remove")
+            worktree_path = Path(workspace.worktree_path)
+            (worktree_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self._git(worktree_path, "add", "feature.txt")
+            self._git(worktree_path, "commit", "-m", "feature")
+
+            removed = cleanup_task_workspace(workspace, policy="remove")
+            release_lock(workspace.lock_path)
+
+        assert removed is True
+        assert not Path(workspace.worktree_path).exists()
+        assert _branch_exists(repo_root, workspace.branch)
+
+    def test_remove_policy_keeps_dirty_worktree_but_releases_lock(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with (
+            patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+            patch("ouroboros.core.worktree._worktree_cleanup_policy", return_value="remove"),
+        ):
+            workspace = prepare_task_workspace(repo_root, "orch_test_dirty_cleanup")
+            worktree_path = Path(workspace.worktree_path)
+            (worktree_path / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+            release_task_workspace(workspace)
+
+        assert Path(workspace.worktree_path).exists()
+        assert not Path(workspace.lock_path).exists()
+        assert _branch_exists(repo_root, workspace.branch)
