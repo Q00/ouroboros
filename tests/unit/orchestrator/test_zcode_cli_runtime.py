@@ -17,6 +17,7 @@ Captured fixtures live under ``tests/fixtures/zcode/``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -153,11 +154,30 @@ def test_build_command_includes_cwd_and_resume() -> None:
 
 
 class _FakeStream:
+    """Mimics asyncio.StreamReader at the granularity the parent helper uses.
+
+    The parent ``iter_runtime_stream_lines`` reads in fixed-size chunks via
+    ``stream.read(chunk_size)`` until EOF (empty bytes), so the fake yields the
+    payload on the first read and signals EOF afterwards.
+    """
+
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+        self._consumed = False
 
-    async def read(self) -> bytes:
+    async def read(self, n: int = -1) -> bytes:  # noqa: ARG002 - matches StreamReader.read
+        if self._consumed:
+            return b""
+        self._consumed = True
         return self._payload
+
+
+class _HangingStream:
+    """Mimics a subprocess that never produces output (auth prompt / stall)."""
+
+    async def read(self, n: int = -1) -> bytes:  # noqa: ARG002
+        await asyncio.sleep(3600)
+        return b""
 
 
 @pytest.mark.asyncio
@@ -174,3 +194,49 @@ async def test_iter_stream_lines_yields_whole_buffer(runtime: ZcodeCLIRuntime) -
 async def test_iter_stream_lines_empty_stdout_yields_nothing(runtime: ZcodeCLIRuntime) -> None:
     out = [line async for line in runtime._iter_stream_lines(_FakeStream(b"   "))]
     assert out == []
+
+
+@pytest.mark.asyncio
+async def test_iter_stream_lines_raises_on_silent_subprocess(
+    runtime: ZcodeCLIRuntime,
+) -> None:
+    """A silent/hung subprocess must raise TimeoutError, not wedge forever.
+
+    This guards the BLOCKING finding: the override must forward
+    ``first_chunk_timeout_seconds`` so the parent watchdog fires when zcode
+    stays alive but emits nothing. The orchestrator's ``execute_task`` relies
+    on this ``TimeoutError`` to terminate the subprocess.
+    """
+    with pytest.raises(TimeoutError, match="produced no stdout"):
+        _ = [
+            line
+            async for line in runtime._iter_stream_lines(
+                _HangingStream(),
+                first_chunk_timeout_seconds=0.05,
+            )
+        ]
+
+
+# -- config schema: persisted runtime_backend / cli_path --------------------
+
+
+def test_config_accepts_zcode_runtime_backend() -> None:
+    from ouroboros.config.models import OrchestratorConfig
+
+    cfg = OrchestratorConfig(runtime_backend="zcode")
+    assert cfg.runtime_backend == "zcode"
+
+
+def test_config_accepts_zcode_cli_path_and_expands() -> None:
+    from ouroboros.config.models import OrchestratorConfig
+
+    cfg = OrchestratorConfig(zcode_cli_path="~/zcode.cjs")
+    assert cfg.zcode_cli_path is not None
+    assert "~" not in cfg.zcode_cli_path  # expand_cli_path validator ran
+    assert cfg.zcode_cli_path.endswith("zcode.cjs")
+
+
+def test_validate_runtime_backend_accepts_zcode() -> None:
+    from ouroboros.config.models import _validate_runtime_backend
+
+    assert _validate_runtime_backend("zcode", field_name="test") == "zcode"
