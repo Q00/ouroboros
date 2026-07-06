@@ -280,6 +280,16 @@ class AutoInterviewResult:
     blocker: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _InterviewRoundOutcome:
+    """Result of one acknowledged or terminal interview round."""
+
+    turn: InterviewTurn
+    prev_ambiguity: float | None
+    stagnant_rounds: int
+    terminal: AutoInterviewResult | None = None
+
+
 @dataclass(slots=True)
 class AutoInterviewDriver:
     """Drive an interview backend with conservative auto answers.
@@ -722,227 +732,30 @@ class AutoInterviewDriver:
         )
         stagnant_rounds = 0
         for round_number in range(state.current_round + 1, self.max_rounds + 1):
-            backend_done = turn.seed_ready or turn.completed
-            backend_confirmed = _backend_confirmed_seed_ready(turn)
-            ledger_done = ledger.is_seed_ready()
-            if ledger_done and backend_confirmed:
-                closure_mode = "mutual_agreement"
-                state.pending_question = None
-                state.interview_completed = True
-                state.interview_closure_mode = closure_mode
-                state.mark_progress(
-                    f"interview closed via {closure_mode} at round "
-                    f"{round_number}/{self.max_rounds} "
-                    f"(backend_ambiguity={turn.ambiguity_score})",
-                    tool_name="interview_driver",
-                )
-                self._save(state)
-                # ``state.current_round`` reflects the number of completed
-                # answer-exchange rounds so far. Use it (not ``round_number``,
-                # which is the upcoming iteration index that hasn't done any
-                # work yet) so the result carries the actual rounds consumed.
-                return AutoInterviewResult(
-                    "seed_ready", state.interview_session_id, ledger, state.current_round
-                )
-
-            state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
-            self._save(state)
-
-            if backend_done and not ledger_done:
-                backend_ready_defaults = await self._try_close_backend_ready_safe_defaults(
-                    state,
-                    ledger,
-                    turn,
-                )
-                if backend_ready_defaults is not None:
-                    return backend_ready_defaults
-
-                # Backend said done but ledger isn't — pick the first detected
-                # gap and answer it. This drives the backend to reopen with
-                # substantive new content; we never accept closure unilaterally.
-                # Mirror the safety guards that ``_answer_with_gap_steering``
-                # enforces so a backend-reported "done" against a CONFLICTING /
-                # BLOCKED / goal-missing ledger does NOT silently get a
-                # fabricated auto-answer appended — those terminal conditions
-                # must surface the unresolved conflict immediately.
-                detected_gaps = self.gap_detector.detect(ledger)
-                if not detected_gaps:
-                    # Defensive: ``ledger.is_seed_ready()`` was False yet the
-                    # structured detector finds no actionable gap. Treat as
-                    # the canonical "must keep asking" path so we at least
-                    # send something through the backend instead of crashing.
-                    answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
-                    question_for_record = turn.question
-                else:
-                    first_gap = detected_gaps[0]
-                    if first_gap.section == "goal" or first_gap.state in {
-                        LedgerStatus.CONFLICTING,
-                        LedgerStatus.BLOCKED,
-                    }:
-                        blocker_text = first_gap.message
-                        state.mark_blocked(blocker_text, tool_name="auto_answerer")
-                        record_authoring_backend(state)
-                        self._save(state)
-                        return AutoInterviewResult(
-                            "blocked",
-                            state.interview_session_id,
-                            ledger,
-                            state.current_round,
-                            blocker_text,
-                        )
-                    answer = self.answerer.answer_gap(first_gap.section, ledger, answer_context)
-                    question_for_record = (
-                        f"[driver gap-reopen '{first_gap.section}': "
-                        "backend_completed=True ledger_done=False]"
-                    )
-            else:
-                answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
-                question_for_record = turn.question
-
-            # Upgrade a generic template answer to a concrete, goal-specific one
-            # via the interview-runtime LLM (when wired). This is what actually
-            # drives ambiguity down round-over-round; the deterministic answerer
-            # above still owns all safety/routing.
-            answer = await self._refine_answer(answer, question_for_record, state, ledger)
-
-            if answer.blocker is not None:
-                self.answerer.apply(answer, ledger, question=question_for_record)
-                state.ledger = ledger.to_dict()
-                blocker_text = answer.blocker.reason
-                state.mark_blocked(blocker_text, tool_name="auto_answerer")
-                record_authoring_backend(state)
-                self._save(state)
-                return AutoInterviewResult(
-                    "blocked",
-                    state.interview_session_id,
-                    ledger,
-                    state.current_round,
-                    blocker_text,
-                )
-            answer = self._guard_intent_answer(
-                state,
-                answer,
-                ledger,
-                answer_context,
-                question=question_for_record,
-            )
-            if answer.blocker is not None:
-                self.answerer.apply(answer, ledger, question=question_for_record)
-                state.ledger = ledger.to_dict()
-                blocker_text = answer.blocker.reason
-                state.mark_blocked(blocker_text, tool_name="intent_guard")
-                record_authoring_backend(state)
-                self._save(state)
-                return AutoInterviewResult(
-                    "blocked",
-                    state.interview_session_id,
-                    ledger,
-                    state.current_round,
-                    blocker_text,
-                )
-            # Apply the answer to the in-memory ledger only. Do NOT persist
-            # ``state.ledger`` / ``state.current_round`` / ``state.pending_question``
-            # / ``state.auto_answer_log`` until ``backend.answer`` acknowledges
-            # the round.
-            #
-            # Why deferred persistence (SSOT #1157 *Closure Policy* — bot review #2
-            # BLOCKER on 17703155): persisting a complete ledger before the
-            # backend transcript reflects the answer creates a resume-time
-            # transcript-sync gap. The previous order saved the complete
-            # ledger first, then called ``backend.answer``; if that backend
-            # call timed out or raised, resume would see the persisted
-            # complete ledger, hit the ledger-primary closure gate above,
-            # close as ``ledger_only``, and proceed to SEED_GENERATION —
-            # but ``GenerateSeedHandler`` reads the persisted interview
-            # transcript, not the ledger, and the backend never accepted
-            # the last answer, so the Seed would be generated from stale
-            # transcript evidence. Deferring the persistence keeps
-            # ``state.ledger`` and the backend transcript monotonically in
-            # sync: on backend.answer failure, ``state.ledger`` on disk is
-            # the pre-answer state, resume re-enters the loop, the answerer
-            # deterministically re-computes the same answer, and the next
-            # ``backend.answer`` attempt either succeeds (round completes
-            # cleanly) or returns the same blocker.
-            self.answerer.apply(answer, ledger, question=question_for_record)
-
-            try:
-                turn = _validate_turn(
-                    await self._with_timeout(
-                        self.backend.answer(
-                            turn.session_id,
-                            answer.prefixed_text,
-                            last_question=question_for_record,
-                        ),
-                        state,
-                        tool_name="interview.answer",
-                    )
-                )
-            except TimeoutError as exc:
-                # In-memory ledger has the unsynced answer applied, but
-                # ``state.ledger`` on disk does NOT (deferred persistence
-                # above). Persist only the blocker context; the next resume
-                # re-computes the answer from the pre-answer ledger.
-                message = str(exc)
-                state.mark_blocked(message, tool_name="interview.answer")
-                record_authoring_backend(state)
-                self._save(state)
-                return AutoInterviewResult(
-                    "blocked", state.interview_session_id, ledger, round_number, message
-                )
-            except Exception as exc:
-                blocker = f"interview answer failed: {exc}"
-                state.mark_blocked(blocker, tool_name="interview.answer")
-                record_authoring_backend(state)
-                self._save(state)
-                return AutoInterviewResult(
-                    "blocked", state.interview_session_id, ledger, round_number, blocker
-                )
-
-            # Backend acknowledged the round — NOW safe to persist all the
-            # round's effects in a single ``self._save(state)`` flush. The
-            # ledger and backend transcript are guaranteed mirrored at this
-            # point, so the next iteration's ledger-primary closure gate
-            # can safely short-circuit close.
-            state.current_round = round_number
-            state.ledger = ledger.to_dict()
-            state.interview_session_id = turn.session_id
-            state.pending_question = turn.question
-            _record_auto_answer(
-                state,
-                round_number=round_number,
-                source=answer.source.value,
-                question=question_for_record,
-                answer=answer.text,
-            )
-            state.mark_progress(
-                f"answered round {round_number}/{self.max_rounds} from {answer.source.value}",
-                tool_name="auto_answerer",
-            )
-            self._save(state)
-            self._emit_auto_answer(
-                state,
-                round_number=round_number,
-                source=answer.source.value,
-                question=question_for_record,
-                answer=answer.text,
-            )
-            # When ambiguity plateaus above threshold, force one concrete
-            # decision via a lateral persona and push it into the transcript so
-            # the next round's scorer reflects the resolved gap. No-op when no
-            # lateral thinker is wired or ambiguity is already converging.
-            prev_ambiguity, stagnant_rounds, turn = await self._maybe_concretize_on_stagnation(
+            closed = self._try_close_mutual_agreement(
                 state,
                 ledger,
                 turn,
+                round_number=round_number,
+                result_rounds=state.current_round,
+            )
+            if closed is not None:
+                return closed
+
+            outcome = await self._run_one_round(
+                state,
+                ledger,
+                turn,
+                answer_context,
+                round_number=round_number,
                 prev_ambiguity=prev_ambiguity,
                 stagnant_rounds=stagnant_rounds,
             )
-            if turn.question and not turn.completed:
-                self._emit_interview_question(
-                    state,
-                    question=turn.question,
-                    round_number=round_number + 1,
-                )
+            if outcome.terminal is not None:
+                return outcome.terminal
+            turn = outcome.turn
+            prev_ambiguity = outcome.prev_ambiguity
+            stagnant_rounds = outcome.stagnant_rounds
 
         # max_rounds exhausted — one final backend-confirmed closure check, then
         # safe-default finalization for autonomous ``ooo auto``.  The manual
@@ -956,22 +769,16 @@ class AutoInterviewDriver:
         # The final check catches the case where the last round's apply /
         # backend exchange both filled the ledger and lowered ambiguity.
         backend_done = turn.seed_ready or turn.completed
-        backend_confirmed = _backend_confirmed_seed_ready(turn)
         ledger_done = ledger.is_seed_ready()
-        if ledger_done and backend_confirmed:
-            closure_mode = "mutual_agreement"
-            state.pending_question = None
-            state.interview_completed = True
-            state.interview_closure_mode = closure_mode
-            state.mark_progress(
-                f"interview closed via {closure_mode} at max_rounds="
-                f"{self.max_rounds} (backend_ambiguity={turn.ambiguity_score})",
-                tool_name="interview_driver",
-            )
-            self._save(state)
-            return AutoInterviewResult(
-                "seed_ready", state.interview_session_id, ledger, self.max_rounds
-            )
+        closed = self._try_close_mutual_agreement(
+            state,
+            ledger,
+            turn,
+            max_rounds_exhausted=True,
+            result_rounds=self.max_rounds,
+        )
+        if closed is not None:
+            return closed
 
         open_gaps = ledger.open_gaps()
         entered_payload = {
@@ -1258,6 +1065,280 @@ class AutoInterviewDriver:
         return AutoInterviewResult(
             "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
         )
+
+    def _try_close_mutual_agreement(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        turn: InterviewTurn,
+        *,
+        result_rounds: int,
+        round_number: int | None = None,
+        max_rounds_exhausted: bool = False,
+    ) -> AutoInterviewResult | None:
+        if not (ledger.is_seed_ready() and _backend_confirmed_seed_ready(turn)):
+            return None
+
+        closure_mode = "mutual_agreement"
+        state.pending_question = None
+        state.interview_completed = True
+        state.interview_closure_mode = closure_mode
+        if max_rounds_exhausted:
+            progress_message = (
+                f"interview closed via {closure_mode} at max_rounds="
+                f"{self.max_rounds} (backend_ambiguity={turn.ambiguity_score})"
+            )
+        else:
+            assert round_number is not None  # noqa: S101 - caller supplies loop-round context
+            progress_message = (
+                f"interview closed via {closure_mode} at round "
+                f"{round_number}/{self.max_rounds} "
+                f"(backend_ambiguity={turn.ambiguity_score})"
+            )
+        state.mark_progress(progress_message, tool_name="interview_driver")
+        self._save(state)
+        return AutoInterviewResult("seed_ready", state.interview_session_id, ledger, result_rounds)
+
+    async def _run_one_round(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        turn: InterviewTurn,
+        answer_context: AutoAnswerContext,
+        *,
+        round_number: int,
+        prev_ambiguity: float | None,
+        stagnant_rounds: int,
+    ) -> _InterviewRoundOutcome:
+        backend_done = turn.seed_ready or turn.completed
+        ledger_done = ledger.is_seed_ready()
+
+        state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
+        self._save(state)
+
+        if backend_done and not ledger_done:
+            backend_ready_defaults = await self._try_close_backend_ready_safe_defaults(
+                state,
+                ledger,
+                turn,
+            )
+            if backend_ready_defaults is not None:
+                return _InterviewRoundOutcome(
+                    turn, prev_ambiguity, stagnant_rounds, backend_ready_defaults
+                )
+
+            # Backend said done but ledger isn't — pick the first detected
+            # gap and answer it. This drives the backend to reopen with
+            # substantive new content; we never accept closure unilaterally.
+            # Mirror the safety guards that ``_answer_with_gap_steering``
+            # enforces so a backend-reported "done" against a CONFLICTING /
+            # BLOCKED / goal-missing ledger does NOT silently get a
+            # fabricated auto-answer appended — those terminal conditions
+            # must surface the unresolved conflict immediately.
+            detected_gaps = self.gap_detector.detect(ledger)
+            if not detected_gaps:
+                # Defensive: ``ledger.is_seed_ready()`` was False yet the
+                # structured detector finds no actionable gap. Treat as
+                # the canonical "must keep asking" path so we at least
+                # send something through the backend instead of crashing.
+                answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
+                question_for_record = turn.question
+            else:
+                first_gap = detected_gaps[0]
+                if first_gap.section == "goal" or first_gap.state in {
+                    LedgerStatus.CONFLICTING,
+                    LedgerStatus.BLOCKED,
+                }:
+                    blocker_text = first_gap.message
+                    state.mark_blocked(blocker_text, tool_name="auto_answerer")
+                    record_authoring_backend(state)
+                    self._save(state)
+                    return _InterviewRoundOutcome(
+                        turn,
+                        prev_ambiguity,
+                        stagnant_rounds,
+                        AutoInterviewResult(
+                            "blocked",
+                            state.interview_session_id,
+                            ledger,
+                            state.current_round,
+                            blocker_text,
+                        ),
+                    )
+                answer = self.answerer.answer_gap(first_gap.section, ledger, answer_context)
+                question_for_record = (
+                    f"[driver gap-reopen '{first_gap.section}': "
+                    "backend_completed=True ledger_done=False]"
+                )
+        else:
+            answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
+            question_for_record = turn.question
+
+        # Upgrade a generic template answer to a concrete, goal-specific one
+        # via the interview-runtime LLM (when wired). This is what actually
+        # drives ambiguity down round-over-round; the deterministic answerer
+        # above still owns all safety/routing.
+        answer = await self._refine_answer(answer, question_for_record, state, ledger)
+
+        if answer.blocker is not None:
+            self.answerer.apply(answer, ledger, question=question_for_record)
+            state.ledger = ledger.to_dict()
+            blocker_text = answer.blocker.reason
+            state.mark_blocked(blocker_text, tool_name="auto_answerer")
+            record_authoring_backend(state)
+            self._save(state)
+            return _InterviewRoundOutcome(
+                turn,
+                prev_ambiguity,
+                stagnant_rounds,
+                AutoInterviewResult(
+                    "blocked",
+                    state.interview_session_id,
+                    ledger,
+                    state.current_round,
+                    blocker_text,
+                ),
+            )
+        answer = self._guard_intent_answer(
+            state,
+            answer,
+            ledger,
+            answer_context,
+            question=question_for_record,
+        )
+        if answer.blocker is not None:
+            self.answerer.apply(answer, ledger, question=question_for_record)
+            state.ledger = ledger.to_dict()
+            blocker_text = answer.blocker.reason
+            state.mark_blocked(blocker_text, tool_name="intent_guard")
+            record_authoring_backend(state)
+            self._save(state)
+            return _InterviewRoundOutcome(
+                turn,
+                prev_ambiguity,
+                stagnant_rounds,
+                AutoInterviewResult(
+                    "blocked",
+                    state.interview_session_id,
+                    ledger,
+                    state.current_round,
+                    blocker_text,
+                ),
+            )
+        # Apply the answer to the in-memory ledger only. Do NOT persist
+        # ``state.ledger`` / ``state.current_round`` / ``state.pending_question``
+        # / ``state.auto_answer_log`` until ``backend.answer`` acknowledges
+        # the round.
+        #
+        # Why deferred persistence (SSOT #1157 *Closure Policy* — bot review #2
+        # BLOCKER on 17703155): persisting a complete ledger before the
+        # backend transcript reflects the answer creates a resume-time
+        # transcript-sync gap. The previous order saved the complete
+        # ledger first, then called ``backend.answer``; if that backend
+        # call timed out or raised, resume would see the persisted
+        # complete ledger, hit the ledger-primary closure gate above,
+        # close as ``ledger_only``, and proceed to SEED_GENERATION —
+        # but ``GenerateSeedHandler`` reads the persisted interview
+        # transcript, not the ledger, and the backend never accepted
+        # the last answer, so the Seed would be generated from stale
+        # transcript evidence. Deferring the persistence keeps
+        # ``state.ledger`` and the backend transcript monotonically in
+        # sync: on backend.answer failure, ``state.ledger`` on disk is
+        # the pre-answer state, resume re-enters the loop, the answerer
+        # deterministically re-computes the same answer, and the next
+        # ``backend.answer`` attempt either succeeds (round completes
+        # cleanly) or returns the same blocker.
+        self.answerer.apply(answer, ledger, question=question_for_record)
+
+        try:
+            turn = _validate_turn(
+                await self._with_timeout(
+                    self.backend.answer(
+                        turn.session_id,
+                        answer.prefixed_text,
+                        last_question=question_for_record,
+                    ),
+                    state,
+                    tool_name="interview.answer",
+                )
+            )
+        except TimeoutError as exc:
+            # In-memory ledger has the unsynced answer applied, but
+            # ``state.ledger`` on disk does NOT (deferred persistence
+            # above). Persist only the blocker context; the next resume
+            # re-computes the answer from the pre-answer ledger.
+            message = str(exc)
+            state.mark_blocked(message, tool_name="interview.answer")
+            record_authoring_backend(state)
+            self._save(state)
+            return _InterviewRoundOutcome(
+                turn,
+                prev_ambiguity,
+                stagnant_rounds,
+                AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, round_number, message
+                ),
+            )
+        except Exception as exc:
+            blocker = f"interview answer failed: {exc}"
+            state.mark_blocked(blocker, tool_name="interview.answer")
+            record_authoring_backend(state)
+            self._save(state)
+            return _InterviewRoundOutcome(
+                turn,
+                prev_ambiguity,
+                stagnant_rounds,
+                AutoInterviewResult(
+                    "blocked", state.interview_session_id, ledger, round_number, blocker
+                ),
+            )
+
+        # Backend acknowledged the round — NOW safe to persist all the
+        # round's effects in a single ``self._save(state)`` flush. The
+        # ledger and backend transcript are guaranteed mirrored at this
+        # point, so the next iteration's ledger-primary closure gate
+        # can safely short-circuit close.
+        state.current_round = round_number
+        state.ledger = ledger.to_dict()
+        state.interview_session_id = turn.session_id
+        state.pending_question = turn.question
+        _record_auto_answer(
+            state,
+            round_number=round_number,
+            source=answer.source.value,
+            question=question_for_record,
+            answer=answer.text,
+        )
+        state.mark_progress(
+            f"answered round {round_number}/{self.max_rounds} from {answer.source.value}",
+            tool_name="auto_answerer",
+        )
+        self._save(state)
+        self._emit_auto_answer(
+            state,
+            round_number=round_number,
+            source=answer.source.value,
+            question=question_for_record,
+            answer=answer.text,
+        )
+        # When ambiguity plateaus above threshold, force one concrete
+        # decision via a lateral persona and push it into the transcript so
+        # the next round's scorer reflects the resolved gap. No-op when no
+        # lateral thinker is wired or ambiguity is already converging.
+        prev_ambiguity, stagnant_rounds, turn = await self._maybe_concretize_on_stagnation(
+            state,
+            ledger,
+            turn,
+            prev_ambiguity=prev_ambiguity,
+            stagnant_rounds=stagnant_rounds,
+        )
+        if turn.question and not turn.completed:
+            self._emit_interview_question(
+                state,
+                question=turn.question,
+                round_number=round_number + 1,
+            )
+        return _InterviewRoundOutcome(turn, prev_ambiguity, stagnant_rounds)
 
     async def _try_close_after_backend_start_failure(
         self,
