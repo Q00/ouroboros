@@ -29,6 +29,7 @@ from ouroboros.cli.commands import (
     config,
     detect,
     dispatch,
+    harness,
     init,
     job,
     mcp,
@@ -96,6 +97,7 @@ app.command(
 app.add_typer(init.app, name="init")
 app.add_typer(run.app, name="run")
 app.add_typer(job.app, name="job")
+app.add_typer(harness.app, name="harness")
 app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")
 app.add_typer(cancel.app, name="cancel")
