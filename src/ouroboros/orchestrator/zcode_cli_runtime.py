@@ -48,8 +48,8 @@ log = structlog.get_logger(__name__)
 # vocabulary is rejected rather than silently escalating.
 _ZCODE_PERMISSION_MODE_TO_FLAG = {
     # Real zcode `--mode` values (from `zcode --help`): build | edit | plan | yolo.
-    "acceptEdits": "edit",          # accept edits
-    "bypassPermissions": "yolo",    # full bypass
+    "acceptEdits": "edit",  # accept edits
+    "bypassPermissions": "yolo",  # full bypass
 }
 _ZCODE_PERMISSION_MODES = frozenset(_ZCODE_PERMISSION_MODE_TO_FLAG)
 # Match the orchestrator-wide ``acceptEdits`` default. Operators must opt in
