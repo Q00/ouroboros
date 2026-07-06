@@ -3944,8 +3944,19 @@ Files present:
                             execution_counters=execution_counters,
                             retry_attempt=ac_retry_attempts[ac_idx],
                         )
-                        if alt is not None:
-                            results[position_by_idx[ac_idx]] = alt
+                        if isinstance(alt, ACExecutionResult):
+                            # The alternate ran via _execute_single_ac, which has
+                            # no seed-level success contract — apply the same V1
+                            # verify gate the same-runtime results get, so an
+                            # alternate 'success' with a failing verify_command or
+                            # missing expected artifact is not accepted as success.
+                            results[position_by_idx[ac_idx]] = await self._apply_verify_gate(
+                                seed=seed,
+                                ac_index=ac_idx,
+                                result=alt,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
                     pending.discard(ac_idx)
                     continue
                 last_failure_class[ac_idx] = new_class

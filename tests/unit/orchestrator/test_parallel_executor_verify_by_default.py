@@ -129,6 +129,82 @@ async def test_apply_verify_gate_flips_success_to_failed(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_early_stop_alt_success_still_verify_gated(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An alternate 'success' taken on the retry early-stop path must be verify-gated.
+
+    Regression: the early-stop cross-harness hook replaces the stored result with
+    the alternate's, and the alternate runs via ``_execute_single_ac``, which has
+    no seed-level success contract. A failing ``verify_command`` must still flip an
+    alternate ``success=True`` to FAILED, exactly like the same-runtime path — the
+    alternate must not bypass the verify-by-default contract.
+    """
+    from ouroboros.orchestrator import cross_harness_redispatch as chr
+
+    executor = ParallelACExecutor(
+        adapter=_StubAdapter(str(tmp_path)),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=True,
+        ac_retry_attempts=2,
+        cross_harness_redispatch=True,
+    )
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 1"))
+    monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
+
+    fab = VerifierVerdict(
+        passed=False,
+        reasons=("fabricated a file",),
+        failure_class="FABRICATION_SUSPECTED",
+    )
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        # Same eligible failure class on the initial attempt and retry 1 so the
+        # loop early-stops before the counter cap and reaches the alt-harness hook.
+        return [
+            ACExecutionResult(
+                ac_index=idx,
+                ac_content="ac",
+                success=False,
+                error="fabricated",
+                outcome=ACExecutionOutcome.FAILED,
+                atomic_verifier_verdict=fab,
+            )
+            for idx in kwargs["batch_indices"]
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    async def alt_reports_success(backend: str, **kwargs: Any) -> ACExecutionResult:
+        # The alternate backend claims success without honoring the contract.
+        return ACExecutionResult(ac_index=0, ac_content="ac", success=True, session_id="alt-sess")
+
+    executor._run_single_ac_on_backend = alt_reports_success  # type: ignore[method-assign]
+
+    results = await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    # The alternate reported success, but 'verify_command: exit 1' must gate it
+    # to FAILED just like a same-runtime success — no contract bypass.
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].success is False
+    assert results[0].outcome == ACExecutionOutcome.FAILED
+    assert "Verify gate failed" in (results[0].error or "")
+
+
+@pytest.mark.asyncio
 async def test_apply_verify_gate_contract_less_is_noop(tmp_path: Any) -> None:
     """A description-only AC (no verify_command) is byte-identical to today."""
     executor = _make_executor(working_directory=str(tmp_path))
