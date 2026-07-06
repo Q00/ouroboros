@@ -2,8 +2,11 @@
 
 These exercise the narrow ``_maybe_redispatch_alt_harness`` shell: it must fire at
 most once per AC, and fall back cleanly (return ``None``) whenever the feature is
-off, no alternative exists, or the re-run itself errors — never making the
-original failure worse. The live alternate-runtime spawn is stubbed.
+off, no alternative exists, or the re-run itself *errors* to spawn — never making
+the original failure worse. When the alternate backend actually runs and *fails*,
+its failed result IS surfaced as the authoritative outcome (it ran in the shared
+workspace and may have edited it), rather than being silently discarded. The live
+alternate-runtime spawn is stubbed.
 """
 
 from __future__ import annotations
@@ -148,15 +151,30 @@ async def test_rerun_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_alt_failure_is_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If the alternate harness also fails, the original failure path stands."""
+async def test_alt_failure_is_surfaced_as_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A FAILED alternate that ran in the workspace is surfaced, not discarded.
+
+    Regression for the workspace-honesty contract: the alternate backend runs in
+    the SAME cwd as the original executor, so when it fails AFTER touching the
+    workspace the caller must receive the alternate's failed result — naming the
+    from→to backends and flagging the possible workspace mutation — rather than
+    silently keeping only the original same-runtime failure.
+    """
     executor = _make_executor(enabled=True)
     monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
 
-    async def _fail(backend: str, **kwargs: Any) -> ACExecutionResult:
-        return _failed()
+    async def _fail_after_editing_workspace(backend: str, **kwargs: Any) -> ACExecutionResult:
+        # Model an alternate that mutated the workspace, then still failed
+        # verification — a distinct error from the original same-runtime failure.
+        return ACExecutionResult(
+            ac_index=0,
+            ac_content="do the thing",
+            success=False,
+            error="codex edited files but verify_command exited 1",
+            session_id="alt-sess",
+        )
 
-    executor._run_single_ac_on_backend = _fail  # type: ignore[method-assign]
+    executor._run_single_ac_on_backend = _fail_after_editing_workspace  # type: ignore[method-assign]
     result = await executor._maybe_redispatch_alt_harness(
         result=_failed(),
         execution_context_id="exec-1",
@@ -164,4 +182,39 @@ async def test_alt_failure_is_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
         atomic_retry_attempt=0,
         stall_retries_exhausted=True,
     )
-    assert result is None
+
+    # The alternate's failure is now the authoritative result (not None, not the
+    # original same-runtime error verbatim).
+    assert result is not None
+    assert result.success is False
+    assert result.session_id == "alt-sess"
+    # It names the alternate backend and flags the possible workspace mutation.
+    assert "codex" in (result.error or "")
+    assert "alt-harness" in (result.error or "")
+    assert "may have modified" in (result.error or "")
+    # The alternate's own failure detail is preserved as context, not erased.
+    assert "codex edited files but verify_command exited 1" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_alt_success_result_returned_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful alternate is returned as the winning result, unannotated."""
+    executor = _make_executor(enabled=True)
+    monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
+
+    async def _win(backend: str, **kwargs: Any) -> ACExecutionResult:
+        return ACExecutionResult(
+            ac_index=0, ac_content="do the thing", success=True, session_id="alt-sess"
+        )
+
+    executor._run_single_ac_on_backend = _win  # type: ignore[method-assign]
+    result = await executor._maybe_redispatch_alt_harness(
+        result=_failed(),
+        execution_context_id="exec-1",
+        rerun_kwargs=_rerun_kwargs(),
+        atomic_retry_attempt=0,
+        stall_retries_exhausted=True,
+    )
+    assert result is not None
+    assert result.success is True
+    assert result.error is None

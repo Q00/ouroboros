@@ -7520,6 +7520,10 @@ class TestParallelACExecutor:
             event_store=event_store,
             console=MagicMock(),
             enable_decomposition=False,
+            # Isolate the stall→failure conversion: cross-harness redispatch is a
+            # separate recovery path (default on) that would otherwise intercept
+            # the abandoned stall and surface an alternate backend's own failure.
+            cross_harness_redispatch=False,
         )
 
         async def always_stall(**kwargs: Any) -> ACExecutionResult:
