@@ -115,6 +115,7 @@ _COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS = 5.0
 _RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 _RECOVERED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-failed-"
 _RECOVERED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-recovered-interrupted-"
+_STRANDED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-stranded-interrupted-"
 _DRAIN_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-drain-interrupted-"
 _DRAIN_GRACE_SECONDS = 5.0
 _TERMINAL_APPEND_RETRY_DELAY_SECONDS = 0.05
@@ -270,6 +271,30 @@ def _orphaned_job_interrupted_event(job_id: str) -> BaseEvent:
     )
 
 
+def _stranded_job_interrupted_data() -> dict[str, Any]:
+    """Terminal payload for a job whose task was released without a terminal event."""
+    return {
+        "status": JobStatus.INTERRUPTED.value,
+        "message": "Job interrupted: job task released without persisting a terminal state",
+        "error": "Job task exited without persisting a terminal event",
+        "result_text": "Job task exited without persisting a terminal event",
+        "result_meta": {"interrupted_from_stranded_job_task": True},
+        "is_error": True,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+def _stranded_job_interrupted_event(job_id: str) -> BaseEvent:
+    """Build the synthetic job-interrupted event for a stranded released job."""
+    return BaseEvent(
+        id=f"{_STRANDED_INTERRUPTED_EVENT_ID_PREFIX}{job_id}",
+        type="mcp.job.interrupted",
+        aggregate_type="job",
+        aggregate_id=job_id,
+        data=_stranded_job_interrupted_data(),
+    )
+
+
 def _snapshot_with_terminal_event(
     snapshot: JobSnapshot,
     event: BaseEvent,
@@ -306,6 +331,8 @@ class JobManager:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
+        self._backstops: dict[str, asyncio.Task[None]] = {}
+        self._started_job_ids: set[str] = set()
         self._monitor_terminalized_jobs: set[str] = set()
         self._recovery_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
@@ -395,6 +422,13 @@ class JobManager:
         task = asyncio.create_task(self._run_job(job_id, job_type, runner_task))
         self._tasks[job_id] = task
         self._monitors[job_id] = asyncio.create_task(self._monitor_job(job_id))
+        # Registered synchronously with the task dicts above: marks THIS manager
+        # instance as the runner owner, so the in-process stranded-job
+        # reconciliation in get_snapshot only ever applies to jobs whose live
+        # tasks this instance owned and released (another instance in the same
+        # process cannot prove task liveness and must never terminalize live
+        # work).
+        self._started_job_ids.add(job_id)
 
         return await self.get_snapshot(job_id)
 
@@ -558,6 +592,27 @@ class JobManager:
                 )
             raise
         finally:
+            # Durability backstop for the residual #1566 zombie class: the
+            # terminal-append helpers used in the try body are best-effort and
+            # SWALLOW persistence failures, and every inline net above (the
+            # except guards and _ensure_terminal_event_best_effort) catches only
+            # Exception while awaiting — a late CancelledError landing on any of
+            # those awaits (or on the monitor await below) silently aborts the
+            # rest of this finally AFTER the pops. PR #1576's own CI run proved
+            # an inline backstop can be skipped exactly that way. Launch the
+            # backstop as a DETACHED task, synchronously, before anything else
+            # in this finally: no cancellation delivered to THIS task can reach
+            # it, so a terminal event is guaranteed to be persisted (or
+            # legitimately deferred to a live drain holder) even if the rest of
+            # the finally is torn down mid-flight.
+            backstop = asyncio.create_task(
+                self._backstop_terminal_event(job_id, cancel_context=cancel_context)
+            )
+            self._backstops[job_id] = backstop
+            backstop.add_done_callback(
+                lambda _task, _job_id=job_id: self._backstops.pop(_job_id, None)
+            )
+            backstop.add_done_callback(_consume_task_result)
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
             self._monitor_terminalized_jobs.discard(job_id)
@@ -568,29 +623,28 @@ class JobManager:
                     await monitor
                 except asyncio.CancelledError:
                     pass
-            # Durability backstop for the residual #1566 zombie: the
-            # terminal-append helpers used in the try body
-            # (_append_terminal_event_with_fallback and
-            # _append_execution_completed_event_with_fallback, via
-            # _append_terminal_fallback_event) are BEST-EFFORT and SWALLOW
-            # persistence failures — when every append attempt raises they log
-            # and return normally. The body then completes with NO terminal
-            # event AND NO propagating exception, so neither the crash guard
-            # (except BaseException) nor the cancel guard (except CancelledError)
-            # fires, and the job is stranded RUNNING forever (persisted stream
-            # shows only created + running, exactly the CI diagnostics). This is
-            # the last point where this process still owns the job's tasks;
-            # guarantee a terminal row before releasing them.
-            await self._backstop_terminal_event(job_id, cancel_context=cancel_context)
+                except Exception:
+                    # A monitor that already crashed re-raises its failure here;
+                    # it must not abort the remainder of this finally.
+                    logger.debug(
+                        "mcp.job.monitor_finished_with_error",
+                        extra={"job_id": job_id},
+                        exc_info=True,
+                    )
+            # Normally the backstop finishes here; if THIS task is (re)cancelled
+            # during the wait, the shield lets the detached backstop keep
+            # running to completion on the loop.
+            await asyncio.shield(backstop)
 
     async def _backstop_terminal_event(self, job_id: str, *, cancel_context: bool) -> None:
         """Guarantee a terminal event exists after ``_run_job`` released a job.
 
-        No-ops once a terminal event is durably present (the normal case) and
-        respects drain semantics: when a live external holder legitimately owns
-        the job's terminal state, ``_terminal_guard_status`` returns ``None`` and
-        this writes nothing. Never raises — it runs inside ``_run_job``'s
-        ``finally`` and must not mask the job-task teardown.
+        Runs as a detached task launched at the top of ``_run_job``'s
+        ``finally`` so that cancellation of the job task cannot skip or
+        interrupt it. No-ops once a terminal event is durably present (the
+        normal case) and respects drain semantics: when a live external holder
+        legitimately owns the job's terminal state, ``_terminal_guard_status``
+        returns ``None`` and this writes nothing. Never raises.
         """
         try:
             if await self._job_has_persisted_terminal_event(job_id):
@@ -1289,11 +1343,12 @@ class JobManager:
         )
         owner_pid, owner_start_time = _read_owner_identity(created.data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(snapshot)
-        return await self._reconcile_orphaned_job_snapshot(
+        snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
             owner_pid=owner_pid,
             owner_start_time=owner_start_time,
         )
+        return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
     async def _recover_linked_execution_terminal_snapshot(
         self, snapshot: JobSnapshot
@@ -1497,6 +1552,79 @@ class JobManager:
             event_id=event_id,
         )
         return True
+
+    async def _reconcile_stranded_started_job_snapshot(self, snapshot: JobSnapshot) -> JobSnapshot:
+        """Terminalize a job THIS manager started whose tasks are gone with no terminal event.
+
+        Second net behind the ``_run_job`` release-point backstop — and the
+        reason a stranded in-process job used to stay RUNNING through thousands
+        of ``get_snapshot`` polls: both restart-oriented reconcilers are
+        structurally inapplicable in-process.
+        :meth:`_recover_linked_execution_terminal_snapshot` needs
+        ``execution.terminal`` evidence and
+        :meth:`_reconcile_orphaned_job_snapshot` needs a provably dead owner,
+        while an in-process zombie has a live owner and may have no execution
+        evidence at all.
+
+        Scoped to ``_started_job_ids`` so only the manager instance that owned
+        (and released) the runner tasks ever self-heals a job — another
+        instance in the same process cannot prove task liveness and must never
+        terminalize live work. Defers while the job's release-point backstop is
+        still pending, while draining (drain owns those semantics), and while a
+        live linked-session holder is the progress authority (it surfaces
+        ``execution.terminal`` evidence the linked-execution reconciler
+        materializes).
+        """
+        if (
+            snapshot.is_terminal
+            or snapshot.status == JobStatus.CANCEL_REQUESTED
+            or snapshot.job_id not in self._started_job_ids
+            or self.has_live_job_task(snapshot.job_id)
+            or snapshot.job_id in self._backstops
+            or self._draining
+        ):
+            return snapshot
+        if snapshot.links.session_id is not None and is_holder_alive(snapshot.links.session_id):
+            return snapshot
+
+        if getattr(self._event_store, "_read_only", False):
+            event = _stranded_job_interrupted_event(snapshot.job_id)
+            return _snapshot_with_terminal_event(snapshot, event, snapshot.cursor)
+
+        lock = self._recovery_locks.setdefault(snapshot.job_id, asyncio.Lock())
+        async with lock:
+            events, cursor = await self._event_store.get_events_after(
+                "job", snapshot.job_id, last_row_id=0
+            )
+            existing_terminal = _latest_job_terminal_event(events)
+            if existing_terminal is not None:
+                return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+            latest_status_event = _latest_job_status_event(events)
+            if (
+                latest_status_event is not None
+                and latest_status_event.data.get("status") == JobStatus.CANCEL_REQUESTED.value
+            ):
+                return _snapshot_with_status_event(snapshot, latest_status_event, cursor)
+            try:
+                await self._append_event(
+                    "mcp.job.interrupted",
+                    snapshot.job_id,
+                    _stranded_job_interrupted_data(),
+                    event_id=f"{_STRANDED_INTERRUPTED_EVENT_ID_PREFIX}{snapshot.job_id}",
+                )
+            except PersistenceError:
+                events, cursor = await self._event_store.get_events_after(
+                    "job", snapshot.job_id, last_row_id=0
+                )
+                existing_terminal = _latest_job_terminal_event(events)
+                if existing_terminal is not None:
+                    return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+                raise
+            events, cursor = await self._event_store.get_events_after(
+                "job", snapshot.job_id, last_row_id=0
+            )
+            latest = events[-1]
+        return _snapshot_with_terminal_event(snapshot, latest, cursor)
 
     async def wait_for_change(
         self,
@@ -1913,6 +2041,7 @@ class JobManager:
             self._monitors.pop(job_id, None)
             self._recovery_locks.pop(job_id, None)
             self._monitor_terminalized_jobs.discard(job_id)
+            self._started_job_ids.discard(job_id)
         return len(expired)
 
     async def _append_event(

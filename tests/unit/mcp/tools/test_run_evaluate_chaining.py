@@ -226,6 +226,97 @@ async def test_successful_run_enqueues_chained_evaluate_job(
     assert "execution artifact" in evaluate_calls[0]["arguments"]["artifact"]
 
 
+async def test_run_job_stranded_without_terminal_event_still_terminalizes(
+    event_store,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for this file's own CI flake signature (#1566 / PR #1576):
+    the run job's task is fully released — job task AND runner task popped,
+    persisted stream = created + running only — with no terminal event and no
+    log. Whatever silently defeats the inline guards (modeled here by dropping
+    every terminal append for the run job while its task lives), the run job
+    must still reach a terminal state instead of zombying for the full wait
+    deadline: first via the detached release-point backstop, and failing that
+    via the get_snapshot in-process stranded-job net.
+    """
+    monkeypatch.setattr(execution_handlers, "get_auto_evaluate_enabled", lambda: True)
+
+    class FakeEvaluateHandler:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="approved"),),
+                    is_error=False,
+                    meta={"final_approved": True, "session_id": arguments["session_id"]},
+                )
+            )
+
+    monkeypatch.setattr(evaluation_handlers, "EvaluateHandler", FakeEvaluateHandler)
+
+    job_manager = JobManager(event_store)
+    handler = StartExecuteSeedHandler(
+        execute_handler=_SuccessfulExecuteHandler(text="execution artifact"),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=job_manager,
+    )
+
+    _terminal_types = {
+        "mcp.job.completed",
+        "mcp.job.failed",
+        "mcp.job.cancelled",
+        "mcp.job.interrupted",
+    }
+    # Identify the run job from its created event (allocated before handle()
+    # returns) and drop its terminal appends while the drop flag is on. The
+    # chained evaluate job is untouched.
+    target: dict[str, str | None] = {"job_id": None}
+    dropping = {"on": True}
+    original_append_event = job_manager._append_event
+
+    async def _drop_run_job_terminal_appends(
+        event_type: str, job_id: str, data: dict, **kwargs: Any
+    ) -> None:
+        if event_type == "mcp.job.created" and data.get("job_type") == "execute_seed":
+            target["job_id"] = job_id
+        if dropping["on"] and job_id == target["job_id"] and event_type in _terminal_types:
+            return  # silently lost, like the CI capture: no event, no exception
+        await original_append_event(event_type, job_id, data, **kwargs)
+
+    job_manager._append_event = _drop_run_job_terminal_appends
+
+    started = await handler.handle({"seed_content": "goal: stranded\n", "cwd": str(tmp_path)})
+    assert started.is_ok
+    run_job_id = started.value.meta["job_id"]
+    assert target["job_id"] == run_job_id
+
+    # Wait for the run job's tasks to be fully released and its detached
+    # backstop (whose appends are also dropped) to finish: the CI signature.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and (
+        run_job_id in job_manager._tasks or getattr(job_manager, "_backstops", {})
+    ):
+        await asyncio.sleep(0.01)
+    assert run_job_id not in job_manager._tasks
+    assert run_job_id not in job_manager._runner_tasks
+    events, _ = await event_store.get_events_after("job", run_job_id, 0)
+    assert all(e.type in {"mcp.job.created", "mcp.job.updated"} for e in events)
+
+    # From here the store is healthy again; the job must terminalize promptly
+    # instead of zombying for the full 60s wait deadline.
+    dropping["on"] = False
+    deadline = time.monotonic() + 5.0
+    snapshot = await job_manager.get_snapshot(run_job_id)
+    while not snapshot.is_terminal and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+        snapshot = await job_manager.get_snapshot(run_job_id)
+    assert snapshot.is_terminal, f"run job stranded in {snapshot.status}"
+    assert snapshot.result_meta.get("interrupted_from_stranded_job_task") is True
+
+
 async def test_chained_evaluate_uses_execution_worktree_when_present(
     event_store,
     tmp_path,
