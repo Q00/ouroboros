@@ -36,7 +36,10 @@ async def event_store():
 
 
 async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
-    deadline = time.monotonic() + 15.0
+    # 15s was too tight for loaded/shared CI runners (observed intermittent
+    # timeouts on GitHub Actions despite the awaited work completing in <1s
+    # locally); 60s gives ample headroom without weakening the assertion.
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         snapshot = await job_manager.get_snapshot(job_id)
         if snapshot.is_terminal:
@@ -54,7 +57,7 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
 
 
 async def _wait_for_call(calls: list[Any]) -> None:
-    deadline = time.monotonic() + 15.0
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         if calls:
             return
