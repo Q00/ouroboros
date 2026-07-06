@@ -189,6 +189,77 @@ class TestForkAndLabelSpawnOptIn:
         assert command[command.index("--name") + 1] == "ooo: ship it"
 
 
+class TestContextReferenceAddDirs:
+    """C4 native context channel: existing context_references dirs become
+    ``--add-dir`` grants (deduped, cap 8). Absent ⇒ byte-identical to pre-C4."""
+
+    def test_no_add_dir_flag_when_no_references(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", cwd="/tmp")
+        assert "--add-dir" not in transport._base_command(cwd="/tmp")
+
+    def test_existing_dirs_become_add_dir_grants(self, tmp_path) -> None:
+        d1 = tmp_path / "pkg-a"
+        d2 = tmp_path / "pkg-b"
+        d1.mkdir()
+        d2.mkdir()
+        transport = ClaudeWorkerTransport(
+            cli_path="claude",
+            cwd=str(tmp_path),
+            context_reference_dirs=[str(d1), str(d2)],
+        )
+        command = transport._base_command(cwd=str(tmp_path))
+        add_dir_values = [command[i + 1] for i, tok in enumerate(command) if tok == "--add-dir"]
+        assert add_dir_values == [str(d1.resolve()), str(d2.resolve())]
+
+    def test_nonexistent_dirs_and_files_are_skipped(self, tmp_path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        a_file = tmp_path / "notes.md"
+        a_file.write_text("x", encoding="utf-8")
+        transport = ClaudeWorkerTransport(
+            cli_path="claude",
+            cwd=str(tmp_path),
+            context_reference_dirs=[str(real), str(tmp_path / "missing"), str(a_file)],
+        )
+        command = transport._base_command(cwd=str(tmp_path))
+        add_dir_values = [command[i + 1] for i, tok in enumerate(command) if tok == "--add-dir"]
+        assert add_dir_values == [str(real.resolve())]
+
+    def test_relative_reference_resolves_against_cwd(self, tmp_path) -> None:
+        (tmp_path / "sub").mkdir()
+        transport = ClaudeWorkerTransport(
+            cli_path="claude",
+            cwd=str(tmp_path),
+            context_reference_dirs=["sub"],
+        )
+        command = transport._base_command(cwd=str(tmp_path))
+        assert command[command.index("--add-dir") + 1] == str((tmp_path / "sub").resolve())
+
+    def test_duplicates_deduped_and_capped(self, tmp_path) -> None:
+        dirs: list[str] = []
+        for i in range(12):
+            d = tmp_path / f"d{i}"
+            d.mkdir()
+            dirs.append(str(d))
+        # Feed a duplicate of the first plus 12 uniques; expect the 8-cap to hold.
+        transport = ClaudeWorkerTransport(
+            cli_path="claude",
+            cwd=str(tmp_path),
+            context_reference_dirs=[dirs[0], *dirs],
+        )
+        command = transport._base_command(cwd=str(tmp_path))
+        add_dir_values = [command[i + 1] for i, tok in enumerate(command) if tok == "--add-dir"]
+        assert len(add_dir_values) == 8
+        assert add_dir_values == [str((tmp_path / f"d{i}").resolve()) for i in range(8)]
+
+    def test_factory_threads_context_reference_dirs(self, tmp_path) -> None:
+        d = tmp_path / "ref"
+        d.mkdir()
+        rt = build_claude_worker_runtime(cwd=str(tmp_path), context_reference_dirs=[str(d)])
+        command = rt._transport._base_command(cwd=str(tmp_path))
+        assert command[command.index("--add-dir") + 1] == str(d.resolve())
+
+
 class TestRecursionHardening:
     """The claude worker must deny ouroboros tools + set the depth guard, while
     preserving native passthrough of every other MCP server."""

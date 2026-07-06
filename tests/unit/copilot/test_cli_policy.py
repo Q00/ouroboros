@@ -190,3 +190,44 @@ class TestBuildCopilotChildEnv:
             depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
         )
         assert env["_OUROBOROS_DEPTH"] == "1"
+
+    def test_no_extra_dirs_is_identical_to_default(self, tmp_path: Path) -> None:
+        # C4 no-op contract: omitting extra_instruction_dirs must yield the exact
+        # same COPILOT_CUSTOM_INSTRUCTIONS_DIRS as the pre-C4 build.
+        base = {"COPILOT_CUSTOM_INSTRUCTIONS_DIRS": str(tmp_path / "user")}
+        default_env = build_copilot_child_env(
+            base_env=dict(base),
+            depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
+        )
+        explicit_empty_env = build_copilot_child_env(
+            base_env=dict(base),
+            depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
+            extra_instruction_dirs=(),
+        )
+        key = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+        assert default_env[key] == explicit_empty_env[key]
+
+    def test_extra_instruction_dirs_appended_after_setup_dir(self, tmp_path: Path) -> None:
+        user = str(tmp_path / "user")
+        pack_dir = str(tmp_path / "context-pack")
+        env = build_copilot_child_env(
+            base_env={"COPILOT_CUSTOM_INSTRUCTIONS_DIRS": user},
+            depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
+            extra_instruction_dirs=[pack_dir],
+        )
+        parts = env["COPILOT_CUSTOM_INSTRUCTIONS_DIRS"].split(",")
+        # User value preserved first, setup-owned dir next, C4 extra dir last.
+        assert parts[0] == user
+        assert parts[-2].endswith(os.path.join(".copilot", "ouroboros-instructions"))
+        assert parts[-1] == pack_dir
+
+    def test_extra_instruction_dirs_deduped_and_blanks_skipped(self, tmp_path: Path) -> None:
+        pack_dir = str(tmp_path / "context-pack")
+        env = build_copilot_child_env(
+            base_env={"COPILOT_CUSTOM_INSTRUCTIONS_DIRS": pack_dir},
+            depth_error_factory=lambda depth, max_depth: RuntimeError(f"depth {depth}/{max_depth}"),
+            extra_instruction_dirs=["", "   ", pack_dir],
+        )
+        parts = env["COPILOT_CUSTOM_INSTRUCTIONS_DIRS"].split(",")
+        # pack_dir already present (user-provided) → not duplicated; blanks dropped.
+        assert parts.count(pack_dir) == 1

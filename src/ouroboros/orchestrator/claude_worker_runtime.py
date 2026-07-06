@@ -15,8 +15,10 @@ JSON ``session_id`` that is only diagnostic, not a valid future resume target.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from ouroboros.config import get_cli_path
@@ -47,6 +49,51 @@ _RECURSION_GUARD_DISALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__plugin_ouroboros_ouroboros",
 )
 
+# Cap on the number of ``--add-dir`` grants emitted for a worker so a seed with
+# many ``context_references`` cannot blow up the argv. The pack (C2) already
+# reaches the worker via the system prompt; ``--add-dir`` is the NATIVE channel
+# that additionally grants the worker filesystem READ access to referenced dirs
+# outside its cwd — a bounded optimization, not a correctness requirement.
+_MAX_ADD_DIRS = 8
+
+
+def _resolve_add_dirs(
+    context_reference_dirs: Sequence[str],
+    *,
+    cwd: str | None,
+) -> tuple[str, ...]:
+    """Return existing, deduped, absolute dirs for ``--add-dir`` (capped).
+
+    Best-effort and side-effect free: relative references are resolved against
+    ``cwd`` (the worker's repo root), non-directories and duplicates are
+    dropped, and the result is capped at :data:`_MAX_ADD_DIRS`. An empty input
+    yields an empty tuple so the caller emits no ``--add-dir`` flag at all
+    (byte-identical to the pre-C4 command).
+    """
+    base = Path(cwd) if cwd else None
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for raw in context_reference_dirs:
+        candidate = (raw or "").strip()
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if not path.is_absolute() and base is not None:
+            path = base / path
+        try:
+            if not path.is_dir():
+                continue
+            key = str(path.resolve())
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(key)
+        if len(resolved) >= _MAX_ADD_DIRS:
+            break
+    return tuple(resolved)
+
 
 class ClaudeWorkerTransport:
     """Spawn/resume a Claude worker session via ``claude -p ... --output-format json``."""
@@ -61,6 +108,7 @@ class ClaudeWorkerTransport:
         timeout: float | None = None,
         disallowed_tools: tuple[str, ...] = _RECURSION_GUARD_DISALLOWED_TOOLS,
         persist_sessions: bool = False,
+        context_reference_dirs: Sequence[str] = (),
     ) -> None:
         self._cli_path = cli_path or get_cli_path() or "claude"
         # Claude sessions are CWD-SCOPED: ``--resume`` finds a conversation only
@@ -79,6 +127,11 @@ class ClaudeWorkerTransport:
         # dashboard is the worker view instead. Opt in (native flag) to persist +
         # fork parent context + ``--name`` so a worker is openable/resumable natively.
         self._persist_sessions = persist_sessions
+        # NATIVE context channel (C4): grant the worker READ access to the
+        # seed's brownfield ``context_references`` dirs via ``--add-dir``.
+        # Resolved once against cwd (existing dirs only, deduped, capped) so the
+        # command builder just appends the flags. Empty ⇒ no ``--add-dir`` at all.
+        self._add_dirs = _resolve_add_dirs(context_reference_dirs, cwd=cwd)
 
     @staticmethod
     def _permission_args(permission_mode: str | None) -> list[str]:
@@ -97,6 +150,10 @@ class ClaudeWorkerTransport:
             # Space-separated list per `claude --disallowedTools` semantics; denies
             # the ouroboros MCP tools so the worker cannot re-enter the orchestrator.
             command.extend(["--disallowedTools", " ".join(self._disallowed_tools)])
+        for add_dir in self._add_dirs:
+            # Native passthrough grants read access to referenced brownfield
+            # dirs outside cwd. No-op when there are no context_references.
+            command.extend(["--add-dir", add_dir])
         if not self._persist_sessions:
             # Don't write a resumable session file → no /resume flooding.
             command.append("--no-session-persistence")
@@ -252,6 +309,7 @@ def build_claude_worker_runtime(
     model: str | None = None,
     llm_backend: str | None = None,
     persist_sessions: bool = False,
+    context_reference_dirs: Sequence[str] = (),
 ) -> LeaderDrivenWorkerRuntime:
     """Construct a leader-driven Claude worker runtime over ``claude -p --resume``.
 
@@ -259,10 +317,18 @@ def build_claude_worker_runtime(
     ``--no-session-persistence`` so they do not flood the human's ``/resume`` list.
     Opt in (native-session-index flag) to persist + fork parent context + ``--name``
     so a worker is openable/resumable in Claude natively.
+
+    ``context_reference_dirs`` (C4 native context channel): brownfield reference
+    directories the worker should be able to READ. Existing dirs are passed as
+    ``--add-dir`` grants (deduped, capped). Empty (the default) is a byte-for-byte
+    no-op — the worker command is identical to the pre-C4 invocation.
     """
     return LeaderDrivenWorkerRuntime(
         transport=ClaudeWorkerTransport(
-            cli_path=cli_path, cwd=cwd, persist_sessions=persist_sessions
+            cli_path=cli_path,
+            cwd=cwd,
+            persist_sessions=persist_sessions,
+            context_reference_dirs=context_reference_dirs,
         ),
         runtime_backend="claude_mcp",
         llm_backend=llm_backend or "claude",

@@ -142,13 +142,21 @@ def build_copilot_child_env(
     max_depth: int = DEFAULT_MAX_OUROBOROS_DEPTH,
     child_session_env_keys: Sequence[str] = DEFAULT_COPILOT_CHILD_SESSION_ENV_KEYS,
     depth_error_factory: Callable[[int, int], Exception],
+    extra_instruction_dirs: Sequence[str] = (),
 ) -> dict[str, str]:
     """Build an isolated environment for nested Copilot subprocesses.
 
     Strips Ouroboros MCP discovery vars and Copilot session vars so the child
     starts as a clean one-shot process. Preserves ``GH_TOKEN`` /
     ``GITHUB_TOKEN`` because the child needs them to authenticate.
+
+    ``extra_instruction_dirs`` (C4 native context channel): additional
+    instruction directories (e.g. a directory holding the deterministic context
+    pack) appended to ``COPILOT_CUSTOM_INSTRUCTIONS_DIRS`` AFTER any
+    user-provided value and the setup-owned Ouroboros dir. Empty (the default)
+    is a byte-for-byte no-op — the env is identical to the pre-C4 build.
     """
+    extras = tuple(extra_instruction_dirs)
     return build_child_env(
         base_env=base_env,
         # Order preserved: Ouroboros markers, Copilot session keys, then the
@@ -162,20 +170,30 @@ def build_copilot_child_env(
         ),
         max_depth=max_depth,
         depth_error_factory=depth_error_factory,
-        post_build=_add_ouroboros_copilot_instruction_dir,
+        post_build=lambda env: _add_ouroboros_copilot_instruction_dir(env, extras),
     )
 
 
-def _add_ouroboros_copilot_instruction_dir(env: dict[str, str]) -> None:
-    """Ensure Copilot CLI sees the setup-owned Ouroboros AGENTS.md directory."""
+def _add_ouroboros_copilot_instruction_dir(
+    env: dict[str, str],
+    extra_instruction_dirs: Sequence[str] = (),
+) -> None:
+    """Ensure Copilot CLI sees the setup-owned Ouroboros AGENTS.md directory.
+
+    Extends (never replaces) any user-provided ``COPILOT_CUSTOM_INSTRUCTIONS_DIRS``:
+    the setup-owned dir is appended first, then each ``extra_instruction_dirs``
+    entry (C4 native context channel), skipping blanks and duplicates.
+    """
     from ouroboros.runtime_instruction_artifacts import copilot_instruction_dir
 
     instruction_dir = str(copilot_instruction_dir())
     key = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
     existing = env.get(key, "")
     parts = [part.strip() for part in existing.split(",") if part.strip()]
-    if instruction_dir not in parts:
-        parts.append(instruction_dir)
+    for candidate in (instruction_dir, *extra_instruction_dirs):
+        candidate = (candidate or "").strip()
+        if candidate and candidate not in parts:
+            parts.append(candidate)
     env[key] = ",".join(parts)
 
 
