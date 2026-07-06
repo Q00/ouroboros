@@ -73,6 +73,64 @@ class TestEventStoreInitialization:
         assert len(events) == 5
         await store.close()
 
+    async def test_memory_store_concurrent_rollback_cannot_void_append(self, monkeypatch) -> None:
+        """The #1566/#1576 CI append-void, reproduced deterministically.
+
+        StaticPool handed the SAME aiosqlite connection to concurrent
+        ``engine.begin()`` blocks with no exclusivity. SQLite transactions are
+        connection-scoped, so a concurrent block exiting via exception (e.g. a
+        cancelled monitor mid-SELECT) issued a ROLLBACK that discarded another
+        task's uncommitted INSERT — whose own COMMIT then no-oped and append()
+        reported success while the event vanished (no exception, no log).
+
+        A slowed commit widens the INSERT→COMMIT window like a loaded CI
+        runner. With the memdb-backed store each block runs on its OWN
+        connection, so the failing block's rollback cannot touch the append's
+        transaction.
+
+        Fails on StaticPool (0 events persisted despite successful append);
+        passes with the process-shared memdb-backed store.
+        """
+        import contextlib
+
+        import aiosqlite
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+
+        commit_delay = 0.1
+        orig_commit = aiosqlite.Connection.commit
+
+        async def slow_commit(self):
+            await asyncio.sleep(commit_delay)
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", slow_commit)
+
+        event = BaseEvent(
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="void",
+            data={},
+        )
+
+        async def concurrent_failing_block() -> None:
+            # Land between the append's INSERT and its COMMIT.
+            await asyncio.sleep(commit_delay / 2)
+            with contextlib.suppress(RuntimeError):
+                async with store._engine.begin():
+                    raise RuntimeError("simulated cancelled concurrent block")
+
+        await asyncio.gather(store.append(event), concurrent_failing_block())
+        monkeypatch.setattr(aiosqlite.Connection, "commit", orig_commit)
+
+        events = await store.replay("test", "void")
+        assert len(events) == 1, (
+            "append() reported success but the event vanished (silent rollback "
+            "by a concurrent transaction sharing the :memory: connection)"
+        )
+        await store.close()
+
 
 class TestEventStoreAppend:
     """Test EventStore.append() method."""

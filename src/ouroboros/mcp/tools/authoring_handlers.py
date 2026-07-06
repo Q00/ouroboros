@@ -47,14 +47,17 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
+    FanoutRegistry,
     SubagentDispatchMode,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
+    register_code_investigation_fanout,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
+    stamp_fanout_meta,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -705,6 +708,7 @@ def _attach_question_assist_requests(
     dispatch_mode: SubagentDispatchMode = SubagentDispatchMode.SEQUENTIAL,
     runtime_backend: str | None = None,
     opencode_mode: str | None = None,
+    fanout_registry: FanoutRegistry | None = None,
 ) -> None:
     """Attach code-fact and advisory fanout requests for a question turn.
 
@@ -713,6 +717,12 @@ def _attach_question_assist_requests(
     ``question_advisory_subagents``, so the response is stamped with an explicit
     ``host_action=spawn_subagents`` cue for the host model to fan the advisory
     lanes out itself.
+
+    When ``fanout_registry`` is provided the code-investigation lane is
+    registered for result re-entry and its ``fanout_id`` is stamped as
+    ``question_advisory_fanout_id`` so a later
+    ``ouroboros_submit_fanout_results`` submission can be matched. With no
+    registry the emitted meta is byte-identical to the pre-registry contract.
     """
     code_request = _build_code_investigation_request(
         session_id=session_id,
@@ -756,16 +766,21 @@ def _attach_question_assist_requests(
         opencode_mode=opencode_mode,
     )
     meta["subagent_orchestration_instruction"] = contract.runtime_instruction_handling
-    if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
-        meta["question_advisory_dispatch_mode"] = "host_driven"
-        meta["question_advisory_host_action"] = "spawn_subagents"
-        # Advisory lanes are keyed by lane_id; their persona is absent on some
-        # lanes (code_context, web_context), so correlate by lane_id, not persona.
-        meta["question_advisory_result_correlation_key"] = "context.lane_id"
-    elif dispatch_mode is SubagentDispatchMode.SEQUENTIAL:
-        meta["question_advisory_dispatch_mode"] = "sequential"
-        meta["question_advisory_host_action"] = "process_payloads_sequentially"
-        meta["question_advisory_result_correlation_key"] = "context.lane_id"
+    # Advisory lanes are keyed by lane_id; their persona is absent on some
+    # lanes (code_context, web_context), so correlate by lane_id, not persona.
+    stamp_fanout_meta(
+        meta,
+        prefix="question_advisory",
+        dispatch_mode=dispatch_mode,
+        payloads=advisory_payloads,
+        correlation_key="context.lane_id",
+    )
+    if fanout_registry is not None:
+        meta["question_advisory_fanout_id"] = register_code_investigation_fanout(
+            fanout_registry,
+            session_id=session_id,
+            request=code_request,
+        )
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -1594,6 +1609,7 @@ class InterviewHandler:
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
     data_dir: Path | None = field(default=None, repr=False)
+    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     suppress_tool_use_prompt_cues: bool = False
 
     def __post_init__(self) -> None:
@@ -2601,6 +2617,7 @@ class InterviewHandler:
                         ),
                         runtime_backend=self.agent_runtime_backend,
                         opencode_mode=self.opencode_mode,
+                        fanout_registry=self.fanout_registry,
                     )
 
                 start_response_text = (
@@ -3134,6 +3151,7 @@ class InterviewHandler:
                         ),
                         runtime_backend=self.agent_runtime_backend,
                         opencode_mode=self.opencode_mode,
+                        fanout_registry=self.fanout_registry,
                     )
 
                 resume_response_text = f"Session {session_id}\n\n{display_question}"
@@ -3376,6 +3394,7 @@ class InterviewHandler:
                 ),
                 runtime_backend=self.agent_runtime_backend,
                 opencode_mode=self.opencode_mode,
+                fanout_registry=self.fanout_registry,
             )
 
         if lateral_review_dispatch_meta is not None:

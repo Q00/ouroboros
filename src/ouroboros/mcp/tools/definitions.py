@@ -34,6 +34,7 @@ from ouroboros.mcp.tools.evaluation_handlers import (
     LateralThinkHandler,
     MeasureDriftHandler,
     StartEvaluateHandler,
+    SubmitFanoutResultsHandler,
 )
 from ouroboros.mcp.tools.evolution_handlers import (
     EvolveRewindHandler,
@@ -60,6 +61,7 @@ from ouroboros.mcp.tools.query_handlers import (
     SessionStatusHandler,
 )
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
+from ouroboros.mcp.tools.subagent import FanoutRegistry
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
@@ -460,6 +462,9 @@ def get_ouroboros_tools(
     resolved_manager, resolved_prefix = _resolve_bridge_fields(
         context, mcp_manager, mcp_tool_prefix
     )
+    # One shared fan-out registry: interview/lateral producers register pending
+    # fan-outs into it, and the submit tool reads them back for synthesis.
+    fanout_registry = FanoutRegistry()
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
@@ -479,6 +484,7 @@ def get_ouroboros_tools(
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
+        fanout_registry=fanout_registry,
     )
     generate_seed = GenerateSeedHandler(
         llm_backend=llm_backend,
@@ -537,7 +543,9 @@ def get_ouroboros_tools(
         LateralThinkHandler(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
+        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
         EvolveStepHandler(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,

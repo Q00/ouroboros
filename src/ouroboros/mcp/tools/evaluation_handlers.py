@@ -30,9 +30,11 @@ from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
+    FanoutRegistry,
     build_evaluate_subagent,
     dispatch_plugin_terminal,
     should_dispatch_via_plugin,
+    submit_fanout_results,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -1420,6 +1422,7 @@ class LateralThinkHandler(BridgeAwareMixin):
 
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1567,7 +1570,9 @@ class LateralThinkHandler(BridgeAwareMixin):
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
                 lateral_persona_panel_metadata_from_capability_definitions,
+                register_lateral_persona_fanout,
                 resolve_subagent_dispatch,
+                stamp_fanout_meta,
             )
 
             if explicit_list:
@@ -1693,7 +1698,6 @@ class LateralThinkHandler(BridgeAwareMixin):
             # machine-readable contract vocabulary, while preserving
             # ``inline_fallback`` as a legacy alias for older skill prose.
             host_driven = dispatch is SubagentDispatchMode.HOST_DRIVEN
-            dispatch_mode_value = "host_driven" if host_driven else "sequential"
             payload_dicts = [p.to_dict() for p in payloads]
             panel_metadata = lateral_persona_panel_metadata_from_capability_definitions()
             contract_backend = self.agent_runtime_backend
@@ -1705,17 +1709,29 @@ class LateralThinkHandler(BridgeAwareMixin):
                 opencode_mode=self.opencode_mode,
             )
             dispatch_record: dict[str, Any] = {
-                "dispatch_mode": dispatch_mode_value,
                 "persona_count": len(sections),
                 "payloads": payload_dicts,
-                "result_correlation_key": "context.persona",
                 "subagent_orchestration_instruction": contract.runtime_instruction_handling,
             }
-            if host_driven:
-                dispatch_record["host_action"] = "spawn_subagents"
-            else:
-                dispatch_record["host_action"] = "process_payloads_sequentially"
+            # Stamp the PR-C-standardized 3-mode contract (dispatch_mode /
+            # host_action / result_correlation_key) via the shared helper. Only
+            # HOST_DRIVEN and SEQUENTIAL reach here (PLUGIN_PASSIVE returned the
+            # ``_subagents`` envelope above), so a cue is always stamped.
+            stamp_fanout_meta(
+                dispatch_record,
+                prefix="",
+                dispatch_mode=dispatch,
+                payloads=payloads,
+                correlation_key="context.persona",
+            )
+            if not host_driven:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
+            if self.fanout_registry is not None:
+                dispatch_record["fanout_id"] = register_lateral_persona_fanout(
+                    self.fanout_registry,
+                    session_id=str(arguments.get("session_id") or ""),
+                    payloads=payloads,
+                )
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (
@@ -1891,6 +1907,128 @@ class LateralThinkHandler(BridgeAwareMixin):
                     tool_name="ouroboros_lateral_think",
                 )
             )
+
+
+@dataclass
+class SubmitFanoutResultsHandler:
+    """Handler for the ``ouroboros_submit_fanout_results`` re-entry tool.
+
+    After a host fans out a set of advisory/persona/investigation subagents
+    (declared by :func:`stamp_fanout_meta` with a stamped ``fanout_id``), it
+    submits the correlated child outputs back through this tool. The server
+    validates the expected keys against the persisted fan-out record and, when
+    complete, routes to the revived synthesizer for the record's kind, returning
+    the correlated synthesis for the host to continue with. Sequential hosts
+    submit after processing payloads one-by-one — same tool, same contract.
+    """
+
+    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._registry = self.fanout_registry or FanoutRegistry()
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the tool definition."""
+        return MCPToolDefinition(
+            name="ouroboros_submit_fanout_results",
+            description=(
+                "Submit correlated results from a subagent fan-out back to "
+                "Ouroboros. After spawning the advisory/persona/investigation "
+                "subagents declared by a prior tool's `meta` (which stamped a "
+                "`fanout_id` and a `result_correlation_key`), call this tool with "
+                "one {key, content} per child output — `key` is the value of the "
+                "correlation field for that child. A complete set returns the "
+                "synthesis to continue with; a partial set returns "
+                "`status=partial` with the missing keys so you can resubmit."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="session_id",
+                    type=ToolInputType.STRING,
+                    description="Interview/lateral session id the fan-out belongs to.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="fanout_id",
+                    type=ToolInputType.STRING,
+                    description="The fanout_id stamped into the originating tool's meta.",
+                    required=True,
+                ),
+                MCPToolParameter(
+                    name="correlation_key",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "The result_correlation_key from the originating meta "
+                        "(e.g. 'context.persona' or 'code_facts')."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="results",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Correlated child outputs: a list of objects each with a "
+                        "'key' (the correlation value) and a 'content' (the child "
+                        "result, object or text)."
+                    ),
+                    required=True,
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Validate the submitted fan-out results and route them to synthesis."""
+        fanout_id = str(arguments.get("fanout_id") or "").strip()
+        if not fanout_id:
+            return Result.err(
+                MCPToolError(
+                    "fanout_id is required",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+
+        raw_results = arguments.get("results")
+        if not isinstance(raw_results, (list, tuple)):
+            return Result.err(
+                MCPToolError(
+                    "results must be a list of {key, content} objects",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+        results = [item for item in raw_results if isinstance(item, dict)]
+
+        outcome = submit_fanout_results(
+            self._registry,
+            session_id=str(arguments.get("session_id") or ""),
+            correlation_key=str(arguments.get("correlation_key") or ""),
+            results=results,
+            fanout_id=fanout_id,
+        )
+
+        if outcome.get("status") == "unknown_fanout_id":
+            return Result.err(
+                MCPToolError(
+                    str(outcome.get("error") or "unknown fanout_id"),
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=json.dumps(outcome, ensure_ascii=False, sort_keys=True),
+                    ),
+                ),
+                is_error=False,
+                meta=outcome,
+            )
+        )
 
 
 @dataclass
