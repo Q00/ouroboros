@@ -103,6 +103,59 @@ class TestBuildEvaluationPrompt:
         assert "## Artifact Content" not in prompt
         assert "inline artifact text that should not be duplicated" not in prompt
 
+    def test_spec_with_contract_renders_contract_block(self) -> None:
+        """A spec-carrying AC renders the DECLARED SUCCESS CONTRACT block (PR-H)."""
+        from ouroboros.core.seed import AcceptanceCriterionSpec
+
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="CLI prints the version",
+            artifact="print('1.2.3')",
+            current_ac_spec=AcceptanceCriterionSpec(
+                description="CLI prints the version",
+                verify_command="mytool --version",
+                expected_artifacts=("mytool",),
+                output_assertion="stdout equals 1.2.3",
+            ),
+        )
+        prompt = build_evaluation_prompt(context)
+
+        assert "DECLARED SUCCESS CONTRACT" in prompt
+        assert "verify_command: mytool --version" in prompt
+        assert "expected_artifacts: mytool" in prompt
+        assert "output_assertion: stdout equals 1.2.3" in prompt
+        assert "The AC passes ONLY if the artifact demonstrates the declared contract" in prompt
+        assert "Cite the evidence line." in prompt
+
+    def test_bare_spec_without_contract_renders_no_contract_block(self) -> None:
+        """A description-only spec (no contract) leaves the prompt unchanged."""
+        from ouroboros.core.seed import AcceptanceCriterionSpec
+
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="User can login",
+            artifact="def login(): pass",
+            current_ac_spec=AcceptanceCriterionSpec(description="User can login"),
+        )
+        prompt = build_evaluation_prompt(context)
+
+        assert "DECLARED SUCCESS CONTRACT" not in prompt
+        assert "User can login" in prompt
+
+    def test_no_spec_renders_no_contract_block(self) -> None:
+        """When current_ac_spec is None the prompt has no contract block."""
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="User can login",
+            artifact="def login(): pass",
+        )
+        prompt = build_evaluation_prompt(context)
+
+        assert "DECLARED SUCCESS CONTRACT" not in prompt
+
 
 class TestParseSemanticResponse:
     """Tests for response parsing."""

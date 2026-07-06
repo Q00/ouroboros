@@ -18,6 +18,7 @@ from ouroboros.evaluation.mechanical import (
     MechanicalVerifier,
 )
 from ouroboros.evaluation.models import (
+    REWARD_HACKING_VETO_THRESHOLD,
     CheckType,
     EvaluationContext,
     EvaluationResult,
@@ -238,10 +239,17 @@ class EvaluationPipeline:
                     final_approved=stage3_result.approved,
                 )
 
-        # No consensus triggered - approve based on Stage 2
+        # No consensus triggered - approve based on Stage 2.
+        # The reward-hacking veto (REWARD_HACKING_VETO_THRESHOLD) blocks an
+        # otherwise-passing artifact only on a *high-confidence* gaming signal,
+        # so a merely uncertain evaluator never vetoes a genuine pass.
         final_approved = True
         if stage2_result:
-            final_approved = stage2_result.ac_compliance and stage2_result.score >= 0.8
+            final_approved = (
+                stage2_result.ac_compliance
+                and stage2_result.score >= 0.8
+                and stage2_result.reward_hacking_risk < REWARD_HACKING_VETO_THRESHOLD
+            )
 
         return self._build_result(
             context.execution_id,
@@ -298,6 +306,15 @@ class EvaluationPipeline:
             elif stage2_result and not stage2_result.ac_compliance:
                 failure_reason = (
                     f"Stage 2 failed: AC non-compliance (score={stage2_result.score:.2f})"
+                )
+            elif (
+                stage2_result and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
+            ):
+                failure_reason = (
+                    "Stage 2 veto: reward-hacking risk "
+                    f"{stage2_result.reward_hacking_risk:.2f} >= "
+                    f"{REWARD_HACKING_VETO_THRESHOLD:.2f} — artifact appears optimized to game "
+                    "the evaluator rather than solve the real task"
                 )
             else:
                 failure_reason = "Unknown failure"

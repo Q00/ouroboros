@@ -21,7 +21,7 @@ from ouroboros.backends import build_runtime_subagent_orchestration_contract
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
-from ouroboros.core.seed import Seed, ac_text
+from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
@@ -65,6 +65,30 @@ def _seed_acceptance_criteria(seed: Seed) -> tuple[str, ...]:
         for criterion in seed.acceptance_criteria
         if (stripped := ac_text(criterion).strip())
     )
+
+
+def _seed_ac_spec_map(seed: Seed | None) -> dict[str, AcceptanceCriterionSpec]:
+    """Map each AC description to its structured spec (PR-H).
+
+    Since PR-F, ``Seed.acceptance_criteria`` holds ``AcceptanceCriterionSpec``
+    objects.  Evaluation flows AC text (descriptions) around as bare strings,
+    so we key specs by their trimmed ``description`` to reattach the declared
+    success contract when building each ``EvaluationContext``.  Only specs
+    that actually carry a contract are included — bare-description ACs map to
+    nothing and the evaluator judges the AC text alone (today's behavior).
+    """
+    if seed is None:
+        return {}
+    spec_map: dict[str, AcceptanceCriterionSpec] = {}
+    for criterion in seed.acceptance_criteria:
+        if not isinstance(criterion, AcceptanceCriterionSpec):
+            continue
+        if not criterion.has_success_contract:
+            continue
+        key = criterion.description.strip()
+        if key:
+            spec_map.setdefault(key, criterion)
+    return spec_map
 
 
 async def _default_brownfield_project_dir() -> Path | None:
@@ -545,6 +569,7 @@ class EvaluateHandler:
                 if not acceptance_criteria:
                     acceptance_criteria = _seed_acceptance_criteria(seed)
             except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
+                # Seed failed to parse — leave seed as None; spec map stays empty.
                 log.warning("mcp.tool.evaluate.seed_parse_warning", error=str(e))
                 # Continue without seed data - not fatal
 
@@ -626,6 +651,11 @@ class EvaluateHandler:
                 if acceptance_criteria
                 else "Verify execution output meets requirements"
             )
+
+            # Reattach declared success contracts (PR-H): map AC text back to
+            # its structured spec so Stage 2 grades against verify_command /
+            # expected_artifacts / output_assertion, not the bare wording.
+            ac_spec_map = _seed_ac_spec_map(seed)
 
             # Evaluation reads multiple spec files (one Read call per AC).
             # Use a dedicated adapter with a higher turn budget — the shared
@@ -719,12 +749,14 @@ class EvaluateHandler:
                     pipeline=pipeline,
                     working_dir=working_dir,
                     executor_backend=executor_backend,
+                    ac_spec_map=ac_spec_map,
                 )
 
             context = EvaluationContext(
                 execution_id=session_id,
                 seed_id=seed_id,
                 current_ac=current_ac,
+                current_ac_spec=ac_spec_map.get(current_ac),
                 artifact=artifact,
                 artifact_type=artifact_type,
                 goal=goal,
@@ -832,6 +864,7 @@ class EvaluateHandler:
         pipeline: object,  # EvaluationPipeline — typed as object to avoid import cycle
         working_dir: Path,
         executor_backend: str | None = None,
+        ac_spec_map: dict[str, AcceptanceCriterionSpec] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
@@ -856,6 +889,8 @@ class EvaluateHandler:
             format_checklist,
         )
 
+        spec_map = ac_spec_map or {}
+
         log.info(
             "mcp.tool.evaluate.multi_ac_started",
             session_id=session_id,
@@ -867,6 +902,7 @@ class EvaluateHandler:
             execution_id=session_id,
             seed_id=seed_id,
             current_ac=acceptance_criteria[0],
+            current_ac_spec=spec_map.get(acceptance_criteria[0]),
             artifact=artifact,
             artifact_type=artifact_type,
             goal=goal,
@@ -895,6 +931,7 @@ class EvaluateHandler:
                 execution_id=session_id,
                 seed_id=seed_id,
                 current_ac=ac_text,
+                current_ac_spec=spec_map.get(ac_text),
                 artifact=artifact,
                 artifact_type=artifact_type,
                 goal=goal,

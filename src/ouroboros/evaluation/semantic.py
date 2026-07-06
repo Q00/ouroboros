@@ -122,6 +122,29 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
         else "None specified"
     )
 
+    # Declared success contract (PR-H): when the seed attached a structured
+    # AcceptanceCriterionSpec carrying verify_command / expected_artifacts /
+    # output_assertion, surface it to the judge so it grades against the
+    # declared contract instead of the bare AC wording.  Bare-string ACs (no
+    # contract) render nothing here — identical to today's behavior.
+    spec = context.current_ac_spec
+    if spec is not None and spec.has_success_contract:
+        contract_lines = ["\n## DECLARED SUCCESS CONTRACT"]
+        if spec.verify_command:
+            contract_lines.append(f"- verify_command: {spec.verify_command}")
+        if spec.expected_artifacts:
+            artifacts = ", ".join(spec.expected_artifacts)
+            contract_lines.append(f"- expected_artifacts: {artifacts}")
+        if spec.output_assertion:
+            contract_lines.append(f"- output_assertion: {spec.output_assertion}")
+        contract_lines.append(
+            "The AC passes ONLY if the artifact demonstrates the declared contract "
+            "was met. Cite the evidence line."
+        )
+        contract_section = "\n".join(contract_lines)
+    else:
+        contract_section = ""
+
     has_files = context.artifact_bundle and context.artifact_bundle.files
 
     if has_files:
@@ -144,6 +167,7 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 
 ## Acceptance Criterion
 {context.current_ac}
+{contract_section}
 
 ## Original Goal
 {context.goal if context.goal else "Not specified"}
