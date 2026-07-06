@@ -222,11 +222,22 @@ class ZcodeCLIRuntime(CodexCliRuntime):
     ) -> list[str]:
         """Build the zcode CLI command for headless execution.
 
-        Measured interface (from `zcode --help`, verified against a live run):
-        invocation is `node <cli_path> ...` where cli_path resolves to the
-        zcode.cjs app-bundle script. Real flags: ``--prompt`` (one-shot),
-        ``--json`` (machine-readable summary), ``--cwd``, ``--mode``
-        (build|edit|plan|yolo), ``--resume <sessionId>``.
+        Measured interface (from `zcode --help`, verified against a live run).
+        Real flags: ``--prompt`` (one-shot), ``--json`` (machine-readable
+        summary), ``--cwd``, ``--mode`` (build|edit|plan|yolo),
+        ``--resume <sessionId>``.
+
+        Two install shapes must both work:
+
+        - **App-bundle script** — ``zcode.cjs`` under
+          ``/Applications/ZCode.app/...``. Invoked as ``node <cli_path> …``.
+        - **PATH executable** — a ``zcode`` wrapper/binary resolved when no
+          explicit path is configured. Must be called **directly**:
+          ``node <executable>`` would parse the binary as JS and fail before
+          zcode ever runs.
+
+        The builder distinguishes by extension: ``.cjs``/``.js``/``.mjs``
+        scripts get the ``node`` prefix; everything else is invoked straight.
 
         NOTE: zcode has **no** ``--non-interactive`` and **no**
         ``--approval-mode`` flag (an earlier draft invented them by copying the
@@ -240,9 +251,15 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             self._permission_mode,
             "edit",
         )
-        command = [
-            "node",
-            self._cli_path,
+        cli_path = str(self._cli_path) if self._cli_path else None
+        if cli_path is None:
+            msg = "zcode CLI path could not be resolved (set OUROBOROS_ZCODE_CLI_PATH or orchestrator.zcode_cli_path)"
+            raise RuntimeError(msg)
+        # node script (app bundle) → `node <script>`; PATH executable → direct.
+        prefix: list[str] = (
+            ["node", cli_path] if cli_path.endswith((".cjs", ".js", ".mjs")) else [cli_path]
+        )
+        command = prefix + [
             "--json",
             "--prompt",
             prompt or "",
