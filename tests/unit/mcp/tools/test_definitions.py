@@ -2539,6 +2539,28 @@ class TestEvaluateHandlerCodeChanges:
         assert "real build/test failures" not in text
         assert "No code changes detected" not in text
 
+    def test_format_result_surfaces_reviewer_independence(self) -> None:
+        """Stage 3 output surfaces the reviewer_independence label when present."""
+        from ouroboros.evaluation.models import ConsensusResult, EvaluationResult, Vote
+
+        handler = self._make_handler()
+        consensus = ConsensusResult(
+            approved=True,
+            votes=(Vote(model="m1", approved=True, confidence=0.9, reasoning="ok"),),
+            majority_ratio=1.0,
+            reviewer_independence="independent",
+        )
+        result = EvaluationResult(
+            execution_id="test-session",
+            stage1_result=self._make_stage1(passed=True),
+            stage2_result=None,
+            stage3_result=consensus,
+            final_approved=True,
+        )
+        text = handler._format_evaluation_result(result, code_changes=None)
+
+        assert "Reviewer Independence: independent" in text
+
     async def test_has_code_changes_true(self) -> None:
         """_has_code_changes returns True when git reports modifications."""
         handler = self._make_handler()

@@ -782,6 +782,9 @@ class EvaluateHandler:
                 "stage3_approved": eval_result.stage3_result.approved
                 if eval_result.stage3_result
                 else None,
+                "stage3_reviewer_independence": eval_result.stage3_result.reviewer_independence
+                if eval_result.stage3_result
+                else None,
                 "code_changes_detected": code_changes,
             }
 
@@ -1108,6 +1111,9 @@ class EvaluateHandler:
                     f"Approving: {s3.approving_votes}",
                 ]
             )
+            reviewer_independence = getattr(s3, "reviewer_independence", None)
+            if reviewer_independence:
+                lines.append(f"Reviewer Independence: {reviewer_independence}")
             for vote in s3.votes:
                 decision = "APPROVE" if vote.approved else "REJECT"
                 lines.append(f"  [{decision}] {vote.model} (confidence: {vote.confidence:.2f})")
