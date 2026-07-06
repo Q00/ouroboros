@@ -568,6 +568,47 @@ class JobManager:
                     await monitor
                 except asyncio.CancelledError:
                     pass
+            # Durability backstop for the residual #1566 zombie: the
+            # terminal-append helpers used in the try body
+            # (_append_terminal_event_with_fallback and
+            # _append_execution_completed_event_with_fallback, via
+            # _append_terminal_fallback_event) are BEST-EFFORT and SWALLOW
+            # persistence failures — when every append attempt raises they log
+            # and return normally. The body then completes with NO terminal
+            # event AND NO propagating exception, so neither the crash guard
+            # (except BaseException) nor the cancel guard (except CancelledError)
+            # fires, and the job is stranded RUNNING forever (persisted stream
+            # shows only created + running, exactly the CI diagnostics). This is
+            # the last point where this process still owns the job's tasks;
+            # guarantee a terminal row before releasing them.
+            await self._backstop_terminal_event(job_id, cancel_context=cancel_context)
+
+    async def _backstop_terminal_event(self, job_id: str, *, cancel_context: bool) -> None:
+        """Guarantee a terminal event exists after ``_run_job`` released a job.
+
+        No-ops once a terminal event is durably present (the normal case) and
+        respects drain semantics: when a live external holder legitimately owns
+        the job's terminal state, ``_terminal_guard_status`` returns ``None`` and
+        this writes nothing. Never raises — it runs inside ``_run_job``'s
+        ``finally`` and must not mask the job-task teardown.
+        """
+        try:
+            if await self._job_has_persisted_terminal_event(job_id):
+                return
+            guard_status = await self._terminal_guard_status(job_id, cancel_context=cancel_context)
+            if guard_status is None:
+                return
+            await self._ensure_terminal_event_best_effort(
+                job_id,
+                reason="terminal event missing after _run_job body released the job",
+                terminal_status=guard_status,
+            )
+        except Exception:
+            logger.error(
+                "mcp.job.backstop_terminal_failed",
+                extra={"job_id": job_id},
+                exc_info=True,
+            )
 
     async def _monitor_job(self, job_id: str) -> None:
         """Mirror linked execution/lineage progress into job updates."""

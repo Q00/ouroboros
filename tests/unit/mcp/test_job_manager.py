@@ -352,6 +352,85 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_run_job_never_strands_running_when_all_terminal_appends_fail(
+        self, tmp_path
+    ) -> None:
+        """Residual #1566 zombie: when EVERY terminal append (the primary
+        completed AND the FAILED fallback) fails, the best-effort helpers
+        swallow the error and ``_run_job`` returns normally with no terminal
+        event and no exception — stranding the job RUNNING forever. The
+        finally-block durability backstop must still persist a terminal state.
+
+        Fails on main (job never leaves RUNNING); passes with the backstop.
+        """
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        _terminal_types = {
+            "mcp.job.completed",
+            "mcp.job.failed",
+            "mcp.job.cancelled",
+            "mcp.job.interrupted",
+        }
+
+        try:
+            original_append_event = manager._append_event
+            failed_terminal_appends = 0
+
+            async def _fail_every_terminal_append_except_backstop(
+                event_type: str, job_id: str, data: dict, **kwargs
+            ) -> None:
+                nonlocal failed_terminal_appends
+                result_meta = data.get("result_meta")
+                # The finally-block backstop is the ONLY terminal writer allowed
+                # through — it is distinguished by the ``ensure_reason`` sentinel
+                # that _ensure_terminal_event_best_effort stamps. Everything the
+                # try body attempts (completed + fallback FAILED) fails, exactly
+                # like a store under sustained "database is locked" pressure.
+                is_backstop = isinstance(result_meta, dict) and "ensure_reason" in result_meta
+                if event_type in _terminal_types and not is_backstop:
+                    failed_terminal_appends += 1
+                    raise PersistenceError(
+                        "synthetic sustained terminal append failure", operation="insert"
+                    )
+                await original_append_event(event_type, job_id, data, **kwargs)
+
+            manager._append_event = _fail_every_terminal_append_except_backstop
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="runner ok"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            # The try body burned its primary + fallback terminal appends...
+            assert failed_terminal_appends >= 2
+            # ...and yet the job is terminal, persisted by the finally backstop.
+            assert snapshot.status is JobStatus.FAILED
+            assert snapshot.result_meta.get("ensure_reason")
+            assert snapshot.result_meta.get("terminal_append_failed") is True
+            assert snapshot.message == "Job terminalized by last-resort guard"
+
+            # Durable across a fresh manager (no live tasks): the terminal row
+            # is genuinely persisted, not an in-memory recovery artifact.
+            recovered = JobManager(store)
+            recovered_snapshot = await recovered.get_snapshot(started.job_id)
+            assert recovered_snapshot.status is JobStatus.FAILED
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_runner_success_transient_append_failure_recovers_original_completed(
         self, tmp_path
     ) -> None:
