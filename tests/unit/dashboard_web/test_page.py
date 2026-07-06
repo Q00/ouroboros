@@ -25,6 +25,19 @@ class TestLivePage:
         assert "EventSource" in INDEX_HTML
         assert "/events?run=" in INDEX_HTML
 
+    def test_index_html_polls_for_pending_run(self) -> None:
+        # The daemon base URL is published before a run exists (auto flow links it
+        # while interview/seed are still running). The page must NOT dead-end on the
+        # first empty /api/runs — it shows a waiting state and keeps polling.
+        assert "waiting for run" in INDEX_HTML
+        assert "no active run" not in INDEX_HTML
+        # The poll must be a real loop that re-checks /api/runs, not a one-shot.
+        assert "while (!runId)" in INDEX_HTML
+        assert "pickRun()" in INDEX_HTML
+        # And it must be interval-gated so an idle page never spins hot.
+        assert "setTimeout" in INDEX_HTML
+        assert "WAIT_POLL_MS" in INDEX_HTML
+
 
 class TestStaticSnapshot:
     def test_static_html_is_self_contained_and_sse_free(self) -> None:

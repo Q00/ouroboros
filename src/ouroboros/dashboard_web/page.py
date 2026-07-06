@@ -126,7 +126,14 @@ __BOOTSTRAP__
 </html>"""
 
 # Live bootstrap: open an SSE stream and re-render on every pushed snapshot.
+#
+# The daemon's base URL is published to the user BEFORE any run exists (the auto
+# flow links it while interview/seed are still running), so the page must never
+# resolve "no run yet" into a dead end: it polls /api/runs until a run appears,
+# then attaches. The poll is interval-gated (setTimeout) so an idle page never
+# spins hot against the shared SQLite file.
 _LIVE_BOOTSTRAP = """
+const WAIT_POLL_MS = 3000;
 function connect(runId) {
   const src = new EventSource("/events?run=" + encodeURIComponent(runId));
   const st = document.getElementById("m-status");
@@ -134,19 +141,24 @@ function connect(runId) {
   src.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (_) {} };
   src.onerror = () => st.innerHTML = '<span class="dot" style="background:var(--failed)"></span>reconnecting…';
 }
+async function pickRun() {
+  // One daemon serves every run; an explicit ?run= wins, else the latest run.
+  const explicit = new URLSearchParams(location.search).get("run");
+  if (explicit) return explicit;
+  try {
+    const runs = (await (await fetch("/api/runs")).json()).runs || [];
+    if (runs.length) return runs[0].execution_id;
+  } catch (_) {}
+  return null;
+}
 async function start() {
   const st = document.getElementById("m-status");
-  // One daemon serves every run; pick the run from ?run=, else the latest.
-  let runId = new URLSearchParams(location.search).get("run");
-  if (!runId) {
-    try {
-      const runs = (await (await fetch("/api/runs")).json()).runs || [];
-      if (runs.length) runId = runs[0].execution_id;
-    } catch (_) {}
-  }
-  if (!runId) {
-    st.innerHTML = '<span class="dot" style="background:var(--muted)"></span>no active run — start one with ooo run / ooo auto';
-    return;
+  // Poll until a run exists — the base URL can be opened before one is created.
+  let runId = await pickRun();
+  while (!runId) {
+    st.innerHTML = '<span class="dot" style="background:var(--muted)"></span>waiting for run… (ooo run / ooo auto)';
+    await new Promise(r => setTimeout(r, WAIT_POLL_MS));
+    runId = await pickRun();
   }
   connect(runId);
 }

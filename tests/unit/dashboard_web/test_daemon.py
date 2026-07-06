@@ -184,3 +184,50 @@ class TestDbIdentity:
         finally:
             for server in servers:
                 server.shutdown()
+
+
+class TestPendingRun:
+    """The base URL is opened before any run exists (auto flow); the server must
+    serve an empty run list AND the polling page without breaking the contract."""
+
+    @staticmethod
+    def _get(port: int, path: str) -> tuple[int, bytes]:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, resp.read()
+        finally:
+            conn.close()
+
+    def test_empty_runs_and_polling_page_are_served(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        # A DB that exists but holds no runs yet — exactly the pending-auto state.
+        empty_db = tmp_path / "empty.db"
+        conn = sqlite3.connect(empty_db)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(empty_db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            port = server.server_address[1]
+            # /api/runs answers 200 with an empty list — no error, no hang.
+            status, body = self._get(port, "/api/runs")
+            assert status == 200
+            assert json.loads(body) == {"runs": []}
+
+            # The index page keeps polling instead of dead-ending on the empty list.
+            status, body = self._get(port, "/")
+            assert status == 200
+            page = body.decode("utf-8")
+            assert "waiting for run" in page
+            assert "while (!runId)" in page
+            assert "no active run" not in page
+        finally:
+            server.shutdown()
