@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ouroboros.auto.ledger import (
+    DecisionProvenance,
     LedgerEntry,
     LedgerSource,
     LedgerStatus,
@@ -93,6 +94,10 @@ def auto_fill_remaining(ledger: SeedDraftLedger, *, fill_slot: FillSlot) -> list
                 confidence=confidence,
                 status=LedgerStatus.DEFAULTED,
                 reversible=True,
+                # Deadline non-convergence backstop → the exact #1485 origin;
+                # stamp it distinctly so the histogram and gate see it as a
+                # timeout default rather than an ordinary model inference.
+                provenance=DecisionProvenance.TIMEOUT_DEFAULT,
                 rationale=(
                     proposal.rationale
                     or "Auto-filled by inference (RFC #1256 §I3) because the "

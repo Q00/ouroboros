@@ -214,6 +214,7 @@ def _synthesized_metadata_kwargs(
         "seed_id": f"seed_{uuid4().hex[:12]}",
         "ambiguity_score": max(0.05, deterministic_floor(ledger)),
         "interview_id": interview_id,
+        "decision_provenance": ledger.provenance_histogram(),
     }
     if recovery_reason is not None:
         kwargs["generation_mode"] = DEADLINE_LEDGER_SEED_GENERATION_MODE
@@ -401,6 +402,7 @@ def partial_seed_from_evidence(
             degraded=degraded,
             unresolved_slots=unresolved_slots,
             recovery_reason=reason,
+            decision_provenance=ledger.provenance_histogram(),
         ),
     )
 

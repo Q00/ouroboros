@@ -21,7 +21,15 @@ import math
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -166,6 +174,12 @@ class SeedMetadata(BaseModel, frozen=True):
         recovery_reason: Free-form description of why the degraded path was
             taken (e.g. ``"interview_phase_deadline"``). ``None`` for normal
             seeds.
+        decision_provenance: Histogram of how the ledger decisions behind this
+            Seed were reached, keyed by decision-origin class (``user_confirmed``
+            / ``model_inferred`` / ``timeout_default`` / ``lateral_consensus`` /
+            ``maintainer_policy``) → count (A1 / #1485). Empty for Seeds not
+            synthesized from an auto ledger. Additive and greppable so later
+            phases can audit how many gated decisions a seed rests on.
     """
 
     seed_id: str = Field(default_factory=lambda: f"seed_{uuid4().hex[:12]}")
@@ -178,6 +192,20 @@ class SeedMetadata(BaseModel, frozen=True):
     degraded: bool = Field(default=False)
     unresolved_slots: tuple[str, ...] = Field(default_factory=tuple)
     recovery_reason: str | None = Field(default=None)
+    decision_provenance: dict[str, int] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Serialize additively: omit ``decision_provenance`` when empty.
+
+        Keeps legacy Seed JSON byte-identical after a round-trip (the histogram
+        is only present for ledger-synthesized seeds) while still emitting it
+        whenever an auto ledger populated it.
+        """
+        data = handler(self)
+        if not self.decision_provenance:
+            data.pop("decision_provenance", None)
+        return data
 
 
 class AcceptanceCriterionSpec(BaseModel, frozen=True):
