@@ -34,27 +34,27 @@ from ouroboros.runtime.child_env import build_child_env
 
 log = structlog.get_logger(__name__)
 
-# Zcode CLI permission mode mapping. Zcode uses similar approval modes to
-# Gemini - map the Ouroboros permission vocabulary to the *non-blocking*
-# native modes only.
+# Zcode CLI permission mode mapping. Zcode exposes its permission surface via
+# the ``--mode`` flag (build | edit | plan | yolo) — there is no
+# ``--approval-mode`` and no ``--non-interactive`` flag (an earlier draft
+# invented both by copying the Codex adapter). ``--prompt`` is already a
+# non-interactive one-shot invocation (no TUI, no approval prompt), so the
+# only permission knob to map is ``--mode``.
 #
-# Ouroboros' ``"default"`` mode (interactive, prompt-driven) is intentionally
-# absent: this runtime always launches zcode with ``--non-interactive`` so a
-# subprocess that surfaces an approval prompt would wedge indefinitely. Callers
-# that pass ``"default"`` are rejected at ``_resolve_permission_mode`` with a
-# message pointing them at ``acceptEdits`` (conservative, non-blocking) or
-# ``bypassPermissions`` (full bypass).
+# Ouroboros' ``"default"`` mode has no zcode-native ``--mode`` equivalent
+# (zcode's vocabulary is build/edit/plan/yolo), so callers that pass
+# ``"default"`` are normalized at ``_resolve_permission_mode`` to the safe
+# default (``acceptEdits`` → ``edit``). Anything outside the recognized
+# vocabulary is rejected rather than silently escalating.
 _ZCODE_PERMISSION_MODE_TO_FLAG = {
     # Real zcode `--mode` values (from `zcode --help`): build | edit | plan | yolo.
-    "acceptEdits": "edit",          # accept edits, non-blocking under --prompt
+    "acceptEdits": "edit",          # accept edits
     "bypassPermissions": "yolo",    # full bypass
 }
 _ZCODE_PERMISSION_MODES = frozenset(_ZCODE_PERMISSION_MODE_TO_FLAG)
-# Match the orchestrator-wide ``acceptEdits`` default. Zcode's ``auto_edit``
-# is non-blocking under ``--non-interactive`` (no approval prompts), so
-# headless safety does not require silently jumping to ``yolo`` (full bypass)
-# when ``permission_mode`` is omitted — operators must opt in to
-# ``bypassPermissions`` explicitly.
+# Match the orchestrator-wide ``acceptEdits`` default. Operators must opt in
+# to ``bypassPermissions`` explicitly — the runtime never silently jumps to
+# ``yolo`` when ``permission_mode`` is omitted.
 _ZCODE_DEFAULT_PERMISSION_MODE = "acceptEdits"
 
 #: Maximum Ouroboros nesting depth to prevent fork bombs
@@ -103,18 +103,21 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         """Initialize the Zcode CLI runtime.
 
         Args:
-            cli_path: Optional path to the zcode binary.
+            cli_path: Optional path to the zcode CLI entry script
+                (``zcode.cjs``). The runtime invokes it as
+                ``node <cli_path>``, so this points at the app-bundle
+                script rather than a bare binary.
             permission_mode: Ouroboros permission level. Recognized
-                non-blocking modes (``acceptEdits`` → ``auto_edit``,
-                ``bypassPermissions`` → ``yolo``) pass through.
-                ``"default"`` is the orchestrator-wide setting that
-                represents an interactive prompt; the headless Zcode
-                runtime cannot honour it, so it is normalized to
-                ``acceptEdits`` with an audit log instead of failing
-                — that keeps a globally valid config working while
-                avoiding the deadlock under ``--non-interactive``.
-                Falls back to ``acceptEdits`` when omitted; operators
-                must opt in to ``bypassPermissions`` explicitly.
+                modes map to zcode ``--mode`` values
+                (``acceptEdits`` → ``edit``,
+                ``bypassPermissions`` → ``yolo``) and pass through.
+                ``"default"`` has no zcode-native ``--mode``
+                equivalent (zcode's vocabulary is build/edit/plan/yolo),
+                so it is normalized to ``acceptEdits`` with an audit
+                log instead of failing — that keeps a globally valid
+                config working. Falls back to ``acceptEdits`` when
+                omitted; operators must opt in to
+                ``bypassPermissions`` explicitly.
             model: Optional model identifier.
             cwd: Optional working directory for the subprocess.
             skills_dir: Optional directory for skill definitions.
@@ -138,13 +141,13 @@ class ZcodeCLIRuntime(CodexCliRuntime):
 
         ``None`` and the orchestrator-wide ``"default"`` setting both
         resolve to :data:`_ZCODE_DEFAULT_PERMISSION_MODE`
-        (``acceptEdits`` → ``auto_edit``, non-blocking under
-        ``--non-interactive``). ``config.orchestrator.permission_mode``
-        accepts ``"default"`` as a valid global setting, so the
-        backend-specific contract narrows it at the boundary rather
-        than turning a previously valid config into a hard error: a
-        prompt-driven ``--approval-mode default`` would wedge a headless
-        subprocess.
+        (``acceptEdits`` → zcode ``--mode edit``).
+        ``config.orchestrator.permission_mode`` accepts ``"default"`` as
+        a valid global setting, but zcode's ``--mode`` vocabulary is
+        build/edit/plan/yolo — there is no ``default`` value to pass
+        through — so the backend-specific contract narrows it at the
+        boundary rather than turning a previously valid config into a
+        hard error.
 
         Other recognized Ouroboros modes (``acceptEdits``,
         ``bypassPermissions``) pass through. Anything else raises
@@ -164,9 +167,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 requested="default",
                 resolved=_ZCODE_DEFAULT_PERMISSION_MODE,
                 reason=(
-                    "Zcode runtime is headless (--non-interactive); the "
-                    "interactive 'default' approval mode would block, so it "
-                    "is normalized to the safe non-blocking equivalent."
+                    "Zcode --mode has no 'default' value (vocabulary is "
+                    "build/edit/plan/yolo); normalized to the safe default."
                 ),
             )
             return _ZCODE_DEFAULT_PERMISSION_MODE
@@ -293,18 +295,39 @@ class ZcodeCLIRuntime(CodexCliRuntime):
     async def _iter_stream_lines(
         self,
         stream: Any,
+        *,
+        chunk_size: int = 16384,
+        first_chunk_timeout_seconds: float | None = None,
+        chunk_timeout_seconds: float | None = None,
         **_kwargs: Any,
     ) -> Any:
-        """Yield zcode's full stdout as a single "line".
+        """Yield zcode's full stdout as a single reassembled "line".
 
         Measured behaviour: ``zcode --prompt --json`` emits ONE pretty-printed
         JSON summary object (multi-line), not an NDJSON event stream. The
-        inherited pipeline json-parses each yielded line, so we read the whole
-        buffer and yield it once — downstream ``_parse_json_event`` then sees
-        the complete document.
+        inherited pipeline json-parses each yielded line, so we must hand it
+        the complete document in one piece.
+
+        Rather than ``await stream.read()`` to EOF (which silently drops the
+        parent's ``first_chunk_timeout_seconds`` / ``chunk_timeout_seconds``
+        watchdogs and can wedge the orchestrator on a zcode process that stays
+        alive but emits nothing — auth prompt, provider stall, model hang), we
+        delegate the chunked read to :meth:`CodexCliRuntime._iter_stream_lines`
+        so the watchdogs still fire and raise ``TimeoutError``. Every decoded
+        line is buffered and then joined into one document and yielded once,
+        so downstream ``_parse_json_event`` sees the whole summary object while
+        ``execute_task``'s ``except TimeoutError`` recovery path keeps working.
         """
-        data = await stream.read()
-        text = data.decode("utf-8", errors="replace").strip() if data else ""
+        chunks: list[str] = []
+        async for line in super()._iter_stream_lines(
+            stream,
+            chunk_size=chunk_size,
+            first_chunk_timeout_seconds=first_chunk_timeout_seconds,
+            chunk_timeout_seconds=chunk_timeout_seconds,
+        ):
+            if line:
+                chunks.append(line)
+        text = "\n".join(chunks).strip()
         if text:
             yield text
 
