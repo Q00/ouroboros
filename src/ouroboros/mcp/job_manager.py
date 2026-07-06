@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -116,6 +117,7 @@ _RECOVERED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-failed-"
 _RECOVERED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-recovered-interrupted-"
 _DRAIN_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-drain-interrupted-"
 _DRAIN_GRACE_SECONDS = 5.0
+_TERMINAL_APPEND_RETRY_DELAY_SECONDS = 0.05
 
 
 def _drain_interrupted_data() -> dict[str, Any]:
@@ -721,6 +723,12 @@ class JobManager:
                     "is_error": False,
                 },
                 append_error=exc,
+                retry_append=lambda: self._append_execution_completed_event(
+                    job_id,
+                    result_text,
+                    session_id=session_id,
+                    result_meta=result_meta,
+                ),
             )
             return True
 
@@ -741,7 +749,18 @@ class JobManager:
                 original_event_type=event_type,
                 original_data=data,
                 append_error=exc,
+                retry_append=lambda: self._append_event(
+                    event_type, job_id, data, event_id=event_id
+                ),
             )
+
+    async def _job_has_persisted_terminal_event(self, job_id: str) -> bool:
+        """Best-effort check whether a terminal event already exists for a job."""
+        try:
+            events, _cursor = await self._event_store.get_events_after("job", job_id, last_row_id=0)
+        except Exception:
+            return False
+        return _latest_job_terminal_event(events) is not None
 
     async def _append_terminal_fallback_event(
         self,
@@ -750,6 +769,7 @@ class JobManager:
         original_event_type: str,
         original_data: dict[str, Any],
         append_error: Exception,
+        retry_append: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
         """Best-effort FAILED event when the intended terminal append fails."""
         logger.warning(
@@ -760,6 +780,31 @@ class JobManager:
             },
             exc_info=True,
         )
+        # EventStore.append only retries "database is locked"; other transient
+        # errors deserve one re-attempt of the ORIGINAL event before we durably
+        # downgrade the job's true terminal state to FAILED.
+        await asyncio.sleep(_TERMINAL_APPEND_RETRY_DELAY_SECONDS)
+        if await self._job_has_persisted_terminal_event(job_id):
+            # A concurrent writer (recovery, monitor) already terminalized the
+            # job; snapshot projection is latest-wins, so writing the FAILED
+            # fallback now would overwrite a truthful terminal state.
+            return
+        if retry_append is not None:
+            try:
+                await retry_append()
+            except Exception:
+                logger.warning(
+                    "mcp.job.terminal_append_retry_failed",
+                    extra={
+                        "job_id": job_id,
+                        "original_event_type": original_event_type,
+                    },
+                    exc_info=True,
+                )
+            else:
+                return
+            if await self._job_has_persisted_terminal_event(job_id):
+                return
         error = f"Failed to append terminal event {original_event_type}: {append_error}"
         fallback_data = {
             "status": JobStatus.FAILED.value,
