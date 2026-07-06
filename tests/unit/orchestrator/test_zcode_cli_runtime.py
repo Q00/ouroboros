@@ -133,6 +133,36 @@ def test_build_command_bypass_permissions_maps_to_yolo() -> None:
     assert "--mode" in cmd
 
 
+# -- _build_command: model override (only intentional non-default ids forwarded) --
+# Regression for the Follow-up finding: ``_normalize_model`` (inherited from
+# CodexCliRuntime) drops ``None`` / empty / ``"default"`` so zcode's own default
+# model is never leaked as a ``--model`` value. Only an explicit, non-default
+# Zcode model id reaches the CLI. The loader's sentinel normalization
+# (``_ZCODE_LLM_BACKENDS``) maps shipped Claude defaults to ``"default"`` first,
+# which this gate then strips — together they keep Claude ids off zcode's CLI.
+
+
+def test_build_command_omits_model_flag_when_unset(runtime: ZcodeCLIRuntime) -> None:
+    runtime._model = None
+    cmd = runtime._build_command("/tmp/unused", prompt="hi")
+    assert "--model" not in cmd
+
+
+def test_build_command_strips_default_sentinel_model(runtime: ZcodeCLIRuntime) -> None:
+    runtime._model = "default"
+    cmd = runtime._build_command("/tmp/unused", prompt="hi")
+    assert "--model" not in cmd
+
+
+def test_build_command_forwards_intentional_non_default_model(
+    runtime: ZcodeCLIRuntime,
+) -> None:
+    runtime._model = "glm-4.6"
+    cmd = runtime._build_command("/tmp/unused", prompt="hi")
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "glm-4.6"
+
+
 def test_build_command_path_executable_invoked_directly_without_node() -> None:
     """A PATH-resolved `zcode` executable (not a .cjs script) is invoked
     directly. ``node <executable>`` would try to parse the binary as JS and
