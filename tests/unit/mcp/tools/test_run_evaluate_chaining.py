@@ -8,6 +8,8 @@ byte-for-byte at the metadata boundary.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
+import io
 import time
 from typing import Any
 
@@ -53,7 +55,34 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
                 pass
         else:
             await asyncio.sleep(0.01)
-    raise AssertionError(f"job {job_id} did not reach a terminal state")
+    raise AssertionError(
+        f"job {job_id} did not reach a terminal state\n{_diagnose_stuck_job(job_manager, job_id)}"
+    )
+
+
+def _diagnose_stuck_job(job_manager: JobManager, job_id: str) -> str:
+    """Capture where every task/thread is stuck when the job never terminalizes.
+
+    This failure is CI-only (issue #1566) and has never reproduced locally, so
+    the assertion message is the only diagnostic channel we get: dump the job
+    task states plus every asyncio task stack and native thread stack.
+    """
+    lines: list[str] = ["--- stuck-job diagnostics (#1566) ---"]
+    task = job_manager._tasks.get(job_id)
+    runner = job_manager._runner_tasks.get(job_id)
+    lines.append(f"job task: {task!r}")
+    lines.append(f"runner task: {runner!r}")
+    for t in asyncio.all_tasks():
+        frames = t.get_stack(limit=6)
+        where = " <- ".join(
+            f"{f.f_code.co_name}:{f.f_code.co_filename.rsplit('/', 1)[-1]}:{f.f_lineno}"
+            for f in reversed(frames)
+        )
+        lines.append(f"asyncio task {t.get_name()} done={t.done()}: {where or '<no stack>'}")
+    buf = io.StringIO()
+    faulthandler.dump_traceback(file=buf)
+    lines.append(buf.getvalue())
+    return "\n".join(lines)
 
 
 async def _wait_for_call(calls: list[Any]) -> None:
