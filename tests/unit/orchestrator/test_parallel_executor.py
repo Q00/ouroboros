@@ -7632,6 +7632,90 @@ class TestParallelACExecutor:
         assert results[0].success is False
 
     @pytest.mark.asyncio
+    async def test_alt_harness_opens_on_retry_early_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repeated-failure-class early-stop must still reach cross-harness recovery.
+
+        Regression for the narrowed ordering blocker: with ``ac_retry_attempts=2``
+        and the SAME alt-harness-eligible class (FABRICATION_SUSPECTED) on the
+        initial attempt and retry 1, the retry loop early-stops before the counter
+        cap. The same-runtime path has given up, so its budget is spent — the
+        alt-harness hook must open on that early-stopped attempt instead of never
+        firing, and the failed alternate must be surfaced as authoritative.
+        """
+        from ouroboros.orchestrator import cross_harness_redispatch as chr
+
+        seed = _make_seed("AC 0 flow")
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            ac_retry_attempts=2,
+            cross_harness_redispatch=True,
+        )
+        executor._adapter.runtime_backend = "claude"
+        monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
+
+        fab_verdict = VerifierVerdict(
+            passed=False,
+            reasons=("claimed a file that does not exist",),
+            failure_class="FABRICATION_SUSPECTED",
+        )
+
+        async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=seed.acceptance_criteria[idx],
+                    success=False,
+                    error="fabricated claim",
+                    outcome=ACExecutionOutcome.FAILED,
+                    atomic_verifier_verdict=fab_verdict,
+                )
+                for idx in kwargs["batch_indices"]
+            ]
+
+        executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+        alt_backends: list[str] = []
+
+        async def fake_run_single(backend: str, **kwargs: Any) -> ACExecutionResult:
+            alt_backends.append(backend)
+            return ACExecutionResult(
+                ac_index=0,
+                ac_content="AC 0 flow",
+                success=False,
+                error="codex also failed verification",
+                session_id="alt-sess",
+            )
+
+        executor._run_single_ac_on_backend = fake_run_single  # type: ignore[method-assign]
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="sess",
+            execution_id="exec",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        # Early-stop fired after retry 1 (initial FAB + retry-1 FAB), before the
+        # counter cap — yet the alternate harness was still consulted exactly once.
+        assert alt_backends == ["codex"]
+        # The failed alternate is surfaced as the authoritative result.
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is False
+        assert "alt-harness" in (results[0].error or "")
+        assert "codex" in (results[0].error or "")
+
+    @pytest.mark.asyncio
     async def test_runtime_handle_cache_isolated_between_acceptance_criteria(self) -> None:
         """Completing one AC must not seed a different AC with its prior runtime session."""
 

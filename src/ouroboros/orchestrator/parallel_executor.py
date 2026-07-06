@@ -3925,6 +3925,27 @@ Files present:
                         ac_index=ac_idx,
                         failure_class=new_class,
                     )
+                    # The same-runtime path has given up before the retry cap, so
+                    # its recovery budget is effectively spent — the alt-harness
+                    # boundary. When this dispatch was not already the final
+                    # attempt (``retry_batch_final``), its workers never got the
+                    # cross-harness hook, so open it here for the (eligible) AC.
+                    if not retry_batch_final and isinstance(gated, ACExecutionResult):
+                        alt = await self._maybe_redispatch_alt_harness_for_batch_ac(
+                            seed=seed,
+                            ac_idx=ac_idx,
+                            result=gated,
+                            session_id=session_id,
+                            execution_id=execution_id,
+                            tools=tools,
+                            tool_catalog=tool_catalog,
+                            system_prompt=system_prompt,
+                            level_contexts=level_contexts,
+                            execution_counters=execution_counters,
+                            retry_attempt=ac_retry_attempts[ac_idx],
+                        )
+                        if alt is not None:
+                            results[position_by_idx[ac_idx]] = alt
                     pending.discard(ac_idx)
                     continue
                 last_failure_class[ac_idx] = new_class
@@ -3932,6 +3953,57 @@ Files present:
                     pending.discard(ac_idx)
 
         return results
+
+    async def _maybe_redispatch_alt_harness_for_batch_ac(
+        self,
+        *,
+        seed: Seed,
+        ac_idx: int,
+        result: ACExecutionResult,
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        execution_counters: dict[str, int] | None,
+        retry_attempt: int,
+    ) -> ACExecutionResult | None:
+        """Give a terminally-failing top-level batch AC one cross-harness redispatch.
+
+        Used at the retry loop's early-stop boundary (repeated failure class),
+        where the same-runtime recovery has given up before the retry counter cap
+        and the workers therefore never reached the in-worker alt-harness hook.
+        Rebuilds the top-level re-run bundle and defers to the shared
+        :meth:`_maybe_redispatch_alt_harness`, so the alternate-harness decision,
+        the one-per-AC cap, and the failed-alt surfacing all stay in one place.
+        """
+        execution_context_id = execution_id or session_id
+        rerun_kwargs: dict[str, Any] = {
+            "ac_index": ac_idx,
+            "ac_content": ac_text(seed.acceptance_criteria[ac_idx]),
+            "session_id": session_id,
+            "tools": tools,
+            "tool_catalog": tool_catalog,
+            "system_prompt": system_prompt,
+            "seed_goal": seed.goal,
+            "depth": 0,
+            "execution_id": execution_id,
+            "level_contexts": level_contexts,
+            "sibling_acs": [],
+            "execution_counters": execution_counters,
+            "is_sub_ac": False,
+            "parent_ac_index": None,
+            "sub_ac_index": None,
+            "node_identity": None,
+        }
+        return await self._maybe_redispatch_alt_harness(
+            result=result,
+            execution_context_id=execution_context_id,
+            rerun_kwargs=rerun_kwargs,
+            atomic_retry_attempt=retry_attempt,
+            stall_retries_exhausted=False,
+        )
 
     def _fat_harness_acceptance_error(
         self,
