@@ -436,6 +436,18 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         soft_tool_enforcement=True,
     ),
     BackendCapability(
+        name="zcode",
+        aliases=("zcode_cli",),
+        supports_runtime=True,
+        supports_llm=True,
+        supports_interview_driver=True,
+        switchable_runtime=True,
+        cli_name="zcode",
+        cli_config_key="zcode_cli_path",
+        skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+        soft_tool_enforcement=True,
+    ),
+    BackendCapability(
         name="hermes",
         aliases=("hermes_cli",),
         supports_runtime=True,

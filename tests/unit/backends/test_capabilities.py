@@ -108,7 +108,7 @@ def test_interview_driver_choices_follow_llm_capability() -> None:
 
 
 def test_soft_tool_enforcement_is_registry_owned() -> None:
-    assert soft_tool_enforcement_backends() == frozenset({"gemini", "goose", "opencode"})
+    assert soft_tool_enforcement_backends() == frozenset({"gemini", "goose", "opencode", "zcode"})
 
 
 def test_tool_envelope_support_is_registry_owned() -> None:

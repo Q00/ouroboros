@@ -331,6 +331,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "grok_cli": "grok_cli",
     "antigravity": "antigravity_cli",
     "antigravity_cli": "antigravity_cli",
+    "zcode": "zcode_cli",
+    "zcode_cli": "zcode_cli",
 }
 
 
