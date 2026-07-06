@@ -17,6 +17,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelACExecutor,
+    _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
 )
 from ouroboros.orchestrator.verifier import VerifierVerdict
@@ -779,3 +780,36 @@ async def test_skip_completed_gates_artifacts_only_contract(tmp_path: Any) -> No
     assert dispatched == []
     assert result.externally_satisfied_count == 1
     assert "verification_status=verified" in result.results[0].final_message
+
+
+class TestSuccessContractBlock:
+    """The worker-facing SUCCESS CONTRACT block surfaced in the leaf prompt."""
+
+    def test_none_spec_yields_empty_block(self) -> None:
+        assert _build_success_contract_block(None) == ""
+
+    def test_contract_less_spec_yields_empty_block(self) -> None:
+        spec = AcceptanceCriterionSpec(description="just a description")
+        assert _build_success_contract_block(spec) == ""
+
+    def test_full_contract_renders_all_three_lines(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="build succeeds",
+            verify_command="make build",
+            expected_artifacts=("dist/app", "dist/app.map"),
+            output_assertion="BUILD OK",
+        )
+        block = _build_success_contract_block(spec)
+        assert block.startswith("SUCCESS CONTRACT for this AC:")
+        assert "- Run: make build and report it in commands_run" in block
+        assert (
+            "- Expected artifacts: dist/app, dist/app.map — report them in files_touched" in block
+        )
+        assert "- Expected output: BUILD OK" in block
+
+    def test_partial_contract_only_renders_present_fields(self) -> None:
+        spec = AcceptanceCriterionSpec(description="verify only", verify_command="pytest -q")
+        block = _build_success_contract_block(spec)
+        assert "- Run: pytest -q and report it in commands_run" in block
+        assert "Expected artifacts" not in block
+        assert "Expected output" not in block

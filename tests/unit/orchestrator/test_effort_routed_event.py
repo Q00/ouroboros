@@ -113,7 +113,7 @@ def _effort_events(events: list) -> list:
     return [e for e in events if getattr(e, "type", None) == "execution.ac.effort_routed"]
 
 
-async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool):
+async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool, retry_attempt: int = 0):
     return await executor._execute_atomic_ac(
         ac_index=1,
         ac_content="Implement a thing",
@@ -127,6 +127,7 @@ async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool):
         is_sub_ac=is_sub_ac,
         parent_ac_index=0 if is_sub_ac else None,
         sub_ac_index=0 if is_sub_ac else None,
+        retry_attempt=retry_attempt,
     )
 
 
@@ -153,7 +154,10 @@ async def test_enforced_runtime_emits_enforced_event_and_passes_kwarg() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decomposed_child_runs_one_notch_lower() -> None:
+async def test_decomposed_child_inherits_parent_tier_unchanged() -> None:
+    # V5: a decomposed child no longer runs one notch lower — it inherits the
+    # parent tier unchanged. ``is_decomposed_child`` is still recorded as a proof
+    # flag, but the level is not dropped.
     store, events = _capturing_event_store()
     runtime = _EnforcedRuntime()
     executor = ParallelACExecutor(
@@ -167,9 +171,29 @@ async def test_decomposed_child_runs_one_notch_lower() -> None:
     await _run_one_ac(executor, is_sub_ac=True)
 
     routed = _effort_events(events)
-    assert routed[0].data["effort_level"] == "medium"  # high -> one notch lower
+    assert routed[0].data["effort_level"] == "high"  # inherited unchanged
     assert routed[0].data["is_decomposed_child"] is True
-    assert runtime.received_effort == "medium"
+    assert runtime.received_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_second_retry_raises_effort_one_notch() -> None:
+    # V5: a hard AC on its second retry earns MORE reasoning — one notch up.
+    store, events = _capturing_event_store()
+    runtime = _EnforcedRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="medium",
+    )
+
+    await _run_one_ac(executor, is_sub_ac=False, retry_attempt=2)
+
+    routed = _effort_events(events)
+    assert routed[0].data["effort_level"] == "high"  # medium raised one notch
+    assert runtime.received_effort == "high"
 
 
 @pytest.mark.asyncio

@@ -296,6 +296,33 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
     return tuple(missing)
 
 
+def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
+    """Render the worker-facing SUCCESS CONTRACT block for an AC, or ``""``.
+
+    The parallel leaf dispatch builds its own prompt (it does not go through the
+    host ``build_execute_subagent`` VERIFY section, nor does the repo-level context
+    pack carry a *per-AC* contract), so a worker was never told the exact
+    verify_command / expected_artifacts / output_assertion the harness will grade
+    it against. When the AC's spec carries a contract, surface it verbatim so the
+    worker runs and reports the same evidence the verify gate checks. Contract-less
+    ACs return ``""`` — the prompt stays byte-identical to before.
+    """
+    if spec is None or not spec.has_success_contract:
+        return ""
+    lines = ["SUCCESS CONTRACT for this AC:"]
+    if spec.verify_command:
+        lines.append(f"- Run: {spec.verify_command} and report it in commands_run")
+    if spec.expected_artifacts:
+        lines.append(
+            "- Expected artifacts: "
+            + ", ".join(spec.expected_artifacts)
+            + " — report them in files_touched"
+        )
+    if spec.output_assertion:
+        lines.append(f"- Expected output: {spec.output_assertion}")
+    return "\n".join(lines)
+
+
 def _collect_decomposition_depth_warning_paths(
     result: ACExecutionResult,
     *,
@@ -1085,9 +1112,10 @@ class ParallelACExecutor:
         async def _run_ac(idx: int, ac_idx: int) -> None:
             async with self._semaphore:
                 try:
+                    ac_criterion = seed.acceptance_criteria[ac_idx]
                     batch_results[idx] = await self._execute_single_ac(
                         ac_index=ac_idx,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(ac_criterion),
                         session_id=session_id,
                         tools=tools,
                         tool_catalog=tool_catalog,
@@ -1101,6 +1129,11 @@ class ParallelACExecutor:
                         execution_counters=execution_counters,
                         retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
                         same_runtime_budget_exhausted=same_runtime_budget_exhausted,
+                        ac_spec=(
+                            ac_criterion
+                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
+                            else None
+                        ),
                     )
                 except BaseException as e:
                     # Never suppress anyio Cancelled — doing so breaks
@@ -1859,6 +1892,7 @@ class ParallelACExecutor:
         node_identity: ExecutionNodeIdentity | None = None,
         retry_prompt_extra: str = "",
         same_runtime_budget_exhausted: bool = True,
+        ac_spec: AcceptanceCriterionSpec | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -1885,6 +1919,10 @@ class ParallelACExecutor:
                 call's stall retries) is spent — so the alternate harness never
                 pre-empts the configured same-runtime retries. The batch layer
                 sets it; direct/sub-AC callers default to ``True``.
+            ac_spec: The top-level AC's structured spec, when it carries a success
+                contract, so the atomic leaf prompt can surface it. Only the batch
+                layer passes it for top-level ACs; sub-AC recursion leaves it
+                ``None`` (a decomposed child has no spec-level contract of its own).
 
         Returns:
             ACExecutionResult for this AC.
@@ -2093,6 +2131,7 @@ class ParallelACExecutor:
             "parent_ac_index": parent_ac_index,
             "sub_ac_index": sub_ac_index,
             "node_identity": node_identity,
+            "ac_spec": ac_spec,
         }
         while True:
             atomic_result = await self._execute_atomic_ac(
@@ -2115,6 +2154,7 @@ class ParallelACExecutor:
                 parent_ac_index=parent_ac_index,
                 sub_ac_index=sub_ac_index,
                 node_identity=node_identity,
+                ac_spec=ac_spec,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if not atomic_result.success and same_runtime_budget_exhausted:
@@ -2828,6 +2868,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         tool_catalog: tuple[MCPToolDefinition, ...] | None = None,
         execution_counters: dict[str, int] | None = None,
         retry_prompt_extra: str = "",
+        ac_spec: AcceptanceCriterionSpec | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -2858,6 +2899,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
         )
+        # Surface this AC's success contract to the worker so it runs and reports
+        # the exact evidence the verify gate will grade. Empty for contract-less
+        # ACs → the prompt stays byte-identical to before.
+        contract_block = _build_success_contract_block(ac_spec)
+        if contract_block:
+            task_section = f"{task_section}\n\n{contract_block}"
         legacy_context_section = (
             ""
             if context_governance_audit is not None
@@ -3089,7 +3136,8 @@ Files present:
         await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
 
         # Lay the executor on the capability contract: decide the effort level for
-        # this unit (a decomposed child runs one notch lower) and classify how the
+        # this unit (a decomposed child inherits the parent tier unchanged; a hard AC
+        # on its second-or-later retry is raised one notch) and classify how the
         # chosen runtime will honor it from its declared capability — enforced via a
         # native knob, or advised. The level is passed to execute_task; an advised
         # runtime ignores it. Dormant by default (base effort None → level None).
@@ -3097,6 +3145,7 @@ Files present:
             self._adapter,
             base_effort=self._reasoning_effort,
             is_decomposed_child=is_sub_ac,
+            retry_attempt=retry_attempt,
         )
         if effort_decision.level is not None:
             log.debug(

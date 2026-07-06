@@ -10,6 +10,7 @@ from ouroboros.orchestrator.effort_routing import (
     EffortDecision,
     decide_effort,
     lower_one_notch,
+    raise_one_notch,
 )
 
 
@@ -34,6 +35,23 @@ class TestLowerOneNotch:
         assert EFFORT_LADDER.index("low") < EFFORT_LADDER.index("high")
 
 
+class TestRaiseOneNotch:
+    def test_lifts_one_rung(self) -> None:
+        assert raise_one_notch("low") == "medium"
+        assert raise_one_notch("medium") == "high"
+        assert raise_one_notch("high") == "xhigh"
+
+    def test_never_above_ceiling(self) -> None:
+        assert raise_one_notch("xhigh") == "xhigh"  # ladder top, cannot rise further
+        assert raise_one_notch("high", ceiling="high") == "high"
+        assert raise_one_notch("low", ceiling="medium") == "medium"
+
+    def test_unknown_level_passthrough(self) -> None:
+        # Claude-only 'max' is off the shared ladder and is returned unchanged.
+        assert raise_one_notch("max") == "max"
+        assert raise_one_notch("bananas") == "bananas"
+
+
 class TestDecideEffort:
     def test_dormant_when_no_base_effort(self) -> None:
         d = decide_effort(ParamSupport.NATIVE, base_effort=None, is_decomposed_child=True)
@@ -53,15 +71,45 @@ class TestDecideEffort:
         assert d.mode == "advised"
         assert d.is_enforced is False  # advised never counts as enforced
 
-    def test_decomposed_child_runs_one_notch_lower(self) -> None:
+    def test_decomposed_child_inherits_parent_tier_unchanged(self) -> None:
+        # V5: a decomposed child no longer runs one notch lower — a harder,
+        # verified-MECE child inherits the parent tier unchanged.
         parent = decide_effort(ParamSupport.NATIVE, base_effort="high", is_decomposed_child=False)
         child = decide_effort(ParamSupport.NATIVE, base_effort="high", is_decomposed_child=True)
         assert parent.level == "high"
-        assert child.level == "medium"
+        assert child.level == "high"
 
-    def test_child_respects_floor(self) -> None:
+    def test_child_at_low_base_also_inherits_unchanged(self) -> None:
         child = decide_effort(ParamSupport.NATIVE, base_effort="low", is_decomposed_child=True)
-        assert child.level == "low"  # floor=low, cannot drop further
+        assert child.level == "low"
+
+    def test_second_retry_raises_one_notch(self) -> None:
+        # retry_attempt: 0 initial, 1 first retry, 2 second retry -> raise.
+        initial = decide_effort(
+            ParamSupport.NATIVE, base_effort="medium", is_decomposed_child=False, retry_attempt=0
+        )
+        first = decide_effort(
+            ParamSupport.NATIVE, base_effort="medium", is_decomposed_child=False, retry_attempt=1
+        )
+        second = decide_effort(
+            ParamSupport.NATIVE, base_effort="medium", is_decomposed_child=False, retry_attempt=2
+        )
+        assert initial.level == "medium"
+        assert first.level == "medium"  # first retry does not raise yet
+        assert second.level == "high"  # second retry earns one extra notch
+
+    def test_retry_raise_caps_at_ladder_top(self) -> None:
+        d = decide_effort(
+            ParamSupport.NATIVE, base_effort="xhigh", is_decomposed_child=False, retry_attempt=3
+        )
+        assert d.level == "xhigh"  # already at the top, cannot rise further
+
+    def test_retry_raise_applies_to_decomposed_child_too(self) -> None:
+        # Children inherit the parent tier AND still earn the retry raise.
+        d = decide_effort(
+            ParamSupport.NATIVE, base_effort="low", is_decomposed_child=True, retry_attempt=2
+        )
+        assert d.level == "medium"
 
 
 class TestDecideEffortEnforceableLevels:
@@ -151,6 +199,18 @@ class TestResolveExecuteEffort:
         )
         assert decision.mode == "advised"
         assert kwargs == {}
+
+    def test_second_retry_raises_the_enforced_kwarg(self) -> None:
+        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+
+        decision, kwargs = resolve_execute_effort(
+            _Adapter(ParamSupport.NATIVE),
+            base_effort="medium",
+            is_decomposed_child=False,
+            retry_attempt=2,
+        )
+        assert decision.level == "high"
+        assert kwargs == {"reasoning_effort": "high"}
 
     def test_dormant_yields_no_kwarg(self) -> None:
         from ouroboros.orchestrator.effort_routing import resolve_execute_effort

@@ -90,6 +90,85 @@ async def test_complete_returns_provider_error_on_nonzero_exit() -> None:
     assert "exited with code 2" in result.error.message
 
 
+@pytest.mark.asyncio
+async def test_complete_retries_only_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    spawns: list[tuple[str, ...]] = []
+
+    async def _fake_exec(*cmd: str, **kwargs: object) -> _FakeProcess:
+        spawns.append(cmd)
+        # 503 is in the shared transient vocabulary -> retry-worthy.
+        return _FakeProcess(stderr="503 Service Unavailable", returncode=1)
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ouroboros.providers.hermes_cli_adapter.asyncio.sleep", _no_sleep)
+    adapter = HermesCliLLMAdapter(cli_path="/usr/bin/hermes", max_retries=3)
+    with patch("asyncio.create_subprocess_exec", side_effect=_fake_exec):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Answer this")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert len(spawns) == 3  # transient error is retried up to the configured budget
+
+
+@pytest.mark.asyncio
+async def test_complete_does_not_retry_non_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawns: list[tuple[str, ...]] = []
+
+    async def _fake_exec(*cmd: str, **kwargs: object) -> _FakeProcess:
+        spawns.append(cmd)
+        return _FakeProcess(stderr="authentication failed: invalid api key", returncode=2)
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ouroboros.providers.hermes_cli_adapter.asyncio.sleep", _no_sleep)
+    adapter = HermesCliLLMAdapter(cli_path="/usr/bin/hermes", max_retries=3)
+    with patch("asyncio.create_subprocess_exec", side_effect=_fake_exec):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Answer this")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert len(spawns) == 1  # non-transient error is terminal — no retry budget burned
+
+
+@pytest.mark.asyncio
+async def test_complete_recovers_after_transient_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawns: list[tuple[str, ...]] = []
+    outcomes = [
+        _FakeProcess(stderr="rate limit exceeded", returncode=1),
+        _FakeProcess(stdout="Recovered\nsession_id: 20260507_120000_abcdef\n"),
+    ]
+
+    async def _fake_exec(*cmd: str, **kwargs: object) -> _FakeProcess:
+        spawns.append(cmd)
+        return outcomes[len(spawns) - 1]
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("ouroboros.providers.hermes_cli_adapter.asyncio.sleep", _no_sleep)
+    adapter = HermesCliLLMAdapter(cli_path="/usr/bin/hermes", max_retries=3)
+    with patch("asyncio.create_subprocess_exec", side_effect=_fake_exec):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="Answer this")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_ok
+    assert result.value.content == "Recovered"
+    assert len(spawns) == 2  # one transient retry, then success
+
+
 def test_build_prompt_includes_tool_envelope() -> None:
     adapter = HermesCliLLMAdapter(
         cli_path=Path("/usr/bin/hermes"),

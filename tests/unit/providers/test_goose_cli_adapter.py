@@ -377,3 +377,73 @@ class TestGooseCliLLMAdapter:
             adapter = GooseCliLLMAdapter()
 
         assert adapter._cli_path == "/tmp/goose"
+
+
+class TestGooseTransientRetryParity:
+    """Goose inherits the shared transient-retry core from the Codex CLI adapter.
+
+    The parallel executor's cross-vendor recovery relies on every CLI adapter
+    retrying transient failures (429/529/overloaded/connection) while returning
+    terminal errors immediately. Goose gets this for free by subclassing
+    ``CodexCliLLMAdapter`` (whose ``complete`` loop classifies against
+    ``core.retry.is_transient_error``); these tests lock that parity in.
+    """
+
+    @pytest.mark.asyncio
+    async def test_transient_error_is_retried(self) -> None:
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.core.types import Result
+        from ouroboros.providers.base import CompletionResponse
+
+        adapter = GooseCliLLMAdapter(cli_path="/bin/true", max_retries=3)
+        calls = {"n": 0}
+
+        async def fake_once(messages: Any, config: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return Result.err(
+                    ProviderError(
+                        message="overloaded_error: server overloaded", provider="goose_cli"
+                    )
+                )
+            return Result.ok(
+                CompletionResponse(
+                    content="ok",
+                    model="m",
+                    usage=None,
+                    finish_reason="stop",
+                    raw_response={},
+                )
+            )
+
+        with patch.object(adapter, "_complete_once", side_effect=fake_once), patch("asyncio.sleep"):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="hi")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert calls["n"] == 2  # one transient retry, then success
+
+    @pytest.mark.asyncio
+    async def test_non_transient_error_is_not_retried(self) -> None:
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.core.types import Result
+
+        adapter = GooseCliLLMAdapter(cli_path="/bin/true", max_retries=3)
+        calls = {"n": 0}
+
+        async def fake_once(messages: Any, config: Any) -> Any:
+            calls["n"] += 1
+            return Result.err(
+                ProviderError(message="authentication failed: bad key", provider="goose_cli")
+            )
+
+        with patch.object(adapter, "_complete_once", side_effect=fake_once), patch("asyncio.sleep"):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="hi")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert calls["n"] == 1  # terminal error — no retry budget burned

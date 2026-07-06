@@ -12,6 +12,7 @@ import structlog
 
 from ouroboros.config import get_hermes_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.retry import is_transient_error
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.hermes_runtime import _parse_quiet_output
@@ -116,8 +117,14 @@ class HermesCliLLMAdapter:
                 return result
 
             last_error = result.error
-            if attempt < self._max_retries - 1:
-                await asyncio.sleep(2**attempt)
+            # Retry only transient failures (429/529/overloaded/connection/
+            # timeout), reusing the shared providers/retry transient core the
+            # other CLI adapters classify against. A non-transient error (auth,
+            # not-found, empty response, non-transient exit) is terminal and is
+            # returned immediately instead of burning the retry budget.
+            if not is_transient_error(result.error.message) or attempt >= self._max_retries - 1:
+                return result
+            await asyncio.sleep(2**attempt)
 
         return Result.err(last_error or ProviderError(message="Max retries exceeded"))
 

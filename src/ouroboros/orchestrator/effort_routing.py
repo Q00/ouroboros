@@ -22,12 +22,20 @@ from ouroboros.orchestrator.adapter import ParamSupport
 # Ordered weakest -> strongest. Shared vocabulary across the runtimes that expose
 # an effort knob (Claude Agent SDK: low/medium/high/xhigh/max; Codex
 # model_reasoning_effort: minimal/low/medium/high/xhigh). ``max`` is Claude-only
-# and deliberately omitted from the ladder used for the one-notch-lower rule so
-# the rule never depends on a level a CLI runtime cannot accept.
+# and deliberately omitted from the ladder used for the notch rules so they never
+# depend on a level a CLI runtime cannot accept.
 EFFORT_LADDER: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
 
-# Default floor for the decomposed-child rule: never strip a unit below "low".
+# Default floor for the (legacy) one-notch-lower helper: never strip below "low".
 DEFAULT_EFFORT_FLOOR = "low"
+
+# Default ceiling for the retry raise rule: the strongest cross-runtime level.
+DEFAULT_EFFORT_CEILING = EFFORT_LADDER[-1]
+
+# Retry attempt at which a hard AC is escalated one notch. ``retry_attempt`` is 0
+# on the initial dispatch, 1 on the first retry, 2 on the second — so a hard AC
+# that has already burned one retry earns MORE reasoning, not less.
+EFFORT_RAISE_RETRY_THRESHOLD = 2
 
 # Effort modes recorded per unit so enforced rows can be told apart from advised
 # ones — the distinction the deterministic frugality proof depends on.
@@ -48,6 +56,22 @@ def lower_one_notch(level: str, *, floor: str = DEFAULT_EFFORT_FLOOR) -> str:
     floor_index = EFFORT_LADDER.index(floor) if floor in EFFORT_LADDER else 0
     current_index = EFFORT_LADDER.index(level)
     return EFFORT_LADDER[max(floor_index, current_index - 1)]
+
+
+def raise_one_notch(level: str, *, ceiling: str = DEFAULT_EFFORT_CEILING) -> str:
+    """Return ``level`` lifted one rung, never above ``ceiling``.
+
+    Unknown levels (not on :data:`EFFORT_LADDER`, e.g. Claude-only ``max``) are
+    returned unchanged — the caller chose a vocabulary this module does not model,
+    so it is not this function's place to silently rewrite it.
+    """
+    if level not in EFFORT_LADDER:
+        return level
+    ceiling_index = (
+        EFFORT_LADDER.index(ceiling) if ceiling in EFFORT_LADDER else len(EFFORT_LADDER) - 1
+    )
+    current_index = EFFORT_LADDER.index(level)
+    return EFFORT_LADDER[min(ceiling_index, current_index + 1)]
 
 
 @dataclass(frozen=True)
@@ -76,7 +100,8 @@ def decide_effort(
     *,
     base_effort: str | None,
     is_decomposed_child: bool,
-    floor: str = DEFAULT_EFFORT_FLOOR,
+    retry_attempt: int = 0,
+    ceiling: str = DEFAULT_EFFORT_CEILING,
     enforceable_levels: frozenset[str] | None = None,
 ) -> EffortDecision:
     """Decide the per-unit effort level and whether the runtime will enforce it.
@@ -86,9 +111,15 @@ def decide_effort(
             ``runtime.capabilities.reasoning_effort_support``.
         base_effort: The configured base level for full-strength units, or ``None``
             to leave effort routing dormant.
-        is_decomposed_child: Whether this unit is a verified-MECE child, which is
-            run one notch lower than its parent (the frugality hypothesis).
-        floor: The lowest level a child may be dropped to.
+        is_decomposed_child: Whether this unit is a verified-MECE child. Retained as
+            a first-class routing/proof flag, but **no longer lowers the level** (V5):
+            a harder decomposed child inherits the parent tier unchanged — it needs at
+            least as much reasoning as its parent, never less.
+        retry_attempt: Same-runtime retry index for this unit (0 on the initial
+            dispatch). From :data:`EFFORT_RAISE_RETRY_THRESHOLD` onward the level is
+            raised one notch (capped at ``ceiling``): a hard AC that keeps failing
+            earns MORE reasoning.
+        ceiling: The strongest level the retry raise may reach.
         enforceable_levels: The runtime's enforceable vocabulary
             (``capabilities.enforceable_reasoning_efforts``). When provided, a level
             outside it is recorded as *advised* even on a NATIVE runtime, because the
@@ -101,10 +132,18 @@ def decide_effort(
         enforces, so a silently-dropped or advised level can never be mistaken for an
         enforced one — exactly the property the proof's enforced rows rely on.
     """
+    # ``is_decomposed_child`` is intentionally not consulted for the level: V5
+    # stopped lowering decomposed children so they inherit the parent tier. It
+    # stays in the signature because live call sites pass it by keyword and the
+    # frugality proof still records it as an admission flag.
+    del is_decomposed_child
+
     if not base_effort:
         return EffortDecision(level=None, mode=EFFORT_MODE_NONE)
 
-    level = lower_one_notch(base_effort, floor=floor) if is_decomposed_child else base_effort
+    level = base_effort
+    if retry_attempt >= EFFORT_RAISE_RETRY_THRESHOLD:
+        level = raise_one_notch(level, ceiling=ceiling)
     enforces_level = enforceable_levels is None or level in enforceable_levels
     mode = (
         EFFORT_MODE_ENFORCED
@@ -119,7 +158,8 @@ def resolve_execute_effort(
     *,
     base_effort: str | None,
     is_decomposed_child: bool,
-    floor: str = DEFAULT_EFFORT_FLOOR,
+    retry_attempt: int = 0,
+    ceiling: str = DEFAULT_EFFORT_CEILING,
 ) -> tuple[EffortDecision, dict[str, str]]:
     """Decide effort for one ``execute_task`` call and build its kwargs.
 
@@ -129,6 +169,9 @@ def resolve_execute_effort(
     level, and returns the ``execute_task`` kwargs — which are **empty unless the
     runtime enforces effort**, so a runtime that does not accept the parameter is
     never handed it.
+
+    ``retry_attempt`` is forwarded so a hard AC on its second-or-later retry earns
+    one extra notch of reasoning (see :func:`decide_effort`).
 
     Returns:
         ``(decision, execute_kwargs)``. ``execute_kwargs`` is ``{"reasoning_effort":
@@ -147,7 +190,8 @@ def resolve_execute_effort(
         support,
         base_effort=base_effort,
         is_decomposed_child=is_decomposed_child,
-        floor=floor,
+        retry_attempt=retry_attempt,
+        ceiling=ceiling,
         enforceable_levels=enforceable_levels,
     )
     kwargs = {"reasoning_effort": decision.level} if decision.is_enforced else {}
