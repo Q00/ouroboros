@@ -1066,8 +1066,15 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int],
         execution_counters: dict[str, int] | None = None,
         retry_prompts: dict[int, str] | None = None,
+        same_runtime_budget_exhausted: bool = True,
     ) -> list[ACExecutionResult | BaseException]:
-        """Execute one batch of stage-ready ACs using the shared worker pool."""
+        """Execute one batch of stage-ready ACs using the shared worker pool.
+
+        ``same_runtime_budget_exhausted`` is forwarded to every AC in the batch:
+        it is ``True`` only on the batch attempt that spends the AC's configured
+        same-runtime retry budget, gating cross-harness redispatch (PR-X X1) so
+        it never pre-empts those retries.
+        """
         batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
         sibling_acs: list[_SiblingACRef] = (
             [(i, ac_text(seed.acceptance_criteria[i])) for i in batch_indices]
@@ -1093,6 +1100,7 @@ class ParallelACExecutor:
                         retry_attempt=ac_retry_attempts[ac_idx],
                         execution_counters=execution_counters,
                         retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
+                        same_runtime_budget_exhausted=same_runtime_budget_exhausted,
                     )
                 except BaseException as e:
                     # Never suppress anyio Cancelled — doing so breaks
@@ -1850,6 +1858,7 @@ class ParallelACExecutor:
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         retry_prompt_extra: str = "",
+        same_runtime_budget_exhausted: bool = True,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -1869,6 +1878,13 @@ class ParallelACExecutor:
             execution_id: Execution ID for event tracking.
             level_contexts: Context from previously completed levels.
             sibling_acs: Descriptions of ACs running in parallel at this level.
+            same_runtime_budget_exhausted: Whether this call is the AC's final
+                same-runtime attempt. Cross-harness redispatch (PR-X X1) is only
+                consulted when this is ``True`` — i.e. the same-runtime recovery
+                budget (batch-level ``ac_retry_attempts`` retries, plus this
+                call's stall retries) is spent — so the alternate harness never
+                pre-empts the configured same-runtime retries. The batch layer
+                sets it; direct/sub-AC callers default to ``True``.
 
         Returns:
             ACExecutionResult for this AC.
@@ -2101,9 +2117,11 @@ class ParallelACExecutor:
                 node_identity=node_identity,
             )
             if atomic_result.error != _STALL_SENTINEL:
-                if not atomic_result.success:
+                if not atomic_result.success and same_runtime_budget_exhausted:
                     # Non-stall terminal failure (e.g. fabrication, exhausted
-                    # transient 429/529): try one cross-harness redispatch.
+                    # transient 429/529) on the FINAL same-runtime attempt: try
+                    # one cross-harness redispatch. Earlier attempts fall through
+                    # so the configured same-runtime retries run first.
                     alt_result = await self._maybe_redispatch_alt_harness(
                         result=atomic_result,
                         execution_context_id=execution_context_id,
@@ -2152,17 +2170,21 @@ class ParallelACExecutor:
                     atomic_result,
                     error=f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)",
                 )
-                # Same-runtime stall retries are spent; try one cross-harness
-                # redispatch before this AC is finally marked FAILED.
-                alt_result = await self._maybe_redispatch_alt_harness(
-                    result=failed_result,
-                    execution_context_id=execution_context_id,
-                    rerun_kwargs=alt_rerun_kwargs,
-                    atomic_retry_attempt=atomic_retry_attempt,
-                    stall_retries_exhausted=True,
-                )
-                if alt_result is not None:
-                    failed_result = alt_result
+                # An abandoned stall is re-dispatched by the batch-level
+                # same-runtime retry loop (its error is no longer the stall
+                # sentinel), so only try a cross-harness redispatch once that
+                # budget is also spent — i.e. this is the final same-runtime
+                # attempt — before the AC is finally marked FAILED.
+                if same_runtime_budget_exhausted:
+                    alt_result = await self._maybe_redispatch_alt_harness(
+                        result=failed_result,
+                        execution_context_id=execution_context_id,
+                        rerun_kwargs=alt_rerun_kwargs,
+                        atomic_retry_attempt=atomic_retry_attempt,
+                        stall_retries_exhausted=True,
+                    )
+                    if alt_result is not None:
+                        failed_result = alt_result
                 if decomposition_depth_warning:
                     return replace(failed_result, decomposition_depth_warning=True)
                 return failed_result
@@ -3796,6 +3818,10 @@ Files present:
             level_contexts=level_contexts,
             ac_retry_attempts=ac_retry_attempts,
             execution_counters=execution_counters,
+            # The initial attempt is the AC's final same-runtime attempt only
+            # when no same-runtime retries are configured; otherwise defer
+            # cross-harness redispatch until the V3 loop below is spent.
+            same_runtime_budget_exhausted=self._ac_retry_attempts <= 0,
         )
         # V1 gate on freshly-successful ACs.
         for position, ac_idx in enumerate(batch_executable):
@@ -3844,6 +3870,13 @@ Files present:
                         is_final_attempt=is_final,
                     )
 
+            # Pending ACs advance their retry counter in lockstep, so the batch
+            # is on its final same-runtime attempt exactly when every retried AC
+            # has reached the configured cap. Only then may cross-harness
+            # redispatch run inside the workers.
+            retry_batch_final = all(
+                ac_retry_attempts[ac_idx] >= self._ac_retry_attempts for ac_idx in retry_idxs
+            )
             retry_results = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=retry_idxs,
@@ -3856,6 +3889,7 @@ Files present:
                 ac_retry_attempts=ac_retry_attempts,
                 execution_counters=execution_counters,
                 retry_prompts=retry_prompts,
+                same_runtime_budget_exhausted=retry_batch_final,
             )
 
             for retry_position, ac_idx in enumerate(retry_idxs):

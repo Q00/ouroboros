@@ -7573,6 +7573,65 @@ class TestParallelACExecutor:
         assert all(event.data["max_attempts"] == MAX_STALL_RETRIES + 1 for event in stall_events)
 
     @pytest.mark.asyncio
+    async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:
+        """Cross-harness redispatch must not fire until same-runtime retries are spent.
+
+        Regression for the ordering blocker: with ``ac_retry_attempts > 0`` the
+        batch retry loop owns the same-runtime recovery budget. Each worker's
+        alt-harness hook is gated on ``same_runtime_budget_exhausted``, which the
+        batch layer sets ``True`` only on the AC's final attempt. So across the
+        initial dispatch plus each configured retry, the flag stays ``False``
+        until the last attempt — the alternate harness never pre-empts the
+        configured same-runtime retries.
+        """
+        seed = _make_seed("AC 0 flow")
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            ac_retry_attempts=2,
+            cross_harness_redispatch=True,
+        )
+
+        exhausted_flags: list[bool] = []
+
+        async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+            exhausted_flags.append(bool(kwargs["same_runtime_budget_exhausted"]))
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=seed.acceptance_criteria[idx],
+                    success=False,
+                    error="non-stall failure",
+                    outcome=ACExecutionOutcome.FAILED,
+                )
+                for idx in kwargs["batch_indices"]
+            ]
+
+        executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="sess",
+            execution_id="exec",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        # Initial dispatch + 2 configured retries = 3 batch calls. The
+        # same-runtime budget is only 'exhausted' (so alt-harness may run) on
+        # the final attempt.
+        assert exhausted_flags == [False, False, True]
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is False
+
+    @pytest.mark.asyncio
     async def test_runtime_handle_cache_isolated_between_acceptance_criteria(self) -> None:
         """Completing one AC must not seed a different AC with its prior runtime session."""
 
