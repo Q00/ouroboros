@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from textual.app import App
 from textual.binding import Binding
 
-from ouroboros.dashboard.board import BOARD_EVENT_TYPES, reduce_board
+from ouroboros.dashboard.board import ProviderLedger, fold_provider_event
 from ouroboros.tui.events import (
     ACUpdated,
     AgentThinkingUpdated,
@@ -273,6 +273,10 @@ class OuroborosTUI(App[None]):
         self._event_store = event_store
         self._execution_id: str | None = execution_id
         self._state = TUIState()
+        # Provider identity ledger — the SAME derivation reduce_board uses for the
+        # web Kanban, folded incrementally (O(1) per event). It wraps the state's
+        # ``provider_by_node`` dict so folds merge in place, never replace it.
+        self._provider_ledger = ProviderLedger(provider_by_node=self._state.provider_by_node)
         self._subscription_task: asyncio.Task[None] | None = None
         self._subscription_generation = 0
         self._poll_interval_seconds = 0.5
@@ -371,9 +375,9 @@ class OuroborosTUI(App[None]):
             self.post_message(message)
             self._update_state_from_event(event)
 
-        # Fold provider identity from the SHARED board reducer (same projection the
-        # web Kanban renders). Additive: it only annotates provider tags and never
-        # touches pause/resume/log/debug flows above.
+        # Fold provider identity through the SHARED board derivation (the exact
+        # rules the web Kanban's reduce_board applies). Additive: it only annotates
+        # provider tags and never touches pause/resume/log/debug flows above.
         self._ingest_board_event(event)
 
         # Forward raw event to debug screen
@@ -393,34 +397,21 @@ class OuroborosTUI(App[None]):
             pass  # Screen might not be installed yet
 
     def _ingest_board_event(self, event: BaseEvent) -> None:
-        """Fold one event into the shared board projection for provider identity.
+        """Fold one event's provider identity through the shared board derivation.
 
         The TUI keeps its own hierarchical ``ac_tree`` for layout, but derives
-        per-node PROVIDER (runtime_backend) from the exact same reducer the web
-        Kanban uses — so the two surfaces can never drift on who ran what. We fold
-        a bounded tail of board-relevant events (tool spam excluded via
-        ``BOARD_EVENT_TYPES``) and read the provider off each card.
+        per-node PROVIDER (runtime_backend) via the exact same rules the web
+        Kanban's ``reduce_board`` applies (``fold_provider_event`` is called by
+        both) — so the two surfaces can never drift on who ran what. The fold is
+        O(1) per event and mutates the ledger in place; no event list is kept.
+        Rendering is refreshed ONLY when provider identity actually changed — a
+        handful of times per run — never on node/status/tool chatter.
         """
-        if event.type not in BOARD_EVENT_TYPES:
+        data = event.data if isinstance(event.data, dict) else {}
+        if not fold_provider_event(event.type, data, ledger=self._provider_ledger):
             return
 
-        data = event.data if isinstance(event.data, dict) else {}
-        self._state.board_events.append({"event_type": event.type, "payload": dict(data)})
-
-        board = reduce_board(
-            self._state.board_events,
-            execution_id=self._execution_id or None,
-        )
-        provider_by_node: dict[str, str] = {}
-        for column in board["columns"].values():
-            for card in column:
-                provider = card.get("provider")
-                node_id = card.get("id")
-                if isinstance(provider, str) and provider and isinstance(node_id, str):
-                    provider_by_node[node_id] = provider
-
-        self._state.provider_by_node = provider_by_node
-        self._state.board_providers = [p for p in board["providers"] if isinstance(p, str)]
+        self._state.board_providers[:] = self._provider_ledger.providers()
         # Stamp providers onto any tree nodes that already exist. Nodes created
         # later (by queued Textual messages) get stamped at their own
         # ``_notify_ac_tree_updated`` via ``_apply_provider_tags``.
@@ -573,8 +564,9 @@ class OuroborosTUI(App[None]):
         self._state.active_tools.clear()
         self._state.tool_history.clear()
         self._state.thinking.clear()
-        self._state.board_events.clear()
-        self._state.provider_by_node.clear()
+        # Wipe folded provider identity for the next run. The ledger wraps the
+        # state's provider_by_node dict, so resetting it clears both.
+        self._provider_ledger.reset()
         self._state.board_providers.clear()
         self._state.add_log("info", "tui.main", f"Monitoring execution: {execution_id}")
         # Forward to logs screen
@@ -1035,21 +1027,30 @@ class OuroborosTUI(App[None]):
             getattr(dashboard, method_name)(message)
 
     def _apply_provider_tags(self) -> None:
-        """Stamp per-node provider onto ac_tree nodes from the shared projection.
+        """Stamp per-node provider onto ac_tree nodes from the shared derivation.
 
         Single choke point: whatever built/mutated the tree, the provider tag is
         applied here right before the widget renders, keyed by node_id — so a
         provider learned before OR after its node was created still lands.
+        Resolution matches reduce_board's per-card rule exactly (per-worker
+        provider wins, run-level backend is the fallback); the structural root is
+        not a board card and is never tagged.
         """
-        nodes = self._state.ac_tree.get("nodes")
-        if not isinstance(nodes, dict) or not self._state.provider_by_node:
+        ledger = self._provider_ledger
+        if not ledger.provider_by_node and not ledger.run_provider:
             return
+        nodes = self._state.ac_tree.get("nodes")
+        if not isinstance(nodes, dict):
+            return
+        root_id = self._state.ac_tree.get("root_id", "root")
         for node_id, node in nodes.items():
-            if not isinstance(node, dict):
+            if node_id == root_id or not isinstance(node, dict):
                 continue
-            provider = self._state.provider_by_node.get(
-                node_id
-            ) or self._state.provider_by_node.get(node.get("node_id", ""))
+            provider = (
+                ledger.provider_by_node.get(node_id)
+                or ledger.provider_by_node.get(str(node.get("node_id") or ""))
+                or ledger.run_provider
+            )
             if provider:
                 node["provider"] = provider
 

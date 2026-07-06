@@ -15,6 +15,8 @@ provider. One reducer, many surfaces — no dual-reducer drift.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 # Status columns, in board order. Node statuses map onto these directly
@@ -56,21 +58,69 @@ _TOOL_EVENTS = frozenset(
 _TERMINAL = frozenset({"completed", "failed"})
 
 
-# Event types that can change a card's identity, status or provider. A consumer
-# that folds events incrementally (the TUI) uses this to skip irrelevant events
-# (e.g. per-keystroke tool calls) before re-folding, keeping the fold bounded
-# without diverging from the reducer's own view of what matters. Tool events are
-# intentionally excluded here: they only annotate a card's ``tool`` field, which
-# no provider-identity consumer reads.
-BOARD_EVENT_TYPES: frozenset[str] = _NODE_EVENTS | frozenset(
-    {
-        "execution.session.started",
-        "execution.ac.completed",
-        "workflow.progress.updated",
-        "orchestrator.session.started",
-        "execution.session.completed",
-    }
-)
+@dataclass
+class ProviderLedger:
+    """Incrementally folded provider identity — ONE derivation, two consumers.
+
+    Encapsulates exactly the provider rules :func:`reduce_board` applies:
+    per-worker ``runtime_backend`` from ``execution.session.started`` (keyed by
+    ``node_id``) wins; the run-level backend from ``orchestrator.session.started``
+    is the fallback for nodes without a per-worker session (simple runs).
+
+    ``reduce_board`` folds its events through a ledger internally, and the TUI
+    folds live events through its own ledger via :func:`fold_provider_event` —
+    O(1) per event, no accumulated event list — so the two surfaces cannot drift.
+    """
+
+    provider_by_node: dict[str, str] = field(default_factory=dict)
+    run_provider: str | None = None
+
+    def resolve(self, node_id: object) -> str | None:
+        """Provider for a node: per-worker if known, else the run-level backend."""
+        if isinstance(node_id, str) and node_id in self.provider_by_node:
+            return self.provider_by_node[node_id]
+        return self.run_provider
+
+    def providers(self) -> list[str]:
+        """Sorted provider legend for the run (per-worker + run-level)."""
+        found = {p for p in self.provider_by_node.values() if p}
+        if self.run_provider:
+            found.add(self.run_provider)
+        return sorted(found)
+
+    def reset(self) -> None:
+        self.provider_by_node.clear()
+        self.run_provider = None
+
+
+def fold_provider_event(
+    event_type: str,
+    payload: Mapping[str, Any],
+    *,
+    ledger: ProviderLedger,
+) -> bool:
+    """Fold ONE event's provider information into ``ledger`` (merge, in place).
+
+    Returns True when the ledger changed — consumers use this to re-render only
+    when provider identity actually moved (a handful of times per run), never on
+    node/status/tool chatter.
+    """
+    if event_type == "execution.session.started":
+        node_id = payload.get("node_id")
+        backend = payload.get("runtime_backend")
+        if isinstance(node_id, str) and node_id and backend:
+            backend_str = str(backend)
+            if ledger.provider_by_node.get(node_id) != backend_str:
+                ledger.provider_by_node[node_id] = backend_str
+                return True
+    elif event_type == "orchestrator.session.started":
+        backend = payload.get("runtime_backend")
+        if backend:
+            backend_str = str(backend)
+            if ledger.run_provider != backend_str:
+                ledger.run_provider = backend_str
+                return True
+    return False
 
 
 def _normalize_status(status: object) -> str | None:
@@ -171,11 +221,12 @@ def reduce_board(
     status/provider for the same node, so pass events in rowid/timestamp order.
     """
     cards: dict[str, dict[str, Any]] = {}
-    provider_by_node: dict[str, str] = {}
+    # Provider derivation is delegated to the SAME ledger the TUI folds live —
+    # the single source of truth for per-node provider + run-level fallback.
+    ledger = ProviderLedger()
     session_by_node: dict[str, str] = {}
     tool_by_node: dict[str, str] = {}
     terminal: set[str] = set()  # node_ids finished by an authoritative event
-    run_backend: str | None = None
     meta: dict[str, Any] = {
         "execution_id": execution_id,
         "session_id": None,
@@ -216,11 +267,10 @@ def reduce_board(
             )
 
         elif event_type == "execution.session.started":
+            fold_provider_event(event_type, payload, ledger=ledger)
             node_id = payload.get("node_id")
             if isinstance(node_id, str) and node_id:
                 card = _card(cards, node_id)
-                if payload.get("runtime_backend"):
-                    provider_by_node[node_id] = str(payload["runtime_backend"])
                 if payload.get("session_id"):
                     session_by_node[node_id] = str(payload["session_id"])
                 card.setdefault("title", payload.get("acceptance_criterion") or node_id)
@@ -268,9 +318,9 @@ def reduce_board(
         elif event_type == "orchestrator.session.started":
             # Run-level provider — the fallback tag for cards that have no
             # per-worker execution.session.started (i.e. simple runs).
-            if payload.get("runtime_backend"):
-                run_backend = str(payload["runtime_backend"])
-                meta["provider"] = run_backend
+            fold_provider_event(event_type, payload, ledger=ledger)
+            if ledger.run_provider:
+                meta["provider"] = ledger.run_provider
             if payload.get("seed_goal") and not meta["goal"]:
                 meta["goal"] = payload["seed_goal"]
 
@@ -282,7 +332,7 @@ def reduce_board(
         # Per-worker provider (execution.session.started) wins; otherwise fall back
         # to the run-level backend (orchestrator.session.started) so simple runs are
         # still provider-tagged.
-        card["provider"] = provider_by_node.get(node_id) or run_backend
+        card["provider"] = ledger.resolve(node_id)
         card["session_id"] = session_by_node.get(node_id)
         card["tool"] = tool_by_node.get(node_id)
         card.setdefault("title", node_id)
@@ -298,11 +348,7 @@ def reduce_board(
 
     # Providers present in this run — lets the UI build a stable legend. Includes
     # the run-level backend so a simple run's single provider still shows.
-    providers = sorted(
-        {p for p in provider_by_node.values() if p} | ({run_backend} if run_backend else set())
-    )
-
-    return {"meta": meta, "columns": columns, "providers": providers}
+    return {"meta": meta, "columns": columns, "providers": ledger.providers()}
 
 
-__all__ = ["BOARD_EVENT_TYPES", "COLUMNS", "reduce_board"]
+__all__ = ["COLUMNS", "ProviderLedger", "fold_provider_event", "reduce_board"]

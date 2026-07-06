@@ -1,16 +1,17 @@
-"""The events->board reducer is ONE projection shared by the web Kanban and TUI.
+"""The events->board provider derivation is ONE fold shared by web Kanban and TUI.
 
 These tests lock the D2 contract: the reducer lives in ``ouroboros.dashboard.board``
-(re-exported by ``ouroboros.dashboard_web.kanban`` for the web surface), and the
-TUI folds the SAME reducer output to tag provider identity — so the two surfaces
-can never drift on who ran what.
+(re-exported by ``ouroboros.dashboard_web.kanban`` for the web surface), and BOTH
+``reduce_board`` (batch, web) and the TUI's live ingestion go through the same
+``fold_provider_event``/``ProviderLedger`` — so the two surfaces can never drift
+on who ran what.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ouroboros.dashboard.board import BOARD_EVENT_TYPES, reduce_board
+from ouroboros.dashboard.board import ProviderLedger, fold_provider_event, reduce_board
 from ouroboros.events.base import BaseEvent
 from ouroboros.tui.app import OuroborosTUI
 
@@ -68,8 +69,26 @@ class TestSharedReducerLocation:
 
 
 class TestNoDualReducerDrift:
+    def test_reduce_board_and_incremental_fold_agree(self) -> None:
+        """Batch reduce and repeated fold_provider_event derive identical providers.
+
+        This is meaningful because reduce_board itself calls fold_provider_event
+        internally — one derivation, two consumption modes.
+        """
+        ledger = ProviderLedger()
+        for event_type, payload in _RUN:
+            fold_provider_event(event_type, payload, ledger=ledger)
+
+        web_board = reduce_board(_raw_events(), execution_id="exec_1")
+        web_providers = _providers_from_board(web_board)
+
+        assert web_providers == {"ac_1": "codex_cli", "ac_2": "claude"}
+        for node_id, provider in web_providers.items():
+            assert ledger.resolve(node_id) == provider
+        assert ledger.providers() == web_board["providers"]
+
     def test_web_and_tui_agree_on_provider_per_node(self) -> None:
-        """Web board and TUI fold produce identical provider-per-node maps."""
+        """The TUI's live fold ends with the same provider map the web board shows."""
         web_board = reduce_board(_raw_events(), execution_id="exec_1")
         web_providers = _providers_from_board(web_board)
 
@@ -77,26 +96,38 @@ class TestNoDualReducerDrift:
         for event in _base_events():
             app._ingest_board_event(event)
 
-        # Identical output from the ONE reducer — this is the anti-drift assertion.
-        assert app.state.provider_by_node == web_providers
-        assert app.state.provider_by_node == {"ac_1": "codex_cli", "ac_2": "claude"}
+        assert {
+            node_id: app._provider_ledger.resolve(node_id) for node_id in web_providers
+        } == web_providers
+        # Per-worker map merged in place; run-level fallback lives on the ledger.
+        assert app.state.provider_by_node == {"ac_1": "codex_cli"}
+        assert app.state.provider_by_node is app._provider_ledger.provider_by_node
         assert app.state.board_providers == web_board["providers"]
 
-    def test_board_event_types_gate_ingestion(self) -> None:
-        """Irrelevant events (e.g. tool spam) never enter the folded tail."""
-        assert "execution.tool.started" not in BOARD_EVENT_TYPES
-
-        app = OuroborosTUI(execution_id="exec_1")
-        app._ingest_board_event(
-            BaseEvent(
-                type="execution.tool.started",
-                aggregate_type="execution",
-                aggregate_id="exec_1",
-                data={"node_id": "ac_1", "tool_name": "Read"},
+    def test_fold_reports_change_only_on_provider_movement(self) -> None:
+        """Non-provider events and repeats fold to False — no re-render churn."""
+        ledger = ProviderLedger()
+        assert (
+            fold_provider_event(
+                "execution.node.created",
+                {"node_id": "ac_1", "status": "executing"},
+                ledger=ledger,
             )
+            is False
         )
-        assert app.state.board_events == []
-        assert app.state.provider_by_node == {}
+        assert (
+            fold_provider_event(
+                "execution.tool.started",
+                {"node_id": "ac_1", "tool_name": "Read"},
+                ledger=ledger,
+            )
+            is False
+        )
+
+        payload = {"node_id": "ac_1", "runtime_backend": "codex_cli"}
+        assert fold_provider_event("execution.session.started", payload, ledger=ledger) is True
+        # Same provider again: no change, so a consumer must not re-render.
+        assert fold_provider_event("execution.session.started", payload, ledger=ledger) is False
 
 
 class TestProviderIdentityReachesTui:
@@ -118,8 +149,9 @@ class TestProviderIdentityReachesTui:
 
         nodes = app.state.ac_tree["nodes"]
         assert nodes["ac_1"]["provider"] == "codex_cli"
+        # No per-worker session for ac_2 -> run-level fallback, like a web card.
         assert nodes["ac_2"]["provider"] == "claude"
-        # The structural root has no card, so it is never mis-tagged.
+        # The structural root is not a board card, so it is never tagged.
         assert "provider" not in nodes["root"]
 
     def test_provider_stamped_via_node_id_alias(self) -> None:
@@ -128,15 +160,15 @@ class TestProviderIdentityReachesTui:
         app._state.ac_tree = {
             "root_id": "root",
             "nodes": {
-                "root": {"id": "root", "children_ids": ["ac_1"]},
+                "root": {"id": "root", "children_ids": ["legacy_1"]},
                 # Tree keyed by a legacy id but carrying the canonical node_id.
-                "ac_1": {"id": "legacy_1", "node_id": "ac_1", "status": "executing"},
+                "legacy_1": {"id": "legacy_1", "node_id": "ac_1", "status": "executing"},
             },
         }
         for event in _base_events():
             app._ingest_board_event(event)
 
-        assert app.state.ac_tree["nodes"]["ac_1"]["provider"] == "codex_cli"
+        assert app.state.ac_tree["nodes"]["legacy_1"]["provider"] == "codex_cli"
 
     def test_reset_clears_provider_state(self) -> None:
         """set_execution wipes the folded provider state for the next run."""
@@ -144,8 +176,11 @@ class TestProviderIdentityReachesTui:
         for event in _base_events():
             app._ingest_board_event(event)
         assert app.state.provider_by_node
+        assert app._provider_ledger.run_provider == "claude"
 
         app.set_execution("exec_2")
         assert app.state.provider_by_node == {}
-        assert app.state.board_events == []
         assert app.state.board_providers == []
+        assert app._provider_ledger.run_provider is None
+        # The ledger still wraps the SAME state dict after reset.
+        assert app.state.provider_by_node is app._provider_ledger.provider_by_node
