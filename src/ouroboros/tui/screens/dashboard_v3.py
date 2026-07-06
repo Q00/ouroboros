@@ -286,6 +286,12 @@ class NodeDetailPanel(Static):
                 yield Label("Depth:", classes="label")
                 yield Static(str(node.get("depth", 0)), classes="value")
 
+            provider = node.get("provider")
+            if isinstance(provider, str) and provider:
+                with Horizontal(classes="detail-row"):
+                    yield Label("Provider:", classes="label")
+                    yield Static(f"[cyan]{provider}[/]", classes="value")
+
             with Horizontal(classes="detail-row"):
                 yield Label("Atomic:", classes="label")
                 is_atomic = node.get("is_atomic", False)
@@ -463,6 +469,12 @@ class SelectableACTree(Static):
             label = f"{icon} {content}"
             if len(child_data.get("content", "")) > 40:
                 label += "..."
+
+            # Provider identity from the shared board projection (runtime_backend
+            # per node) — gives the TUI the multi-provider view the web Kanban has.
+            provider = child_data.get("provider")
+            if isinstance(provider, str) and provider:
+                label += f" [dim cyan]\\[{provider}][/]"
 
             # P2: Show inline tool activity for executing nodes
             activity = self._active_tools.get(child_id) or self._activity_from_node(child_data)
