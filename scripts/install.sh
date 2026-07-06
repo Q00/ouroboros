@@ -481,20 +481,20 @@ if [ "$HAS_UV" = true ]; then
   case "$EXTRAS" in
     "[mcp,claude,tui]")
       UV_ARGS+=(
-        --with "mcp==1.28.0"
-        --with "claude-agent-sdk==0.2.106"
-        --with "anthropic==0.111.0"
+        --with "mcp==1.28.1"
+        --with "claude-agent-sdk==0.2.110"
+        --with "anthropic==0.112.0"
       )
       ;;
     "[mcp,tui]")
-      UV_ARGS+=(--with "mcp==1.28.0")
+      UV_ARGS+=(--with "mcp==1.28.1")
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "mcp==1.28.0"
-        --with "claude-agent-sdk==0.2.106"
-        --with "anthropic==0.111.0"
-        --with "litellm==1.89.3"
+        --with "mcp==1.28.1"
+        --with "claude-agent-sdk==0.2.110"
+        --with "anthropic==0.112.0"
+        --with "litellm==1.90.0"
       )
       ;;
   esac
