@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
-import io
+import tempfile
 import time
 from typing import Any
 
@@ -79,9 +79,16 @@ def _diagnose_stuck_job(job_manager: JobManager, job_id: str) -> str:
             for f in reversed(frames)
         )
         lines.append(f"asyncio task {t.get_name()} done={t.done()}: {where or '<no stack>'}")
-    buf = io.StringIO()
-    faulthandler.dump_traceback(file=buf)
-    lines.append(buf.getvalue())
+    # faulthandler needs a real file descriptor (StringIO raises
+    # io.UnsupportedOperation: fileno), so dump native thread stacks to a
+    # temp file and read them back into the assertion message.
+    try:
+        with tempfile.TemporaryFile(mode="w+") as buf:
+            faulthandler.dump_traceback(file=buf)
+            buf.seek(0)
+            lines.append(buf.read())
+    except Exception as exc:  # diagnostics must never mask the real failure
+        lines.append(f"<faulthandler dump unavailable: {exc!r}>")
     return "\n".join(lines)
 
 
