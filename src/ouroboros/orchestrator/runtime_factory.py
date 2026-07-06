@@ -233,7 +233,6 @@ def _create_gjc_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
 
 
 def _create_zcode_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
-    from ouroboros.config import get_zcode_cli_path
     from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
     return ZcodeCLIRuntime(

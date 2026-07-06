@@ -133,6 +133,23 @@ def test_build_command_bypass_permissions_maps_to_yolo() -> None:
     assert "--mode" in cmd
 
 
+def test_build_command_path_executable_invoked_directly_without_node() -> None:
+    """A PATH-resolved `zcode` executable (not a .cjs script) is invoked
+    directly. ``node <executable>`` would try to parse the binary as JS and
+    fail before zcode ever runs, so the builder must drop the ``node`` prefix
+    for non-script paths.
+    """
+    rt = ZcodeCLIRuntime(
+        cli_path="/usr/local/bin/zcode",  # executable wrapper, no .cjs
+        permission_mode="acceptEdits",
+    )
+    cmd = rt._build_command("/tmp/unused", prompt="hi")
+    assert cmd[0] == "/usr/local/bin/zcode"
+    assert "node" not in cmd
+    assert "--json" in cmd
+    assert "--prompt" in cmd
+
+
 def test_build_command_includes_cwd_and_resume() -> None:
     rt = ZcodeCLIRuntime(
         cli_path="/tmp/zcode.cjs",
