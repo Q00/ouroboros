@@ -31,7 +31,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
-from ouroboros.runtime.child_env import build_child_env
+from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
 log = structlog.get_logger(__name__)
 
@@ -62,7 +62,7 @@ _MAX_OUROBOROS_DEPTH = 5
 # Child-env strip set for Gemini.  Gemini does NOT strip CLAUDECODE (unlike
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+_CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 
 class GeminiCLIRuntime(CodexCliRuntime):

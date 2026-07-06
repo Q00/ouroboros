@@ -23,7 +23,6 @@ from collections.abc import AsyncIterator
 import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
-import json
 import math
 import os
 from pathlib import Path
@@ -52,6 +51,7 @@ from ouroboros.orchestrator.opencode_event_normalizer import (
 )
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
+    parse_json_event,
     terminate_runtime_process,
 )
 from ouroboros.router import (
@@ -62,7 +62,7 @@ from ouroboros.router import (
     ResolveRequest,
     resolve_skill_dispatch,
 )
-from ouroboros.runtime.child_env import build_child_env
+from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
 log = get_logger(__name__)
 
@@ -71,7 +71,7 @@ _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
 # Child-env strip set for OpenCode.  OpenCode does NOT strip CLAUDECODE (unlike
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+_CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 _STDOUT_IDLE_TIMEOUT_ENV = "OUROBOROS_OPENCODE_STDOUT_IDLE_TIMEOUT"
@@ -697,11 +697,7 @@ class OpenCodeRuntime:
             Parsed dict, or ``None`` if the line is not valid JSON
             or is not a dict.
         """
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        return event if isinstance(event, dict) else None
+        return parse_json_event(line)
 
     def _extract_event_session_id(self, event: dict[str, Any]) -> str | None:
         """Extract the OpenCode session ID from a JSON event.

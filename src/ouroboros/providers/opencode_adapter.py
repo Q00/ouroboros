@@ -61,7 +61,7 @@ from ouroboros.providers.codex_cli_stream import (
     terminate_process,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
-from ouroboros.runtime.child_env import build_child_env
+from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
 log = structlog.get_logger()
 
@@ -70,7 +70,7 @@ _MAX_OUROBOROS_DEPTH = 5
 # Child-env strip set for OpenCode.  OpenCode does NOT strip CLAUDECODE (unlike
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+_CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 _RETRYABLE_ERROR_PATTERNS = BASE_TRANSIENT_PATTERNS
 

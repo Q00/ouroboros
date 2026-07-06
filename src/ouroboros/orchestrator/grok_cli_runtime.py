@@ -49,7 +49,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
-from ouroboros.runtime.child_env import build_child_env
+from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
 log = structlog.get_logger(__name__)
 
@@ -65,7 +65,7 @@ _SENTINEL_MODEL = "default"
 
 #: Maximum Ouroboros nesting depth to prevent fork bombs.
 _MAX_OUROBOROS_DEPTH = 5
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+_CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 
 class GrokCliRuntime(CodexCliRuntime):

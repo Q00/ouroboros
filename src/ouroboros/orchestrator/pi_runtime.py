@@ -12,7 +12,6 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 import contextlib
-import json
 import os
 from pathlib import Path
 import re
@@ -33,6 +32,8 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
+    malformed_event_message,
+    parse_json_event,
     terminate_runtime_process,
 )
 
@@ -232,17 +233,10 @@ class PiRuntime:
     # -- Event parsing -----------------------------------------------------
 
     def _parse_event(self, line: str) -> dict[str, Any] | None:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        return event if isinstance(event, dict) else None
+        return parse_json_event(line)
 
     def _malformed_event_message(self, line: str) -> str:
-        preview = line.strip()
-        if len(preview) > 240:
-            preview = f"{preview[:237]}..."
-        return f"Malformed {self._display_name} JSON event: {preview}"
+        return malformed_event_message(line, display_name=self._display_name)
 
     def _extract_session_id(self, event: dict[str, Any]) -> str | None:
         """Extract session ID from the pi session header event."""

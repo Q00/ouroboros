@@ -26,6 +26,10 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
+from ouroboros.providers.codex_cli_stream import (
+    malformed_event_message,
+    parse_json_event,
+)
 from ouroboros.providers.gjc_rpc_protocol import (
     SUPPORTED_EVENT_TYPES,
     GjcCommandError,
@@ -214,23 +218,15 @@ class GjcRuntime:
         return list(lines)
 
     def _parse_event(self, line: str) -> dict[str, Any]:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise MalformedGjcEvent(
-                message=self._malformed_event_message(line), provider=self._provider_name
-            ) from exc
-        if not isinstance(event, dict):
+        parsed = parse_json_event(line)
+        if parsed is None:
             raise MalformedGjcEvent(
                 message=self._malformed_event_message(line), provider=self._provider_name
             )
-        return event
+        return parsed
 
     def _malformed_event_message(self, line: str) -> str:
-        preview = line.strip()
-        if len(preview) > 240:
-            preview = f"{preview[:237]}..."
-        return f"Malformed {self._display_name} JSON event: {preview}"
+        return malformed_event_message(line, display_name=self._display_name)
 
     def _extract_content_delta(self, event: dict[str, Any]) -> str | None:
         if event.get("type") != "message_update":

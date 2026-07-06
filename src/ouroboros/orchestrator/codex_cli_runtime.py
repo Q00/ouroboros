@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Mapping
 import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
-import json
 import os
 from pathlib import Path
 import re
@@ -44,6 +43,7 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
+    parse_json_event,
     terminate_runtime_process,
 )
 from ouroboros.providers.profiles import resolve_completion_profile
@@ -1207,12 +1207,7 @@ class CodexCliRuntime:
 
     def _parse_json_event(self, line: str) -> dict[str, Any] | None:
         """Parse a JSONL event line, returning None for non-JSON output."""
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-
-        return event if isinstance(event, dict) else None
+        return parse_json_event(line)
 
     def _extract_event_session_id(self, event: Mapping[str, Any]) -> str | None:
         """Extract a backend-native session identifier from a runtime event."""

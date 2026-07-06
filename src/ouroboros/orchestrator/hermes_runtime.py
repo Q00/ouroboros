@@ -46,7 +46,7 @@ from ouroboros.router import (
     ResolveRequest,
     resolve_skill_dispatch,
 )
-from ouroboros.runtime.child_env import build_child_env
+from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
 log = get_logger(__name__)
 
@@ -58,7 +58,7 @@ _IDLE_TIMEOUT_ENV = "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS"
 # Child-env strip set for Hermes.  Hermes does NOT strip CLAUDECODE (unlike
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+_CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
 
 
 def _resolve_timeout_override(

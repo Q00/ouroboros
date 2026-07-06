@@ -15,6 +15,7 @@ import asyncio
 import codecs
 from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
+import json
 import os
 import signal
 from typing import Any, Protocol
@@ -126,6 +127,33 @@ async def collect_stream_lines(
             )
         lines.append(line)
     return lines
+
+
+def parse_json_event(line: str) -> dict[str, Any] | None:
+    """Parse a JSONL event line into a dict, or ``None`` for non-JSON/non-dict.
+
+    Shared by the orchestrator CLI runtimes (codex, opencode, pi, gjc) whose
+    stdout is newline-delimited JSON.  Callers that must *raise* on malformed
+    output (e.g. gjc) wrap this at the call site:
+    ``if parse_json_event(line) is None: raise ...``.
+    """
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def malformed_event_message(line: str, *, display_name: str) -> str:
+    """Build a bounded diagnostic message for a malformed JSONL event line.
+
+    Truncates the offending line to a 240-char preview so a pathological
+    stdout line cannot bloat logs or error payloads.
+    """
+    preview = line.strip()
+    if len(preview) > 240:
+        preview = f"{preview[:237]}..."
+    return f"Malformed {display_name} JSON event: {preview}"
 
 
 async def iter_runtime_stream_lines(
@@ -438,6 +466,8 @@ __all__ = [
     "collect_stream_lines",
     "iter_runtime_stream_lines",
     "iter_stream_lines",
+    "malformed_event_message",
+    "parse_json_event",
     "terminate_process",
     "terminate_runtime_process",
 ]
