@@ -66,6 +66,7 @@ from ouroboros.auto.state import (
     utc_now_iso,
 )
 from ouroboros.auto.task_class_application import apply_default_ac_template
+from ouroboros.auto.trace_export import best_effort_export_trace
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
@@ -477,8 +478,43 @@ class AutoPipeline:
     # of the ``probe_runner`` callback so multiple ``_result()`` returns
     # within a single run share the same evidence tuple.
     _last_probe_evidence: tuple[RuntimeEvidence, ...] = field(default=(), init=False, repr=False)
+    # A2 / run-metaharness trace artifact. ``run()`` recurses (resume paths do
+    # ``return await self.run(state)``); the depth counter fires the finalize
+    # trace export exactly once, at the outermost terminal return.
+    # ``_active_ledger`` is the live ledger the deepest ``_run_pipeline`` frame
+    # actually mutated, so the export projects the freshest decisions/history.
+    _run_depth: int = field(default=0, init=False, repr=False)
+    _active_ledger: SeedDraftLedger | None = field(default=None, init=False, repr=False)
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
+        """Run the pipeline and, once at the outermost terminal, export a trace.
+
+        Thin re-entrancy-aware wrapper around :meth:`_run_pipeline`. The auto
+        pipeline recurses through ``run`` on resume boundaries; the depth
+        counter ensures the best-effort A2 interview-trace projection runs a
+        single time at the outermost frame when the session is terminal. The
+        export never raises into the run (see
+        :func:`ouroboros.auto.trace_export.best_effort_export_trace`).
+        """
+        self._run_depth += 1
+        try:
+            result = await self._run_pipeline(state)
+        finally:
+            self._run_depth -= 1
+        if self._run_depth == 0 and state.is_terminal():
+            await best_effort_export_trace(
+                state,
+                self._active_ledger
+                or (
+                    SeedDraftLedger.from_dict(state.ledger)
+                    if state.ledger
+                    else SeedDraftLedger.from_goal(state.goal)
+                ),
+                event_store=getattr(self.interview_driver, "event_store", None),
+            )
+        return result
+
+    async def _run_pipeline(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
         self._last_emitted_phase = None
         self._last_emitted_grade = None
@@ -497,6 +533,9 @@ class AutoPipeline:
             if state.ledger
             else SeedDraftLedger.from_goal(state.goal)
         )
+        # A2 trace export: expose the live ledger to the outermost ``run()``
+        # wrapper so the finalize projection uses the freshest decisions.
+        self._active_ledger = ledger
         # L2-2 / #1172: wall-clock watchdog check.
         # Runs once per ``run()`` entry — both fresh sessions whose
         # ``created_at`` is too long ago (resume after budget elapsed)
