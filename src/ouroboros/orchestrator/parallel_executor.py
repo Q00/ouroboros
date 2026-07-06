@@ -34,19 +34,21 @@ import json
 import os
 from pathlib import Path
 import re
-import time
 from typing import TYPE_CHECKING, Any
 
 import anyio
 from rich.console import Console
 
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
-from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     RuntimeHandle,
+)
+from ouroboros.orchestrator.atomic_prompt_builder import (
+    AtomicPromptBuilder,
+    _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
@@ -209,9 +211,12 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_ac_runtime_identity,
 )
+from ouroboros.orchestrator.leaf_dispatcher import (
+    LeafDispatcher,
+    LeafDispatchState,
+)
 from ouroboros.orchestrator.level_context import (
     LevelContext,
-    build_context_prompt,
     deserialize_level_contexts,
     extract_level_context,
     serialize_level_contexts,
@@ -229,9 +234,6 @@ from ouroboros.orchestrator.rate_limit import (
     RateLimitGate,
     build_rate_limit_gate,
     estimate_runtime_request_tokens,
-)
-from ouroboros.orchestrator.runtime_message_projection import (
-    project_runtime_message,
 )
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
@@ -294,33 +296,6 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
         if not candidate.exists():
             missing.append(artifact)
     return tuple(missing)
-
-
-def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
-    """Render the worker-facing SUCCESS CONTRACT block for an AC, or ``""``.
-
-    The parallel leaf dispatch builds its own prompt (it does not go through the
-    host ``build_execute_subagent`` VERIFY section, nor does the repo-level context
-    pack carry a *per-AC* contract), so a worker was never told the exact
-    verify_command / expected_artifacts / output_assertion the harness will grade
-    it against. When the AC's spec carries a contract, surface it verbatim so the
-    worker runs and reports the same evidence the verify gate checks. Contract-less
-    ACs return ``""`` — the prompt stays byte-identical to before.
-    """
-    if spec is None or not spec.has_success_contract:
-        return ""
-    lines = ["SUCCESS CONTRACT for this AC:"]
-    if spec.verify_command:
-        lines.append(f"- Run: {spec.verify_command} and report it in commands_run")
-    if spec.expected_artifacts:
-        lines.append(
-            "- Expected artifacts: "
-            + ", ".join(spec.expected_artifacts)
-            + " — report them in files_touched"
-        )
-    if spec.output_assertion:
-        lines.append(f"- Expected output: {spec.output_assertion}")
-    return "\n".join(lines)
 
 
 def _collect_decomposition_depth_warning_paths(
@@ -2877,193 +2852,26 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         """
         ac_session_id: str | None = None
 
-        # Build prompt
-        if node_identity is not None:
-            label = (
-                f"AC {node_identity.display_path}"
-                if node_identity.depth == 0
-                else f"Sub-AC {node_identity.display_path}"
-            )
-            indent = "    " if node_identity.depth > 0 else "  "
-        elif is_sub_ac:
-            label = f"Sub-AC {sub_ac_index + 1} of AC {parent_ac_index + 1}"
-            indent = "    "
-        else:
-            label = f"AC {ac_index + 1}"
-            indent = "  "
-
-        task_section, context_governance_audit = self._build_atomic_dispatch_context(
+        # Build prompt (label/indent, governed task section, success contract,
+        # retry/parallel-awareness sections, cwd scan, completion contract).
+        prompt_bundle = AtomicPromptBuilder(self).build(
             ac_index=ac_index,
             ac_content=ac_content,
-            label=label,
+            seed_goal=seed_goal,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            node_identity=node_identity,
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
+            retry_attempt=retry_attempt,
+            retry_prompt_extra=retry_prompt_extra,
+            ac_spec=ac_spec,
         )
-        # Surface this AC's success contract to the worker so it runs and reports
-        # the exact evidence the verify gate will grade. Empty for contract-less
-        # ACs → the prompt stays byte-identical to before.
-        contract_block = _build_success_contract_block(ac_spec)
-        if contract_block:
-            task_section = f"{task_section}\n\n{contract_block}"
-        legacy_context_section = (
-            ""
-            if context_governance_audit is not None
-            and context_governance_audit.get("context_governed") is True
-            else build_context_prompt(level_contexts or [])
-        )
-
-        retry_section = ""
-        if retry_attempt > 0:
-            retry_section = (
-                "\n## Retry Context\n"
-                f"This is retry attempt {retry_attempt} for this acceptance criterion.\n"
-                "Resume from the current shared workspace state, including any "
-                "coordinator-reconciled changes already applied.\n"
-            )
-        if retry_prompt_extra:
-            # Verify-by-default retry enrichment (failure taxonomy, error tail,
-            # verify-command output, and — on the final attempt — a lateral
-            # change-of-approach directive) built by the batch retry loop.
-            retry_section += "\n" + retry_prompt_extra + "\n"
-
-        # Build parallel awareness section
-        parallel_section = ""
-        if sibling_acs and len(sibling_acs) > 1:
-            other_acs = [
-                content for sibling_index, content in sibling_acs if sibling_index != ac_index
-            ]
-            if other_acs:
-                context_is_governed = (
-                    context_governance_audit is not None
-                    and context_governance_audit.get("context_governed") is True
-                )
-                if context_is_governed:
-                    if self._fat_harness_mode and self._execution_profile is not None:
-                        other_list = (
-                            "Sibling/future ACs are summarized in the governed "
-                            "sibling-status section above as out-of-scope boundary "
-                            "context."
-                        )
-                    else:
-                        other_list = (
-                            "Sibling tasks in progress are summarized in the governed "
-                            "sibling-status section above."
-                        )
-                else:
-                    sibling_heading = (
-                        "Sibling/future ACs that are OUT OF SCOPE for this dispatch:"
-                        if self._fat_harness_mode and self._execution_profile is not None
-                        else "Sibling tasks in progress:"
-                    )
-                    other_list = (
-                        sibling_heading + "\n" + "\n".join(f"- {ac[:80]}" for ac in other_acs)
-                    )
-                if self._fat_harness_mode and self._execution_profile is not None:
-                    parallel_section = (
-                        "\n## Current AC Scope Boundary\n"
-                        "Sibling/future ACs are listed only to define work that is "
-                        "outside the current dispatch. Do not satisfy those criteria "
-                        "now, and do not pre-create their files, tests, docs, or "
-                        "evidence. Avoid modifying files that sibling/future ACs are "
-                        "likely to own unless the current AC explicitly requires it.\n\n"
-                        f"{other_list}\n"
-                    )
-                else:
-                    parallel_section = (
-                        "\n## Parallel Execution Notice\n"
-                        "Other agents are working on sibling tasks concurrently. "
-                        "Avoid modifying files that other agents are likely editing. "
-                        "Focus on files directly related to YOUR task.\n\n"
-                        f"{other_list}\n"
-                    )
-
-        # Scan the requested runtime workspace so prompts stay aligned with the actual task cwd.
-        import os
-
-        cwd = self._task_cwd or self._adapter.working_directory
-        if not isinstance(cwd, str) or not cwd:
-            cwd = os.getcwd()
-        try:
-            entries = sorted(os.listdir(cwd))
-            file_listing = "\n".join(f"- {e}" for e in entries if not e.startswith("."))
-        except OSError:
-            file_listing = "(unable to list)"
-
-        if self._fat_harness_mode and self._execution_profile is not None:
-            effective_schema = _effective_evidence_schema_for_ac(
-                self._execution_profile, ac_content
-            )
-            required_fields = ", ".join(effective_schema.required)
-            doc_only_note = ""
-            if _is_documentation_only_ac(ac_content):
-                doc_only_note = (
-                    "This is a documentation-only current AC: verify the requested docs "
-                    "with current-session README/docs evidence such as Edit plus a direct "
-                    "read/grep/diff command when that command is the validation for the docs change. "
-                    "Do not include tests_passed at all for documentation-only ACs. "
-                    "If you ran tests as a sanity check, cite only the validation command "
-                    "in commands_run when it directly validates the current docs change; "
-                    "do not list individual test names or prior test IDs.\n"
-                )
-            validation_only_note = ""
-            if _is_validation_only_ac(ac_content):
-                validation_only_note = (
-                    "This is a validation-only current AC: prove it with commands_run "
-                    "and tests_passed from this runtime session. Do not include "
-                    "files_touched unless you actually edited, wrote, or generated files "
-                    "for this current AC. Read-only inspection or running tests does not "
-                    "count as files_touched.\n"
-                )
-            completion_instruction = (
-                "## Current AC Scope Contract\n"
-                "You are responsible only for the current acceptance criterion in "
-                "this dispatch. Do not implement, test, document, or pre-create work "
-                "that belongs only to sibling or future ACs. If another AC mentions "
-                "related files, future functions, tests, or docs, treat that work as "
-                "out of scope unless the current AC explicitly requires it.\n"
-                "Your final evidence JSON must cite only files, commands, and tests "
-                "directly changed or run for this current AC in this runtime session. "
-                "For files_touched, cite workspace-relative paths only, never absolute "
-                "paths such as /tmp/... or /private/tmp/..., and never paths outside "
-                "the working directory. "
-                "For commands_run, include only validation/production commands such "
-                "as test, build, lint, generation, or docs verification commands; omit "
-                "exploratory discovery commands such as rg, grep, sed, cat, ls, find, "
-                "or pwd unless the current AC explicitly requires that command as validation.\n"
-                f"{doc_only_note}{validation_only_note}\n"
-                "Use the available tools to accomplish this task. Report progress through "
-                "tool-visible work, not a prose-only completion claim.\n"
-                "When complete, emit exactly ONE fenced JSON evidence record as the "
-                "final response and then stop. Populate the active profile fields "
-                f"directly ({required_fields}); do not emit a generic command_result "
-                "wrapper. Do not prefix it with [TASK_COMPLETE] or any prose; the "
-                "harness decides success from typed evidence plus the verifier PASS."
-            )
-        else:
-            completion_instruction = (
-                "Use the available tools to accomplish this task. Report your progress "
-                "clearly.\nWhen complete, explicitly state: [TASK_COMPLETE]"
-            )
-
-        prompt = f"""Execute the following task:
-
-## Working Directory
-`{cwd}`
-
-Files present:
-{file_listing}
-
-**Important**: Use Glob to discover files. Never guess absolute paths.
-
-## Goal Context
-{seed_goal}
-
-{render_auto_recursion_guard()}
-
-{task_section}
-{legacy_context_section}{retry_section}{parallel_section}
-{completion_instruction}
-"""
+        prompt = prompt_bundle.prompt
+        label = prompt_bundle.label
+        indent = prompt_bundle.indent
+        context_governance_audit = prompt_bundle.context_governance_audit
 
         messages: list[AgentMessage] = []
         final_message = ""
@@ -3116,19 +2924,6 @@ Files present:
             ac_content=ac_content,
             context_audit=context_governance_audit,
         )
-        lifecycle_event_type = (
-            "execution.session.resumed"
-            if self._is_resumable_runtime_handle(runtime_handle)
-            else "execution.session.started"
-        )
-        lifecycle_emitted = False
-        emitted_recovery_turn_ids: set[str] = set()
-
-        # Stall detection: CancelScope with resettable deadline (RC6)
-        message_count = 0
-        last_heartbeat = time.monotonic()
-        exec_start = time.monotonic()
-
         await self._wait_for_memory(label)
         self._announce_param_degradations(system_prompt=system_prompt, tools=tools)
         # Pace delivery within the backend's shared rate budget (dormant unless
@@ -3183,175 +2978,48 @@ Files present:
         # reasoning_effort ONLY for runtimes that enforce it; advised runtimes that
         # do not accept the parameter are never handed it.
 
+        # Runtime dispatch + streaming/heartbeat consumption. The dispatcher owns
+        # the stall-scoped CancelScope and the per-message loop; it mutates
+        # ``dispatch_state`` in place (including on the exception path) so the
+        # ``except``/``finally`` below observe the latest runtime handle, session
+        # id, and partial message list. Created before the ``try`` so it is always
+        # bound for the ``except``/``finally``.
+        dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         try:
-            with anyio.CancelScope(
-                deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
-            ) as stall_scope:
-                async for message in self._adapter.execute_task(
-                    prompt=prompt,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                    resume_handle=runtime_handle,
-                    **execute_effort_kwargs,
-                ):
-                    # Reset stall deadline on every message (RC6 core)
-                    stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
-                    if message.resume_handle is not None:
-                        runtime_handle = self._remember_ac_runtime_handle(
-                            ac_index,
-                            message.resume_handle,
-                            execution_context_id=execution_context_id,
-                            is_sub_ac=is_sub_ac,
-                            parent_ac_index=parent_ac_index,
-                            sub_ac_index=sub_ac_index,
-                            node_identity=node_identity,
-                            retry_attempt=retry_attempt,
-                        )
-
-                    if runtime_handle is not None and runtime_handle.native_session_id:
-                        ac_session_id = runtime_handle.native_session_id
-                    elif (
-                        message.resume_handle is None
-                        and isinstance(message.data.get("session_id"), str)
-                        and message.data["session_id"]
-                    ):
-                        ac_session_id = message.data["session_id"]
-
-                    runtime_handle = self._with_native_session_id(runtime_handle, ac_session_id)
-                    if runtime_handle is not None and message.resume_handle is not None:
-                        message = replace(message, resume_handle=runtime_handle)
-
-                    recovery_discontinuity = self._runtime_recovery_discontinuity(runtime_handle)
-                    if recovery_discontinuity is not None:
-                        replacement = recovery_discontinuity.get("replacement", {})
-                        replacement_turn_id = replacement.get("turn_id")
-                        if isinstance(replacement_turn_id, str) and replacement_turn_id:
-                            if replacement_turn_id not in emitted_recovery_turn_ids:
-                                await self._emit_ac_runtime_event(
-                                    event_type="execution.session.recovered",
-                                    runtime_identity=runtime_identity,
-                                    ac_content=ac_content,
-                                    runtime_handle=runtime_handle,
-                                    execution_id=execution_context_id,
-                                    session_id=ac_session_id,
-                                )
-                                emitted_recovery_turn_ids.add(replacement_turn_id)
-
-                    messages.append(message)
-                    message_count += 1
-                    if execution_counters is not None:
-                        async with self._execution_counters_lock:
-                            execution_counters["messages_count"] = (
-                                execution_counters.get("messages_count", 0) + 1
-                            )
-
-                    # RC1: Emit heartbeat piggybacking on message flow
-                    now = time.monotonic()
-                    if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
-                        await self._event_emitter.emit_heartbeat(
-                            session_id=session_id,
-                            ac_index=ac_index,
-                            ac_id=runtime_identity.ac_id,
-                            elapsed_seconds=now - exec_start,
-                            message_count=message_count,
-                            node_identity=node_identity,
-                        )
-                        last_heartbeat = now
-
-                    projected = project_runtime_message(message)
-
-                    persisted_session_id = self._runtime_resume_session_id(runtime_handle)
-                    if not lifecycle_emitted and persisted_session_id:
-                        await self._emit_ac_runtime_event(
-                            event_type=lifecycle_event_type,
-                            runtime_identity=runtime_identity,
-                            ac_content=ac_content,
-                            runtime_handle=runtime_handle,
-                            execution_id=execution_context_id,
-                            session_id=persisted_session_id,
-                        )
-                        lifecycle_emitted = True
-                        self._remember_ac_runtime_handle(
-                            ac_index,
-                            runtime_handle,
-                            execution_context_id=execution_context_id,
-                            is_sub_ac=is_sub_ac,
-                            parent_ac_index=parent_ac_index,
-                            sub_ac_index=sub_ac_index,
-                            node_identity=node_identity,
-                            retry_attempt=retry_attempt,
-                        )
-
-                    session_tool_event = self._build_session_tool_called_event(
-                        session_id,
-                        projected=projected,
-                    )
-                    if session_tool_event is not None:
-                        await self._event_store.append(session_tool_event)
-
-                    if self._should_emit_session_progress_event(
-                        message,
-                        projected=projected,
-                        messages_processed=len(messages),
-                    ):
-                        session_progress_event = self._build_session_progress_event(
-                            session_id,
-                            message,
-                            projected=projected,
-                        )
-                        await self._event_store.append(session_progress_event)
-
-                    if projected.is_tool_call and projected.tool_name is not None:
-                        # RC6: Tool invocations prove liveness — reset stall
-                        # deadline so long-running tools (Bash, external APIs)
-                        # are not falsely detected as stalls.
-                        stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
-                        if execution_counters is not None:
-                            async with self._execution_counters_lock:
-                                execution_counters["tool_calls_count"] = (
-                                    execution_counters.get("tool_calls_count", 0) + 1
-                                )
-                        tool_input = projected.tool_input
-                        tool_detail = self._format_tool_detail(projected.tool_name, tool_input)
-                        self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
-                        self._flush_console()
-
-                        await self._event_emitter.emit_atomic_tool_started(
-                            runtime_identity=runtime_identity,
-                            tool_name=projected.tool_name,
-                            tool_detail=tool_detail,
-                            tool_input=tool_input,
-                            runtime_metadata=self._runtime_event_metadata(message),
-                        )
-
-                    if projected.is_tool_result and projected.tool_name is not None:
-                        await self._event_emitter.emit_atomic_tool_completed(
-                            runtime_identity=runtime_identity,
-                            tool_name=projected.tool_name,
-                            tool_result_text=projected.content,
-                            runtime_metadata=self._runtime_event_metadata(message),
-                        )
-
-                    if projected.thinking:
-                        await self._event_emitter.emit_atomic_thinking(
-                            runtime_identity=runtime_identity,
-                            thinking_text=projected.thinking,
-                            runtime_metadata=self._runtime_event_metadata(message),
-                        )
-
-                    if message.is_final:
-                        final_message = message.content
-                        success = not message.is_error
+            await LeafDispatcher(self).stream(
+                state=dispatch_state,
+                prompt=prompt,
+                tools=tools,
+                system_prompt=system_prompt,
+                execute_effort_kwargs=execute_effort_kwargs,
+                runtime_identity=runtime_identity,
+                execution_context_id=execution_context_id,
+                session_id=session_id,
+                ac_index=ac_index,
+                ac_content=ac_content,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+                label=label,
+                indent=indent,
+                execution_counters=execution_counters,
+            )
+            runtime_handle = dispatch_state.runtime_handle
+            ac_session_id = dispatch_state.ac_session_id
+            final_message = dispatch_state.final_message
+            success = dispatch_state.success
 
             # Check if stall was detected (CancelScope ate the Cancelled)
-            if stall_scope.cancelled_caught:
+            if dispatch_state.stalled:
                 duration = (datetime.now(UTC) - start_time).total_seconds()
                 log.warning(
                     "parallel_executor.ac.stall_detected",
                     ac_index=ac_index,
                     depth=depth,
                     silent_seconds=STALL_TIMEOUT_SECONDS,
-                    message_count=message_count,
+                    message_count=dispatch_state.message_count,
                 )
                 clear_cached_runtime_handle = True
                 return ACExecutionResult(
@@ -3509,7 +3177,7 @@ Files present:
 
             self._remember_ac_runtime_handle(
                 ac_index,
-                runtime_handle,
+                dispatch_state.runtime_handle,
                 execution_context_id=execution_context_id,
                 is_sub_ac=is_sub_ac,
                 parent_ac_index=parent_ac_index,
@@ -3521,9 +3189,9 @@ Files present:
                 event_type="execution.session.failed",
                 runtime_identity=runtime_identity,
                 ac_content=ac_content,
-                runtime_handle=runtime_handle,
+                runtime_handle=dispatch_state.runtime_handle,
                 execution_id=execution_context_id,
-                session_id=ac_session_id,
+                session_id=dispatch_state.ac_session_id,
                 success=False,
                 error=str(e),
             )
@@ -3543,15 +3211,15 @@ Files present:
                 messages=tuple(messages),
                 error=str(e),
                 duration_seconds=duration,
-                session_id=ac_session_id,
+                session_id=dispatch_state.ac_session_id,
                 retry_attempt=retry_attempt,
                 depth=depth,
-                runtime_handle=runtime_handle,
+                runtime_handle=dispatch_state.runtime_handle,
             )
         finally:
             if clear_cached_runtime_handle:
                 await self._terminate_runtime_handle(
-                    runtime_handle,
+                    dispatch_state.runtime_handle,
                     runtime_scope_id=runtime_identity.session_scope_id,
                 )
                 self._forget_ac_runtime_handle(
