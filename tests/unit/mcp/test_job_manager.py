@@ -398,6 +398,39 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_crash_inside_terminalization_still_persists_terminal_state(
+        self, tmp_path
+    ) -> None:
+        """If _run_job's own terminal-writing logic crashes (not the append),
+        the job must still end terminal instead of stranding in RUNNING."""
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+
+            async def _boom_derivation(snapshot: JobSnapshot) -> str | None:
+                raise PersistenceError("synthetic derivation crash", operation="select")
+
+            manager._derive_completed_execution_result = _boom_derivation
+
+            started = await manager.start_job(
+                job_type="test",
+                initial_message="queued",
+                runner=_ok_runner(),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert snapshot.status is JobStatus.FAILED
+            assert snapshot.result_meta["terminal_append_failed"] is True
+            assert "synthetic derivation crash" in (snapshot.error or "")
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_terminal_fallback_skips_when_job_already_terminal(self, tmp_path) -> None:
         """The FAILED fallback must not overwrite a terminal event a concurrent writer persisted."""
         store = _build_store(tmp_path)
