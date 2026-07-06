@@ -87,6 +87,10 @@ _ANTIGRAVITY_LLM_BACKENDS = frozenset({"antigravity", "agy"})
 # Grok models, so generic Claude default ids map to the CLI's own configured
 # default (the "default" sentinel).
 _GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
+# Zcode (Z.ai GLM-5) is runtime-only and Claude-incapable: it runs its own
+# configured default model, so generic Claude default ids map to the CLI's
+# own ``"default"`` sentinel, exactly like antigravity and grok above.
+_ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
@@ -96,6 +100,7 @@ _PI_DEFAULT_MODEL = "default"
 _GJC_DEFAULT_MODEL = "default"
 _ANTIGRAVITY_DEFAULT_MODEL = "default"
 _GROK_DEFAULT_MODEL = "default"
+_ZCODE_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -1949,6 +1954,8 @@ def _default_model_for_backend(
         return _ANTIGRAVITY_DEFAULT_MODEL
     if resolved in _GROK_LLM_BACKENDS:
         return _GROK_DEFAULT_MODEL
+    if resolved in _ZCODE_LLM_BACKENDS:
+        return _ZCODE_DEFAULT_MODEL
     return default_model
 
 
@@ -1999,6 +2006,8 @@ def _normalize_configured_model_for_backend(
         return _ANTIGRAVITY_DEFAULT_MODEL
     if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
         return _GROK_DEFAULT_MODEL
+    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
+        return _ZCODE_DEFAULT_MODEL
 
     return candidate
 
