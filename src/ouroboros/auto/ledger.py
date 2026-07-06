@@ -38,6 +38,29 @@ class LedgerStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class DecisionProvenance(StrEnum):
+    """How a ledger decision came to be — orthogonal to :class:`LedgerSource`.
+
+    ``LedgerSource`` classifies *what kind of content-authority* a decision
+    rests on (user goal, repo fact, inference, …). ``DecisionProvenance``
+    classifies *how the decision was reached*, which is the axis the #1485
+    failure exposed: a timeout-defaulted decision was indistinguishable from a
+    user-confirmed one, so degraded seeds (whose contract fields contained raw
+    question text) executed silently.
+
+    The two gated classes — :data:`MODEL_INFERRED` and :data:`TIMEOUT_DEFAULT` —
+    must pass a low-ambiguity criterion (see :mod:`ouroboros.auto.grading`)
+    before the ledger can become an executable Seed. The other three are
+    grounded/human-authorized and pass the gate unconditionally.
+    """
+
+    USER_CONFIRMED = "user_confirmed"
+    MODEL_INFERRED = "model_inferred"
+    TIMEOUT_DEFAULT = "timeout_default"
+    LATERAL_CONSENSUS = "lateral_consensus"
+    MAINTAINER_POLICY = "maintainer_policy"
+
+
 SOURCE_PRIORITY: tuple[LedgerSource, ...] = (
     LedgerSource.USER_GOAL,
     LedgerSource.REPO_FACT,
@@ -108,6 +131,33 @@ _RESOLVED_STATUSES: frozenset[LedgerStatus] = frozenset(
 )
 
 
+# Derivation from the content-authority axis (``LedgerSource``) to the
+# decision-origin axis (``DecisionProvenance``) for entries that were never
+# explicitly stamped — i.e. legacy sessions, deserialized entries, and the many
+# writer sites whose ``LedgerSource`` already fully implies the origin. Sources
+# not listed here (currently only ``BLOCKER``, which is never active) fall
+# through to the safest honest default: ``MODEL_INFERRED``. That default keeps
+# old sessions from crashing AND from silently passing the provenance gate — an
+# unstamped entry is treated as a model guess and screened for low ambiguity.
+_PROVENANCE_FROM_SOURCE: dict[LedgerSource, DecisionProvenance] = {
+    # Grounded in a human statement OR verified repo/convention evidence — these
+    # are not model guesses, so they pass the provenance gate unconditionally.
+    LedgerSource.USER_GOAL: DecisionProvenance.USER_CONFIRMED,
+    LedgerSource.USER_PREFERENCE: DecisionProvenance.USER_CONFIRMED,
+    LedgerSource.NON_GOAL: DecisionProvenance.USER_CONFIRMED,
+    LedgerSource.REPO_FACT: DecisionProvenance.USER_CONFIRMED,
+    LedgerSource.EXISTING_CONVENTION: DecisionProvenance.USER_CONFIRMED,
+    # Deterministic policy/config fill applied during normal answering.
+    LedgerSource.CONSERVATIVE_DEFAULT: DecisionProvenance.MAINTAINER_POLICY,
+    # Model best-guesses — gated.
+    LedgerSource.INFERENCE: DecisionProvenance.MODEL_INFERRED,
+    LedgerSource.ASSUMPTION: DecisionProvenance.MODEL_INFERRED,
+    LedgerSource.AUTO_FILL_INFERENCE: DecisionProvenance.MODEL_INFERRED,
+}
+
+_PROVENANCE_DEFAULT: DecisionProvenance = DecisionProvenance.MODEL_INFERRED
+
+
 @dataclass(frozen=True, slots=True)
 class AssumptionRecord:
     """Auditable provenance for an assumption-class ledger entry.
@@ -144,17 +194,45 @@ class LedgerEntry:
     reversible: bool = True
     rationale: str = ""
     evidence: list[str] = field(default_factory=list)
+    # Decision-origin stamp (A1 / #1485). ``None`` for unstamped/legacy entries;
+    # :attr:`effective_provenance` derives a value from ``source`` in that case.
+    # Writer sites whose origin ``source`` cannot express (deadline/timeout
+    # backstops, lateral consensus) stamp this explicitly at the decision point.
+    provenance: DecisionProvenance | str | None = None
 
     def __post_init__(self) -> None:
         self.source = LedgerSource(str(self.source))
         self.status = LedgerStatus(str(self.status))
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
+        if self.provenance is not None:
+            self.provenance = DecisionProvenance(str(self.provenance))
+
+    @property
+    def effective_provenance(self) -> DecisionProvenance:
+        """Return the decision origin, deriving from ``source`` when unstamped.
+
+        Explicit :attr:`provenance` wins; otherwise the content-authority
+        ``source`` is mapped via :data:`_PROVENANCE_FROM_SOURCE`, defaulting to
+        :data:`_PROVENANCE_DEFAULT` (``model_inferred``) — the safe fallback that
+        neither crashes legacy sessions nor lets an unstamped decision skip the
+        low-ambiguity gate.
+        """
+        if self.provenance is not None:
+            return DecisionProvenance(self.provenance)
+        source = self.source if isinstance(self.source, LedgerSource) else LedgerSource(self.source)
+        return _PROVENANCE_FROM_SOURCE.get(source, _PROVENANCE_DEFAULT)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible data."""
         data = asdict(self)
         data["source"] = self.source.value
         data["status"] = self.status.value
+        # Keep serialization additive: only emit ``provenance`` when explicitly
+        # stamped so legacy round-trips (entries without the key) are byte-stable.
+        if self.provenance is None:
+            data.pop("provenance", None)
+        else:
+            data["provenance"] = DecisionProvenance(self.provenance).value
         return data
 
     @classmethod
@@ -192,6 +270,13 @@ class LedgerEntry:
         if confidence < 0.0 or confidence > 1.0:
             msg = "ledger entry confidence must be between 0 and 1"
             raise ValueError(msg)
+        provenance = data.get("provenance")
+        if provenance is not None:
+            try:
+                DecisionProvenance(str(provenance))
+            except ValueError as exc:
+                msg = f"ledger entry provenance is not a valid decision provenance: {provenance!r}"
+                raise ValueError(msg) from exc
         return cls(**data)
 
 
@@ -462,6 +547,26 @@ class SeedDraftLedger:
             for entry in section.entries
             if entry.status == LedgerStatus.CONFLICTING
         )
+
+    def provenance_histogram(self) -> dict[str, int]:
+        """Return counts of active entries by decision origin (A1 / #1485).
+
+        Keys are :class:`DecisionProvenance` string values; only *active*
+        entries (not WEAK/CONFLICTING/BLOCKED) are counted, so the histogram
+        reflects the decisions that actually flow into the synthesized Seed.
+        Surfaced on ``SeedMetadata.decision_provenance`` so later phases (the A2
+        trace artifact) can grep how a seed's contract was assembled and how
+        many gated (``model_inferred`` / ``timeout_default``) decisions it rests
+        on. Deterministically ordered for stable serialization.
+        """
+        counts: dict[str, int] = {}
+        for section in self.sections.values():
+            for entry in section.entries:
+                if entry.status in _INACTIVE_STATUSES:
+                    continue
+                key = entry.effective_provenance.value
+                counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items()))
 
     def assumptions(self) -> list[str]:
         """Return assumption entry values."""

@@ -11,6 +11,7 @@ import unicodedata
 import structlog
 
 from ouroboros.auto.ledger import (
+    DecisionProvenance,
     LedgerEntry,
     LedgerSource,
     LedgerStatus,
@@ -295,6 +296,11 @@ def finalize_safe_defaultable_gaps(
                 source=LedgerSource.ASSUMPTION,
                 confidence=0.68,
                 status=LedgerStatus.DEFAULTED,
+                # Forced closure of an unconverged interview (max_rounds /
+                # phase deadline) — same #1485 backstop class as auto-fill, so
+                # stamp it timeout_default rather than letting ASSUMPTION derive
+                # to a plain model inference.
+                provenance=DecisionProvenance.TIMEOUT_DEFAULT,
                 rationale=f"{spec.rationale} Applied at {provenance}.",
                 evidence=[
                     provenance,

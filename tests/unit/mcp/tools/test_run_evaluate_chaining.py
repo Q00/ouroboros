@@ -56,15 +56,49 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
         else:
             await asyncio.sleep(0.01)
     diagnostics = _diagnose_stuck_job(job_manager, job_id)
-    try:
-        events, cursor = await job_manager._event_store.get_events_after("job", job_id, 0)
-        stream = "\n".join(
-            f"  {e.timestamp} {e.type} id={e.id} status={e.data.get('status')}" for e in events
-        )
-        diagnostics += f"\npersisted job events (cursor={cursor}):\n{stream or '  <empty stream>'}"
-    except Exception as exc:
-        diagnostics += f"\n<event stream unavailable: {exc!r}>"
+    diagnostics += "\n" + await _dump_all_job_streams(job_manager)
     raise AssertionError(f"job {job_id} did not reach a terminal state\n{diagnostics}")
+
+
+async def _dump_all_job_streams(job_manager: JobManager) -> str:
+    """Dump every persisted job stream plus store/manager state (#1566 insurance).
+
+    The append-void class of this flake (silently lost terminal events) is only
+    diagnosable from the FULL persisted picture: the run job's stream, the
+    chained evaluate job's stream, and the store connection/pool state.
+    """
+    lines: list[str] = ["--- all persisted job streams ---"]
+    store = job_manager._event_store
+    try:
+        created_events = await store.query_events(event_type="mcp.job.created", limit=50)
+        for job_id in [e.aggregate_id for e in created_events]:
+            try:
+                events, cursor = await store.get_events_after("job", job_id, 0)
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not mask failures
+                lines.append(f"job {job_id}: <stream unavailable: {exc!r}>")
+                continue
+            lines.append(f"job {job_id} (cursor={cursor}):")
+            for e in events:
+                meta = e.data.get("result_meta")
+                meta_keys = sorted(meta) if isinstance(meta, dict) else meta
+                lines.append(
+                    f"  {e.timestamp} {e.type} id={e.id} "
+                    f"status={e.data.get('status')} meta_keys={meta_keys}"
+                )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"<job discovery unavailable: {exc!r}>")
+    try:
+        engine = store._engine
+        lines.append(f"engine pool: {engine.pool.status() if engine is not None else '<none>'}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"<pool status unavailable: {exc!r}>")
+    lines.append(f"manager tasks={sorted(job_manager._tasks)}")
+    lines.append(f"manager runner_tasks={sorted(job_manager._runner_tasks)}")
+    lines.append(f"manager backstops={sorted(getattr(job_manager, '_backstops', {}))}")
+    lines.append(
+        f"manager started_job_ids={sorted(getattr(job_manager, '_started_job_ids', set()))}"
+    )
+    return "\n".join(lines)
 
 
 def _diagnose_stuck_job(job_manager: JobManager, job_id: str) -> str:
@@ -203,7 +237,14 @@ async def test_successful_run_enqueues_chained_evaluate_job(
 
     snapshot = await _wait_terminal(job_manager, started.value.meta["job_id"])
 
-    assert snapshot.status == JobStatus.COMPLETED
+    if snapshot.status != JobStatus.COMPLETED:
+        # Self-explaining flake diagnostics (#1566): a non-COMPLETED terminal
+        # here has historically meant a silently lost terminal append; dump
+        # the full persisted picture for both jobs plus store state.
+        raise AssertionError(
+            f"expected COMPLETED, got {snapshot.status} "
+            f"(result_meta={snapshot.result_meta})\n" + await _dump_all_job_streams(job_manager)
+        )
     assert snapshot.result_meta["success"] is True
     evaluation_job_id = snapshot.result_meta["chained_evaluate_job_id"]
     assert isinstance(evaluation_job_id, str)
@@ -224,6 +265,97 @@ async def test_successful_run_enqueues_chained_evaluate_job(
     ]
     assert evaluate_calls[0]["arguments"]["working_dir"] == str(tmp_path)
     assert "execution artifact" in evaluate_calls[0]["arguments"]["artifact"]
+
+
+async def test_run_job_stranded_without_terminal_event_still_terminalizes(
+    event_store,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for this file's own CI flake signature (#1566 / PR #1576):
+    the run job's task is fully released — job task AND runner task popped,
+    persisted stream = created + running only — with no terminal event and no
+    log. Whatever silently defeats the inline guards (modeled here by dropping
+    every terminal append for the run job while its task lives), the run job
+    must still reach a terminal state instead of zombying for the full wait
+    deadline: first via the detached release-point backstop, and failing that
+    via the get_snapshot in-process stranded-job net.
+    """
+    monkeypatch.setattr(execution_handlers, "get_auto_evaluate_enabled", lambda: True)
+
+    class FakeEvaluateHandler:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="approved"),),
+                    is_error=False,
+                    meta={"final_approved": True, "session_id": arguments["session_id"]},
+                )
+            )
+
+    monkeypatch.setattr(evaluation_handlers, "EvaluateHandler", FakeEvaluateHandler)
+
+    job_manager = JobManager(event_store)
+    handler = StartExecuteSeedHandler(
+        execute_handler=_SuccessfulExecuteHandler(text="execution artifact"),  # type: ignore[arg-type]
+        event_store=event_store,
+        job_manager=job_manager,
+    )
+
+    _terminal_types = {
+        "mcp.job.completed",
+        "mcp.job.failed",
+        "mcp.job.cancelled",
+        "mcp.job.interrupted",
+    }
+    # Identify the run job from its created event (allocated before handle()
+    # returns) and drop its terminal appends while the drop flag is on. The
+    # chained evaluate job is untouched.
+    target: dict[str, str | None] = {"job_id": None}
+    dropping = {"on": True}
+    original_append_event = job_manager._append_event
+
+    async def _drop_run_job_terminal_appends(
+        event_type: str, job_id: str, data: dict, **kwargs: Any
+    ) -> None:
+        if event_type == "mcp.job.created" and data.get("job_type") == "execute_seed":
+            target["job_id"] = job_id
+        if dropping["on"] and job_id == target["job_id"] and event_type in _terminal_types:
+            return  # silently lost, like the CI capture: no event, no exception
+        await original_append_event(event_type, job_id, data, **kwargs)
+
+    job_manager._append_event = _drop_run_job_terminal_appends
+
+    started = await handler.handle({"seed_content": "goal: stranded\n", "cwd": str(tmp_path)})
+    assert started.is_ok
+    run_job_id = started.value.meta["job_id"]
+    assert target["job_id"] == run_job_id
+
+    # Wait for the run job's tasks to be fully released and its detached
+    # backstop (whose appends are also dropped) to finish: the CI signature.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and (
+        run_job_id in job_manager._tasks or getattr(job_manager, "_backstops", {})
+    ):
+        await asyncio.sleep(0.01)
+    assert run_job_id not in job_manager._tasks
+    assert run_job_id not in job_manager._runner_tasks
+    events, _ = await event_store.get_events_after("job", run_job_id, 0)
+    assert all(e.type in {"mcp.job.created", "mcp.job.updated"} for e in events)
+
+    # From here the store is healthy again; the job must terminalize promptly
+    # instead of zombying for the full 60s wait deadline.
+    dropping["on"] = False
+    deadline = time.monotonic() + 5.0
+    snapshot = await job_manager.get_snapshot(run_job_id)
+    while not snapshot.is_terminal and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+        snapshot = await job_manager.get_snapshot(run_job_id)
+    assert snapshot.is_terminal, f"run job stranded in {snapshot.status}"
+    assert snapshot.result_meta.get("interrupted_from_stranded_job_task") is True
 
 
 async def test_chained_evaluate_uses_execution_worktree_when_present(
