@@ -340,32 +340,44 @@ def _resolve_context_pack_root(
     seed: Seed,
     repo_root: str | Path | None,
 ) -> Path | None:
-    """Resolve the repo the context pack should describe, or ``None``.
+    """Resolve the contained project directory the context pack may describe.
 
-    Prefers the run's explicit working directory; falls back to the seed's
-    first resolvable ``context_references`` path (files collapse to their
-    parent directory). Returns ``None`` when nothing points at an existing
-    directory.
+    Security contract: the pack scans this directory and, for git repos,
+    cache-writes ``.ouroboros/context_pack.json`` under it, so it must never
+    resolve outside the run's own contained project. ``repo_root`` is that
+    project — it was already resolved and containment-checked upstream by
+    ``_resolve_cli_project_dir`` (via ``resolve_seed_project_path``) — so it is
+    the single trust anchor here.
+
+    Seed-encoded ``metadata.project_dir`` / ``context_references`` are
+    untrusted (LLM-generated, or imported via ``ooo publish``). They are only
+    honored when they resolve *inside* ``repo_root`` under the very same
+    ``resolve_seed_project_path`` containment contract the CLI uses — never as
+    a way to redirect the scan (and cache write) at an arbitrary local repo.
+    Any escaping candidate is rejected and we fall back to ``repo_root``
+    itself. Without a trusted ``repo_root`` there is no stable base to contain
+    seed paths against, so the resolver returns ``None`` (no pack) rather than
+    scanning a raw seed path.
     """
-    if repo_root:
-        candidate = Path(repo_root)
+    if not repo_root:
+        return None
+    base = Path(repo_root)
+    if not base.is_dir():
+        return None
+    base = base.resolve()
+
+    from ouroboros.core.project_paths import resolve_seed_project_path
+
+    resolution = resolve_seed_project_path(seed, stable_base=base)
+    candidate = resolution.path
+    if candidate is not None:
+        # Contained candidate (existing metadata dir, or an existing reference
+        # file/dir inside ``base``). Files collapse to their parent directory.
+        if candidate.is_file():
+            return candidate.parent
         if candidate.is_dir():
             return candidate
-    brownfield = getattr(seed, "brownfield_context", None)
-    references = getattr(brownfield, "context_references", ()) if brownfield else ()
-    for reference in references:
-        raw = getattr(reference, "path", "")
-        if not raw:
-            continue
-        try:
-            path = Path(raw).expanduser()
-        except (TypeError, ValueError):
-            continue
-        if path.is_file():
-            return path.parent
-        if path.is_dir():
-            return path
-    return None
+    return base
 
 
 def _context_pack_fragment(

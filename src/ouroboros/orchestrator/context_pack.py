@@ -23,7 +23,7 @@ Design constraints (non-negotiable):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import subprocess
@@ -166,10 +166,16 @@ def build_context_pack(repo_root: Path | str) -> ContextPack | None:
 
     Best-effort and side-effect-tolerant: reads a sidecar cache at
     ``.ouroboros/context_pack.json`` keyed by git ``HEAD`` **plus** a
-    fingerprint of every working-tree file the scanner parses (HEAD alone is
-    insufficient — the sources are mutable without a commit), otherwise scans
-    and (for git dirs) refreshes the cache. Any failure yields ``None`` so a
-    caller can safely fall through to a pack-free prompt.
+    fingerprint of every working-tree manifest the scanner parses (HEAD alone
+    is insufficient — the sources are mutable without a commit), otherwise
+    scans and (for git dirs) refreshes the cache. Any failure yields ``None``
+    so a caller can safely fall through to a pack-free prompt.
+
+    The repo map is intentionally *not* cached: it is derived from the
+    uncommitted top-level layout (dirs + entry-point files), which neither
+    ``HEAD`` nor the manifest fingerprint tracks. It is rebuilt fresh on every
+    cache hit so a hit can never serve a stale layout when an uncommitted
+    top-level directory or entry-point file is added or removed.
     """
     try:
         root = Path(repo_root)
@@ -179,7 +185,7 @@ def build_context_pack(repo_root: Path | str) -> ContextPack | None:
         fingerprint = _source_fingerprint(root)
         cached = _read_cache(root, head, fingerprint)
         if cached is not None:
-            return cached
+            return replace(cached, repo_map=_build_repo_map(root))
         pack = _scan(root, head)
         if pack is None:
             return None
@@ -493,11 +499,16 @@ def _read_cache(
 
 def _write_cache(root: Path, pack: ContextPack, fingerprint: dict[str, Any]) -> None:
     cache_path = root / _CACHE_RELATIVE_PATH
+    payload = pack.to_json()
+    # The repo map is rebuilt fresh on every read (its uncommitted-layout
+    # inputs are not covered by the fingerprint), so it is never persisted —
+    # caching it would only risk a stale layout slipping through.
+    payload.pop("repo_map", None)
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
             json.dumps(
-                {**pack.to_json(), "fingerprint": fingerprint},
+                {**payload, "fingerprint": fingerprint},
                 ensure_ascii=False,
                 indent=2,
             ),

@@ -217,6 +217,43 @@ class TestCache:
         assert pack.head is None
         assert not (tmp_path / ".ouroboros" / "context_pack.json").is_file()
 
+    def test_repo_map_is_fresh_after_uncommitted_toplevel_dir(self, tmp_path: Path) -> None:
+        """A new uncommitted top-level dir must appear even on a cache hit.
+
+        Regression for the layout-staleness gap: the cache fingerprint covers
+        only manifests/HEAD, so adding a top-level directory without a commit
+        left them unchanged. The repo map is now rebuilt fresh on every hit, so
+        the cached layout can never go stale.
+        """
+        _write_fixture_repo(tmp_path)
+        self._init_git(tmp_path)
+        first = build_context_pack(tmp_path)
+        assert first is not None
+        assert not any("newpkg/" in line for line in first.repo_map)
+        # The cache file exists, so the next build is a fingerprint/HEAD hit.
+        assert (tmp_path / ".ouroboros" / "context_pack.json").is_file()
+
+        # New uncommitted top-level dir: HEAD and the manifest fingerprint are
+        # unchanged, yet the fresh repo map must surface it.
+        (tmp_path / "newpkg").mkdir()
+        (tmp_path / "newpkg" / "__init__.py").write_text("", encoding="utf-8")
+        second = build_context_pack(tmp_path)
+        assert second is not None
+        assert any("newpkg/" in line for line in second.repo_map)
+        # Stack/verify facts still come from the cache (proving it was a hit).
+        assert second.stack == first.stack
+
+    def test_repo_map_not_persisted_in_cache_artifact(self, tmp_path: Path) -> None:
+        """The cached artifact must not carry repo map layout data."""
+        import json
+
+        _write_fixture_repo(tmp_path)
+        self._init_git(tmp_path)
+        build_context_pack(tmp_path)
+        cache_path = tmp_path / ".ouroboros" / "context_pack.json"
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert "repo_map" not in data
+
 
 class TestSystemPromptInjection:
     def test_pack_present_when_flag_on(self, tmp_path: Path, monkeypatch) -> None:
@@ -242,7 +279,16 @@ class TestSystemPromptInjection:
         prompt = build_system_prompt(_sample_seed())
         assert "## Project Context (auto-detected facts)" not in prompt
 
-    def test_root_falls_back_to_context_reference(self, tmp_path: Path, monkeypatch) -> None:
+    def test_no_pack_without_trusted_repo_root_even_with_seed_reference(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A raw seed reference must not drive a scan without a trusted repo_root.
+
+        Regression for the containment gap: previously a seed's absolute
+        ``context_references`` path was scanned with ``repo_root=None``. There
+        is no stable base to contain seed paths against, so the pack must stay
+        absent rather than reading from an arbitrary local repo.
+        """
         monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
         _write_fixture_repo(tmp_path)
         brownfield = BrownfieldContext(
@@ -250,8 +296,41 @@ class TestSystemPromptInjection:
             context_references=(ContextReference(path=str(tmp_path), role="primary", summary=""),),
         )
         prompt = build_system_prompt(_sample_seed(brownfield), repo_root=None)
+        assert "## Project Context (auto-detected facts)" not in prompt
+
+    def test_out_of_tree_reference_is_rejected_and_never_scanned(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """An absolute seed reference outside repo_root cannot redirect the scan.
+
+        Blocking regression: a hand-authored/imported seed pointing at an
+        arbitrary local repo must not cause the pack to read from — or cache
+        under — that repo. The pack must describe the contained ``repo_root``
+        only, and no cache may be written beneath the outside directory.
+        """
+        monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+        inside = tmp_path / "inside"
+        inside.mkdir()
+        _write_fixture_repo(inside)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "pyproject.toml").write_text(
+            _PYPROJECT.replace('name = "fixture-app"', 'name = "SECRET-external-repo"'),
+            encoding="utf-8",
+        )
+
+        brownfield = BrownfieldContext(
+            project_type="brownfield",
+            context_references=(ContextReference(path=str(outside), role="primary", summary=""),),
+        )
+        prompt = build_system_prompt(_sample_seed(brownfield), repo_root=inside)
+
         assert "## Project Context (auto-detected facts)" in prompt
+        # Pack describes the contained repo, never the out-of-tree reference.
         assert "fixture-app" in prompt
+        assert "SECRET-external-repo" not in prompt
+        # No cache write leaked under the arbitrary outside repo.
+        assert not (outside / ".ouroboros" / "context_pack.json").exists()
 
 
 @pytest.mark.parametrize(

@@ -133,3 +133,8 @@ docs/cli-inventory.yaml
 # (recurring stray — has been accidentally committed before).
 .ouroboros_eval_artifact.md
 
+# Deterministic run-worker context pack cache written under the target repo.
+# Machine-generated and keyed by working-tree state; never tracked.
+.ouroboros/context_pack.json
+**/.ouroboros/context_pack.json
+
