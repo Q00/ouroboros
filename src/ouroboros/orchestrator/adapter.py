@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
@@ -38,9 +39,6 @@ from ouroboros.orchestrator.rate_limit import (
     RateLimitSnapshot,
     SharedRateLimitBucket,
     estimate_runtime_request_tokens,
-)
-from ouroboros.providers.retry import (
-    TRANSIENT_ERROR_PATTERNS as _SHARED_TRANSIENT_ERROR_PATTERNS,
 )
 from ouroboros.router.types import Resolved
 
@@ -990,15 +988,18 @@ RETRY_WAIT_MAX: float = 10.0  # seconds
 
 # Error patterns that indicate transient failures worth retrying.
 #
-# Derived from the canonical transient core in ``providers.retry`` plus the one
+# Derived from the canonical transient core in ``core.retry`` plus the one
 # execution-specific signal (``"exit code 1"`` — the SDK CLI process failing).
 # Adopting the shared core fixes a real divergence: this adapter previously did
 # NOT retry on ``"overloaded"`` (Anthropic 529), the most common transient error
 # under load, even though the completion adapters did. The shared tuple closes
 # that gap without dropping any pattern this adapter already matched.
-TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
-    *_SHARED_TRANSIENT_ERROR_PATTERNS,
+_CLAUDE_EXECUTION_RETRYABLE_EXTRA_PATTERNS = (
     "exit code 1",  # SDK CLI process failed
+)
+TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
+    *BASE_TRANSIENT_PATTERNS,
+    *_CLAUDE_EXECUTION_RETRYABLE_EXTRA_PATTERNS,
 )
 
 
@@ -1110,8 +1111,10 @@ class ClaudeAgentAdapter:
         Returns:
             True if the error appears to be transient.
         """
-        error_str = str(error).lower()
-        return any(pattern in error_str for pattern in TRANSIENT_ERROR_PATTERNS)
+        return is_transient_error(
+            str(error),
+            extra_patterns=_CLAUDE_EXECUTION_RETRYABLE_EXTRA_PATTERNS,
+        )
 
     @staticmethod
     def _parse_optional_positive_int(

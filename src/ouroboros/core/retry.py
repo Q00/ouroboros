@@ -1,4 +1,4 @@
-"""Small async retry helper used in place of a third-party retry package."""
+"""Retry helpers and shared transient-error classification."""
 
 from __future__ import annotations
 
@@ -10,6 +10,34 @@ from typing import Any, ParamSpec, TypeVar
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+BASE_TRANSIENT_PATTERNS: tuple[str, ...] = (
+    "concurrency",  # parallel-request contention inside an active session
+    "rate",  # rate limit / rate-limited / rate_limit
+    "429",  # HTTP 429 Too Many Requests
+    "500",  # HTTP 500 Internal Server Error
+    "502",  # HTTP 502 Bad Gateway
+    "503",  # HTTP 503 Service Unavailable
+    "504",  # HTTP 504 Gateway Timeout
+    "timeout",
+    "timed out",
+    "overloaded",  # Anthropic 529 overloaded_error
+    "temporarily",  # "temporarily unavailable"
+    "try again",
+    "connection",  # connection reset / aborted / error
+)
+
+
+def is_transient_error(
+    message: str,
+    *,
+    extra_patterns: tuple[str, ...] = (),
+) -> bool:
+    """Return whether *message* looks like a transient, retry-worthy failure."""
+    lowered = message.lower()
+    if any(pattern in lowered for pattern in BASE_TRANSIENT_PATTERNS):
+        return True
+    return any(pattern in lowered for pattern in extra_patterns)
 
 
 def retry_async(
@@ -49,3 +77,6 @@ def retry_async(
         return wrapper
 
     return decorator
+
+
+__all__ = ["BASE_TRANSIENT_PATTERNS", "is_transient_error", "retry_async"]

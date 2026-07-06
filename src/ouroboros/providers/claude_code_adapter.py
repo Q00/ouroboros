@@ -41,6 +41,7 @@ import structlog
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -50,7 +51,6 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
-from ouroboros.providers.retry import TRANSIENT_ERROR_PATTERNS
 from ouroboros.providers.tool_use_diagnostics import diagnose_tool_use_turn
 
 log = structlog.get_logger(__name__)
@@ -73,7 +73,7 @@ _INITIAL_BACKOFF_SECONDS = (
 )
 # Shared transient core (rate/429/5xx/timeout/overloaded/connection/…) plus the
 # Claude-CLI-specific bootstrap signals that only this adapter can safely match.
-# Composed from the single source of truth in ``providers.retry`` so the common
+# Composed from the single source of truth in ``core.retry`` so the common
 # terms can never drift from the Codex / execution adapters again.
 _CLAUDE_CLI_BOOTSTRAP_PATTERNS = (
     "empty response",  # custom CLI startup delay
@@ -81,7 +81,7 @@ _CLAUDE_CLI_BOOTSTRAP_PATTERNS = (
     "startup",
 )
 _RETRYABLE_ERROR_PATTERNS = (
-    *TRANSIENT_ERROR_PATTERNS,
+    *BASE_TRANSIENT_PATTERNS,
     *_CLAUDE_CLI_BOOTSTRAP_PATTERNS,
 )
 
@@ -284,8 +284,10 @@ class ClaudeCodeAdapter:
         Returns:
             True if the error is likely transient and worth retrying.
         """
-        error_lower = error_msg.lower()
-        return any(pattern in error_lower for pattern in _RETRYABLE_ERROR_PATTERNS)
+        return is_transient_error(
+            error_msg,
+            extra_patterns=_CLAUDE_CLI_BOOTSTRAP_PATTERNS,
+        )
 
     def _is_retryable_provider_error(self, error: ProviderError) -> bool:
         """Check if a provider error is transient enough to retry.

@@ -45,6 +45,7 @@ from ouroboros.copilot_permissions import (
     resolve_copilot_permission_mode,
 )
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -61,15 +62,13 @@ log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 
-_RETRYABLE_ERROR_PATTERNS = (
-    "rate limit",
-    "temporarily unavailable",
-    "timeout",
-    "overloaded",
-    "try again",
-    "connection reset",
+_COPILOT_RETRYABLE_EXTRA_PATTERNS = (
     "quota exceeded",
     "github api error",
+)
+_RETRYABLE_ERROR_PATTERNS = (
+    *BASE_TRANSIENT_PATTERNS,
+    *_COPILOT_RETRYABLE_EXTRA_PATTERNS,
 )
 
 _AUTH_ERROR_PATTERNS = (
@@ -578,8 +577,10 @@ class CopilotCliLLMAdapter(RuntimeStreamMixin):
         return content
 
     def _is_retryable_error(self, message: str) -> bool:
-        lowered = message.lower()
-        return any(pattern in lowered for pattern in _RETRYABLE_ERROR_PATTERNS)
+        return is_transient_error(
+            message,
+            extra_patterns=_COPILOT_RETRYABLE_EXTRA_PATTERNS,
+        )
 
     @staticmethod
     def _looks_like_auth_error(text: str) -> bool:
