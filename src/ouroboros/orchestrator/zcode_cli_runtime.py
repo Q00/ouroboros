@@ -99,6 +99,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        startup_output_timeout_seconds: float | None = None,
+        stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
         """Initialize the Zcode CLI runtime.
 
@@ -123,6 +125,16 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             skills_dir: Optional directory for skill definitions.
             skill_dispatcher: Optional handler for skill execution.
             llm_backend: Optional LLM backend identifier.
+            startup_output_timeout_seconds: Override the watchdog that
+                aborts a subprocess which emits no first stdout chunk
+                within the deadline. Passed straight through to the
+                Codex base runtime; ``0`` or negative disables the guard.
+                The MCP execute-seed path sets this to ``0`` to keep
+                long agent runs alive — Zcode buffers its whole JSON
+                summary until completion and would otherwise be killed
+                as "produced no stdout" before the summary lands.
+            stdout_idle_timeout_seconds: Override the inter-chunk idle
+                watchdog. Same forwarding / disable contract as above.
         """
         super().__init__(
             cli_path=cli_path,
@@ -132,6 +144,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             skills_dir=skills_dir,
             skill_dispatcher=skill_dispatcher,
             llm_backend=llm_backend,
+            startup_output_timeout_seconds=startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
         )
 
     # -- Permission mode overrides -----------------------------------------

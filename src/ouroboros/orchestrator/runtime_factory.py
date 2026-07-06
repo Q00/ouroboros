@@ -237,6 +237,8 @@ def _create_zcode_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
 
     return ZcodeCLIRuntime(
         cli_path=request.cli_path or get_zcode_cli_path(),
+        startup_output_timeout_seconds=request.startup_output_timeout_seconds,
+        stdout_idle_timeout_seconds=request.stdout_idle_timeout_seconds,
         **_runtime_kwargs(request),
     )
 
