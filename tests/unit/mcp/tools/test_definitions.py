@@ -135,6 +135,9 @@ class TestExecuteSeedHandler:
         gated_resume_tracker = SessionTracker.create("exec_resume", "seed-123").with_progress(
             {"fat_harness_mode": True}
         )
+        opted_out_resume_tracker = SessionTracker.create(
+            "exec_opted_out", "seed-123"
+        ).with_progress({"fat_harness_mode": False})
         legacy_resume_tracker = SessionTracker.create("exec_legacy", "seed-123")
         missing_contract_tracker = SessionTracker.create("exec_missing", "seed-123")
 
@@ -152,6 +155,7 @@ class TestExecuteSeedHandler:
             async def reconstruct_session(self, session_id: str) -> Result:
                 trackers = {
                     "sess_resume": gated_resume_tracker,
+                    "sess_opted_out": opted_out_resume_tracker,
                     "sess_legacy": legacy_resume_tracker,
                     "sess_missing": missing_contract_tracker,
                 }
@@ -214,8 +218,21 @@ class TestExecuteSeedHandler:
             {"seed_content": VALID_SEED_YAML, "skip_qa": True},
             synchronous=True,
         )
+        legacy_fresh = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace(
+                    "metadata:", "orchestrator:\n  execution_mode: legacy\nmetadata:", 1
+                ),
+                "skip_qa": True,
+            },
+            synchronous=True,
+        )
         resumed = await handler.handle(
             {"seed_content": VALID_SEED_YAML, "session_id": "sess_resume", "skip_qa": True},
+            synchronous=True,
+        )
+        opted_out_resumed = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "session_id": "sess_opted_out", "skip_qa": True},
             synchronous=True,
         )
         legacy_resumed = await handler.handle(
@@ -238,10 +255,16 @@ class TestExecuteSeedHandler:
         )
 
         assert fresh.is_ok
+        assert legacy_fresh.is_ok
         assert resumed.is_ok
+        assert opted_out_resumed.is_ok
         assert legacy_resumed.is_ok
         assert missing_contract_resumed.is_ok
-        assert captured_modes == [False, True, False, False]
+        # Verify-by-default: fresh runs enforce fat-harness unless the seed
+        # opts out with execution_mode='legacy'; a persisted contract always
+        # wins on resume (True stays True, False stays False); resume without
+        # a persisted contract mirrors the fresh default.
+        assert captured_modes == [True, False, True, False, False, True]
 
     async def test_handle_passes_execution_model_to_runtime(
         self,
@@ -408,19 +431,25 @@ class TestExecuteSeedHandler:
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_verify" in result.value.text_content
 
-    async def test_handle_rejects_removed_legacy_execution_mode(self) -> None:
-        """MCP execute_seed matches the CLI removal of the legacy selector."""
-        handler = ExecuteSeedHandler()
-        result = await handler.handle(
-            {
-                "seed_content": VALID_SEED_YAML.replace(
-                    "metadata:", "orchestrator:\n  execution_mode: legacy\nmetadata:", 1
-                )
-            }
+    def test_fresh_execution_mode_gate_readmits_legacy_opt_out(self) -> None:
+        """Verify-by-default re-admits 'legacy' as the explicit opt-out.
+
+        #978 P5 removed 'legacy' while the default runner was observe-mode
+        (the token was redundant). With verify-by-default the opt-out token is
+        meaningful again, matching the CLI resolver vocabulary.
+        """
+        from ouroboros.mcp.tools.execution_handlers import (
+            _fresh_fat_harness_mode,
+            _validate_fresh_execution_mode,
         )
 
-        assert result.is_err
-        assert "execution_mode='legacy' was removed" in str(result.error)
+        for mode in (None, "", "fat_harness", "legacy"):
+            assert _validate_fresh_execution_mode(mode, tool_name="t").is_ok
+
+        assert _fresh_fat_harness_mode(None) is True
+        assert _fresh_fat_harness_mode("") is True
+        assert _fresh_fat_harness_mode("fat_harness") is True
+        assert _fresh_fat_harness_mode("legacy") is False
 
     async def test_handle_plugin_marks_direct_delegation_unverified(
         self,
@@ -448,11 +477,11 @@ class TestExecuteSeedHandler:
         )
         assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
 
-    async def test_handle_plugin_rejects_removed_legacy_execution_mode(
+    async def test_handle_plugin_accepts_legacy_opt_out_without_downgrade_note(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Plugin-dispatched execute_seed uses the same fresh execution-mode gate."""
+        """An explicit legacy opt-out dispatches via plugin with no downgrade stamp."""
         handler = ExecuteSeedHandler(
             event_store=memory_event_store,
             agent_runtime_backend="opencode",
@@ -466,8 +495,26 @@ class TestExecuteSeedHandler:
             }
         )
 
-        assert result.is_err
-        assert "execution_mode='legacy' was removed" in str(result.error)
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert "fat_harness_downgraded" not in result.value.meta
+
+    async def test_handle_plugin_default_stamps_fat_harness_downgrade(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Verify-by-default would enable fat-harness; plugin dispatch cannot
+        enforce it, so the silent downgrade must be visible in the meta."""
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert result.value.meta["fat_harness_downgraded"] == "plugin_dispatch_cannot_enforce"
 
     async def test_handle_plugin_rejects_fat_harness_execution_mode(
         self,
@@ -577,7 +624,7 @@ class TestExecuteSeedHandler:
         )
 
         assert result.is_err
-        assert "execution_mode must be 'fat_harness' when set" in str(result.error)
+        assert "execution_mode must be 'fat_harness' or 'legacy' when set" in str(result.error)
 
     async def test_handle_reports_execution_handler_config_error(self) -> None:
         """Config failures should surface with execution-handler context."""
@@ -1957,11 +2004,11 @@ class TestAsyncJobHandlers:
         )
         assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
 
-    async def test_start_execute_seed_plugin_rejects_removed_legacy_execution_mode(
+    async def test_start_execute_seed_plugin_accepts_legacy_opt_out(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Plugin-dispatched start_execute_seed uses the same fresh execution-mode gate."""
+        """An explicit legacy opt-out dispatches via plugin with no downgrade stamp."""
         handler = StartExecuteSeedHandler(
             event_store=memory_event_store,
             agent_runtime_backend="opencode",
@@ -1976,8 +2023,26 @@ class TestAsyncJobHandlers:
             }
         )
 
-        assert result.is_err
-        assert "execution_mode='legacy' was removed" in str(result.error)
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert "fat_harness_downgraded" not in result.value.meta
+
+    async def test_start_execute_seed_plugin_default_stamps_fat_harness_downgrade(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """The default-ON fat-harness downgrade is visible on start_execute_seed too."""
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_ok
+        assert result.value.meta["dispatch_mode"] == "plugin"
+        assert result.value.meta["fat_harness_downgraded"] == "plugin_dispatch_cannot_enforce"
 
     async def test_start_execute_seed_plugin_rejects_fat_harness_execution_mode(
         self,

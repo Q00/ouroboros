@@ -203,12 +203,22 @@ class ExecutionConfig(BaseModel, frozen=True):
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
         auto_evaluate: When true, a successful `execute_seed` run automatically
             enqueues formal evaluation as a background job.
+        run_verify_commands: Whether the orchestrator checks an AC's success
+            contract itself before accepting the AC: all ``expected_artifacts``
+            must exist under the run workspace and ``verify_command`` must exit
+            0 (plus any ``output_assertion``). On by default.
+        verify_command_timeout_seconds: Timeout for an AC verify command.
+        ac_retry_attempts: How many times a failed AC is re-dispatched before
+            it is marked FAILED (per-AC, excludes stall retries).
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False
     auto_evaluate: bool = True
+    run_verify_commands: bool = True
+    verify_command_timeout_seconds: int = Field(default=600, ge=1)
+    ac_retry_attempts: int = Field(default=2, ge=0)
 
 
 class ResilienceConfig(BaseModel, frozen=True):

@@ -503,6 +503,19 @@ class OrchestratorRunner:
         from ouroboros.config import get_agent_reasoning_effort
 
         self._reasoning_effort = get_agent_reasoning_effort()
+        # Verify-by-default execution knobs (PR-V). Read once from config with a
+        # safe fallback so direct/test construction never fails on config IO.
+        try:
+            from ouroboros.config import load_config
+
+            _execution_config = load_config().execution
+            self._run_verify_commands = _execution_config.run_verify_commands
+            self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+            self._ac_retry_attempts = _execution_config.ac_retry_attempts
+        except Exception:  # pragma: no cover - defensive config fallback
+            self._run_verify_commands = True
+            self._verify_command_timeout_seconds = 600
+            self._ac_retry_attempts = 2
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
@@ -2924,6 +2937,9 @@ class OrchestratorRunner:
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
             reasoning_effort=self._reasoning_effort,
+            run_verify_commands=self._run_verify_commands,
+            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
+            ac_retry_attempts=self._ac_retry_attempts,
         )
 
         # Check for cancellation before starting parallel execution

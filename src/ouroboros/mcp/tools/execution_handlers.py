@@ -118,25 +118,46 @@ def _validate_fresh_execution_mode(
     *,
     tool_name: str,
 ) -> Result[None, MCPToolError]:
-    """Reject removed/unknown fresh execution-mode selectors on every MCP path."""
-    if execution_mode == "legacy":
+    """Reject unknown fresh execution-mode selectors on every MCP path.
+
+    ``legacy`` was removed after #978 P5 while the default runner was
+    observe-mode (the opt-out token was redundant then). With verify-by-default
+    the default runner enforces typed evidence plus verifier PASS acceptance,
+    so ``legacy`` is re-admitted as the explicit opt-out — mirroring the CLI
+    ``_resolve_fat_harness_mode`` contract.
+    """
+    if execution_mode not in (None, "", "fat_harness", "legacy"):
         return Result.err(
             MCPToolError(
-                "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
-                "omit the selector for the default runner or set execution_mode='fat_harness' "
-                "to opt in to typed evidence plus verifier PASS acceptance.",
-                tool_name=tool_name,
-            )
-        )
-    if execution_mode not in (None, "", "fat_harness"):
-        return Result.err(
-            MCPToolError(
-                "seed.orchestrator.execution_mode must be 'fat_harness' when set "
-                f"(got {execution_mode!r}).",
+                "seed.orchestrator.execution_mode must be 'fat_harness' or 'legacy' "
+                f"when set (got {execution_mode!r}).",
                 tool_name=tool_name,
             )
         )
     return Result.ok(None)
+
+
+def _fresh_fat_harness_mode(execution_mode: Any) -> bool:
+    """Verify-by-default resolution shared with the CLI.
+
+    Missing/blank selector OR explicit ``fat_harness`` → True; explicit
+    ``legacy`` is the supported opt-out → False.
+    """
+    return execution_mode != "legacy"
+
+
+def _plugin_fat_harness_downgrade_meta(execution_mode: Any) -> dict[str, str]:
+    """Stamp the verify-by-default downgrade for fresh plugin dispatch.
+
+    Plugin dispatch cannot enforce typed evidence plus verifier PASS in the
+    child task. Explicit ``fat_harness`` requests are rejected upstream and an
+    explicit ``legacy`` opted out; only the missing/blank selector — where the
+    default would have enabled fat-harness — is silently downgraded, so it must
+    carry a visible note in the response meta.
+    """
+    if execution_mode in (None, ""):
+        return {"fat_harness_downgraded": "plugin_dispatch_cannot_enforce"}
+    return {}
 
 
 def _validate_plugin_execution_mode(
@@ -651,6 +672,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
                     "model_tier": model_tier,
+                    **({} if is_resume else _plugin_fat_harness_downgrade_meta(execution_mode)),
                     **_plugin_verification_meta(
                         session_id,
                         auto_evaluate=auto_evaluate,
@@ -782,13 +804,16 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Create checkpoint store for execution state persistence
                 checkpoint_store = CheckpointStore()
                 checkpoint_store.initialize()
-                fat_harness_mode = execution_mode == "fat_harness"
+                fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
                 if is_resume:
                     persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
                     if isinstance(persisted_fat_harness_mode, bool):
                         fat_harness_mode = persisted_fat_harness_mode
                     else:
-                        fat_harness_mode = execution_mode == "fat_harness"
+                        # No persisted contract (historical session): mirror the
+                        # CLI resume semantics — verify-by-default unless the
+                        # seed opts out with execution_mode='legacy'.
+                        fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
 
                 # Create orchestrator runner
                 runner = OrchestratorRunner(
@@ -1582,6 +1607,7 @@ class StartExecuteSeedHandler:
                 "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
+                **({} if is_resume else _plugin_fat_harness_downgrade_meta(execution_mode)),
                 **_plugin_verification_meta(
                     plugin_session_id,
                     auto_evaluate=auto_evaluate,

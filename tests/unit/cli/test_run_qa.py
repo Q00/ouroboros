@@ -310,9 +310,9 @@ def test_resolve_cli_project_dir_global_seed_store_still_uses_brownfield_target_
     assert resolved == target_dir.resolve()
 
 
-def test_resolve_fat_harness_mode_defaults_to_disabled() -> None:
-    """Fresh runs use the default runner unless the seed opts into fat-harness."""
-    assert _resolve_fat_harness_mode(VALID_SEED_DATA) is False
+def test_resolve_fat_harness_mode_defaults_to_enabled() -> None:
+    """Verify-by-default: fresh runs enforce fat-harness unless opted out."""
+    assert _resolve_fat_harness_mode(VALID_SEED_DATA) is True
 
 
 def test_resolve_fat_harness_mode_accepts_fat_harness_execution_mode() -> None:
@@ -322,12 +322,11 @@ def test_resolve_fat_harness_mode_accepts_fat_harness_execution_mode() -> None:
     assert _resolve_fat_harness_mode(seed_data) is True
 
 
-def test_resolve_fat_harness_mode_rejects_legacy_execution_mode() -> None:
-    """#978 P5 removes the legacy self-report fallback selector."""
+def test_resolve_fat_harness_mode_legacy_execution_mode_opts_out() -> None:
+    """`execution_mode: legacy` is the supported verify-by-default escape hatch."""
     seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "legacy"}}
 
-    with pytest.raises(typer.Exit):
-        _resolve_fat_harness_mode(seed_data)
+    assert _resolve_fat_harness_mode(seed_data) is False
 
 
 def test_resolve_fat_harness_mode_rejects_unknown_execution_mode() -> None:
@@ -346,11 +345,13 @@ def test_resolve_resume_fat_harness_mode_uses_persisted_contract() -> None:
 
 
 def test_resolve_resume_fat_harness_mode_migrates_missing_contract_to_default_runner() -> None:
-    """Only explicit fat-harness selectors resume with verifier-gated acceptance."""
+    """Sessions with no persisted contract resume verify-by-default unless opted out."""
     fat_harness_seed = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "fat_harness"}}
+    legacy_seed = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "legacy"}}
 
     assert _resolve_resume_fat_harness_mode(fat_harness_seed, {}) is True
-    assert _resolve_resume_fat_harness_mode(VALID_SEED_DATA, {}) is False
+    assert _resolve_resume_fat_harness_mode(VALID_SEED_DATA, {}) is True
+    assert _resolve_resume_fat_harness_mode(legacy_seed, {}) is False
 
 
 def test_resolve_max_decomposition_depth_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -538,12 +539,12 @@ async def test_run_orchestrator_passes_resolved_execution_caps_to_runner(tmp_pat
 
     assert mock_runner_cls.call_args.kwargs["max_decomposition_depth"] == 3
     assert mock_runner_cls.call_args.kwargs["max_parallel_workers"] == 7
-    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
+    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is True
 
 
 @pytest.mark.asyncio
 async def test_run_orchestrator_passes_default_runner_mode_to_runner(tmp_path: Path) -> None:
-    """The default path leaves fat-harness disabled unless the seed opts in."""
+    """Verify-by-default: the default path enables fat-harness unless opted out."""
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
 
@@ -582,7 +583,7 @@ async def test_run_orchestrator_passes_default_runner_mode_to_runner(tmp_path: P
         mock_event_store_cls.return_value.initialize = AsyncMock()
         await _run_orchestrator(seed_file)
 
-    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is False
+    assert mock_runner_cls.call_args.kwargs["fat_harness_mode"] is True
 
 
 @pytest.mark.asyncio
