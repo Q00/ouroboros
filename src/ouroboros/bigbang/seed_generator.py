@@ -393,8 +393,13 @@ class SeedGenerator:
             Result containing extracted requirements dict or error.
         """
         context = self._build_interview_context(state)
+        is_brownfield = (
+            state.is_brownfield
+            or bool(state.codebase_context.strip())
+            or bool(state.codebase_paths)
+        )
         system_prompt = self._build_extraction_system_prompt()
-        user_prompt = self._build_extraction_user_prompt(context)
+        user_prompt = self._build_extraction_user_prompt(context, is_brownfield=is_brownfield)
 
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -452,7 +457,12 @@ class SeedGenerator:
                         Message(role=MessageRole.SYSTEM, content=system_prompt),
                         Message(
                             role=MessageRole.USER,
-                            content=self._build_retry_prompt(context, last_response, last_error),
+                            content=self._build_retry_prompt(
+                                context,
+                                last_response,
+                                last_error,
+                                is_brownfield=is_brownfield,
+                            ),
                         ),
                     ]
 
@@ -464,13 +474,21 @@ class SeedGenerator:
             )
         )
 
-    def _build_retry_prompt(self, context: str, failed_response: str, error: str) -> str:
+    def _build_retry_prompt(
+        self,
+        context: str,
+        failed_response: str,
+        error: str,
+        *,
+        is_brownfield: bool = False,
+    ) -> str:
         """Build a retry prompt after extraction parse failure.
 
         Args:
             context: Original interview context.
             failed_response: The response that failed to parse.
             error: The parse error message.
+            is_brownfield: Whether the interview targets an existing codebase.
 
         Returns:
             Retry prompt string.
@@ -501,7 +519,25 @@ ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
 EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
 EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
-PROJECT_TYPE: greenfield"""
+{self._project_type_template(is_brownfield=is_brownfield)}"""
+
+    @staticmethod
+    def _project_type_template(*, is_brownfield: bool) -> str:
+        """Return the PROJECT_TYPE trailer for the extraction format.
+
+        Greenfield interviews keep today's single ``PROJECT_TYPE: greenfield``
+        line. Brownfield interviews declare the type and request the three
+        brownfield keys the parser already recognizes so the resulting Seed
+        carries a populated ``brownfield_context``.
+        """
+        if not is_brownfield:
+            return "PROJECT_TYPE: greenfield"
+        return (
+            "PROJECT_TYPE: brownfield\n"
+            "CONTEXT_REFERENCES: <path>:<role primary|reference>:<summary> | ...\n"
+            "EXISTING_PATTERNS: <pattern 1> | <pattern 2> | ...\n"
+            "EXISTING_DEPENDENCIES: <dependency 1> | <dependency 2> | ..."
+        )
 
     def _build_interview_context(self, state: InterviewState) -> str:
         """Build context string from interview state.
@@ -513,6 +549,21 @@ PROJECT_TYPE: greenfield"""
             Formatted context string.
         """
         parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
+
+        # Brownfield priming: carry the auto-explore codebase summary and the
+        # referenced paths into the extraction context so the seed architect
+        # can populate CONTEXT_REFERENCES / EXISTING_PATTERNS / EXISTING_DEPENDENCIES
+        # instead of defaulting the seed to greenfield.
+        if state.codebase_context.strip():
+            parts.append(f"\nCodebase Context:\n{state.codebase_context.strip()}")
+        if state.codebase_paths:
+            rendered_paths = "; ".join(
+                f"{entry.get('path', '')} ({entry.get('role', 'reference')})"
+                for entry in state.codebase_paths
+                if entry.get("path")
+            )
+            if rendered_paths:
+                parts.append(f"\nCodebase Paths: {rendered_paths}")
 
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
@@ -533,11 +584,14 @@ PROJECT_TYPE: greenfield"""
 
         return load_agent_prompt("seed-architect")
 
-    def _build_extraction_user_prompt(self, context: str) -> str:
+    def _build_extraction_user_prompt(self, context: str, *, is_brownfield: bool = False) -> str:
         """Build user prompt with interview context.
 
         Args:
             context: Formatted interview context.
+            is_brownfield: Whether the interview targets an existing codebase.
+                When True, the format requests brownfield keys the parser
+                already understands; greenfield keeps today's template output.
 
         Returns:
             User prompt string.
@@ -562,7 +616,7 @@ ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
 EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
 EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
-PROJECT_TYPE: greenfield"""
+{self._project_type_template(is_brownfield=is_brownfield)}"""
 
     _KNOWN_PREFIXES = (
         "GOAL:",

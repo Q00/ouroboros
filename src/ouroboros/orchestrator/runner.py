@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import inspect
 import math
+from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import uuid4
@@ -293,6 +294,8 @@ def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> Executi
 def build_system_prompt(
     seed: Seed,
     strategy: ExecutionStrategy | None = None,
+    *,
+    repo_root: str | Path | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -300,6 +303,11 @@ def build_system_prompt(
         seed: Seed to extract system prompt from.
         strategy: Execution strategy for prompt customization.
             If None, uses strategy from seed.task_type.
+        repo_root: Working directory for the run. When it (or the seed's first
+            resolvable ``context_references`` path) is an existing repo, a
+            deterministic context pack (stack, verify commands, layout) is
+            appended so workers are not primed blind. Best-effort — a scan
+            failure or a non-project directory simply omits the pack.
 
     Returns:
         System prompt string.
@@ -314,13 +322,89 @@ def build_system_prompt(
     recovery_protocol = get_run_recovery_protocol_prompt()
     seed_contract = render_seed_contract_for_execution(SeedContract.from_seed(seed))
 
-    return f"""{strategy_fragment}
+    prompt = f"""{strategy_fragment}
 
 {seed_contract}
 
 {ac_tracking}
 
 {recovery_protocol}"""
+
+    context_pack_fragment = _context_pack_fragment(seed, repo_root)
+    if context_pack_fragment:
+        prompt = f"{prompt}\n\n{context_pack_fragment}"
+    return prompt
+
+
+def _resolve_context_pack_root(
+    seed: Seed,
+    repo_root: str | Path | None,
+) -> Path | None:
+    """Resolve the contained project directory the context pack may describe.
+
+    Security contract: the pack scans this directory and, for git repos,
+    cache-writes ``.ouroboros/context_pack.json`` under it, so it must never
+    resolve outside the run's own contained project. ``repo_root`` is that
+    project — it was already resolved and containment-checked upstream by
+    ``_resolve_cli_project_dir`` (via ``resolve_seed_project_path``) — so it is
+    the single trust anchor here.
+
+    Seed-encoded ``metadata.project_dir`` / ``context_references`` are
+    untrusted (LLM-generated, or imported via ``ooo publish``). They are only
+    honored when they resolve *inside* ``repo_root`` under the very same
+    ``resolve_seed_project_path`` containment contract the CLI uses — never as
+    a way to redirect the scan (and cache write) at an arbitrary local repo.
+    Any escaping candidate is rejected and we fall back to ``repo_root``
+    itself. Without a trusted ``repo_root`` there is no stable base to contain
+    seed paths against, so the resolver returns ``None`` (no pack) rather than
+    scanning a raw seed path.
+    """
+    if not repo_root:
+        return None
+    base = Path(repo_root)
+    if not base.is_dir():
+        return None
+    base = base.resolve()
+
+    from ouroboros.core.project_paths import resolve_seed_project_path
+
+    resolution = resolve_seed_project_path(seed, stable_base=base)
+    candidate = resolution.path
+    if candidate is not None:
+        # Contained candidate (existing metadata dir, or an existing reference
+        # file/dir inside ``base``). Files collapse to their parent directory.
+        if candidate.is_file():
+            return candidate.parent
+        if candidate.is_dir():
+            return candidate
+    return base
+
+
+def _context_pack_fragment(
+    seed: Seed,
+    repo_root: str | Path | None,
+) -> str:
+    """Render the deterministic context pack fragment, or empty string.
+
+    Root resolution happens before the config lookup so the common
+    no-repo path (unit tests, greenfield seeds) never loads config and
+    never touches the filesystem scanner.
+    """
+    root = _resolve_context_pack_root(seed, repo_root)
+    if root is None:
+        return ""
+
+    from ouroboros.config import get_context_pack_enabled
+
+    if not get_context_pack_enabled():
+        return ""
+
+    from ouroboros.orchestrator.context_pack import build_context_pack, render_context_pack
+
+    pack = build_context_pack(root)
+    if pack is None:
+        return ""
+    return render_context_pack(pack)
 
 
 def build_task_prompt(
@@ -2260,7 +2344,9 @@ class OrchestratorRunner:
             # the profile-backed prompt contract so leaf agents are told to emit
             # schema-valid evidence before the acceptance gate parses it.
             strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
-            system_prompt = build_system_prompt(seed, strategy=strategy)
+            system_prompt = build_system_prompt(
+                seed, strategy=strategy, repo_root=self._effective_cwd()
+            )
             task_prompt = build_task_prompt(seed, strategy=strategy)
 
             # Get merged tools (strategy tools + MCP tools if configured)
@@ -3245,7 +3331,7 @@ class OrchestratorRunner:
             )
 
             # Build resume prompt
-            system_prompt = build_system_prompt(seed)
+            system_prompt = build_system_prompt(seed, repo_root=self._effective_cwd())
             resume_prompt = f"""Continue executing the task from where you left off.
 
 {build_task_prompt(seed)}
