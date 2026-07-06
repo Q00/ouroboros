@@ -302,10 +302,28 @@ def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] |
     return inherited or None
 
 
-async def _resolve_dashboard_url(execution_id: str | None) -> str | None:
+def _event_store_db_path(store: EventStore | None) -> str | None:
+    """Filesystem DB path a store writes to, so the dashboard daemon is DB-scoped.
+
+    ``None`` (default home DB / in-memory / non-SQLite) is a valid answer — the
+    daemon then falls back to its own default. Never raises: dashboard wiring is
+    strictly best-effort.
+    """
+    if store is None:
+        return None
+    try:
+        return store.sqlite_path()
+    except Exception:  # noqa: BLE001 - observability must never break a run
+        return None
+
+
+async def _resolve_dashboard_url(
+    execution_id: str | None, *, db_path: str | None = None
+) -> str | None:
     """Best-effort live-dashboard URL for a run, off-loaded from the event loop.
 
-    Spins up (or reuses) the singleton dashboard daemon and returns this run's
+    Spins up (or reuses) the singleton dashboard daemon for ``db_path`` (the DB the
+    execution actually writes to — the daemon is DB-scoped) and returns this run's
     ``?run=`` URL. Strictly best-effort — any failure yields ``None`` so a run is
     never blocked or broken by observability.
     """
@@ -314,7 +332,7 @@ async def _resolve_dashboard_url(execution_id: str | None) -> str | None:
     try:
         from ouroboros.dashboard_web import dashboard_url_for_run
 
-        return await asyncio.to_thread(dashboard_url_for_run, execution_id)
+        return await asyncio.to_thread(dashboard_url_for_run, execution_id, db_path=db_path)
     except Exception:  # noqa: BLE001 - observability must never break a run
         return None
 
@@ -860,7 +878,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Best-effort live dashboard URL (singleton daemon, reused across
                 # runs; default on, opt out via OUROBOROS_DASHBOARD=0). Offloaded
                 # to a thread so the healthz/first-spawn wait never blocks the loop.
-                dashboard_url = await _resolve_dashboard_url(tracker.execution_id)
+                dashboard_url = await _resolve_dashboard_url(
+                    tracker.execution_id, db_path=_event_store_db_path(self.event_store)
+                )
                 if dashboard_url:
                     message += f"Live Dashboard: {dashboard_url}\n"
                 if pause_metadata:
@@ -1461,7 +1481,10 @@ class StartExecuteSeedHandler:
         except (ValueError, Exception):
             llm_backend = "unknown"
 
-        dashboard_url = await _resolve_dashboard_url(snapshot.links.execution_id or execution_id)
+        dashboard_url = await _resolve_dashboard_url(
+            snapshot.links.execution_id or execution_id,
+            db_path=_event_store_db_path(self._event_store),
+        )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
             f"Started background execution.\n\n"

@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any
+from urllib.parse import quote
 
 # Events relevant to the execution Kanban. Filtering at the SQL layer keeps the
 # tail cheap even on a mult-hundred-MB DB shared by many runs.
@@ -42,7 +43,11 @@ def default_db_path() -> Path:
 
 
 def _connect_readonly(db_path: str | Path) -> sqlite3.Connection:
-    uri = f"file:{Path(db_path).expanduser()}?mode=ro"
+    # Percent-encode the path (keeping ``/`` separators) so a path containing
+    # ``?`` or ``#`` can't be misparsed as the URI's query/fragment. Without this
+    # a DB path like ``/tmp/a?b/ouroboros.db`` would truncate at the ``?``.
+    encoded = quote(str(Path(db_path).expanduser()), safe="/")
+    uri = f"file:{encoded}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     return conn

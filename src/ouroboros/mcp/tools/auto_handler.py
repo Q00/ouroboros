@@ -106,17 +106,34 @@ from ouroboros.runtime.watchdog import Watchdog
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
 
 
-async def _resolve_dashboard_base_url() -> str | None:
+def _event_store_db_path(store: EventStore | None) -> str | None:
+    """Filesystem DB path a store writes to, so the dashboard daemon is DB-scoped.
+
+    ``None`` (default home DB / in-memory / non-SQLite) is a valid answer — the
+    daemon then falls back to its own default. Never raises: dashboard wiring is
+    strictly best-effort.
+    """
+    if store is None:
+        return None
+    try:
+        return store.sqlite_path()
+    except Exception:  # noqa: BLE001 - observability must never break a run
+        return None
+
+
+async def _resolve_dashboard_base_url(*, db_path: str | None = None) -> str | None:
     """Best-effort live-dashboard base URL for an auto session (off the event loop).
 
     Auto's execution id only materializes after interview+seed, so we link the
-    daemon's base URL — the page auto-selects the latest active run. Strictly
-    best-effort: any failure yields ``None`` so auto is never blocked.
+    daemon's base URL — the page auto-selects the latest active run. The daemon is
+    DB-scoped, so ``db_path`` (the DB this auto session writes to) must be threaded
+    through or a custom-path store links a dashboard for the wrong database.
+    Strictly best-effort: any failure yields ``None`` so auto is never blocked.
     """
     try:
         from ouroboros.dashboard_web import dashboard_base_url
 
-        return await asyncio.to_thread(dashboard_base_url)
+        return await asyncio.to_thread(dashboard_base_url, db_path=db_path)
     except Exception:  # noqa: BLE001 - observability must never break a run
         return None
 
@@ -900,7 +917,9 @@ class StartAutoHandler:
                 )
             )
 
-        dashboard_url = await _resolve_dashboard_base_url()
+        dashboard_url = await _resolve_dashboard_base_url(
+            db_path=_event_store_db_path(self._event_store)
+        )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
             "Started background auto session.\n\n"

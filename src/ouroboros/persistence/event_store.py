@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from sqlalchemy import and_, event, func, or_, select, text
 from sqlalchemy.exc import OperationalError
@@ -174,6 +175,38 @@ class EventStore:
             return database_url
 
         return f"{prefix}file:{path_part}?mode=ro&uri=true"
+
+    @staticmethod
+    def _sqlite_path_from_url(database_url: str) -> str | None:
+        """Filesystem path of the SQLite file this URL points at, else ``None``.
+
+        Returns ``None`` for in-memory or non-SQLite backends (they have no local
+        file). Understands both the plain ``sqlite+aiosqlite:///<path>`` form and
+        the read-only ``…///file:<path>?mode=ro&uri=true`` URI form.
+        """
+        prefix = "sqlite+aiosqlite:///"
+        if not database_url.startswith(prefix):
+            return None
+        path_part = database_url[len(prefix) :]
+        if path_part.startswith("file:"):
+            # URI form — drop the ``file:`` scheme and any ``?query``/``#fragment``,
+            # then percent-decode the path back to its filesystem form.
+            rest = path_part[len("file:") :]
+            rest = rest.split("?", 1)[0].split("#", 1)[0]
+            path_part = unquote(rest)
+        if path_part in (":memory:", ""):
+            return None
+        return path_part
+
+    def sqlite_path(self) -> str | None:
+        """Filesystem path of the backing SQLite file, or ``None``.
+
+        The dashboard daemon is DB-scoped: it must tail the *same* file this store
+        writes to. Custom-path stores (``ooo mcp --db-path``) otherwise get a
+        dashboard for the home-directory default. Returns ``None`` for in-memory /
+        non-SQLite backends, where there is no local file to point the daemon at.
+        """
+        return self._sqlite_path_from_url(self._database_url)
 
     def _raise_invalid_append_input(
         self,
