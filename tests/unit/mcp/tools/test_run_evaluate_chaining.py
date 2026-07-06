@@ -55,9 +55,16 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
                 pass
         else:
             await asyncio.sleep(0.01)
-    raise AssertionError(
-        f"job {job_id} did not reach a terminal state\n{_diagnose_stuck_job(job_manager, job_id)}"
-    )
+    diagnostics = _diagnose_stuck_job(job_manager, job_id)
+    try:
+        events, cursor = await job_manager._event_store.get_events_after("job", job_id, 0)
+        stream = "\n".join(
+            f"  {e.timestamp} {e.type} id={e.id} status={e.data.get('status')}" for e in events
+        )
+        diagnostics += f"\npersisted job events (cursor={cursor}):\n{stream or '  <empty stream>'}"
+    except Exception as exc:
+        diagnostics += f"\n<event stream unavailable: {exc!r}>"
+    raise AssertionError(f"job {job_id} did not reach a terminal state\n{diagnostics}")
 
 
 def _diagnose_stuck_job(job_manager: JobManager, job_id: str) -> str:
