@@ -449,6 +449,11 @@ class JobManager:
         coroutine ``close()`` cleanup.
         """
         cancel_context = False
+        # The terminal event the body intends to persist, captured before each
+        # append so the release-point backstop can replay the REAL payload
+        # (result_text / result_meta — e.g. chained_evaluate_job_id — matter to
+        # consumers) instead of a guard-status fallback if the append is lost.
+        intended_terminal: tuple[str, dict[str, Any]] | None = None
         try:
             await self.update_status(job_id, JobStatus.RUNNING, f"Running {job_type}")
 
@@ -484,28 +489,32 @@ class JobManager:
                             event_id=f"{_DRAIN_INTERRUPTED_EVENT_ID_PREFIX}{job_id}",
                         )
                     raise
+                cancelled_data = {
+                    "status": JobStatus.CANCELLED.value,
+                    "message": "Job cancelled",
+                }
+                intended_terminal = ("mcp.job.cancelled", cancelled_data)
                 await self._append_terminal_event_with_fallback(
                     "mcp.job.cancelled",
                     job_id,
-                    {
-                        "status": JobStatus.CANCELLED.value,
-                        "message": "Job cancelled",
-                    },
+                    cancelled_data,
                 )
                 raise
             except Exception as exc:
                 snapshot = await self.get_snapshot(job_id)
                 if snapshot.is_terminal:
                     return
+                failed_data = {
+                    "status": JobStatus.FAILED.value,
+                    "message": f"Job failed: {exc}",
+                    "error": str(exc),
+                    "is_error": True,
+                }
+                intended_terminal = ("mcp.job.failed", failed_data)
                 await self._append_terminal_event_with_fallback(
                     "mcp.job.failed",
                     job_id,
-                    {
-                        "status": JobStatus.FAILED.value,
-                        "message": f"Job failed: {exc}",
-                        "error": str(exc),
-                        "is_error": True,
-                    },
+                    failed_data,
                 )
             else:
                 snapshot = await self.get_snapshot(job_id)
@@ -547,22 +556,24 @@ class JobManager:
                             result_meta=result_meta if isinstance(result_meta, dict) else None,
                         )
                         return
+                terminal_data = {
+                    "status": terminal_status.value,
+                    "message": {
+                        JobStatus.COMPLETED: "Job complete",
+                        JobStatus.CANCELLED: "Job cancelled",
+                        JobStatus.INTERRUPTED: "Job interrupted",
+                        JobStatus.FAILED: "Job failed",
+                    }.get(terminal_status, "Job complete"),
+                    "result_text": getattr(result, "text_content", str(result))[:20_000],
+                    "result_meta": _safe_meta(getattr(result, "meta", {})),
+                    "result_payload": _safe_result_payload(result),
+                    "is_error": bool(getattr(result, "is_error", False)),
+                }
+                intended_terminal = (terminal_type, terminal_data)
                 await self._append_terminal_event_with_fallback(
                     terminal_type,
                     job_id,
-                    {
-                        "status": terminal_status.value,
-                        "message": {
-                            JobStatus.COMPLETED: "Job complete",
-                            JobStatus.CANCELLED: "Job cancelled",
-                            JobStatus.INTERRUPTED: "Job interrupted",
-                            JobStatus.FAILED: "Job failed",
-                        }.get(terminal_status, "Job complete"),
-                        "result_text": getattr(result, "text_content", str(result))[:20_000],
-                        "result_meta": _safe_meta(getattr(result, "meta", {})),
-                        "result_payload": _safe_result_payload(result),
-                        "is_error": bool(getattr(result, "is_error", False)),
-                    },
+                    terminal_data,
                 )
         except asyncio.CancelledError:
             # Cancellation can strike the terminal-writing logic itself (e.g. a
@@ -606,7 +617,11 @@ class JobManager:
             # legitimately deferred to a live drain holder) even if the rest of
             # the finally is torn down mid-flight.
             backstop = asyncio.create_task(
-                self._backstop_terminal_event(job_id, cancel_context=cancel_context)
+                self._backstop_terminal_event(
+                    job_id,
+                    cancel_context=cancel_context,
+                    intended_terminal=intended_terminal,
+                )
             )
             self._backstops[job_id] = backstop
             backstop.add_done_callback(
@@ -636,19 +651,43 @@ class JobManager:
             # running to completion on the loop.
             await asyncio.shield(backstop)
 
-    async def _backstop_terminal_event(self, job_id: str, *, cancel_context: bool) -> None:
+    async def _backstop_terminal_event(
+        self,
+        job_id: str,
+        *,
+        cancel_context: bool,
+        intended_terminal: tuple[str, dict[str, Any]] | None = None,
+    ) -> None:
         """Guarantee a terminal event exists after ``_run_job`` released a job.
 
         Runs as a detached task launched at the top of ``_run_job``'s
         ``finally`` so that cancellation of the job task cannot skip or
         interrupt it. No-ops once a terminal event is durably present (the
-        normal case) and respects drain semantics: when a live external holder
-        legitimately owns the job's terminal state, ``_terminal_guard_status``
-        returns ``None`` and this writes nothing. Never raises.
+        normal case). When the body's intended terminal event was lost, replay
+        the REAL payload (``intended_terminal``: result_text / result_meta —
+        e.g. ``chained_evaluate_job_id`` — matter to consumers) before falling
+        back to a guard-status diagnostic terminal. Respects drain semantics:
+        when a live external holder legitimately owns the job's terminal
+        state, ``_terminal_guard_status`` returns ``None`` and the fallback
+        writes nothing. Never raises.
         """
         try:
             if await self._job_has_persisted_terminal_event(job_id):
                 return
+            if intended_terminal is not None:
+                event_type, data = intended_terminal
+                try:
+                    await self._append_event(event_type, job_id, data)
+                except Exception:
+                    logger.warning(
+                        "mcp.job.backstop_intended_terminal_append_failed",
+                        extra={"job_id": job_id, "event_type": event_type},
+                        exc_info=True,
+                    )
+                else:
+                    return
+                if await self._job_has_persisted_terminal_event(job_id):
+                    return
             guard_status = await self._terminal_guard_status(job_id, cancel_context=cancel_context)
             if guard_status is None:
                 return

@@ -56,15 +56,49 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
         else:
             await asyncio.sleep(0.01)
     diagnostics = _diagnose_stuck_job(job_manager, job_id)
-    try:
-        events, cursor = await job_manager._event_store.get_events_after("job", job_id, 0)
-        stream = "\n".join(
-            f"  {e.timestamp} {e.type} id={e.id} status={e.data.get('status')}" for e in events
-        )
-        diagnostics += f"\npersisted job events (cursor={cursor}):\n{stream or '  <empty stream>'}"
-    except Exception as exc:
-        diagnostics += f"\n<event stream unavailable: {exc!r}>"
+    diagnostics += "\n" + await _dump_all_job_streams(job_manager)
     raise AssertionError(f"job {job_id} did not reach a terminal state\n{diagnostics}")
+
+
+async def _dump_all_job_streams(job_manager: JobManager) -> str:
+    """Dump every persisted job stream plus store/manager state (#1566 insurance).
+
+    The append-void class of this flake (silently lost terminal events) is only
+    diagnosable from the FULL persisted picture: the run job's stream, the
+    chained evaluate job's stream, and the store connection/pool state.
+    """
+    lines: list[str] = ["--- all persisted job streams ---"]
+    store = job_manager._event_store
+    try:
+        created_events = await store.query_events(event_type="mcp.job.created", limit=50)
+        for job_id in [e.aggregate_id for e in created_events]:
+            try:
+                events, cursor = await store.get_events_after("job", job_id, 0)
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not mask failures
+                lines.append(f"job {job_id}: <stream unavailable: {exc!r}>")
+                continue
+            lines.append(f"job {job_id} (cursor={cursor}):")
+            for e in events:
+                meta = e.data.get("result_meta")
+                meta_keys = sorted(meta) if isinstance(meta, dict) else meta
+                lines.append(
+                    f"  {e.timestamp} {e.type} id={e.id} "
+                    f"status={e.data.get('status')} meta_keys={meta_keys}"
+                )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"<job discovery unavailable: {exc!r}>")
+    try:
+        engine = store._engine
+        lines.append(f"engine pool: {engine.pool.status() if engine is not None else '<none>'}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"<pool status unavailable: {exc!r}>")
+    lines.append(f"manager tasks={sorted(job_manager._tasks)}")
+    lines.append(f"manager runner_tasks={sorted(job_manager._runner_tasks)}")
+    lines.append(f"manager backstops={sorted(getattr(job_manager, '_backstops', {}))}")
+    lines.append(
+        f"manager started_job_ids={sorted(getattr(job_manager, '_started_job_ids', set()))}"
+    )
+    return "\n".join(lines)
 
 
 def _diagnose_stuck_job(job_manager: JobManager, job_id: str) -> str:
@@ -203,7 +237,14 @@ async def test_successful_run_enqueues_chained_evaluate_job(
 
     snapshot = await _wait_terminal(job_manager, started.value.meta["job_id"])
 
-    assert snapshot.status == JobStatus.COMPLETED
+    if snapshot.status != JobStatus.COMPLETED:
+        # Self-explaining flake diagnostics (#1566): a non-COMPLETED terminal
+        # here has historically meant a silently lost terminal append; dump
+        # the full persisted picture for both jobs plus store state.
+        raise AssertionError(
+            f"expected COMPLETED, got {snapshot.status} "
+            f"(result_meta={snapshot.result_meta})\n" + await _dump_all_job_streams(job_manager)
+        )
     assert snapshot.result_meta["success"] is True
     evaluation_job_id = snapshot.result_meta["chained_evaluate_job_id"]
     assert isinstance(evaluation_job_id, str)

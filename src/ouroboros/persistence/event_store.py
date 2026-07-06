@@ -11,8 +11,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import sqlite3
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
+from uuid import uuid4
 
 from sqlalchemy import and_, event, func, or_, select, text
 from sqlalchemy.exc import OperationalError
@@ -20,7 +22,7 @@ from sqlalchemy.exc import OperationalError
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
@@ -152,6 +154,9 @@ class EventStore:
             database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
+        # Anchor connection for process-shared in-memory databases (memdb VFS):
+        # the database lives as long as at least one connection holds it open.
+        self._memory_keepalive: sqlite3.Connection | None = None
 
     @staticmethod
     def _coerce_to_readonly_url(database_url: str) -> str:
@@ -250,9 +255,10 @@ class EventStore:
                 ``read_only=True`` skip schema creation and all others create
                 it, preserving the prior default behaviour.
 
-        For aiosqlite, uses StaticPool (default) which maintains a single
-        connection. This avoids connection accumulation while supporting
-        :memory: databases in tests.
+        For aiosqlite ``:memory:`` databases, backs the store with SQLite's
+        process-shared in-memory VFS (``memdb``): pooled connections join one
+        shared database with normal connection-scoped transactions, and a
+        keepalive connection anchors the database's lifetime.
         """
         if create_schema is None:
             create_schema = not self._read_only
@@ -276,16 +282,54 @@ class EventStore:
                 "echo": False,
                 "connect_args": connect_args,
             }
+            engine_url = self._database_url
             if self._database_url.endswith("/:memory:"):
-                # SQLite in-memory databases are scoped to the DB-API
-                # connection.  Without a StaticPool, concurrent async tasks can
-                # observe a fresh connection that has not run create_all(),
-                # producing intermittent "no such table: events" failures in
-                # watchdog cancellation paths.
-                engine_kwargs["poolclass"] = StaticPool
+                # A plain ``:memory:`` SQLite database is scoped to ONE DB-API
+                # connection, which is fundamentally unsafe under concurrent
+                # async use:
+                #
+                # - StaticPool (used previously) hands the same connection to
+                #   CONCURRENT ``engine.begin()`` blocks with no mutual
+                #   exclusion. SQLite transactions are connection-scoped, so a
+                #   concurrent block exiting via exception (e.g. a monitor task
+                #   cancelled mid-SELECT) issues a ROLLBACK that silently
+                #   discards another task's uncommitted INSERT — whose own
+                #   COMMIT then no-ops (sqlite3 commit with no active
+                #   transaction) and append() reports success while the event
+                #   vanishes. That silent append-void is the mechanism behind
+                #   the #1566 / PR #1576 CI zombie jobs.
+                # - ANY single-connection pool additionally loses the entire
+                #   database when asyncio cancellation invalidates the pooled
+                #   connection: the replacement connection is a fresh empty DB
+                #   ("no such table: events").
+                #
+                # Fix: back ``:memory:`` stores with SQLite's process-shared
+                # in-memory VFS (``memdb``, SQLite >= 3.36). Every pooled
+                # connection then joins the SAME in-memory database with normal
+                # connection-scoped transactions (no interleaving) and the
+                # database survives connection invalidation; a keepalive
+                # connection anchors its lifetime. Each store instance gets a
+                # unique name, preserving the "one ``:memory:`` store == one
+                # private database" semantics.
+                if sqlite3.sqlite_version_info >= (3, 36):
+                    shared_name = f"/ouroboros-mem-{uuid4().hex}"
+                    engine_url = f"sqlite+aiosqlite:///file:{shared_name}?vfs=memdb&uri=true"
+                    self._memory_keepalive = sqlite3.connect(
+                        f"file:{shared_name}?vfs=memdb",
+                        uri=True,
+                        check_same_thread=False,
+                    )
+                else:  # pragma: no cover - ancient SQLite fallback
+                    # Serialized one-connection pool: keeps the shared
+                    # connection AND makes checkouts mutually exclusive so
+                    # transactions cannot interleave (closes the append-void);
+                    # cancellation-invalidation remains a residual risk here.
+                    engine_kwargs["poolclass"] = AsyncAdaptedQueuePool
+                    engine_kwargs["pool_size"] = 1
+                    engine_kwargs["max_overflow"] = 0
 
             self._engine = create_async_engine(
-                self._database_url,
+                engine_url,
                 **engine_kwargs,
             )
 
@@ -1377,6 +1421,13 @@ class EventStore:
             await self.checkpoint_wal()
             await self._engine.dispose()
             self._engine = None
+        if self._memory_keepalive is not None:
+            # Release the shared in-memory database anchor last so pooled
+            # connections never observe the database disappearing mid-dispose.
+            try:
+                self._memory_keepalive.close()
+            finally:
+                self._memory_keepalive = None
 
 
 @dataclass(frozen=True, slots=True)
