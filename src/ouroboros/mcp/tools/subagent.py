@@ -1413,6 +1413,78 @@ forwarding anything back to ouroboros_interview."""
     return payloads
 
 
+def build_ambiguity_dimension_fanout(
+    *,
+    session_id: str,
+    context_text: str,
+    is_brownfield: bool = False,
+    additional_context: str = "",
+) -> tuple[list[SubagentPayload], str]:
+    """Build the per-dimension ambiguity scoring fan-out (K1, MCP path).
+
+    Splits the single combined ambiguity-scoring call into one focused subagent
+    per dimension (scope/constraints/outputs[/brownfield context]). Each payload
+    carries ``context.dimension`` so results correlate back deterministically;
+    the returned ``correlation_key`` (``"context.dimension"``) is what the host
+    submits results under. Aggregation of the per-dimension clarity scores is
+    the caller's job and reuses the SAME weighted formula as the combined path
+    (``AmbiguityScorer._calculate_overall_score``) — this builder only packages
+    the requests.
+
+    Returns:
+        ``(payloads, correlation_key)`` — payloads in dimension order.
+    """
+    from ouroboros.bigbang.ambiguity import dimension_specs
+
+    if not session_id:
+        raise ValueError("session_id must not be empty")
+    if not context_text:
+        raise ValueError("context_text must not be empty")
+
+    additional_section = ""
+    if additional_context:
+        additional_section = (
+            "\n## Additional context (intentional deferrals — do not penalise)\n"
+            f"{additional_context}\n"
+        )
+
+    requests: list[dict[str, Any]] = []
+    for spec in dimension_specs(is_brownfield=is_brownfield):
+        prompt = f"""## Task
+You are an Ouroboros ambiguity scorer. Score ONE dimension of the requirements.
+
+## Dimension to score
+{spec.rubric}
+
+Score from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very
+specific requirements. Deferred / decide-later items are intentional and must
+NOT reduce the clarity score.
+
+## Requirements conversation
+---
+{context_text}
+---
+{additional_section}
+## Output
+Return ONLY valid JSON, no other text:
+{{"clarity_score": 0.0, "justification": "string"}}"""
+        requests.append(
+            {
+                "tool_name": "ouroboros_interview",
+                "title": f"Ambiguity: {spec.name}",
+                "prompt": prompt,
+                "agent": "general",
+                "context": {
+                    "session_id": session_id,
+                    "dimension": spec.key,
+                    "weight": spec.weight,
+                },
+            }
+        )
+
+    return build_fanout_subagents(requests, "context.dimension"), "context.dimension"
+
+
 def build_generate_seed_subagent(
     *,
     session_id: str,
@@ -2729,4 +2801,173 @@ def submit_fanout_results(
         "fanout_id": fanout_id,
         "kind": record.kind,
         "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Seed-closer tri-panel (K3)
+# ---------------------------------------------------------------------------
+#
+# The single-pass Seed-ready Acceptance Guard (skills/interview/SKILL.md step 8)
+# becomes a 3-lane fan-out: a ``closer`` lane whose verdict GATES closure, plus
+# ``contrarian`` and ``gap_hunter`` lanes whose HIGH-severity findings append as
+# blocking follow-up questions. Correlation is by ``context.lane_id``.
+
+SEED_CLOSER_TRIPANEL_LANES: tuple[tuple[str, str, str], ...] = (
+    (
+        "closer",
+        "seed-closer",
+        "Apply the canonical Seed Closer closure gate. Return a closure verdict "
+        "and the single highest-impact follow-up question if a material decision "
+        "remains unresolved.",
+    ),
+    (
+        "contrarian",
+        "contrarian",
+        "Challenge the interview's conclusions. Surface hidden assumptions, "
+        "overloaded terms, and decisions the interview may have skipped. Rate the "
+        "severity of the most material gap you find.",
+    ),
+    (
+        "gap_hunter",
+        "researcher",
+        "Hunt for missing requirements, unlisted constraints, unhandled edge "
+        "cases, and unverifiable acceptance criteria. Rate the severity of the "
+        "most material gap you find.",
+    ),
+)
+
+_SEED_CLOSER_HIGH_SEVERITY = "high"
+
+
+def build_seed_closer_tripanel_fanout(
+    *,
+    session_id: str,
+    seed_context: str,
+    ambiguity_score: float | None = None,
+) -> tuple[list[SubagentPayload], str]:
+    """Build the 3-lane Seed-closer acceptance fan-out (K3).
+
+    Lanes: ``closer`` (gates), ``contrarian`` + ``gap_hunter`` (advisory,
+    HIGH-severity findings become blocking questions). Each payload carries
+    ``context.lane_id`` for correlation; the returned key is ``context.lane_id``.
+
+    Returns:
+        ``(payloads, correlation_key)`` — payloads in lane order.
+    """
+    if not session_id:
+        raise ValueError("session_id must not be empty")
+    if not seed_context:
+        raise ValueError("seed_context must not be empty")
+
+    closer_summary = _load_seed_closer_summary()
+    ambiguity_line = (
+        f"- Current ambiguity score: {ambiguity_score}\n" if ambiguity_score is not None else ""
+    )
+
+    requests: list[dict[str, Any]] = []
+    for lane_id, agent, lane_task in SEED_CLOSER_TRIPANEL_LANES:
+        if lane_id == "closer":
+            output_shape = (
+                '{"lane_id": "closer", "verdict": "seed_ready" | "not_ready", '
+                '"reason": "string", "blocking_question": "string | null"}'
+            )
+            gate_note = (
+                "\n## Closure Gate Summary\n"
+                f"{closer_summary}\n"
+                "Do NOT treat ambiguity <= 0.2 as sufficient for closure."
+            )
+        else:
+            output_shape = (
+                f'{{"lane_id": "{lane_id}", "severity": "high" | "medium" | "low", '
+                '"finding": "string", "question": "string | null"}'
+            )
+            gate_note = (
+                "\n## Severity Rule\n"
+                'Rate "high" ONLY when the gap would materially change the '
+                "implementation if left unresolved."
+            )
+        prompt = f"""## Task
+You are the Ouroboros seed-closer tri-panel **{lane_id}** lane.
+{lane_task}
+
+## Session
+- session_id: {session_id}
+{ambiguity_line}
+## Seed / Interview Context
+---
+{seed_context}
+---
+{gate_note}
+
+## Output
+Return ONLY valid JSON, no other text:
+{output_shape}"""
+        requests.append(
+            {
+                "tool_name": "ouroboros_interview",
+                "title": f"Seed closer: {lane_id}",
+                "prompt": prompt,
+                "agent": agent,
+                "context": {"session_id": session_id, "lane_id": lane_id},
+            }
+        )
+
+    return build_fanout_subagents(requests, "context.lane_id"), "context.lane_id"
+
+
+def synthesize_seed_closer_tripanel(
+    lane_outputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Synthesize the 3 Seed-closer lanes into a deterministic closure decision.
+
+    The ``closer`` verdict gates: if it is not ``seed_ready`` the seed is
+    blocked. Additionally, any HIGH-severity ``contrarian`` / ``gap_hunter``
+    finding blocks and its question is appended to ``blocking_questions``. This
+    is pure and deterministic — no LLM judge — so ``seed_ready`` is testable.
+
+    Args:
+        lane_outputs: Mapping of ``lane_id`` -> that lane's JSON output.
+
+    Returns:
+        ``{"seed_ready", "closer_verdict", "blocking_questions",
+        "high_severity_lanes", "missing_lanes"}``.
+    """
+    expected = [lane_id for lane_id, _agent, _task in SEED_CLOSER_TRIPANEL_LANES]
+    missing = [lane_id for lane_id in expected if lane_id not in lane_outputs]
+
+    closer = lane_outputs.get("closer")
+    closer_verdict = ""
+    if isinstance(closer, Mapping):
+        closer_verdict = str(closer.get("verdict") or "").strip()
+
+    blocking_questions: list[str] = []
+    high_severity_lanes: list[str] = []
+
+    # Closer gate: a non-"seed_ready" verdict blocks with its follow-up.
+    if closer_verdict != "seed_ready":
+        if isinstance(closer, Mapping):
+            question = closer.get("blocking_question") or closer.get("reason")
+            if question:
+                blocking_questions.append(str(question))
+
+    # Advisory lanes: HIGH-severity findings block and append their questions.
+    for lane_id in ("contrarian", "gap_hunter"):
+        output = lane_outputs.get(lane_id)
+        if not isinstance(output, Mapping):
+            continue
+        severity = str(output.get("severity") or "").strip().lower()
+        if severity == _SEED_CLOSER_HIGH_SEVERITY:
+            high_severity_lanes.append(lane_id)
+            question = output.get("question") or output.get("finding")
+            if question:
+                blocking_questions.append(str(question))
+
+    seed_ready = not missing and closer_verdict == "seed_ready" and not high_severity_lanes
+    return {
+        "seed_ready": seed_ready,
+        "closer_verdict": closer_verdict,
+        "blocking_questions": blocking_questions,
+        "high_severity_lanes": high_severity_lanes,
+        "missing_lanes": missing,
     }

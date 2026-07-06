@@ -283,6 +283,155 @@ def initial_context_summary_missing(state: InterviewState) -> bool:
     return prompt_safe_initial_context(state) == INITIAL_CONTEXT_SUMMARY_REQUIRED
 
 
+# ---------------------------------------------------------------------------
+# Question candidate panel (K2)
+# ---------------------------------------------------------------------------
+#
+# Instead of one question per round, three persona candidates
+# (contrarian / architect / researcher) each propose a question aimed at a
+# specific ambiguity dimension. Selection is deterministic (no LLM judge): pick
+# the candidate targeting the WORST-scoring dimension; ties break by persona
+# priority contrarian > architect > researcher.
+
+# Persona priority order, most-preferred first.
+QUESTION_CANDIDATE_PERSONAS: tuple[str, ...] = ("contrarian", "architect", "researcher")
+_QUESTION_CANDIDATE_PRIORITY: dict[str, int] = {
+    persona: index for index, persona in enumerate(QUESTION_CANDIDATE_PERSONAS)
+}
+
+# Ambiguity dimension keys a candidate may target (same keys ScoreBreakdown
+# uses, so K1's per-dimension output selects K2's question directly).
+QUESTION_CANDIDATE_DIMENSIONS: tuple[str, ...] = (
+    "goal_clarity",
+    "constraint_clarity",
+    "success_criteria_clarity",
+    "context_clarity",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionCandidate:
+    """One persona-proposed interview question aimed at a dimension."""
+
+    persona: str
+    question: str
+    target_dimension: str
+
+
+def select_question_candidate(
+    candidates: list[QuestionCandidate],
+    dimension_clarity: dict[str, float],
+) -> QuestionCandidate:
+    """Deterministically select the best question candidate.
+
+    Selection rule (no LLM judge):
+
+    1. Prefer the candidate targeting the dimension with the WORST (lowest)
+       current clarity score. A candidate whose ``target_dimension`` is absent
+       from ``dimension_clarity`` is treated as least urgent.
+    2. Ties (candidates targeting the same worst dimension) break by persona
+       priority: contrarian > architect > researcher.
+
+    Args:
+        candidates: Non-empty candidate list.
+        dimension_clarity: Mapping of dimension key -> clarity score (0..1).
+
+    Returns:
+        The selected candidate.
+
+    Raises:
+        ValueError: If ``candidates`` is empty.
+    """
+    if not candidates:
+        raise ValueError("candidates must not be empty")
+
+    def _sort_key(candidate: QuestionCandidate) -> tuple[float, int]:
+        clarity = dimension_clarity.get(candidate.target_dimension)
+        # Lower clarity = worse = more urgent = preferred. Unknown dimension is
+        # least urgent (treated as maximally clear).
+        clarity_rank = clarity if clarity is not None else float("inf")
+        priority = _QUESTION_CANDIDATE_PRIORITY.get(
+            candidate.persona, len(_QUESTION_CANDIDATE_PRIORITY)
+        )
+        return (clarity_rank, priority)
+
+    return min(candidates, key=_sort_key)
+
+
+def _dimension_clarity_from_breakdown(breakdown: dict[str, Any] | None) -> dict[str, float]:
+    """Extract ``{dimension_key: clarity_score}`` from a stored breakdown dict.
+
+    Accepts the ``ScoreBreakdown.model_dump`` shape persisted by
+    ``InterviewState.store_ambiguity``. Non-numeric / missing entries are
+    skipped so selection only sees usable per-dimension scores.
+    """
+    clarity: dict[str, float] = {}
+    if not isinstance(breakdown, dict):
+        return clarity
+    for key, payload in breakdown.items():
+        if key not in QUESTION_CANDIDATE_DIMENSIONS or not isinstance(payload, dict):
+            continue
+        value = payload.get("clarity_score")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            clarity[key] = float(value)
+    return clarity
+
+
+def _question_candidate_persona_roles() -> dict[str, str]:
+    """Return persona -> role, sourced from the lateral persona metadata.
+
+    Reads ``orchestrator/capabilities`` persona metadata (read-only) so the
+    candidate lens descriptions reuse the same persona vocabulary as the lateral
+    system rather than duplicating role strings here.
+    """
+    try:
+        from ouroboros.orchestrator.capabilities.lateral_personas import (
+            _lateral_persona_panel_metadata,
+        )
+
+        metadata = _lateral_persona_panel_metadata()
+        roles = {persona.persona_id: persona.role for persona in metadata.personas}
+    except Exception:  # noqa: BLE001 - metadata is advisory; fall back to bare ids
+        roles = {}
+    for persona in QUESTION_CANDIDATE_PERSONAS:
+        roles.setdefault(persona, persona)
+    return roles
+
+
+def _parse_question_candidate(persona: str, response: str) -> QuestionCandidate | None:
+    """Parse a persona candidate JSON ``{question, target_dimension}``.
+
+    Returns ``None`` on any parse failure or missing question so a single bad
+    candidate never breaks the panel (the others still select).
+    """
+    import json
+    import re
+
+    text = response.strip()
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        text = match.group(1)
+    else:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            text = match.group(0)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return None
+    target = str(data.get("target_dimension") or "").strip()
+    if target not in QUESTION_CANDIDATE_DIMENSIONS:
+        # Unknown/blank target is tolerated: it simply ranks least-urgent in
+        # selection rather than dropping an otherwise valid question.
+        target = ""
+    return QuestionCandidate(persona=persona, question=question, target_dimension=target)
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -332,6 +481,13 @@ class InterviewEngine:
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
     _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
     suppress_tool_use_prompt_cues: bool = False
+    # When True, ``ask_next_question`` generates three persona candidates
+    # (contrarian / architect / researcher) concurrently and deterministically
+    # selects the one targeting the worst-scoring ambiguity dimension. Defaults
+    # to False so the single-call path — and every existing test — is preserved.
+    # Requires a stored per-dimension ambiguity breakdown; falls back to the
+    # single call when no breakdown or no valid candidate is available.
+    question_candidate_panel: bool = False
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -504,6 +660,20 @@ class InterviewEngine:
             message_count=len(messages),
         )
 
+        # Question candidate panel (K2): three persona candidates + deterministic
+        # selection. Falls through to the single call when disabled, when no
+        # per-dimension breakdown is stored, or when no valid candidate is
+        # produced — so existing behavior is always reachable.
+        if self.question_candidate_panel:
+            candidate = await self._select_question_from_candidates(
+                state,
+                system_prompt=system_prompt,
+                conversation_history=conversation_history,
+                config=config,
+            )
+            if candidate is not None:
+                return Result.ok(candidate)
+
         result = await self.llm_adapter.complete(messages, config)
 
         if result.is_err:
@@ -525,6 +695,87 @@ class InterviewEngine:
         )
 
         return Result.ok(question)
+
+    async def _select_question_from_candidates(
+        self,
+        state: InterviewState,
+        *,
+        system_prompt: str,
+        conversation_history: list[Message],
+        config: CompletionConfig,
+    ) -> str | None:
+        """Generate persona candidates and deterministically select one.
+
+        Returns the selected question, or ``None`` to signal the caller should
+        fall back to the single-call path (no stored breakdown, or no valid
+        candidate produced).
+        """
+        dimension_clarity = _dimension_clarity_from_breakdown(state.ambiguity_breakdown)
+        if not dimension_clarity:
+            return None
+
+        candidates = await self._generate_question_candidates(
+            state,
+            system_prompt=system_prompt,
+            conversation_history=conversation_history,
+            config=config,
+        )
+        if not candidates:
+            return None
+
+        selected = select_question_candidate(candidates, dimension_clarity)
+        log.info(
+            "interview.question_candidate_selected",
+            interview_id=state.interview_id,
+            persona=selected.persona,
+            target_dimension=selected.target_dimension,
+            candidate_count=len(candidates),
+        )
+        return selected.question
+
+    async def _generate_question_candidates(
+        self,
+        state: InterviewState,
+        *,
+        system_prompt: str,
+        conversation_history: list[Message],
+        config: CompletionConfig,
+    ) -> list[QuestionCandidate]:
+        """Generate one persona question candidate per persona, concurrently."""
+        persona_roles = _question_candidate_persona_roles()
+
+        async def _one(persona: str) -> QuestionCandidate | None:
+            role = persona_roles.get(persona, persona)
+            persona_prompt = (
+                f"{system_prompt}\n\n"
+                f"## Persona Lens: {persona} — {role}\n"
+                "Propose ONE clarifying question through this persona's lens, "
+                "aimed at the single ambiguity dimension you judge weakest.\n\n"
+                "Respond ONLY with JSON, no other text:\n"
+                '{"question": "string", "target_dimension": "goal_clarity" | '
+                '"constraint_clarity" | "success_criteria_clarity" | '
+                '"context_clarity"}'
+            )
+            messages = [
+                Message(role=MessageRole.SYSTEM, content=persona_prompt),
+                *conversation_history,
+            ]
+            try:
+                result = await self.llm_adapter.complete(messages, config)
+            except Exception as exc:  # noqa: BLE001 - candidate is best-effort
+                log.warning(
+                    "interview.question_candidate_failed",
+                    interview_id=state.interview_id,
+                    persona=persona,
+                    error=str(exc),
+                )
+                return None
+            if result.is_err:
+                return None
+            return _parse_question_candidate(persona, result.value.content)
+
+        results = await asyncio.gather(*(_one(persona) for persona in QUESTION_CANDIDATE_PERSONAS))
+        return [candidate for candidate in results if candidate is not None]
 
     async def record_response(
         self, state: InterviewState, user_response: str, question: str

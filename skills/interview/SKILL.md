@@ -538,19 +538,34 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 7. **Repeat steps 2-6** until the user says "done" or MCP signals seed-ready.
 
-8. **Seed-ready Acceptance Guard**:
+8. **Seed-ready Acceptance Guard (tri-panel fan-out)**:
    When MCP signals seed-ready, do NOT relay completion blindly. Before
-   announcing completion or suggesting `ooo seed`, apply the canonical Seed
-   Closer criteria from `src/ouroboros/agents/seed-closer.md` as the single
-   source of truth for closure readiness. Run the check from the main session's
-   perspective, including any code, research, or brownfield context MCP did not
-   see.
+   announcing completion or suggesting `ooo seed`, run the acceptance guard as a
+   **3-lane fan-out** instead of a single local check, so closure is pressure
+   -tested from three independent perspectives:
+   - `closer` — apply the canonical Seed Closer criteria from
+     `src/ouroboros/agents/seed-closer.md`. This lane's verdict **gates**.
+   - `contrarian` — challenge the interview's conclusions: hidden assumptions,
+     overloaded terms, decisions the interview skipped.
+   - `gap_hunter` — hunt for missing requirements, unlisted constraints,
+     unhandled edge cases, and unverifiable acceptance criteria.
 
-   If any material decision remains unresolved, do not announce seed-ready.
-   If the local challenge finds a material gap, explicitly override the MCP
-   signal: `"MCP says seed-ready, but I am not accepting it yet because <gap>."`
-   Explain the gap briefly and ask the single highest-impact follow-up question,
-   routed through PATH 2 or PATH 3 as appropriate.
+   Spawn one subagent per lane through your runtime's native subagent mechanism
+   (Claude Code → one Task/Agent call per lane in one parallel batch; Codex →
+   one native Codex subagent per lane; runtimes with no parallel primitive →
+   process the lane payloads sequentially). Correlate results by
+   `context.lane_id`. Run the check from the main session's perspective,
+   including any code, research, or brownfield context MCP did not see.
+
+   **Synthesis (deterministic)**: the `closer` verdict gates — if it is not
+   `seed_ready`, do not announce seed-ready. Additionally, any HIGH-severity
+   `contrarian` or `gap_hunter` finding blocks closure and its question is
+   appended to the blocking follow-ups. If closure is blocked, explicitly
+   override the MCP signal: `"MCP says seed-ready, but I am not accepting it yet
+   because <gap>."` Explain the gap briefly and ask the single highest-impact
+   blocking follow-up question, routed through PATH 2 or PATH 3 as appropriate.
+   When no parallel primitive exists, running only the `closer` lane is the
+   backward-compatible single-pass fallback.
 
 9. **Restate gate** (only after Seed-ready Acceptance Guard passes):
 
