@@ -246,6 +246,99 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_runner_failure_terminal_append_failure_persists_fallback_failed(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            original_append_event = manager._append_event
+            failed_attempts = 0
+
+            async def _fail_first_terminal_append(
+                event_type: str, job_id: str, data: dict, **kwargs
+            ) -> None:
+                nonlocal failed_attempts
+                if event_type == "mcp.job.failed" and failed_attempts == 0:
+                    failed_attempts += 1
+                    raise PersistenceError("synthetic terminal append failure", operation="insert")
+                await original_append_event(event_type, job_id, data, **kwargs)
+
+            manager._append_event = _fail_first_terminal_append
+
+            async def _runner() -> MCPToolResult:
+                raise RuntimeError("runner boom")
+
+            started = await manager.start_job(
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert failed_attempts == 1
+            assert snapshot.result_meta["terminal_append_failed"] is True
+            assert snapshot.result_meta["original_event_type"] == "mcp.job.failed"
+            assert snapshot.result_meta["original_status"] == JobStatus.FAILED.value
+            assert "synthetic terminal append failure" in (snapshot.error or "")
+            assert snapshot.status is not JobStatus.RUNNING
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_runner_success_terminal_append_failure_persists_fallback_failed(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            original_append_event = manager._append_event
+            failed_attempts = 0
+
+            async def _fail_first_completed_append(
+                event_type: str, job_id: str, data: dict, **kwargs
+            ) -> None:
+                nonlocal failed_attempts
+                if event_type == "mcp.job.completed" and failed_attempts == 0:
+                    failed_attempts += 1
+                    raise PersistenceError("synthetic completed append failure", operation="insert")
+                await original_append_event(event_type, job_id, data, **kwargs)
+
+            manager._append_event = _fail_first_completed_append
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="runner ok"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert failed_attempts == 1
+            assert snapshot.result_meta["terminal_append_failed"] is True
+            assert snapshot.result_meta["original_event_type"] == "mcp.job.completed"
+            assert snapshot.result_meta["original_status"] == JobStatus.COMPLETED.value
+            assert "synthetic completed append failure" in (snapshot.error or "")
+            assert snapshot.status is not JobStatus.RUNNING
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_error_result_is_not_masked_by_execution_completion(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
