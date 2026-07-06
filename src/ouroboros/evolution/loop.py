@@ -58,11 +58,12 @@ from ouroboros.evolution.directive_mapping import (
 )
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
+from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
 )
-from ouroboros.evolution.wonder import WonderEngine, WonderOutput
+from ouroboros.evolution.wonder import WonderEngine, WonderOutput, ground_questions
 from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
 from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessHandle
 from ouroboros.persistence.event_store import EventStore
@@ -90,6 +91,7 @@ class EvolutionaryLoopConfig:
     enable_oscillation_detection: bool = True
     eval_gate_enabled: bool = True
     eval_min_score: float = 0.7
+    scoped_reexecution: bool = True
 
     def __post_init__(self) -> None:
         """Map legacy generation_timeout_seconds onto no-progress detection."""
@@ -1220,6 +1222,7 @@ class EvolutionaryLoop:
         *,
         parallel: bool,
         execution_id: str | None,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         """Call the configured executor with optional execution_id support."""
         kwargs: dict[str, Any] = {"parallel": parallel}
@@ -1228,6 +1231,11 @@ class EvolutionaryLoop:
             "execution_id",
         ):
             kwargs["execution_id"] = execution_id
+        if externally_satisfied_acs and self._callable_accepts_keyword(
+            self.executor,
+            "externally_satisfied_acs",
+        ):
+            kwargs["externally_satisfied_acs"] = externally_satisfied_acs
         return await self.executor(seed, **kwargs)
 
     @staticmethod
@@ -1401,8 +1409,15 @@ class EvolutionaryLoop:
             if interrupted_gen and interrupted_gen.partial_state:
                 ps = interrupted_gen.partial_state
                 if _should_skip("wondering") and ps.get("wonder_questions"):
+                    # partial_state persists only plain strings — re-ground them
+                    # via the deterministic regex so a restored challenge is not
+                    # silently demoted to a gap (which would over-protect its AC).
+                    restored_questions = tuple(ps["wonder_questions"])
                     wonder_output = WonderOutput(
-                        questions=tuple(ps["wonder_questions"]),
+                        questions=restored_questions,
+                        grounded_questions=ground_questions(
+                            restored_questions, len(current_seed.acceptance_criteria)
+                        ),
                         should_continue=True,
                     )
                 if _should_skip("reflecting") and ps.get("reflect_output"):
@@ -1436,6 +1451,10 @@ class EvolutionaryLoop:
                 (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
                 lineage.generations[-1],  # fallback if no completed gen exists
             )
+
+            # Compute regressions once and reuse for both Reflect's prompt and its
+            # deterministic satisficing backstop (a regressed AC is never settled).
+            regression_report: RegressionReport = RegressionDetector().detect(lineage)
 
             # Emit generation started
             await self.event_store.append(
@@ -1531,6 +1550,7 @@ class EvolutionaryLoop:
                         evaluation_summary=prev_gen.evaluation_summary,
                         wonder_output=wonder_output,
                         lineage=lineage,
+                        regression_report=regression_report,
                     )
 
                     if reflect_result.is_ok:
@@ -1695,11 +1715,31 @@ class EvolutionaryLoop:
                 extra={"generation": generation_number},
             )
         elif execute and self.executor:
+            # AC-scoped re-execution: skip ACs that satisficed last generation
+            # (passed AND not challenged AND not regressed). Only when Reflect ran
+            # fresh this invocation — resume paths pass nothing (conservative full
+            # run). Verification still runs over ALL ACs downstream.
+            externally_satisfied_acs: dict[int, dict[str, Any]] | None = None
+            if (
+                self.config.scoped_reexecution
+                and reflect_output is not None
+                and reflect_output.settled_ac_indices
+                and not _should_skip("reflecting")
+            ):
+                externally_satisfied_acs = {
+                    i: {
+                        "reason": (
+                            "satisficed: passed in previous generation; not challenged or regressed"
+                        )
+                    }
+                    for i in reflect_output.settled_ac_indices
+                }
             try:
                 exec_result = await self._call_executor(
                     current_seed,
                     parallel=parallel,
                     execution_id=execution_id,
+                    externally_satisfied_acs=externally_satisfied_acs,
                 )
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
                     orch_result = exec_result.value

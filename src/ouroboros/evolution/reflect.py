@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 import logging
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,7 +26,7 @@ from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDe
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
-from ouroboros.evolution.regression import RegressionDetector
+from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -52,6 +53,21 @@ class OntologyMutation(BaseModel, frozen=True):
     reason: str = ""
 
 
+class ACPatch(BaseModel, frozen=True):
+    """A single delta against the parent AC list.
+
+    ``keep``/``revise`` target an existing parent AC by ``index`` (0-based);
+    ``add`` appends a new AC (``index`` is None). ``remove`` is not offered in
+    v1 — deleting an AC would shift positional identity that regression
+    detection and the per-AC gate depend on.
+    """
+
+    op: Literal["keep", "revise", "add"]
+    index: int | None = None
+    content: str | None = None
+    reason: str = ""
+
+
 class ReflectOutput(BaseModel, frozen=True):
     """Output of the Reflect phase -- feeds directly into SeedGenerator.
 
@@ -62,8 +78,137 @@ class ReflectOutput(BaseModel, frozen=True):
     refined_goal: str
     refined_constraints: tuple[str, ...] = Field(default_factory=tuple)
     refined_acs: tuple[str, ...] = Field(default_factory=tuple)
+    ac_patches: tuple[ACPatch, ...] = Field(default_factory=tuple)
+    settled_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     ontology_mutations: tuple[OntologyMutation, ...] = Field(default_factory=tuple)
     reasoning: str = ""
+
+
+def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
+    """Parse raw LLM patch objects, coercing unknown/``remove`` ops to keep."""
+    patches: list[ACPatch] = []
+    if not isinstance(raw_patches, list):
+        return patches
+    for item in raw_patches:
+        if not isinstance(item, dict):
+            continue
+        op = str(item.get("op", "")).lower()
+        if op not in ("keep", "revise", "add"):
+            logger.warning("reflect.patch.op_coerced_to_keep", extra={"op": op})
+            op = "keep"
+        raw_index = item.get("index")
+        index = (
+            raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else None
+        )
+        raw_content = item.get("content")
+        content = raw_content if isinstance(raw_content, str) else None
+        raw_reason = item.get("reason", "")
+        reason = raw_reason if isinstance(raw_reason, str) else ""
+        patches.append(ACPatch(op=op, index=index, content=content, reason=reason))
+    return patches
+
+
+def _derive_legacy_patches(
+    refined_acs: tuple[str, ...], parent_acs: tuple[str, ...]
+) -> list[ACPatch] | None:
+    """Derive patches from a full refined-AC list (old JSON shape).
+
+    Verbatim positional diff: identical text → keep, different → revise, extra
+    tail entries → add. A *shorter* list returns None to signal full-rewrite
+    semantics (the caller uses ``refined_acs`` as-is with no settled indices)
+    rather than guessing at deletions.
+    """
+    if len(refined_acs) < len(parent_acs):
+        return None
+    patches: list[ACPatch] = []
+    for i, parent_text in enumerate(parent_acs):
+        new_text = refined_acs[i]
+        if new_text == parent_text:
+            patches.append(ACPatch(op="keep", index=i))
+        else:
+            patches.append(ACPatch(op="revise", index=i, content=new_text))
+    for j in range(len(parent_acs), len(refined_acs)):
+        patches.append(ACPatch(op="add", content=refined_acs[j]))
+    return patches
+
+
+def _apply_satisficing_backstop(
+    parent_acs: tuple[str, ...],
+    patches: list[ACPatch],
+    protected: set[int],
+    passed_indices: set[int],
+) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
+    """Deterministically enforce the satisficing invariant.
+
+    The LLM proposes; this disposes. Protected indices (passed AND not
+    challenged AND not regressed) are forced to verbatim keep. Missing indices
+    keep implicitly. Malformed/duplicate/out-of-range patches are dropped so the
+    composed list holds every parent index exactly once (keeps/revises in place,
+    adds appended in order), preserving positional AC identity.
+
+    Returns ``(refined_acs, final_patches, settled_ac_indices)``.
+    """
+    n = len(parent_acs)
+    keep_revise: dict[int, ACPatch] = {}
+    adds: list[ACPatch] = []
+
+    for patch in patches:
+        if patch.op == "add":
+            if not patch.content:
+                logger.warning("reflect.patch.dropped", extra={"reason": "add_without_content"})
+                continue
+            adds.append(patch)
+            continue
+        # keep / revise must target a valid, not-yet-seen parent index.
+        if patch.index is None or not (0 <= patch.index < n):
+            logger.warning(
+                "reflect.patch.dropped",
+                extra={"reason": "index_out_of_range", "index": patch.index, "op": patch.op},
+            )
+            continue
+        if patch.op == "revise" and not patch.content:
+            logger.warning(
+                "reflect.patch.dropped",
+                extra={"reason": "revise_without_content", "index": patch.index},
+            )
+            continue
+        if patch.index in keep_revise:
+            logger.warning(
+                "reflect.patch.dropped", extra={"reason": "duplicate_index", "index": patch.index}
+            )
+            continue
+        keep_revise[patch.index] = patch
+
+    # Backstop: a protected AC may not be revised — force verbatim keep.
+    for i, patch in list(keep_revise.items()):
+        if i in protected and patch.op == "revise":
+            logger.info("reflect.backstop.forced_keep", extra={"index": i})
+            keep_revise[i] = ACPatch(
+                op="keep", index=i, reason="satisficing backstop: protected AC"
+            )
+
+    # Implicit keep for any parent index the LLM omitted.
+    for i in range(n):
+        if i not in keep_revise:
+            keep_revise[i] = ACPatch(op="keep", index=i, reason="implicit keep")
+
+    refined: list[str] = []
+    final_patches: list[ACPatch] = []
+    settled: list[int] = []
+    for i in range(n):
+        patch = keep_revise[i]
+        if patch.op == "keep":
+            refined.append(parent_acs[i])
+            if i in passed_indices:
+                settled.append(i)
+        else:
+            refined.append(patch.content or parent_acs[i])
+        final_patches.append(patch)
+    for add in adds:
+        refined.append(add.content or "")
+        final_patches.append(add)
+
+    return tuple(refined), tuple(final_patches), tuple(settled)
 
 
 @dataclass
@@ -191,6 +336,7 @@ class ReflectEngine:
         evaluation_summary: EvaluationSummary,
         wonder_output: WonderOutput,
         lineage: OntologyLineage,
+        regression_report: RegressionReport | None = None,
     ) -> Result[ReflectOutput, ProviderError]:
         """Reflect on execution results and propose evolution.
 
@@ -200,16 +346,23 @@ class ReflectEngine:
             evaluation_summary: How the execution was evaluated.
             wonder_output: What we still don't know (from WonderEngine).
             lineage: Full lineage for cross-generation context.
+            regression_report: Precomputed regressions (from the loop). When
+                None, computed once here and reused for both the prompt and the
+                satisficing backstop.
 
         Returns:
             Result containing ReflectOutput or ProviderError.
         """
+        if regression_report is None:
+            regression_report = RegressionDetector().detect(lineage)
+
         prompt = self._build_prompt(
             current_seed,
             execution_output,
             evaluation_summary,
             wonder_output,
             lineage,
+            regression_report,
         )
 
         messages = [
@@ -241,7 +394,13 @@ class ReflectEngine:
             },
         )
 
-        parsed = self._parse_response(raw_content, current_seed)
+        parsed = self._parse_response(
+            raw_content,
+            current_seed,
+            evaluation_summary,
+            wonder_output,
+            regression_report,
+        )
         if parsed is None:
             return Result.err(
                 ProviderError(
@@ -264,7 +423,11 @@ You must respond with a JSON object (no markdown, no code fences):
 {
     "refined_goal": "the goal, possibly refined based on what we learned",
     "refined_constraints": ["constraint 1", "constraint 2", ...],
-    "refined_acs": ["acceptance criterion 1", "criterion 2", ...],
+    "ac_patches": [
+        {"op": "keep", "index": 0, "reason": "passed, unchallenged"},
+        {"op": "revise", "index": 2, "content": "the corrected acceptance criterion", "reason": "failed / challenged"},
+        {"op": "add", "content": "a new acceptance criterion for an uncovered gap", "reason": "gap question"}
+    ],
     "ontology_mutations": [
         {"action": "add|modify|remove", "field_name": "name", "field_type": "type", "description": "desc", "reason": "why"},
         ...
@@ -272,12 +435,27 @@ You must respond with a JSON object (no markdown, no code fences):
     "reasoning": "explanation of why these changes are needed"
 }
 
+SATISFICING DELTA — patch the AC list, do NOT rewrite it:
+- The AC list is addressed by 0-based "index" against the CURRENT seed's ACs.
+- Emit ONE patch per current AC, plus "add" patches for new ACs.
+- "keep" (index only): an AC that PASSED evaluation AND is not named by any
+  grounded challenge AND is not regressed MUST be kept VERBATIM. Do not reword a
+  settled AC — rational agents with bounded resources do not re-derive satisficed
+  commitments without evidence. (A deterministic backstop will force-keep these
+  even if you try to revise them.)
+- "revise" (index + content): only for ACs that FAILED, were CHALLENGED by a
+  grounded Wonder question, or REGRESSED. Provide the full corrected AC text.
+- "add" (content only): for gap questions — something the goal requires that no
+  AC covers yet.
+- "remove" is NOT available in v1. Never delete an AC; it would break positional
+  AC identity.
+
 Guidelines:
 - If Wonder questions exist, you MUST propose at least one ontology_mutation that addresses them
 - If evaluation score >= 0.8 and approved, keep changes focused but still evolve the ontology based on Wonder insights
 - If evaluation score < 0.8 or not approved, propose more aggressive mutations to address failures
 - Each mutation must have a clear reason tied to evaluation findings or wonder questions
-- refined_acs should address the wonder questions and ontology tensions
+- Patches should address the wonder questions and ontology tensions
 - Do NOT change things that are working well -- only evolve what needs evolution
 - action must be exactly one of: "add", "modify", "remove"
 - An empty ontology_mutations list is ONLY acceptable when there are no Wonder questions
@@ -290,6 +468,7 @@ Guidelines:
         eval_summary: EvaluationSummary,
         wonder: WonderOutput,
         lineage: OntologyLineage,
+        regression_report: RegressionReport,
     ) -> str:
         parts = ["## Current Seed"]
         parts.append(f"Goal: {seed.goal}")
@@ -333,19 +512,27 @@ Guidelines:
                     f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones."
                 )
 
-        # Regression context
-        if lineage and len(lineage.generations) >= 2:
-            report = RegressionDetector().detect(lineage)
-            if report.has_regressions:
-                parts.append(f"\n## REGRESSIONS ({len(report.regressions)})")
-                for reg in report.regressions:
-                    parts.append(
-                        f"  - AC {reg.ac_index + 1} (Gen {reg.passed_in_generation}→Gen {reg.failed_in_generation}): "
-                        f"{reg.ac_text}"
-                    )
+        # Regression context (precomputed once by the caller and reused here).
+        if regression_report.has_regressions:
+            parts.append(f"\n## REGRESSIONS ({len(regression_report.regressions)})")
+            for reg in regression_report.regressions:
                 parts.append(
-                    "  CRITICAL: These ACs previously passed. Preserve their behavior while fixing other issues."
+                    f"  - AC {reg.ac_index + 1} (Gen {reg.passed_in_generation}→Gen {reg.failed_in_generation}): "
+                    f"{reg.ac_text}"
                 )
+            parts.append(
+                "  CRITICAL: These ACs previously passed. Preserve their behavior while fixing other issues."
+            )
+
+        # Grounded challenges: which ACs a Wonder question explicitly reopened.
+        challenged: set[int] = set()
+        for gq in wonder.grounded_questions:
+            if gq.kind == "challenge":
+                challenged.update(gq.ac_indices)
+        if challenged:
+            challenged_labels = ", ".join(f"AC {i + 1}" for i in sorted(challenged))
+            parts.append(f"\n## Grounded Challenges (ACs reopened by Wonder): {challenged_labels}")
+            parts.append("  Only these passing ACs may be revised; keep all other passing ACs.")
 
         parts.append("\n## Wonder Questions (what we still don't know)")
         for q in wonder.questions:
@@ -399,10 +586,20 @@ Guidelines:
 
         return "\n".join(parts)
 
-    def _parse_response(self, content: str, current_seed: Seed) -> ReflectOutput | None:
+    def _parse_response(
+        self,
+        content: str,
+        current_seed: Seed,
+        evaluation_summary: EvaluationSummary,
+        wonder_output: WonderOutput,
+        regression_report: RegressionReport,
+    ) -> ReflectOutput | None:
         """Parse LLM response into ReflectOutput.
 
-        Returns None on parse failure so the caller can retry or propagate error.
+        Parses the AC delta (new ``ac_patches`` shape or legacy full-list diff),
+        then applies the deterministic satisficing backstop before composing the
+        final ``refined_acs``. Returns None on JSON parse failure so the caller
+        can retry or propagate error.
         """
         try:
             cleaned = content.strip()
@@ -428,12 +625,23 @@ Guidelines:
                     )
                 )
 
+            parent_acs = tuple(current_seed.acceptance_criteria)
+            refined_acs, ac_patches, settled = self._compose_acs(
+                data,
+                parent_acs,
+                evaluation_summary,
+                wonder_output,
+                regression_report,
+            )
+
             return ReflectOutput(
                 refined_goal=data.get("refined_goal", current_seed.goal),
                 refined_constraints=tuple(
                     data.get("refined_constraints", list(current_seed.constraints))
                 ),
-                refined_acs=tuple(data.get("refined_acs", list(current_seed.acceptance_criteria))),
+                refined_acs=refined_acs,
+                ac_patches=ac_patches,
+                settled_ac_indices=settled,
                 ontology_mutations=tuple(mutations),
                 reasoning=data.get("reasoning", ""),
             )
@@ -446,6 +654,44 @@ Guidelines:
                 },
             )
             return None
+
+    @staticmethod
+    def _compose_acs(
+        data: dict[str, object],
+        parent_acs: tuple[str, ...],
+        evaluation_summary: EvaluationSummary,
+        wonder_output: WonderOutput,
+        regression_report: RegressionReport,
+    ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
+        """Compose the next AC list from LLM patches under the satisficing backstop."""
+        passed_indices = {ac.ac_index for ac in evaluation_summary.ac_results if ac.passed}
+        challenged: set[int] = set()
+        for gq in wonder_output.grounded_questions:
+            if gq.kind == "challenge":
+                challenged.update(gq.ac_indices)
+        regressed = set(regression_report.regressed_ac_indices)
+        protected = {
+            i
+            for i in passed_indices
+            if 0 <= i < len(parent_acs) and i not in challenged and i not in regressed
+        }
+        # Invariant: a regressed AC is never settled, even if kept — subtract it
+        # from the settleable set before the backstop decides settling.
+        settleable = passed_indices - regressed
+
+        raw_patches = data.get("ac_patches")
+        if isinstance(raw_patches, list) and raw_patches:
+            patches = _parse_ac_patches(raw_patches)
+            return _apply_satisficing_backstop(parent_acs, patches, protected, settleable)
+
+        # Legacy full-list shape: derive patches by positional diff.
+        llm_refined_acs: tuple[str, ...] = tuple(data.get("refined_acs", list(parent_acs)))  # type: ignore[arg-type]
+        legacy_patches = _derive_legacy_patches(llm_refined_acs, parent_acs)
+        if legacy_patches is None:
+            # Shorter list → full-rewrite semantics: use the LLM list as-is with
+            # no settled indices and no patches (do not guess at deletions).
+            return llm_refined_acs, (), ()
+        return _apply_satisficing_backstop(parent_acs, legacy_patches, protected, settleable)
 
 
 def _adapter_rebuild_kwargs(adapter: LLMAdapter) -> dict[str, object]:
