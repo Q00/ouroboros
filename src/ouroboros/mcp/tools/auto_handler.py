@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -76,6 +75,7 @@ from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
@@ -104,38 +104,6 @@ from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
 
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
-
-
-def _event_store_db_path(store: EventStore | None) -> str | None:
-    """Filesystem DB path a store writes to, so the dashboard daemon is DB-scoped.
-
-    ``None`` (default home DB / in-memory / non-SQLite) is a valid answer — the
-    daemon then falls back to its own default. Never raises: dashboard wiring is
-    strictly best-effort.
-    """
-    if store is None:
-        return None
-    try:
-        return store.sqlite_path()
-    except Exception:  # noqa: BLE001 - observability must never break a run
-        return None
-
-
-async def _resolve_dashboard_base_url(*, db_path: str | None = None) -> str | None:
-    """Best-effort live-dashboard base URL for an auto session (off the event loop).
-
-    Auto's execution id only materializes after interview+seed, so we link the
-    daemon's base URL — the page auto-selects the latest active run. The daemon is
-    DB-scoped, so ``db_path`` (the DB this auto session writes to) must be threaded
-    through or a custom-path store links a dashboard for the wrong database.
-    Strictly best-effort: any failure yields ``None`` so auto is never blocked.
-    """
-    try:
-        from ouroboros.dashboard_web import dashboard_base_url
-
-        return await asyncio.to_thread(dashboard_base_url, db_path=db_path)
-    except Exception:  # noqa: BLE001 - observability must never break a run
-        return None
 
 
 @dataclass(slots=True)
@@ -917,9 +885,7 @@ class StartAutoHandler:
                 )
             )
 
-        dashboard_url = await _resolve_dashboard_base_url(
-            db_path=_event_store_db_path(self._event_store)
-        )
+        dashboard_url = await resolve_dashboard_base_url(self._event_store)
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
             "Started background auto session.\n\n"

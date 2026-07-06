@@ -35,6 +35,7 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.subagent import (
@@ -300,41 +301,6 @@ def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] |
         return None
     inherited = [t for t in tools if isinstance(t, str) and t]
     return inherited or None
-
-
-def _event_store_db_path(store: EventStore | None) -> str | None:
-    """Filesystem DB path a store writes to, so the dashboard daemon is DB-scoped.
-
-    ``None`` (default home DB / in-memory / non-SQLite) is a valid answer — the
-    daemon then falls back to its own default. Never raises: dashboard wiring is
-    strictly best-effort.
-    """
-    if store is None:
-        return None
-    try:
-        return store.sqlite_path()
-    except Exception:  # noqa: BLE001 - observability must never break a run
-        return None
-
-
-async def _resolve_dashboard_url(
-    execution_id: str | None, *, db_path: str | None = None
-) -> str | None:
-    """Best-effort live-dashboard URL for a run, off-loaded from the event loop.
-
-    Spins up (or reuses) the singleton dashboard daemon for ``db_path`` (the DB the
-    execution actually writes to — the daemon is DB-scoped) and returns this run's
-    ``?run=`` URL. Strictly best-effort — any failure yields ``None`` so a run is
-    never blocked or broken by observability.
-    """
-    if not execution_id:
-        return None
-    try:
-        from ouroboros.dashboard_web import dashboard_url_for_run
-
-        return await asyncio.to_thread(dashboard_url_for_run, execution_id, db_path=db_path)
-    except Exception:  # noqa: BLE001 - observability must never break a run
-        return None
 
 
 @dataclass
@@ -878,8 +844,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Best-effort live dashboard URL (singleton daemon, reused across
                 # runs; default on, opt out via OUROBOROS_DASHBOARD=0). Offloaded
                 # to a thread so the healthz/first-spawn wait never blocks the loop.
-                dashboard_url = await _resolve_dashboard_url(
-                    tracker.execution_id, db_path=_event_store_db_path(self.event_store)
+                dashboard_url = await resolve_dashboard_run_url(
+                    tracker.execution_id, self.event_store
                 )
                 if dashboard_url:
                     message += f"Live Dashboard: {dashboard_url}\n"
@@ -1481,9 +1447,8 @@ class StartExecuteSeedHandler:
         except (ValueError, Exception):
             llm_backend = "unknown"
 
-        dashboard_url = await _resolve_dashboard_url(
-            snapshot.links.execution_id or execution_id,
-            db_path=_event_store_db_path(self._event_store),
+        dashboard_url = await resolve_dashboard_run_url(
+            snapshot.links.execution_id or execution_id, self._event_store
         )
         dashboard_line = f"Live Dashboard: {dashboard_url}\n" if dashboard_url else ""
         text = (
