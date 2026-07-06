@@ -45,8 +45,9 @@ log = structlog.get_logger(__name__)
 # message pointing them at ``acceptEdits`` (conservative, non-blocking) or
 # ``bypassPermissions`` (full bypass).
 _ZCODE_PERMISSION_MODE_TO_FLAG = {
-    "acceptEdits": "auto_edit",
-    "bypassPermissions": "yolo",
+    # Real zcode `--mode` values (from `zcode --help`): build | edit | plan | yolo.
+    "acceptEdits": "edit",          # accept edits, non-blocking under --prompt
+    "bypassPermissions": "yolo",    # full bypass
 }
 _ZCODE_PERMISSION_MODES = frozenset(_ZCODE_PERMISSION_MODE_TO_FLAG)
 # Match the orchestrator-wide ``acceptEdits`` default. Zcode's ``auto_edit``
@@ -217,35 +218,38 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         # declares reasoning_effort_support=IGNORED, so it is surfaced as advised).
         reasoning_effort: str | None = None,
     ) -> list[str]:
-        """Build the Zcode CLI command arguments for non-interactive execution.
+        """Build the zcode CLI command for headless execution.
 
-        Headless contract:
-        - ``--prompt`` carries the request (Zcode's documented headless trigger).
-        - ``--non-interactive`` disables TTY prompts so the subprocess never blocks.
-        - ``--json`` emits JSON events on stdout.
-        - ``--approval-mode`` is mapped from ``self._permission_mode``:
-          ``acceptEdits`` → ``auto_edit`` (default; non-blocking) and
-          ``bypassPermissions`` → ``yolo`` (full bypass). Zcode's native
-          ``default`` mode is intentionally unreachable through this runtime
-          — :meth:`_resolve_permission_mode` rejects it because a
-          prompt-driven mode under ``--non-interactive`` would deadlock the
-          subprocess. The fallback to ``auto_edit`` below is defensive only.
+        Measured interface (from `zcode --help`, verified against a live run):
+        invocation is `node <cli_path> ...` where cli_path resolves to the
+        zcode.cjs app-bundle script. Real flags: ``--prompt`` (one-shot),
+        ``--json`` (machine-readable summary), ``--cwd``, ``--mode``
+        (build|edit|plan|yolo), ``--resume <sessionId>``.
+
+        NOTE: zcode has **no** ``--non-interactive`` and **no**
+        ``--approval-mode`` flag (an earlier draft invented them by copying the
+        Codex adapter). ``--mode`` is the real permission surface, and
+        ``--prompt`` is already non-interactive (no TUI), so nothing else is
+        needed to keep the subprocess headless.
         """
         del runtime_handle, reasoning_effort
 
-        approval_flag = _ZCODE_PERMISSION_MODE_TO_FLAG.get(
+        mode_flag = _ZCODE_PERMISSION_MODE_TO_FLAG.get(
             self._permission_mode,
-            "auto_edit",
+            "edit",
         )
         command = [
+            "node",
             self._cli_path,
             "--json",
             "--prompt",
             prompt or "",
-            "--non-interactive",
-            "--approval-mode",
-            approval_flag,
+            "--mode",
+            mode_flag,
         ]
+        cwd = getattr(self, "_cwd", None)
+        if cwd:
+            command.extend(["--cwd", str(cwd)])
         normalized_model = self._normalize_model(self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
@@ -286,150 +290,87 @@ class ZcodeCLIRuntime(CodexCliRuntime):
 
     # -- Event parsing and normalization -----------------------------------
 
-    def _extract_event_session_id(self, event: dict[str, Any]) -> str | None:
-        """Extract a backend-native session id from a runtime event.
+    async def _iter_stream_lines(
+        self,
+        stream: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        """Yield zcode's full stdout as a single "line".
 
-        Looks at standard top-level keys first, then ``metadata`` and the raw
-        payload (where Zcode's ``init`` event lands its ``session_id``).
+        Measured behaviour: ``zcode --prompt --json`` emits ONE pretty-printed
+        JSON summary object (multi-line), not an NDJSON event stream. The
+        inherited pipeline json-parses each yielded line, so we read the whole
+        buffer and yield it once — downstream ``_parse_json_event`` then sees
+        the complete document.
         """
-        session_id = super()._extract_event_session_id(event)
-        if session_id:
-            return session_id
+        data = await stream.read()
+        text = data.decode("utf-8", errors="replace").strip() if data else ""
+        if text:
+            yield text
 
-        metadata = event.get("metadata", {})
-        if isinstance(metadata, dict):
-            session_id = metadata.get("session_id")
-            if isinstance(session_id, str) and session_id.strip():
-                return session_id.strip()
+    def _extract_event_session_id(self, event: dict[str, Any]) -> str | None:
+        """Extract the zcode session id for ``--resume``.
 
-        raw = event.get("raw")
-        if isinstance(raw, dict):
-            session_id = raw.get("session_id")
-            if isinstance(session_id, str) and session_id.strip():
-                return session_id.strip()
-
-        return None
+        zcode's ``--prompt --json`` summary carries a top-level ``sessionId``
+        of the form ``sess_<uuid>`` — exactly what ``--resume`` consumes. Fall
+        back to the inherited keys for any future streaming shape.
+        """
+        sid = event.get("sessionId")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip()
+        return super()._extract_event_session_id(event)
 
     def _convert_event(
         self,
         event: dict[str, Any],
         current_handle: RuntimeHandle | None,
     ) -> list[AgentMessage]:
-        """Convert a Zcode CLI event into normalized AgentMessage values.
+        """Convert a zcode ``--prompt --json`` summary into AgentMessage values.
 
-        Handles the Zcode ``--json`` event schema:
+        Measured shape (verified against live runs of
+        ``node zcode.cjs --prompt ... --json``): zcode emits a SINGLE
+        pretty-printed JSON object — NOT an NDJSON event stream — with
+        top-level fields:
 
-        - ``init`` — session metadata (session_id is captured by
-          ``_extract_event_session_id``); produces no AgentMessage
-        - ``message`` / ``text`` — assistant prose
-        - ``thinking`` — internal reasoning
-        - ``tool_use`` — tool invocation request
-        - ``tool_result`` — tool output
-        - ``error`` — error condition
-        - ``result`` — terminal payload carrying the final response (Zcode emits
-          the assistant's final answer here when no intermediate ``message``
-          event was produced); the content is surfaced as the final assistant message.
+        - ``sessionId`` (sess_<uuid>) — captured for ``--resume`` by
+          :meth:`_extract_event_session_id`.
+        - ``response`` — the assistant's final text answer.
+        - ``usage`` / ``eventCount`` / ``projection`` / ``traceId`` / ``turnId``
+          — carried as metadata.
+
+        Intermediate tool calls are reflected only in ``eventCount`` and token
+        usage; they are not emitted as discrete stdout events. The whole turn
+        is therefore surfaced as one terminal assistant message. If a future
+        zcode build adds streamed events, handle them here.
         """
-        event_type = event.get("type")
-        content = event.get("content", "")
-        metadata = event.get("metadata", {})
-        is_error = event.get("is_error", False)
+        response = event.get("response")
+        if not isinstance(response, str) or not response:
+            return []
 
-        # Truncate content using InputValidator for text-bearing events
-        # (including the terminal `result` payload, since `content` may be long).
-        if event_type in ("text", "message", "thinking", "result"):
-            is_valid, _ = InputValidator.validate_llm_response(content)
-            if not is_valid:
-                log.warning(
-                    "zcode.response.truncated",
-                    event_type=event_type,
-                    original_length=len(content),
-                    max_length=MAX_LLM_RESPONSE_LENGTH,
-                )
-                content = content[:MAX_LLM_RESPONSE_LENGTH]
+        is_valid, _ = InputValidator.validate_llm_response(response)
+        if not is_valid:
+            log.warning(
+                "zcode.response.truncated",
+                original_length=len(response),
+                max_length=MAX_LLM_RESPONSE_LENGTH,
+            )
+            response = response[:MAX_LLM_RESPONSE_LENGTH]
 
-        if event_type in ("text", "message"):
-            if not content:
-                return []
-            return [
-                AgentMessage(
-                    type="assistant",
-                    content=content,
-                    resume_handle=current_handle,
-                )
-            ]
-
-        if event_type == "thinking":
-            if not content:
-                return []
-            return [
-                AgentMessage(
-                    type="assistant",
-                    content=content,
-                    data={"thinking": content},
-                    resume_handle=current_handle,
-                )
-            ]
-
-        if event_type == "tool_use":
-            tool_name = metadata.get("name", "")
-            tool_args = metadata.get("input", {})
-            return [
-                AgentMessage(
-                    type="assistant",
-                    content=content or f"Using tool: {tool_name}",
-                    tool_name=tool_name,
-                    data={"tool_input": tool_args},
-                    resume_handle=current_handle,
-                )
-            ]
-
-        if event_type == "tool_result":
-            tool_name = metadata.get("name", "")
-            return [
-                AgentMessage(
-                    type="tool",
-                    content=content,
-                    tool_name=tool_name,
-                    data={"is_error": is_error},
-                    resume_handle=current_handle,
-                )
-            ]
-
-        if event_type == "error":
-            return [
-                AgentMessage(
-                    type="system",
-                    content=f"Zcode Error: {content}",
-                    data={"is_error": True, "metadata": metadata},
-                    resume_handle=current_handle,
-                )
-            ]
-
-        if event_type == "result":
-            # Terminal event. If no content is present we still emit a marker message
-            # carrying the metadata so downstream callers see the completion.
-            if not content:
-                return [
-                    AgentMessage(
-                        type="assistant",
-                        content="",
-                        data={"terminal": True, "metadata": metadata},
-                        resume_handle=current_handle,
-                    )
-                ]
-            return [
-                AgentMessage(
-                    type="assistant",
-                    content=content,
-                    data={"terminal": True, "metadata": metadata},
-                    resume_handle=current_handle,
-                )
-            ]
-
-        # Ignore other auxiliary events (init/done/etc.) that don't map
-        # to messages; init's session_id is captured separately above.
-        return []
+        return [
+            AgentMessage(
+                type="assistant",
+                content=response,
+                data={
+                    "terminal": True,
+                    "traceId": event.get("traceId"),
+                    "turnId": event.get("turnId"),
+                    "usage": event.get("usage"),
+                    "projection": event.get("projection"),
+                    "eventCount": event.get("eventCount"),
+                },
+                resume_handle=current_handle,
+            )
+        ]
 
 
 __all__ = ["ZcodeCLIRuntime"]
