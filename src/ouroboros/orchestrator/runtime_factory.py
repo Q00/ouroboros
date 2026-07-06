@@ -21,6 +21,7 @@ from ouroboros.config import (
     get_llm_backend,
     get_opencode_stdout_idle_timeout_seconds,
     get_runtime_profile,
+    get_zcode_cli_path,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
@@ -231,6 +232,16 @@ def _create_gjc_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
     )
 
 
+def _create_zcode_runtime(request: _AgentRuntimeRequest) -> AgentRuntime:
+    from ouroboros.config import get_zcode_cli_path
+    from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
+
+    return ZcodeCLIRuntime(
+        cli_path=request.cli_path or get_zcode_cli_path(),
+        **_runtime_kwargs(request),
+    )
+
+
 _AGENT_RUNTIME_FACTORIES: dict[str, Callable[[_AgentRuntimeRequest], AgentRuntime]] = {
     "_create_claude_runtime": _create_claude_runtime,
     "_create_codex_runtime": _create_codex_runtime,
@@ -246,6 +257,7 @@ _AGENT_RUNTIME_FACTORIES: dict[str, Callable[[_AgentRuntimeRequest], AgentRuntim
     "_create_goose_runtime": _create_goose_runtime,
     "_create_pi_runtime": _create_pi_runtime,
     "_create_gjc_runtime": _create_gjc_runtime,
+    "_create_zcode_runtime": _create_zcode_runtime,
 }
 
 

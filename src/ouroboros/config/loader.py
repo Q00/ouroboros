@@ -31,6 +31,7 @@ Functions:
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
     get_hermes_cli_path: Get Hermes CLI path from env var or config
     get_goose_cli_path: Get Goose CLI path from env var or config
+    get_zcode_cli_path: Get zcode CLI path from env var or config
 """
 
 import ast
@@ -183,6 +184,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_ANTIGRAVITY_CLI_PATH",
         "OUROBOROS_GROK_CLI_PATH",
         "OUROBOROS_OUROCODE_CLI_PATH",
+        "OUROBOROS_ZCODE_CLI_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -1542,6 +1544,49 @@ def get_grok_cli_path() -> str | None:
                 return resolved
     except ConfigError:
         pass
+
+    return None
+
+
+def get_zcode_cli_path() -> str | None:
+    """Get the zcode CLI path (Z.ai GLM-5 agent) from environment or config.
+
+    Priority:
+        1. OUROBOROS_ZCODE_CLI_PATH environment variable
+        2. config.yaml orchestrator.zcode_cli_path
+        3. macOS app-bundle default (/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs)
+        4. None (resolve from PATH at runtime)
+
+    The zcode CLI is executed via Node.js: the returned path should point to the
+    zcode.cjs script, and the runtime wrapper will invoke it as ``node <cli_path>``.
+
+    Stale env var / config values that don't point to an executable file are
+    treated as missing so callers can fall back to PATH discovery instead of
+    persisting an unusable path.
+
+    Returns:
+        Path to the zcode CLI script or None.
+    """
+    env_path = os.environ.get("OUROBOROS_ZCODE_CLI_PATH", "").strip()
+    if env_path:
+        resolved = str(Path(env_path).expanduser())
+        if Path(resolved).is_file():
+            return resolved
+
+    try:
+        config = load_config()
+        zcode_path = getattr(config.orchestrator, "zcode_cli_path", None)
+        if zcode_path:
+            resolved = str(Path(zcode_path).expanduser())
+            if Path(resolved).is_file():
+                return resolved
+    except ConfigError:
+        pass
+
+    # macOS app-bundle default
+    macos_bundle_path = Path("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
+    if macos_bundle_path.is_file():
+        return str(macos_bundle_path)
 
     return None
 

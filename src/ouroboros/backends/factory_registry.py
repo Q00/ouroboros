@@ -109,6 +109,11 @@ _FACTORY_SPECS: tuple[BackendFactorySpec, ...] = (
         agent_runtime_factory="_create_grok_runtime",
     ),
     BackendFactorySpec(
+        name="zcode",
+        runtime_backend="zcode",
+        agent_runtime_factory="_create_zcode_runtime",
+    ),
+    BackendFactorySpec(
         name="ourocode",
         llm_backend="ourocode",
         llm_adapter_factory="_create_ourocode_adapter",
