@@ -1834,6 +1834,7 @@ class TestOuroborosTools:
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
+        "ouroboros_submit_fanout_results",
     }
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:

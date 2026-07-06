@@ -93,6 +93,7 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_start_evolve_step": "background",
     "ouroboros_start_execute_seed": "background",
     "ouroboros_start_ralph": "background",
+    "ouroboros_submit_fanout_results": "status",
 }
 
 _VALID_OUROBOROS_TOOL_EXECUTION_MODES = frozenset(
@@ -215,6 +216,7 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_start_evolve_step": ("lineage_id",),
     "ouroboros_start_execute_seed": ("seed_content", "session_id"),
     "ouroboros_start_ralph": ("lineage_id",),
+    "ouroboros_submit_fanout_results": ("fanout_id", "results"),
 }
 
 _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
@@ -434,6 +436,10 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_evolve_rewind",
         "ouroboros_ralph",
     ),
+    "ouroboros_submit_fanout_results": (
+        "ouroboros_interview",
+        "ouroboros_lateral_think",
+    ),
 }
 
 _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
@@ -475,6 +481,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_start_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_start_execute_seed": ("workspace_write", "event_store_write"),
     "ouroboros_start_ralph": ("workspace_write", "event_store_write"),
+    "ouroboros_submit_fanout_results": (),
 }
 
 _EXPECTED_MUTATION_TARGETS_BY_SIDE_EFFECT = {
@@ -782,6 +789,7 @@ _EXPECTED_READ_ONLY_OUROBOROS_TOOLS = {
     "ouroboros_query_events",
     "ouroboros_query_projection",
     "ouroboros_session_status",
+    "ouroboros_submit_fanout_results",
 }
 
 _EXPECTED_OUROBOROS_TOOL_RETRY = {
@@ -814,6 +822,7 @@ _EXPECTED_OUROBOROS_TOOL_RETRY = {
     "ouroboros_start_evolve_step": {"supported": True, "mode": "job_poll"},
     "ouroboros_start_execute_seed": {"supported": True, "mode": "job_poll"},
     "ouroboros_start_ralph": {"supported": True, "mode": "job_poll"},
+    "ouroboros_submit_fanout_results": {"supported": True, "mode": "handler_owned"},
 }
 
 _BACKGROUND_INTERRUPT = {
@@ -904,6 +913,7 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_start_evolve_step": _BACKGROUND_INTERRUPT,
     "ouroboros_start_execute_seed": _BACKGROUND_INTERRUPT,
     "ouroboros_start_ralph": _BACKGROUND_INTERRUPT,
+    "ouroboros_submit_fanout_results": _READ_ONLY_INTERRUPT,
 }
 
 _UNSUPPORTED_CANCEL = {
@@ -974,6 +984,7 @@ _EXPECTED_OUROBOROS_TOOL_CANCEL = {
     "ouroboros_start_evolve_step": _BACKGROUND_JOB_CANCEL,
     "ouroboros_start_execute_seed": _BACKGROUND_JOB_CANCEL,
     "ouroboros_start_ralph": _BACKGROUND_JOB_CANCEL,
+    "ouroboros_submit_fanout_results": _UNSUPPORTED_CANCEL,
 }
 
 _OUROBOROS_TOOL_CONTRACT_CASE_SETS = {
@@ -2811,6 +2822,7 @@ def test_read_only_query_status_projection_tools_have_non_mutating_interrupt_met
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_session_status",
+        "ouroboros_submit_fanout_results",
     }
 
     assert expected_query_status_projection_tools == _EXPECTED_READ_ONLY_OUROBOROS_TOOLS
@@ -3242,6 +3254,7 @@ def test_non_cancel_ouroboros_owned_tools_explicitly_do_not_expose_cancel_semant
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_session_status",
+        "ouroboros_submit_fanout_results",
     }
     assert cancel_capable_tools == {
         "ouroboros_cancel_execution",

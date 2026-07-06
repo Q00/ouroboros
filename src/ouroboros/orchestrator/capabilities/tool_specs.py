@@ -785,6 +785,17 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
         interrupt=_OUROBOROS_DEFAULT_INTERRUPT_METADATA,
     ),
+    "ouroboros_submit_fanout_results": _OuroborosToolCapabilitySpec(
+        # Re-entry synthesis is a read-only routing step: it reads persisted
+        # fan-out state and returns the correlated synthesis. The fan-out state
+        # write happens on the producer side, not here.
+        execution_mode="status",
+        companions=("ouroboros_interview", "ouroboros_lateral_think"),
+        side_effects=_OUROBOROS_SIDE_EFFECT_FREE_METADATA,
+        retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
+        interrupt=_OUROBOROS_READ_ONLY_INTERRUPT_METADATA,
+        mutation_class=CapabilityMutationClass.READ_ONLY,
+    ),
     "ouroboros_evolve_step": _OuroborosToolCapabilitySpec(
         execution_mode="blocking",
         companions=(
@@ -963,6 +974,7 @@ _OUROBOROS_CANCEL_METADATA: Mapping[str, Mapping[str, Any]] = {
     "ouroboros_start_evolve_step": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_execute_seed": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
     "ouroboros_start_ralph": _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA,
+    "ouroboros_submit_fanout_results": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
 }
 
 _OUROBOROS_BACKGROUND_BLOCKING_COMPANIONS: Mapping[str, str] = {
