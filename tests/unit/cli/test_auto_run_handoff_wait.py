@@ -47,7 +47,14 @@ async def _cancel_manager_tasks(manager: JobManager) -> None:
 
 
 def _handoff_only_result(job_id: str) -> AutoPipelineResult:
-    """A COMPLETE-but-handoff-only result, the state the wait path acts on."""
+    """A COMPLETE-but-handoff-only result, the state the wait path acts on.
+
+    Matches what ``AutoPipeline._result()`` actually emits for a COMPLETE
+    handoff: ``resume_capability=AutoResumeCapability.NONE`` (because
+    ``AutoPipelineState.resume_capability()`` maps COMPLETE -> NONE). The wait
+    reconciliation must therefore *upgrade* a blocked-but-resumable outcome to
+    RESUME explicitly — it cannot inherit RESUME from the input.
+    """
     return AutoPipelineResult(
         status="complete",
         auto_session_id="auto_wait",
@@ -58,7 +65,7 @@ def _handoff_only_result(job_id: str) -> AutoPipelineResult:
         execution_id="exec_wait",
         run_session_id="orch_wait",
         run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
-        resume_capability=AutoResumeCapability.RESUME,
+        resume_capability=AutoResumeCapability.NONE,
     )
 
 
@@ -134,6 +141,8 @@ async def test_wait_reflects_failed_run_job_verdict(tmp_path) -> None:
         assert reconciled.status == "failed"
         assert reconciled.execution_job_status == JobStatus.FAILED.value
         assert reconciled.blocker and "boom in executor" in reconciled.blocker
+        # Genuine failure keeps the non-resumable capability (NOT upgraded).
+        assert reconciled.resume_capability is AutoResumeCapability.NONE
     finally:
         await _cancel_manager_tasks(manager)
         await store.close()
@@ -164,6 +173,9 @@ async def test_wait_paused_run_is_not_complete_and_stays_resumable(tmp_path) -> 
             job_type="execute", initial_message="queued", runner=_runner()
         )
         result = _handoff_only_result(started.job_id)
+        # Production input: a COMPLETE handoff carries NONE, so a passing
+        # RESUME assertion below proves an explicit upgrade, not inheritance.
+        assert result.resume_capability is AutoResumeCapability.NONE
 
         reconciled = await _await_run_handoff_terminal(
             result,
@@ -180,7 +192,7 @@ async def test_wait_paused_run_is_not_complete_and_stays_resumable(tmp_path) -> 
         # NOT successful completion.
         assert reconciled.status == "blocked"
         assert reconciled.blocker is not None and "paused" in reconciled.blocker
-        # Resume capability and the run handle are preserved.
+        # Upgraded to RESUME (from the NONE input) with the run handle intact.
         assert reconciled.resume_capability is AutoResumeCapability.RESUME
         assert reconciled.job_id == started.job_id
         assert reconciled.execution_id == "exec_wait"
@@ -208,6 +220,7 @@ async def test_wait_completed_job_without_success_meta_is_not_complete(tmp_path)
             job_type="execute", initial_message="queued", runner=_runner()
         )
         result = _handoff_only_result(started.job_id)
+        assert result.resume_capability is AutoResumeCapability.NONE
 
         reconciled = await _await_run_handoff_terminal(
             result,
@@ -219,6 +232,7 @@ async def test_wait_completed_job_without_success_meta_is_not_complete(tmp_path)
         assert reconciled.status == "blocked"
         assert reconciled.blocker is not None
         assert "without confirming terminal run success" in reconciled.blocker
+        # Upgraded from the NONE input — allowlist-blocked runs are resumable.
         assert reconciled.resume_capability is AutoResumeCapability.RESUME
     finally:
         await _cancel_manager_tasks(manager)
@@ -251,6 +265,7 @@ async def test_wait_deadline_cancels_wedged_job_and_reports_bounded_verdict(tmp_
         )
         await asyncio.wait_for(started_running.wait(), timeout=5)
         result = _handoff_only_result(started.job_id)
+        assert result.resume_capability is AutoResumeCapability.NONE
 
         wait_started = time_module.monotonic()
         reconciled = await asyncio.wait_for(
@@ -275,7 +290,7 @@ async def test_wait_deadline_cancels_wedged_job_and_reports_bounded_verdict(tmp_
         assert reconciled.blocker is not None
         assert "deadline" in reconciled.blocker
         assert "--resume auto_wait" in reconciled.blocker
-        # Resume capability and the run handle are preserved.
+        # Upgraded from the NONE input — a deadline-cancelled run is resumable.
         assert reconciled.resume_capability is AutoResumeCapability.RESUME
         assert reconciled.job_id == started.job_id
 

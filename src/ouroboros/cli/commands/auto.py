@@ -956,6 +956,13 @@ def _reconcile_run_handoff_result(
     """
     status = result.status
     blocker = result.blocker
+    # Do NOT inherit ``result.resume_capability``: for a COMPLETE handoff the
+    # pipeline emits ``AutoResumeCapability.NONE`` (see
+    # ``AutoPipelineState.resume_capability()`` — COMPLETE -> NONE). Each branch
+    # below sets the capability explicitly so a blocked-but-resumable run
+    # (paused / unknown-success / deadline) is upgraded to RESUME regardless of
+    # the incoming COMPLETE->NONE, while genuine success stays NONE and genuine
+    # failure keeps NONE.
     resume_capability = result.resume_capability
     if snapshot.status is JobStatus.COMPLETED:
         run_status, run_success = _run_meta_verdict(snapshot)
@@ -964,6 +971,7 @@ def _reconcile_run_handoff_result(
             # Same contract as the pipeline's resume gate: block with resume
             # guidance and keep the persisted run handle resumable.
             status = "blocked"
+            resume_capability = AutoResumeCapability.RESUME
             blocker = (
                 "run execution paused before completion; resume the paused "
                 f"run before continuing (auto session {result.auto_session_id}, "
@@ -980,11 +988,12 @@ def _reconcile_run_handoff_result(
             # Allowlist gate (pipeline parity): terminal job metadata without
             # an explicit success signal is NOT evidence of run success.
             status = "blocked"
+            resume_capability = AutoResumeCapability.RESUME
             blocker = (
                 "execution job completed without confirming terminal run "
                 f"success (status={run_status!r}, success={run_success!r}); "
                 "inspect the run before treating the product as complete "
-                f"(job {snapshot.job_id})"
+                f"(auto session {result.auto_session_id}, job {snapshot.job_id})"
             )
         else:
             status = "complete"
@@ -997,8 +1006,14 @@ def _reconcile_run_handoff_result(
             if detail
             else f"execution job {snapshot.status.value}"
         )
-        status = "failed" if snapshot.status is JobStatus.FAILED else "blocked"
-        resume_capability = AutoResumeCapability.NONE
+        if snapshot.status is JobStatus.FAILED:
+            # Genuine failure: keep the failure (non-resumable) capability.
+            status = "failed"
+            resume_capability = AutoResumeCapability.NONE
+        else:
+            # Cancelled/interrupted mid-run is resumable, not a dead end.
+            status = "blocked"
+            resume_capability = AutoResumeCapability.RESUME
     else:
         # Non-terminal snapshot (should not happen after a terminal wait): keep
         # the handoff-only result intact and only surface the live status.
@@ -1027,11 +1042,14 @@ def _run_wait_deadline_result(
     """Bounded verdict for a run wait that exhausted the pipeline deadline.
 
     Same shape as the paused reconciliation: NOT complete, blocked with the
-    resume handle and guidance, resume capability preserved.
+    resume handle and guidance. ``resume_capability`` is set explicitly to
+    RESUME (not inherited): the incoming COMPLETE handoff result carries
+    ``AutoResumeCapability.NONE``, but a deadline-cancelled run IS resumable.
     """
     return replace(
         result,
         status="blocked",
+        resume_capability=AutoResumeCapability.RESUME,
         blocker=(
             "run wait deadline exhausted (top-level pipeline --timeout budget); "
             f"cancelled run job {snapshot.job_id}. The product run did NOT "
