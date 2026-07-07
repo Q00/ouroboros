@@ -767,6 +767,16 @@ class AutoPipelineState:
         ``run_handoff_status`` are left intact so the RUN-phase resume path can
         reconcile the owned job. ``last_tool_name`` is set to ``"run_starter"``
         so the state classifies as RUN-recoverable (resumable).
+
+        The absolute pipeline deadline (``deadline_at`` / ``deadline_at_epoch``)
+        is CLEARED. The premature COMPLETE was often reached because the wait's
+        own deadline expired, so the persisted absolute deadline is already
+        past; leaving it would make ``--resume`` hit ``AutoPipeline.run``'s
+        deadline gate (which fires on an expired deadline BEFORE the RUN
+        reconciliation) and immediately re-block with ``pipeline_timeout`` —
+        turning the advertised resume into a dead end. Clearing both fields lets
+        ``AutoPipelineState.from_dict`` re-arm a fresh budget on the next load
+        (its non-terminal re-arm path), so a fresh resume gets a fresh deadline.
         """
         if self.phase is not AutoPhase.COMPLETE:
             return False
@@ -780,6 +790,8 @@ class AutoPipelineState:
         self.last_error_code = None
         self.last_tool_name = "run_starter"
         self.last_authoring_backend = None
+        self.deadline_at = None
+        self.deadline_at_epoch = None
         return True
 
     def close_completed_run_handoff_as_failed(self, message: str) -> bool:

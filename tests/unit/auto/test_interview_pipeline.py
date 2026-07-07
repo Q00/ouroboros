@@ -2661,6 +2661,90 @@ async def test_run_resume_completes_when_owned_job_succeeded(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_resume_after_deadline_reopen_is_not_deadlined_out(tmp_path) -> None:
+    """A deadline-cancelled reopen-to-RUN must resume cleanly, not dead-end.
+
+    Q00/ouroboros#1590: the reopen clears the expired absolute deadline so
+    ``from_dict`` re-arms a fresh budget on load. Without it, ``--resume`` hits
+    the deadline gate (pipeline.run) and returns ``pipeline_timeout`` before the
+    RUN reconciliation ever runs — a dead-end resume promise. Here the reopened
+    state, saved and loaded through the store (as ``--resume`` does), resumes
+    into the owned-job reconciliation (paused → blocked) instead.
+    """
+    import time as time_module
+
+    from ouroboros.auto.interview_driver import FunctionInterviewBackend
+    from ouroboros.mcp.job_manager import JobManager
+    from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+    from ouroboros.persistence.event_store import EventStore
+
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    store = AutoStore(tmp_path)
+    try:
+
+        async def _paused_runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="PAUSED"),),
+                is_error=False,
+                meta={"status": "paused", "success": None},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_paused_runner()
+        )
+
+        # Build the durable state exactly as the CLI leaves it after a
+        # deadline-cancelled wait: a COMPLETE handoff with an already-expired
+        # absolute deadline, then reopened to RUN (which clears the deadline).
+        state = _run_state_with_handle(tmp_path, started.job_id)
+        state.transition(AutoPhase.COMPLETE, "execution started for grade A Seed")
+        state.deadline_at = time_module.monotonic() - 100.0
+        state.deadline_at_epoch = time_module.time() - 100.0
+        assert state.is_deadline_expired()
+        assert state.reopen_completed_run_handoff_to_run("run cancelled by deadline")
+        assert state.deadline_at is None
+        store.save(state)
+
+        # Load fresh (as --resume): from_dict re-arms a fresh, non-expired budget.
+        loaded = store.load(state.auto_session_id)
+        assert loaded.phase is AutoPhase.RUN
+        assert loaded.deadline_at is not None and not loaded.is_deadline_expired()
+
+        async def _unused(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("run resume should not restart interview/seed")
+
+        driver = AutoInterviewDriver(
+            FunctionInterviewBackend(_unused, _unused), store=AutoStore(tmp_path)
+        )
+        pipeline = AutoPipeline(
+            driver,
+            _unused,
+            run_starter=_run_starter_over_manager(manager),
+            store=AutoStore(tmp_path),
+        )
+
+        result = await pipeline.run(loaded)
+
+        # NOT the deadline dead-end — it reached the RUN reconciliation.
+        assert "pipeline_timeout" not in (result.blocker or "")
+        assert result.status == "blocked"
+        assert "paused" in (result.blocker or "")
+    finally:
+        tasks = [
+            *manager._tasks.values(),  # noqa: SLF001
+            *manager._runner_tasks.values(),  # noqa: SLF001
+            *manager._monitors.values(),  # noqa: SLF001
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_persists_blocker_ledger_entry(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What API key should the workflow use?", "interview_1")

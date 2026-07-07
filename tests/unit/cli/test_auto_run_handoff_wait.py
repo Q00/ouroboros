@@ -292,6 +292,75 @@ async def test_wait_blocked_verdict_persists_resumable_durable_state(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_wait_deadline_reopen_rearms_deadline_so_resume_is_not_dead_end(tmp_path) -> None:
+    """A deadline-cancelled reopen must not leave an expired deadline behind.
+
+    Otherwise a later ``ouroboros auto --resume`` hits ``AutoPipeline.run``'s
+    deadline gate (which fires on an expired deadline BEFORE the RUN
+    reconciliation) and is immediately re-blocked with ``pipeline_timeout`` —
+    the advertised resume would be a dead end. The reopen clears the absolute
+    deadline so a fresh load re-arms a fresh budget that is NOT already expired.
+    """
+    import time as time_module
+
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    auto_store = AutoStore(tmp_path / "auto")
+    try:
+        started_running = asyncio.Event()
+
+        async def _wedged_runner() -> MCPToolResult:
+            started_running.set()
+            await asyncio.sleep(3600)  # never terminates
+            raise AssertionError("unreachable")
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_wedged_runner()
+        )
+        await asyncio.wait_for(started_running.wait(), timeout=5)
+        state = _completed_handoff_state(tmp_path, started.job_id)
+        # Mimic the pipeline: an armed absolute deadline that is already expired.
+        state.deadline_at = time_module.monotonic() - 100.0
+        state.deadline_at_epoch = time_module.time() - 100.0
+        assert state.is_deadline_expired()
+        auto_store.save(state)
+
+        result = AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            job_id=started.job_id,
+            run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.NONE,
+        )
+
+        reconciled = await asyncio.wait_for(
+            _await_run_handoff_terminal(
+                result,
+                job_manager=manager,
+                event_store=jobs,
+                quiet=True,
+                deadline_at=time_module.monotonic() + 0.5,
+                state=state,
+                store=auto_store,
+            ),
+            timeout=15,
+        )
+        assert reconciled.status == "blocked"
+
+        # DURABLE state, loaded fresh as --resume would: RUN + a FRESH deadline
+        # that is NOT already expired, so the resume-time deadline gate passes.
+        reloaded = AutoStore(tmp_path / "auto").load(state.auto_session_id)
+        assert reloaded.phase is AutoPhase.RUN
+        assert reloaded.deadline_at is not None
+        assert not reloaded.is_deadline_expired()
+        assert reloaded.resume_capability() is AutoResumeCapability.RESUME
+    finally:
+        await _cancel_manager_tasks(manager)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
 async def test_wait_interrupt_persists_resumable_durable_state(tmp_path) -> None:
     """An operator interrupt mid-wait must correct the DURABLE state too.
 
