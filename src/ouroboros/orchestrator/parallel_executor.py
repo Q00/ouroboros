@@ -3059,6 +3059,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 messages=tuple(messages),
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
+                ac_spec=ac_spec,
             )
             fat_harness_error = self._fat_harness_acceptance_error(
                 runtime_success=success,
@@ -3778,6 +3779,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         messages: tuple[AgentMessage, ...],
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
+        ac_spec: AcceptanceCriterionSpec | None = None,
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
@@ -3815,6 +3817,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     messages=messages,
                     typed_evidence=scoped_evidence,
                     ac_content=ac_content,
+                    verify_command=(
+                        ac_spec.verify_command
+                        if isinstance(ac_spec, AcceptanceCriterionSpec)
+                        else None
+                    ),
                 )
             )
         except VerifierContractError:
@@ -3832,6 +3839,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         messages: tuple[AgentMessage, ...],
         typed_evidence: EvidenceRecord,
         ac_content: str,
+        verify_command: str | None = None,
     ) -> VerifierVerdict:
         return _verify_atomic_evidence_against_runtime_messages(
             messages=messages,
@@ -3840,6 +3848,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             execution_profile=self._execution_profile,
             task_cwd=self._task_cwd,
             adapter_working_directory=self._adapter.working_directory,
+            verify_command=verify_command,
         )
 
     async def _emit_atomic_typed_evidence_event(

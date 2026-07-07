@@ -29,6 +29,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     execution_profile: ExecutionProfile,
     task_cwd: str | None,
     adapter_working_directory: str | None,
+    verify_command: str | None = None,
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -93,6 +94,7 @@ def _verify_atomic_evidence_against_runtime_messages(
                     backed_commands=backed_commands,
                     messages=support_messages,
                     task_cwd=workspace_cwd,
+                    verify_command=verify_command,
                 ):
                     continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(

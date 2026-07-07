@@ -1474,6 +1474,7 @@ def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_with
             }
         ),
         ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
     )
 
     assert verdict.passed is True, verdict.reasons
@@ -1522,6 +1523,7 @@ def test_atomic_verifier_accepts_symlinked_cwd_against_resolved_transcript_path(
             }
         ),
         ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
     )
     assert verdict.passed is True, verdict.reasons
 
@@ -1559,14 +1561,14 @@ def test_atomic_verifier_rejects_fabricated_greeting_claims_without_transcript()
     assert "files_touched: goodbye.py" in verdict.reasons[0]
 
 
-def test_atomic_verifier_accepts_prose_tests_passed_backed_by_run_command() -> None:
-    """Release blocker (live shape): prose ``tests_passed`` + a real successful command.
+def test_atomic_verifier_accepts_prose_tests_passed_backed_by_declared_verify_command() -> None:
+    """Release blocker (live shape): prose ``tests_passed`` + the declared verify_command run.
 
     The live codex worker recorded ``tests_passed`` as a natural-language
-    description ("greet('x') returned 'Hello, x' and command output was OK")
-    rather than restating the inline verify command. It is accepted because the
-    ``commands_run`` verification command matched the wrapped Bash event and ran
-    with exit code 0 — anchoring the prose to a real, successful execution.
+    description ("greet('World') returned 'Hello, World!' and command output was
+    OK") rather than restating the command. It is accepted because the AC's
+    DECLARED ``verify_command`` matched the wrapped Bash event and ran with exit
+    code 0 — the declared contract is the oracle, not the prose text.
     """
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
@@ -1590,17 +1592,18 @@ def test_atomic_verifier_accepts_prose_tests_passed_backed_by_run_command() -> N
             }
         ),
         ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
     )
 
     assert verdict.passed is True, verdict.reasons
 
 
-def test_atomic_verifier_rejects_prose_tests_passed_without_successful_command() -> None:
-    """Prose ``tests_passed`` with no successfully-run backed command still fails.
+def test_atomic_verifier_rejects_tests_passed_when_declared_verify_command_not_run() -> None:
+    """Contract AC whose declared verify_command was never run still fails.
 
-    Fabrication guard: the transcript contains only a read-only ``cat`` and no
-    verification command matching the ``commands_run`` claim, so the prose claim
-    of a passing test is not anchored to any real successful execution.
+    Fabrication guard: the transcript contains only a read-only ``cat`` — the
+    declared ``verify_command`` never executed — so the prose claim of a passing
+    test is not anchored to the AC's oracle command.
     """
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
@@ -1643,6 +1646,7 @@ def test_atomic_verifier_rejects_prose_tests_passed_without_successful_command()
             }
         ),
         ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
     )
 
     assert verdict.passed is False
@@ -1651,15 +1655,16 @@ def test_atomic_verifier_rejects_prose_tests_passed_without_successful_command()
     assert "commands_run" in reason and "tests_passed" in reason
 
 
-def test_atomic_verifier_rejects_inline_command_without_a_real_check() -> None:
-    """A successfully-run ``python3 -c "print('OK')"`` cannot back tests_passed.
+def test_atomic_verifier_rejects_inline_command_that_does_not_match_declared_verify_command() -> (
+    None
+):
+    """The declared verify_command is the oracle — a stand-in inline check is rejected.
 
-    Anti-fabrication boundary: the inline command performs no assertion — its
-    exit 0 is meaningless as test evidence — so a prose ``tests_passed`` claim
-    about the AC behaviour must NOT be satisfied even though the command really
-    ran and printed a success-looking line. Contrast with the real inline
-    assertion accepted by
-    ``test_atomic_verifier_accepts_prose_tests_passed_backed_by_run_command``.
+    The bot's fabrication repro: the transcript ran a trivial ``python3 -c
+    "assert True"`` (a "real construct" that tests nothing relevant) and the
+    worker fabricated a prose ``tests_passed`` claim about the greeting. The AC
+    declares a DIFFERENT ``verify_command`` (the real greeting assertion), which
+    was never run, so the claim must be rejected.
     """
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
@@ -1671,7 +1676,7 @@ def test_atomic_verifier_rejects_inline_command_without_a_real_check() -> None:
         task_cwd="/private/tmp/ooo-repro-blos",
     )
 
-    print_only_command = "python3 -c \"print('OK')\""
+    trivial_command = 'python3 -c "assert True"'
     messages = (
         AgentMessage(
             type="tool",
@@ -1681,19 +1686,19 @@ def test_atomic_verifier_rejects_inline_command_without_a_real_check() -> None:
         ),
         AgentMessage(
             type="tool",
-            content="run print",
+            content="run trivial check",
             tool_name="Bash",
             data={
-                "tool_input": {"command": f'/bin/zsh -lc "{print_only_command}"'},
+                "tool_input": {"command": f'/bin/zsh -lc "{trivial_command}"'},
                 "exit_code": 0,
                 "status": "completed",
             },
         ),
         AgentMessage(
             type="tool_result",
-            content="OK",
+            content="",
             tool_name=None,
-            data={"subtype": "tool_result", "output": "OK", "exit_code": 0},
+            data={"subtype": "tool_result", "output": "", "exit_code": 0},
         ),
         AgentMessage(type="result", content="done", data={}),
     )
@@ -1703,12 +1708,49 @@ def test_atomic_verifier_rejects_inline_command_without_a_real_check() -> None:
         typed_evidence=EvidenceRecord(
             data={
                 "files_touched": ["hello.py"],
-                # A real, backed command — but it only prints, it never checks.
-                "commands_run": [print_only_command],
-                "tests_passed": ["greet('x') returned 'Hello, x' and command output was OK"],
+                "commands_run": [trivial_command],
+                "tests_passed": ['greet("World") returned "Hello, World!"'],
             }
         ),
         ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "tests_passed:" in verdict.reasons[0]
+
+
+def test_atomic_verifier_rejects_inline_command_for_legacy_ac_without_verify_command() -> None:
+    """Legacy AC (no declared verify_command) keeps strict-runner-only behavior.
+
+    Even though the inline ``python3 -c "...assert..."`` command actually ran and
+    succeeded, without a declared ``verify_command`` there is no oracle to bind
+    to, so ``tests_passed`` requires a formal test runner exactly as before this
+    PR — no arbitrary inline command is accepted.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": [_GREETING_INNER_COMMAND],
+            }
+        ),
+        ac_content=_GREETING_AC,
+        # No verify_command declared -> legacy strict behavior.
+        verify_command=None,
     )
 
     assert verdict.passed is False
