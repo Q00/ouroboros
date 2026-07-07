@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import threading
 import time
 import types
 
@@ -485,6 +486,40 @@ async def test_pipeline_finalize_survives_blocking_filesystem(
 
     assert result.status == "complete"
     assert elapsed < 0.75  # returned at the deadline, not after the 1.0s stall
+
+
+def test_asyncio_run_teardown_not_blocked_by_wedged_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for review 4642581190: asyncio.to_thread runs on the loop's
+    # DEFAULT executor, and asyncio.run() teardown awaits
+    # shutdown_default_executor(), which JOINS executor threads. An abandoned
+    # wedged write therefore hung the `ooo auto` CLI (cli/commands/auto.py
+    # prints the terminal result only AFTER asyncio.run() returns) even though
+    # the coroutine itself had already timed out cleanly. The write phase now
+    # runs on a plain daemon thread — never joined at teardown — so
+    # asyncio.run() must return promptly and simply abandon the wedged thread.
+    # Deliberately a SYNC test: it must own its asyncio.run() to exercise the
+    # exact teardown join the review flagged.
+    monkeypatch.setattr(trace_export, "TRACE_EXPORT_DEADLINE_SECONDS", 0.05)
+    _install_blocking_write_text(monkeypatch, block_seconds=3.0)
+    state = _terminal_state(tmp_path)
+    ledger = _populated_ledger()
+
+    start = time.monotonic()
+    result = asyncio.run(best_effort_export_trace(state, ledger, event_store=None))
+    elapsed = time.monotonic() - start
+
+    assert result is None  # deadline breach swallowed like any failure
+    # Wall-clock bound covers asyncio.run() INCLUDING loop teardown. With the
+    # executor-backed design the teardown join would pin elapsed >= 3.0s (the
+    # wedged write); the daemon-thread design returns at the ~0.05s deadline.
+    assert elapsed < 2.0
+    # The abandoned write-phase thread is still wedged past teardown and must
+    # be a daemon, i.e. it can never block interpreter exit either.
+    wedged = [t for t in threading.enumerate() if t.name == trace_export._EXPORT_THREAD_NAME]
+    assert wedged, "expected the abandoned export thread to still be alive"
+    assert all(t.daemon is True for t in wedged)
 
 
 @pytest.mark.asyncio
