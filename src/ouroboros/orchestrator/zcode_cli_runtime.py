@@ -4,7 +4,7 @@ This module provides the ZcodeCLIRuntime that shells out to the locally
 installed ``zcode`` CLI to execute agentic tasks.
 
 Usage:
-    runtime = ZcodeCLIRuntime(model="glm-5", cwd="/path/to/project")
+    runtime = ZcodeCLIRuntime(cwd="/path/to/project")
     async for message in runtime.execute_task("Fix the bug in auth.py"):
         print(message.content)
 
@@ -13,6 +13,16 @@ Custom CLI Path:
         runtime = ZcodeCLIRuntime(cli_path="/path/to/zcode")
         # or
         export OUROBOROS_ZCODE_CLI_PATH=/path/to/zcode
+
+Model selection:
+    zcode has **no** ``--model`` CLI flag (verified against ``zcode --help``
+    on 0.14.5 and 0.15.0 — passing ``--model`` is a hard ``Unknown option``
+    rejection, not a silent no-op). Model selection is done **outside** the
+    runtime, via the zcode config file ``~/.zcode/cli/config.json`` under
+    ``model.main``, or the interactive ``/model`` slash command. Any ``model``
+    value passed to the constructor is therefore intentionally ignored at the
+    CLI boundary — a warning is emitted when a non-default model is requested
+    so the misconfiguration (expected model vs. configured model) is visible.
 """
 
 from __future__ import annotations
@@ -89,6 +99,16 @@ class ZcodeCLIRuntime(CodexCliRuntime):
     _skills_package_uri = "packaged://ouroboros.zcode/skills"
     _process_shutdown_timeout_seconds = 5.0
     _max_resume_retries = 3  # Zcode CLI supports session resumption
+    # zcode ``--prompt --json`` buffers its whole summary until completion and
+    # stays silent until then — unlike Codex, which streams events continuously
+    # and resets the inherited "first chunk" watchdog on every chunk. The
+    # parent default of 60s would therefore cap the ENTIRE task at 60s on any
+    # caller that doesn't explicitly disable the guard (e.g. a direct
+    # ``create_agent_runtime(backend="zcode")``), killing healthy long runs as
+    # "produced no stdout". Disable it at the class level — callers that want
+    # a cap can still pass an explicit ``startup_output_timeout_seconds`` (the
+    # execute-seed path already passes ``0`` for the same reason).
+    _startup_output_timeout_seconds = None
 
     def __init__(
         self,
@@ -120,7 +140,14 @@ class ZcodeCLIRuntime(CodexCliRuntime):
                 config working. Falls back to ``acceptEdits`` when
                 omitted; operators must opt in to
                 ``bypassPermissions`` explicitly.
-            model: Optional model identifier.
+            model: Optional model identifier. **Ignored at the CLI
+                boundary** — zcode has no ``--model`` flag (passing one is
+                a hard ``Unknown option`` rejection, verified on 0.14.5 and
+                0.15.0). Set the model via ``~/.zcode/cli/config.json``
+                (``model.main``). A non-default value here emits a warning
+                so the divergence between the requested model and the
+                model zcode actually uses is visible; the value is never
+                forwarded to the subprocess.
             cwd: Optional working directory for the subprocess.
             skills_dir: Optional directory for skill definitions.
             skill_dispatcher: Optional handler for skill execution.
@@ -147,6 +174,21 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             startup_output_timeout_seconds=startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
         )
+        # zcode has no --model flag, so a non-default model requested here
+        # cannot reach the CLI. Surface it loudly rather than silently
+        # dropping it — the caller believes a specific model was selected
+        # when zcode will in fact use whatever ~/.zcode/cli/config.json
+        # declares. Only an explicit, non-default id triggers this.
+        requested_model = self._normalize_model(self._model)
+        if requested_model:
+            log.warning(
+                "zcode_cli_runtime.model_not_forwarded",
+                requested_model=self._model,
+                reason=(
+                    "zcode has no --model CLI flag; set model.main in "
+                    "~/.zcode/cli/config.json to select the model."
+                ),
+            )
 
     # -- Permission mode overrides -----------------------------------------
 
@@ -253,11 +295,17 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         The builder distinguishes by extension: ``.cjs``/``.js``/``.mjs``
         scripts get the ``node`` prefix; everything else is invoked straight.
 
-        NOTE: zcode has **no** ``--non-interactive`` and **no**
-        ``--approval-mode`` flag (an earlier draft invented them by copying the
-        Codex adapter). ``--mode`` is the real permission surface, and
-        ``--prompt`` is already non-interactive (no TUI), so nothing else is
-        needed to keep the subprocess headless.
+        NOTE: zcode has **no** ``--non-interactive``, **no**
+        ``--approval-mode``, and **no** ``--model`` flag. The first two were
+        invented by an earlier draft copying the Codex adapter; ``--model``
+        was the last un-measured artifact copied from the same source —
+        verified absent on zcode 0.14.5 and 0.15.0, where ``--model`` is a
+        hard ``Unknown option`` rejection that aborts the run before zcode
+        does any work. ``--mode`` is the real permission surface, ``--prompt``
+        is already non-interactive (no TUI), and model selection lives in
+        ``~/.zcode/cli/config.json`` (``model.main``), never on the CLI. Do
+        not re-add ``--model`` here — :meth:`ZcodeCLIRuntime.__init__` warns
+        when a non-default model is requested so the gap is visible.
         """
         del runtime_handle, reasoning_effort
 
@@ -283,9 +331,6 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         cwd = getattr(self, "_cwd", None)
         if cwd:
             command.extend(["--cwd", str(cwd)])
-        normalized_model = self._normalize_model(self._model)
-        if normalized_model:
-            command.extend(["--model", normalized_model])
         if resume_session_id:
             command.extend(["--resume", resume_session_id])
         return command

@@ -133,13 +133,17 @@ def test_build_command_bypass_permissions_maps_to_yolo() -> None:
     assert "--mode" in cmd
 
 
-# -- _build_command: model override (only intentional non-default ids forwarded) --
-# Regression for the Follow-up finding: ``_normalize_model`` (inherited from
-# CodexCliRuntime) drops ``None`` / empty / ``"default"`` so zcode's own default
-# model is never leaked as a ``--model`` value. Only an explicit, non-default
-# Zcode model id reaches the CLI. The loader's sentinel normalization
-# (``_ZCODE_LLM_BACKENDS``) maps shipped Claude defaults to ``"default"`` first,
-# which this gate then strips — together they keep Claude ids off zcode's CLI.
+# -- _build_command: NO --model flag, ever (zcode has no model CLI flag) -----
+# zcode has NO ``--model`` flag — verified on 0.14.5 and 0.15.0, where
+# ``--model`` is a hard ``Unknown option`` rejection that aborts the run before
+# zcode does any work (reproduced: ``node zcode.cjs --model glm-4.6 --version``
+# → "Unknown option '--model'"). The constructor warns when a non-default model
+# is requested so the request-vs-config gap is visible, but the value is never
+# forwarded. These tests pin that contract: regardless of what ``_model`` holds,
+# the built command must NOT contain ``--model``. This inverts the earlier
+# (wrong) test ``test_build_command_forwards_intentional_non_default_model``,
+# which asserted ``--model glm-4.6`` WAS forwarded — that assertion locked in a
+# regression and shipped a hard-failing flag.
 
 
 def test_build_command_omits_model_flag_when_unset(runtime: ZcodeCLIRuntime) -> None:
@@ -154,13 +158,55 @@ def test_build_command_strips_default_sentinel_model(runtime: ZcodeCLIRuntime) -
     assert "--model" not in cmd
 
 
-def test_build_command_forwards_intentional_non_default_model(
+def test_build_command_never_emits_model_flag_even_when_explicit_non_default(
     runtime: ZcodeCLIRuntime,
 ) -> None:
+    """A non-default model must NEVER produce ``--model``.
+
+    zcode has no ``--model`` flag; emitting it aborts the run. This is the
+    inverted regression for the blocking defect: the earlier test asserted the
+    opposite (that ``glm-4.6`` WAS forwarded) and thereby guaranteed a
+    hard-failing flag for any non-default model config.
+    """
     runtime._model = "glm-4.6"
     cmd = runtime._build_command("/tmp/unused", prompt="hi")
-    assert "--model" in cmd
-    assert cmd[cmd.index("--model") + 1] == "glm-4.6"
+    assert "--model" not in cmd
+    # And the model id must not leak in as a bare positional either.
+    assert "glm-4.6" not in cmd
+
+
+# -- startup timeout: disabled by default for zcode's buffered output ---------
+# zcode ``--prompt --json`` stays silent until its whole summary lands, so the
+# inherited 60s "first chunk" watchdog would cap the ENTIRE task at 60s on any
+# caller that doesn't pass an explicit override (e.g. a direct
+# ``create_agent_runtime(backend="zcode")``). The class-level default is
+# therefore ``None`` (disabled); an explicit positive override still wins.
+
+
+def test_startup_output_timeout_disabled_by_default() -> None:
+    rt = ZcodeCLIRuntime(cli_path="/tmp/zcode.cjs", permission_mode="acceptEdits")
+    assert rt._startup_output_timeout_seconds is None
+
+
+def test_startup_output_timeout_explicit_override_still_wins() -> None:
+    """A caller that explicitly wants a cap can still set one."""
+    rt = ZcodeCLIRuntime(
+        cli_path="/tmp/zcode.cjs",
+        permission_mode="acceptEdits",
+        startup_output_timeout_seconds=30,
+    )
+    assert rt._startup_output_timeout_seconds == 30
+
+
+def test_startup_output_timeout_execute_seed_zero_contract() -> None:
+    """The execute-seed path forwards ``0`` to disable the guard — the class
+    default must not interfere with that (``0`` → ``None`` via the parent)."""
+    rt = ZcodeCLIRuntime(
+        cli_path="/tmp/zcode.cjs",
+        permission_mode="acceptEdits",
+        startup_output_timeout_seconds=0,
+    )
+    assert rt._startup_output_timeout_seconds is None
 
 
 def test_build_command_path_executable_invoked_directly_without_node() -> None:
