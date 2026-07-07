@@ -29,8 +29,10 @@ Two entry points:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -108,19 +110,26 @@ _MAX_TEXT = 2000
 # Hard wall-clock bound on the *caller's wait* for the finalize trace
 # projection. The finalize hook awaits ``export_trace_from_state`` — up to two
 # unbounded ``event_store.query_events`` aggregate scans (cooperative awaits)
-# plus the filesystem tail, which runs off-loop in a worker thread via
-# ``asyncio.to_thread`` (see ``_write_trace_files``) — right before the
-# pipeline returns its already-computed terminal result. A slow or hung
-# EventStore / filesystem must never delay (or hang) a COMPLETE / BLOCKED /
-# FAILED return: trace generation is best-effort and cannot affect the run
-# outcome. On breach the caller stops waiting and the projection is dropped
-# like any other swallowed failure. Precisely: the deadline bounds only the
-# caller-visible wait — an abandoned worker thread may still finish its writes
-# (or stay wedged against the hung filesystem) in the background, which is the
-# standard, acceptable trade for best-effort observability. 30s is generous
-# for a healthy store yet keeps the terminal-return delay to a predictable
-# ceiling.
+# plus the filesystem tail, which runs off-loop on a dedicated **daemon**
+# thread (see ``_run_detached``) — right before the pipeline returns its
+# already-computed terminal result. A slow or hung EventStore / filesystem
+# must never delay (or hang) a COMPLETE / BLOCKED / FAILED return: trace
+# generation is best-effort and cannot affect the run outcome. On breach the
+# caller stops waiting and the projection is dropped like any other swallowed
+# failure. Precisely: the deadline bounds only the caller-visible wait — an
+# abandoned daemon thread may still finish its writes (or stay wedged against
+# the hung filesystem) in the background, possibly outliving the event loop
+# and running right up to process exit, where it is killed without being
+# joined. Torn/partial files from such a kill are harmless: the projection is
+# byte-idempotent, so any re-export deterministically overwrites them. That is
+# the standard, acceptable trade for best-effort observability. 30s is
+# generous for a healthy store yet keeps the terminal-return delay to a
+# predictable ceiling.
 TRACE_EXPORT_DEADLINE_SECONDS = 30.0
+
+# Name prefix for the detached write-phase threads — greppable in thread dumps
+# and asserted daemon in tests.
+_EXPORT_THREAD_NAME = "ooo-trace-export"
 
 
 def _clip(value: Any) -> Any:
@@ -488,6 +497,56 @@ def _resolve_out_root(state: AutoPipelineState, out_root: Path | None) -> Path:
     return base / ".ouroboros" / "traces" / state.auto_session_id
 
 
+async def _run_detached(fn: Callable[[], None]) -> None:
+    """Run blocking ``fn`` on a **daemon** thread; await its completion.
+
+    Why not ``asyncio.to_thread`` / ``ThreadPoolExecutor``: both run on
+    pool workers that are **joined at teardown** — ``asyncio.run()`` awaits
+    ``loop.shutdown_default_executor()`` and ``ThreadPoolExecutor`` workers
+    are non-daemon and joined via ``threading._register_atexit``. Either way,
+    a wedged filesystem write abandoned by our deadline would still block the
+    join, hanging the ``ooo auto`` CLI (which prints the terminal result only
+    *after* ``asyncio.run()`` returns) or process exit itself. A plain daemon
+    ``threading.Thread`` is never joined at exit, so abandonment truly
+    detaches: the caller resumes at the deadline and teardown stays unblocked.
+
+    Completion is bridged back via ``loop.call_soon_threadsafe`` resolving an
+    ``asyncio.Future``; an exception raised by ``fn`` propagates to the
+    awaiter unchanged (preserving the caller's best-effort except/log paths).
+    The bridge is guarded for late completion: if the future was already
+    abandoned (deadline / outer cancel) the result is dropped, and if the loop
+    is already closed the ``RuntimeError`` from ``call_soon_threadsafe`` is
+    swallowed — a post-teardown thread must never touch the dead loop.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[None] = loop.create_future()
+
+    def _deliver(exc: BaseException | None) -> None:
+        if future.cancelled():
+            return
+        if exc is None:
+            future.set_result(None)
+        else:
+            future.set_exception(exc)
+
+    def _worker() -> None:
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001 - relayed to the awaiter
+            outcome_exc: BaseException | None = exc
+        else:
+            outcome_exc = None
+        try:
+            loop.call_soon_threadsafe(_deliver, outcome_exc)
+        except RuntimeError:
+            # Loop already closed: the wait was abandoned and the process is
+            # tearing down. There is nobody left to deliver to.
+            pass
+
+    threading.Thread(target=_worker, name=_EXPORT_THREAD_NAME, daemon=True).start()
+    await future
+
+
 def _write_trace_files(
     out_dir: Path,
     streams: dict[str, list[dict[str, Any]]],
@@ -497,12 +556,13 @@ def _write_trace_files(
     """Synchronous filesystem tail of the export: mkdir + every write.
 
     Deliberately a plain sync function with **no** await points, executed off
-    the event loop via ``asyncio.to_thread`` by :func:`export_trace_from_state`.
+    the event loop via :func:`_run_detached` by :func:`export_trace_from_state`.
     ``mkdir`` / ``write_text`` / ``unlink`` are blocking syscalls; run on the
     loop they would stall *every* coroutine — including the ``asyncio.wait_for``
     deadline in :func:`best_effort_export_trace`, which can only interrupt
-    cooperative awaits. In a worker thread, a hung or slow filesystem blocks
-    only that thread and the deadline still releases the caller.
+    cooperative awaits. On the detached daemon thread, a hung or slow
+    filesystem blocks only that thread; the deadline still releases the caller
+    and the thread never blocks loop or interpreter teardown.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     for filename, rows in streams.items():
@@ -532,9 +592,10 @@ async def export_trace_from_state(
     Idempotent: content is derived only from persisted state and stored
     events, so re-export is byte-identical.
 
-    The filesystem phase (:func:`_write_trace_files`) runs in a worker thread
-    via ``asyncio.to_thread`` so blocking syscalls never stall the event loop;
-    only the cooperative event queries and pure data-shaping run on the loop.
+    The filesystem phase (:func:`_write_trace_files`) runs on a detached
+    daemon thread (:func:`_run_detached`) so blocking syscalls never stall the
+    event loop — nor, if abandoned, loop/interpreter teardown; only the
+    cooperative event queries and pure data-shaping run on the loop.
     """
     aggregate_ids: tuple[str, ...] = tuple(
         agg for agg in (state.auto_session_id, state.interview_session_id) if agg
@@ -568,7 +629,7 @@ async def export_trace_from_state(
         DECISIONS_FILE: decision_lines,
         FLAGS_FILE: flag_lines,
     }
-    await asyncio.to_thread(_write_trace_files, out_dir, streams, outcome, summary_md)
+    await _run_detached(lambda: _write_trace_files(out_dir, streams, outcome, summary_md))
 
     log.info(
         "auto.trace_export.written",
@@ -623,22 +684,26 @@ async def best_effort_export_trace(
     The caller's wait is additionally **time-bounded** by
     :data:`TRACE_EXPORT_DEADLINE_SECONDS` via :func:`asyncio.wait_for`. For the
     bound to hold against *blocking* work — not just cooperative awaits — the
-    filesystem tail of the export runs in a worker thread
-    (``asyncio.to_thread`` in :func:`export_trace_from_state`); ``wait_for``
+    filesystem tail of the export runs on a detached **daemon** thread
+    (:func:`_run_detached` in :func:`export_trace_from_state`); ``wait_for``
     can only interrupt code that yields to the loop. The guarantee is therefore
     exactly this: the caller resumes within the deadline. On breach the wait is
     **abandoned**, surfacing as :class:`TimeoutError` and swallowed like any
-    other projection failure — while the abandoned worker thread may still
-    complete its writes (or stay wedged against a hung filesystem) in the
-    background. That is the standard trade for best-effort observability; the
-    trace may be partial or missing, the run outcome is unaffected.
+    other projection failure — while the abandoned daemon thread may still
+    complete its writes, stay wedged against the hung filesystem, or be killed
+    unjoined at process exit (daemon threads never block ``asyncio.run()``
+    teardown or interpreter shutdown, so the CLI's terminal print and process
+    exit stay unblocked). Writes torn by such an exit are harmless: the
+    projection is byte-idempotent and any re-export deterministically
+    overwrites them. That is the standard trade for best-effort observability;
+    the trace may be partial or missing, the run outcome is unaffected.
 
     Cancellation semantics follow the driver's established
     ``wait_for`` / ``CancelledError`` idiom: ``asyncio.wait_for`` converts its
     *own* timeout into ``TimeoutError``, so any :class:`asyncio.CancelledError`
     reaching this frame is a **genuine outer cancellation** (the pipeline task
     itself being torn down) — it is re-raised, never swallowed. An in-flight
-    worker thread is likewise abandoned on outer cancel.
+    daemon thread is likewise abandoned on outer cancel.
     """
     try:
         return await asyncio.wait_for(
