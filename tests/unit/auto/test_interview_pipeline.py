@@ -2514,6 +2514,152 @@ async def test_pipeline_resumes_run_with_persisted_handle_without_restarting(tmp
     assert result.job_id == "job_existing"
 
 
+def _run_state_with_handle(tmp_path, job_id: str) -> AutoPipelineState:
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.job_id = job_id
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    return state
+
+
+def _run_starter_over_manager(manager):  # noqa: ANN001, ANN202
+    """A run starter whose ``handler._job_manager`` exposes get_snapshot.
+
+    Matches the shape ``_wait_owned_run_job_terminal`` reads on the production
+    ``HandlerRunStarter`` (``adapter.handler._job_manager.get_snapshot``). The
+    persisted-handle RUN resume path reconciles the owned job and never invokes
+    the starter, so it does not need to be callable.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(handler=SimpleNamespace(_job_manager=manager))
+
+
+@pytest.mark.asyncio
+async def test_run_resume_reconciles_owned_paused_job_to_blocked(tmp_path) -> None:
+    """Default RUN resume must not report COMPLETE when the owned job paused.
+
+    Q00/ouroboros#1590: a persisted run handle proves dispatch, not terminal
+    success. When the owned execute job finished paused, ``--resume`` must
+    reconcile the owned job and block (resumably) instead of returning a stale
+    product-complete off the handle alone.
+    """
+    from ouroboros.auto.interview_driver import FunctionInterviewBackend
+    from ouroboros.mcp.job_manager import JobManager
+    from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+    from ouroboros.persistence.event_store import EventStore
+
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    try:
+
+        async def _paused_runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="PAUSED"),),
+                is_error=False,
+                meta={"status": "paused", "success": None},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_paused_runner()
+        )
+
+        async def _unused(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("run resume should not restart interview/seed")
+
+        state = _run_state_with_handle(tmp_path, started.job_id)
+        driver = AutoInterviewDriver(
+            FunctionInterviewBackend(_unused, _unused), store=AutoStore(tmp_path)
+        )
+        pipeline = AutoPipeline(
+            driver,
+            _unused,
+            run_starter=_run_starter_over_manager(manager),
+            store=AutoStore(tmp_path),
+        )
+
+        result = await pipeline.run(state)
+
+        assert result.status != "complete"
+        assert result.status == "blocked"
+        assert "paused" in (result.blocker or "")
+        assert state.phase is AutoPhase.BLOCKED
+    finally:
+        tasks = [
+            *manager._tasks.values(),  # noqa: SLF001
+            *manager._runner_tasks.values(),  # noqa: SLF001
+            *manager._monitors.values(),  # noqa: SLF001
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
+async def test_run_resume_completes_when_owned_job_succeeded(tmp_path) -> None:
+    """Default RUN resume still completes when the owned job reached success."""
+    from ouroboros.auto.interview_driver import FunctionInterviewBackend
+    from ouroboros.mcp.job_manager import JobManager
+    from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+    from ouroboros.persistence.event_store import EventStore
+
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    try:
+
+        async def _ok_runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
+                is_error=False,
+                meta={"status": "completed", "success": True},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_ok_runner()
+        )
+
+        async def _unused(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("run resume should not restart interview/seed")
+
+        state = _run_state_with_handle(tmp_path, started.job_id)
+        driver = AutoInterviewDriver(
+            FunctionInterviewBackend(_unused, _unused), store=AutoStore(tmp_path)
+        )
+        pipeline = AutoPipeline(
+            driver,
+            _unused,
+            run_starter=_run_starter_over_manager(manager),
+            store=AutoStore(tmp_path),
+        )
+
+        result = await pipeline.run(state)
+
+        assert result.status == "complete"
+        assert state.phase is AutoPhase.COMPLETE
+    finally:
+        tasks = [
+            *manager._tasks.values(),  # noqa: SLF001
+            *manager._runner_tasks.values(),  # noqa: SLF001
+            *manager._monitors.values(),  # noqa: SLF001
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await jobs.close()
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_persists_blocker_ledger_entry(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001

@@ -18,7 +18,12 @@ from typer.testing import CliRunner
 
 from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.auto.state import AutoResumeCapability
+from ouroboros.auto.state import (
+    AutoPhase,
+    AutoPipelineState,
+    AutoResumeCapability,
+    AutoStore,
+)
 from ouroboros.cli.commands import auto as auto_command
 from ouroboros.cli.commands.auto import _await_run_handoff_terminal
 from ouroboros.cli.main import app
@@ -146,6 +151,131 @@ async def test_wait_reflects_failed_run_job_verdict(tmp_path) -> None:
     finally:
         await _cancel_manager_tasks(manager)
         await store.close()
+
+
+def _completed_handoff_state(tmp_path, job_id: str) -> AutoPipelineState:
+    """Build the durable state exactly as ``AutoPipeline.run`` leaves it after a
+    run handoff: phase COMPLETE, with the persisted run handle."""
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.job_id = job_id
+    state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
+    # CREATED -> ... -> RUN -> COMPLETE, matching the pipeline's fresh path.
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "execution started for grade A Seed")
+    return state
+
+
+@pytest.mark.asyncio
+async def test_wait_blocked_verdict_persists_resumable_durable_state(tmp_path) -> None:
+    """A non-success wait verdict must correct the DURABLE state, not just memory.
+
+    The pipeline saved COMPLETE at handoff. After the wait observes a paused
+    run, a fresh load from the store (as a later ``ouroboros auto --resume``
+    would do) must NOT see COMPLETE/product-complete but a resumable state.
+    This is the durability the in-memory-only reconciliation could not provide.
+    """
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    auto_store = AutoStore(tmp_path / "auto")
+    try:
+
+        async def _runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="Seed Execution PAUSED"),),
+                is_error=False,
+                meta={"status": "paused", "success": None},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        state = _completed_handoff_state(tmp_path, started.job_id)
+        auto_store.save(state)
+        # Durable state starts as COMPLETE (the stale, wrong verdict).
+        assert auto_store.load(state.auto_session_id).phase is AutoPhase.COMPLETE
+
+        result = AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            job_id=started.job_id,
+            run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.NONE,
+        )
+
+        reconciled = await _await_run_handoff_terminal(
+            result,
+            job_manager=manager,
+            event_store=jobs,
+            quiet=True,
+            state=state,
+            store=auto_store,
+        )
+
+        # In-memory verdict is blocked + resumable.
+        assert reconciled.status == "blocked"
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+
+        # DURABLE state, loaded fresh (new store instance) as --resume would:
+        # NOT COMPLETE, and classifies as resumable.
+        reloaded = AutoStore(tmp_path / "auto").load(state.auto_session_id)
+        assert reloaded.phase is not AutoPhase.COMPLETE
+        assert reloaded.phase is AutoPhase.RUN
+        assert reloaded.job_id == started.job_id
+        assert reloaded.resume_capability() is AutoResumeCapability.RESUME
+    finally:
+        await _cancel_manager_tasks(manager)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_success_keeps_durable_state_complete(tmp_path) -> None:
+    """Genuine success must leave the durable state COMPLETE (fast-path intact)."""
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    auto_store = AutoStore(tmp_path / "auto")
+    try:
+
+        async def _runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="2/2 ACs satisfied"),),
+                is_error=False,
+                meta={"status": "completed", "success": True},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        state = _completed_handoff_state(tmp_path, started.job_id)
+        auto_store.save(state)
+
+        result = AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            job_id=started.job_id,
+            run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.NONE,
+        )
+
+        reconciled = await _await_run_handoff_terminal(
+            result,
+            job_manager=manager,
+            event_store=jobs,
+            quiet=True,
+            state=state,
+            store=auto_store,
+        )
+
+        assert reconciled.status == "complete"
+        reloaded = AutoStore(tmp_path / "auto").load(state.auto_session_id)
+        assert reloaded.phase is AutoPhase.COMPLETE
+    finally:
+        await _cancel_manager_tasks(manager)
+        await jobs.close()
 
 
 @pytest.mark.asyncio

@@ -747,6 +747,41 @@ class AutoPipelineState:
         self.last_tool_name = tool_name
         self.transition(AutoPhase.FAILED, message, error=message)
 
+    def reopen_completed_run_handoff_to_run(self, message: str) -> bool:
+        """Reopen a prematurely-COMPLETE run handoff back to the RUN phase.
+
+        ``AutoPipeline.run`` persists ``COMPLETE`` immediately after a run
+        handoff is *dispatched* (to avoid duplicate run starts on resume), but
+        that COMPLETE is not verified product completion. When a caller later
+        observes the execute job finish paused / unsuccessfully / cancelled (for
+        example the CLI in-process wait), the durable state must be corrected so
+        a later ``--resume`` reconciles the owned run job instead of returning
+        the stale COMPLETE (the ``pipeline.run`` COMPLETE fast-path returns
+        immediately for ``AutoPhase.COMPLETE``).
+
+        ``_ALLOWED_TRANSITIONS`` has no ``COMPLETE -> *`` edge by design — auto
+        never *advances* out of COMPLETE — so this corrective re-open sets the
+        phase directly rather than via :meth:`transition`. It is a no-op (returns
+        ``False``) unless the state is currently ``COMPLETE``; the run handles
+        (``job_id`` / ``execution_id`` / ``run_session_id``) and
+        ``run_handoff_status`` are left intact so the RUN-phase resume path can
+        reconcile the owned job. ``last_tool_name`` is set to ``"run_starter"``
+        so the state classifies as RUN-recoverable (resumable).
+        """
+        if self.phase is not AutoPhase.COMPLETE:
+            return False
+        now = utc_now_iso()
+        self.phase = AutoPhase.RUN
+        self.phase_started_at = now
+        self.last_progress_at = now
+        self.updated_at = now
+        self.last_progress_message = message
+        self.last_error = None
+        self.last_error_code = None
+        self.last_tool_name = "run_starter"
+        self.last_authoring_backend = None
+        return True
+
     def is_terminal(self) -> bool:
         """Return True when the state cannot continue automatically."""
         return self.phase in TERMINAL_PHASES

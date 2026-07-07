@@ -705,6 +705,11 @@ async def _run_auto(
                 # pipeline_timeout_seconds window applies — never unbounded.
                 deadline_at=state.deadline_at,
                 fallback_timeout_seconds=float(state.pipeline_timeout_seconds),
+                # Correct the durable state (out of the pipeline's premature
+                # COMPLETE) on a non-success verdict so a later --resume
+                # reconciles the run instead of returning stale complete.
+                state=state,
+                store=store,
             )
     finally:
         release_auto_worktree(auto_workspace)
@@ -1085,6 +1090,36 @@ async def _cancel_run_and_build_deadline_result(
     return _run_wait_deadline_result(result, snapshot)
 
 
+def _persist_resumable_run_verdict(
+    result: AutoPipelineResult,
+    state: AutoPipelineState | None,
+    store: AutoStore | None,
+) -> AutoPipelineResult:
+    """Persist a non-success run verdict onto the durable auto state.
+
+    ``AutoPipeline.run`` saved the durable state as ``AutoPhase.COMPLETE`` when
+    the run handoff started. If the wait then observed the run finish paused /
+    unsuccessfully / deadline-cancelled, the in-memory ``result`` is corrected
+    but the DURABLE state is still COMPLETE — so a later plain
+    ``ouroboros auto --resume`` would hit the ``pipeline.run`` COMPLETE
+    fast-path and return the stale product-complete. Reopen the durable state
+    back to the RUN phase (and save via the same store the pipeline uses) so
+    ``--resume`` reconciles the owned run job instead. Genuine success stays
+    COMPLETE (no reopen). The in-memory ``resume_capability`` is then taken from
+    the durable state so it matches what ``--resume`` will actually do.
+    """
+    if result.status == "complete" or state is None:
+        return result
+    reopened = state.reopen_completed_run_handoff_to_run(
+        result.blocker or "run handoff started but not verified complete"
+    )
+    if not reopened:
+        return result
+    if store is not None:
+        store.save(state)
+    return replace(result, resume_capability=state.resume_capability())
+
+
 async def _await_run_handoff_terminal(
     result: AutoPipelineResult,
     *,
@@ -1093,6 +1128,8 @@ async def _await_run_handoff_terminal(
     quiet: bool,
     deadline_at: float | None = None,
     fallback_timeout_seconds: float = DEFAULT_PIPELINE_TIMEOUT_SECONDS,
+    state: AutoPipelineState | None = None,
+    store: AutoStore | None = None,
 ) -> AutoPipelineResult:
     """Wait for the started execute job to finish, streaming run progress.
 
@@ -1110,6 +1147,11 @@ async def _await_run_handoff_terminal(
     applies — the wait is never unbounded. On expiry the job is cancelled
     cleanly via the existing cancel path and a bounded blocked/timeout verdict
     is returned, mirroring the Ctrl-C semantics.
+
+    When ``state`` / ``store`` are provided, a non-success verdict also
+    corrects the DURABLE auto state (out of the pipeline's premature COMPLETE)
+    so a later ``--resume`` reconciles the run rather than returning stale
+    product-complete.
     """
     job_id = result.job_id
     if not job_id or job_manager is None or event_store is None:
@@ -1137,9 +1179,10 @@ async def _await_run_handoff_terminal(
         while not snapshot.is_terminal:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return await _cancel_run_and_build_deadline_result(
+                deadline_result = await _cancel_run_and_build_deadline_result(
                     result, job_manager, job_id, snapshot
                 )
+                return _persist_resumable_run_verdict(deadline_result, state, store)
             try:
                 wait_result = await asyncio.wait_for(
                     wait_handler.handle(
@@ -1180,7 +1223,8 @@ async def _await_run_handoff_terminal(
         receipt = await result_handler.handle({"job_id": job_id})
         if receipt.is_ok and receipt.value.text_content:
             console.print(receipt.value.text_content)
-    return _reconcile_run_handoff_result(result, snapshot)
+    reconciled = _reconcile_run_handoff_result(result, snapshot)
+    return _persist_resumable_run_verdict(reconciled, state, store)
 
 
 def _print_detached_guidance(result: AutoPipelineResult) -> None:
