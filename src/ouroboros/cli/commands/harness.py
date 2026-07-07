@@ -82,11 +82,36 @@ def _default_db_path() -> Path:
 
 
 def _auto_store(data_root: Path | None) -> AutoStore:
-    return AutoStore(root=data_root) if data_root is not None else AutoStore()
+    return AutoStore(root=data_root.expanduser()) if data_root is not None else AutoStore()
 
 
 def _trace_dir(traces_root: Path, run_id: str) -> Path:
     return traces_root / run_id
+
+
+# Run ids are auto session ids: ``auto_<uuid4().hex[:12]>`` (see
+# :class:`ouroboros.auto.state.AutoPipelineState`) and A2 keys every trace
+# directory by exactly that id. The real id is therefore ``auto_`` + 12 hex
+# chars — a strict subset of the conservative single-segment allowlist below.
+# We enforce the *allowlist* rather than the exact ``auto_<hex>`` shape so that
+# any exporter-written directory name (and the ids used in tests, e.g.
+# ``auto_ondemand``) still resolves, while a caller can never break out of
+# ``--traces-root``: the pattern admits only ``[A-Za-z0-9._-]`` — which forbids
+# every path separator (``/``, ``\``, ``os.sep``), drive/colon prefixes, and
+# whitespace — and we additionally reject any ``..`` parent reference and the
+# empty string. This runs BEFORE any filesystem lookup.
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _is_valid_run_id(run_id: str) -> bool:
+    """Return ``True`` only for a safe single-segment auto session id.
+
+    Rejects the empty string, any ``..`` parent reference, and anything outside
+    the conservative allowlist (which already excludes absolute paths and every
+    path separator). Deliberately conservative: the real id shape
+    (``auto_<hex12>``) is a strict subset of what this accepts.
+    """
+    return bool(run_id) and ".." not in run_id and _RUN_ID_RE.fullmatch(run_id) is not None
 
 
 def _is_exported(trace_dir: Path) -> bool:
@@ -249,11 +274,27 @@ def _ensure_trace(
 ) -> Path | None:
     """Resolve a run's trace dir, projecting on-demand when not yet exported.
 
-    Filesystem first: an already-exported trace is returned untouched. When
-    missing, fall back to A2's :func:`export_interview_trace`. Returns ``None``
-    when the run can be neither found on disk nor projected from state.
+    Validation first: a caller-controlled ``run_id`` is checked against the
+    conservative allowlist BEFORE any filesystem lookup, so an absolute or
+    ``../`` id can never reach :func:`_trace_dir`. Filesystem next: an
+    already-exported trace is returned untouched. When missing, fall back to
+    A2's :func:`export_interview_trace`. Returns ``None`` when the run is
+    invalid, cannot be found on disk, or cannot be projected from state — all
+    funnel into the caller's single clean "run not found" error (no info leak).
     """
+    if not _is_valid_run_id(run_id):
+        return None
     trace_dir = _trace_dir(traces_root, run_id)
+    # Defense in depth: the built dir must resolve strictly inside traces_root.
+    # (``resolve()`` collapses any symlink/relative component the allowlist did
+    # not catch.) A violation is treated exactly like an unknown run.
+    try:
+        resolved_root = traces_root.resolve()
+        resolved_dir = trace_dir.resolve()
+    except OSError:
+        return None
+    if not resolved_dir.is_relative_to(resolved_root):
+        return None
     if _is_exported(trace_dir):
         return trace_dir
     return asyncio.run(
@@ -316,9 +357,9 @@ def _resolve_roots(
     data_root: Path | None,
     db_path: Path | None,
 ) -> tuple[Path, AutoStore, Path]:
-    root = traces_root if traces_root is not None else _default_traces_root()
+    root = (traces_root if traces_root is not None else _default_traces_root()).expanduser()
     store = _auto_store(data_root)
-    db = db_path if db_path is not None else _default_db_path()
+    db = (db_path if db_path is not None else _default_db_path()).expanduser()
     return root, store, db
 
 
@@ -336,7 +377,7 @@ def list_runs(
     wall-clock at render), export status, terminal phase / grade, final
     ambiguity, and a provenance-histogram digest.
     """
-    root = traces_root if traces_root is not None else _default_traces_root()
+    root = (traces_root if traces_root is not None else _default_traces_root()).expanduser()
     store = _auto_store(data_root)
 
     exported: set[str] = set()
@@ -653,7 +694,7 @@ def frontier(
         raise typer.Exit(EXIT_UNKNOWN)
 
     extractor, ascending, _description = _FRONTIER_METRICS[metric]
-    root = traces_root if traces_root is not None else _default_traces_root()
+    root = (traces_root if traces_root is not None else _default_traces_root()).expanduser()
 
     traced: list[str] = []
     if root.is_dir():

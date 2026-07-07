@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.state import AutoPipelineState, AutoStore
@@ -414,3 +415,163 @@ def test_frontier_no_traces(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0
     assert "No traced runs found." in result.output
+
+
+# --------------------------------------------------------------------------- #
+# run_id path-traversal boundary (security regression, #1582 bot finding)     #
+# --------------------------------------------------------------------------- #
+# The bot reproduced: ``harness show <abs-path> --traces-root <root>`` served
+# an *outside* directory's summary.md (exit 0) because ``traces_root / run_id``
+# was computed before any validation — an absolute run_id ignores --traces-root
+# and a ``../`` run_id escapes it. These tests pin the fix: a caller-controlled
+# run_id must be validated (and the resolved dir confined under traces_root)
+# BEFORE any filesystem lookup, funnelling into the clean "run not found" path.
+
+# A distinctive marker planted in a fully-exported trace sitting OUTSIDE the
+# --traces-root the CLI is pointed at. If any subcommand ever serves it, the
+# boundary has been breached.
+_OUTSIDE_SUMMARY_MARKER = "Interview trace — outside"
+_OUTSIDE_QUESTION_MARKER = "OUTSIDE_SECRET_QUESTION"
+
+
+def _setup_boundary(tmp_path: Path) -> Path:
+    """Create a real traces_root plus an exported trace just outside it.
+
+    Layout::
+
+        tmp_path/traces/auto_legit/   # a valid in-root trace
+        tmp_path/outside/             # exported, but NOT under traces_root
+
+    Returns the traces_root the CLI will be pointed at.
+    """
+    traces_root = tmp_path / "traces"
+    traces_root.mkdir(parents=True)
+    _write_trace(traces_root, "auto_legit")
+    # The escape target: a complete, greppable trace outside traces_root.
+    _write_trace(tmp_path, "outside", questions=[_OUTSIDE_QUESTION_MARKER])
+    return traces_root
+
+
+def _attack_run_ids(tmp_path: Path) -> dict[str, str]:
+    """Malicious run ids that all target ``tmp_path/outside`` (or any escape)."""
+    return {
+        # Absolute path ignores --traces-root entirely (the bot's repro).
+        "absolute": str(tmp_path / "outside"),
+        # ``..`` climbs out of traces_root back to tmp_path/outside.
+        "parent_traversal": "../outside",
+        # Any path separator must be rejected outright.
+        "separator": "sub/outside",
+    }
+
+
+def _assert_no_outside_leak(output: str) -> None:
+    assert _OUTSIDE_SUMMARY_MARKER not in output
+    assert _OUTSIDE_QUESTION_MARKER not in output
+
+
+@pytest.mark.parametrize("attack", ["absolute", "parent_traversal", "separator"])
+def test_show_rejects_out_of_root_run_id(tmp_path: Path, attack: str) -> None:
+    traces_root = _setup_boundary(tmp_path)
+    run_id = _attack_run_ids(tmp_path)[attack]
+
+    result = runner.invoke(
+        app,
+        [
+            "harness",
+            "show",
+            run_id,
+            "--traces-root",
+            str(traces_root),
+            "--data-root",
+            str(tmp_path / "data"),
+            "--db-path",
+            str(tmp_path / "absent.db"),
+        ],
+    )
+
+    assert result.exit_code != 0, result.output
+    _assert_no_outside_leak(result.output)
+
+
+@pytest.mark.parametrize("attack", ["absolute", "parent_traversal", "separator"])
+def test_trace_rejects_out_of_root_run_id(tmp_path: Path, attack: str) -> None:
+    traces_root = _setup_boundary(tmp_path)
+    run_id = _attack_run_ids(tmp_path)[attack]
+
+    result = runner.invoke(
+        app,
+        [
+            "harness",
+            "trace",
+            run_id,
+            "--grep",
+            _OUTSIDE_QUESTION_MARKER,
+            "--traces-root",
+            str(traces_root),
+            "--data-root",
+            str(tmp_path / "data"),
+            "--db-path",
+            str(tmp_path / "absent.db"),
+        ],
+    )
+
+    assert result.exit_code != 0, result.output
+    _assert_no_outside_leak(result.output)
+
+
+@pytest.mark.parametrize("attack", ["absolute", "parent_traversal", "separator"])
+def test_diff_rejects_out_of_root_run_id(tmp_path: Path, attack: str) -> None:
+    traces_root = _setup_boundary(tmp_path)
+    run_id = _attack_run_ids(tmp_path)[attack]
+
+    result = runner.invoke(
+        app,
+        [
+            "harness",
+            "diff",
+            run_id,
+            "auto_legit",  # a valid in-root run for the B slot
+            "--traces-root",
+            str(traces_root),
+            "--data-root",
+            str(tmp_path / "data"),
+            "--db-path",
+            str(tmp_path / "absent.db"),
+        ],
+    )
+
+    assert result.exit_code != 0, result.output
+    _assert_no_outside_leak(result.output)
+    # It must error before rendering anything (no partial diff of the escape).
+    assert "# diff" not in result.output
+
+
+def test_show_valid_run_id_still_works(tmp_path: Path) -> None:
+    traces_root = _setup_boundary(tmp_path)
+    result = runner.invoke(
+        app,
+        ["harness", "show", "auto_legit", "--traces-root", str(traces_root)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Interview trace — auto_legit" in result.output
+
+
+def test_trace_valid_run_id_still_works(tmp_path: Path) -> None:
+    traces_root = _setup_boundary(tmp_path)
+    result = runner.invoke(
+        app,
+        ["harness", "trace", "auto_legit", "--grep", "goal", "--traces-root", str(traces_root)],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"{QUESTIONS_FILE}:" in result.output
+
+
+def test_diff_valid_run_ids_still_work(tmp_path: Path) -> None:
+    traces_root = _setup_boundary(tmp_path)
+    _write_trace(traces_root, "auto_legit2", grade="B")
+    result = runner.invoke(
+        app,
+        ["harness", "diff", "auto_legit", "auto_legit2", "--traces-root", str(traces_root)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "# diff A=auto_legit B=auto_legit2" in result.output
