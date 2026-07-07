@@ -268,8 +268,19 @@ def _runtime_messages_support_file_claim(
     claimed relative path resolves inside the active workspace, which covers
     tool outputs that report ``generated.py`` instead of ``src/generated.py``.
     """
-    relative_claim = _workspace_relative_file_claim(value, task_cwd=task_cwd)
-    if relative_claim is not None:
+    if task_cwd is not None:
+        # Workspace is KNOWN: every ``files_touched`` claim must resolve inside
+        # it. ``_workspace_relative_file_claim`` returns None for an absolute
+        # outside-workspace claim or a ``..`` traversal that escapes the cwd, and
+        # such claims are rejected here — they never fall through to command-text
+        # mutation proof (which would otherwise let ``touch /tmp/outside.py`` back
+        # an out-of-scope claim). The relative↔absolute (and macOS
+        # ``/tmp`` <-> ``/private/tmp``) form mismatch is already handled by the
+        # tiers below: ``_file_claim_matches_runtime_path`` resolves BOTH sides
+        # against the workspace, so the permissive raw tier is unnecessary here.
+        relative_claim = _workspace_relative_file_claim(value, task_cwd=task_cwd)
+        if relative_claim is None:
+            return False
         candidate = Path(relative_claim)
         base = Path(task_cwd).resolve()
         resolved = (base / candidate).resolve()
@@ -298,31 +309,31 @@ def _runtime_messages_support_file_claim(
                 for index, message in enumerate(messages)
             ):
                 return True
+        return False
 
-    # Most permissive tier: match the raw claim against a structured mutation
-    # event (Edit/Write/NotebookEdit path, or an explicit shell write) by
-    # basename-with-parent-dir suffix. This rescues the common live shape where
-    # the worker claims a workspace-relative path (``hello.py``) while the
-    # transcript records the same real file under an absolute disposable-repo
-    # path (``/private/tmp/<run>/hello.py``) and no workspace cwd was threaded to
-    # the verifier (``task_cwd`` is None). ``_file_claim_matches_runtime_path``
-    # resolves both sides, so macOS ``/tmp`` <-> ``/private/tmp`` and other
-    # symlink forms compare equal. Anti-fabrication is preserved: a real
-    # mutation event for the claimed file must exist in the transcript, so a
-    # fabricated claim with no matching event (or a near-miss filename) is still
-    # rejected.
+    # Workspace is UNKNOWN (``task_cwd`` is None — the original live case where no
+    # cwd was threaded to the verifier). Be conservative and scope to the
+    # transcript's own structured mutation events: accept only an exact
+    # basename-with-parent-dir match to an Edit/Write/NotebookEdit path, whose
+    # tool identity supplies the mutation semantics and whose recorded path
+    # confirms the same file. This rescues the relative↔absolute form mismatch
+    # (claim ``hello.py`` vs Edit ``/private/tmp/<run>/hello.py``;
+    # ``_file_claim_matches_runtime_path`` resolves both sides so ``/tmp`` <->
+    # ``/private/tmp`` compare equal) WITHOUT trusting arbitrary
+    # ``touch <abspath>`` command text — which could name a file outside any
+    # workspace and cannot be scope-checked when the workspace is unknown.
+    # ``_file_claim_matches_runtime_path`` also rejects absolute claims and ``..``
+    # traversal outright, so a fabricated or out-of-tree claim still fails.
     raw_claim = value.strip()
     if not raw_claim:
         return False
     return any(
-        _runtime_message_supports_file_reference(
-            raw_claim,
-            message,
-            messages=messages,
-            index=index,
-            task_cwd=task_cwd,
+        message.tool_name in {"Edit", "Write", "NotebookEdit"}
+        and any(
+            _file_claim_matches_runtime_path(raw_claim, path, task_cwd=None)
+            for path in _runtime_message_file_path_values(message)
         )
-        for index, message in enumerate(messages)
+        for message in messages
     )
 
 

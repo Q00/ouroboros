@@ -24,6 +24,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
@@ -1559,6 +1560,128 @@ def test_atomic_verifier_rejects_fabricated_greeting_claims_without_transcript()
     assert verdict.passed is False
     assert verdict.failure_class == "FABRICATION_SUSPECTED"
     assert "files_touched: goodbye.py" in verdict.reasons[0]
+
+
+def _file_scope_executor(task_cwd: str | None) -> ParallelACExecutor:
+    return ParallelACExecutor(
+        adapter=MagicMock(working_directory=task_cwd),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd=task_cwd,
+    )
+
+
+def test_files_touched_rejects_absolute_outside_workspace_claim_with_touch(tmp_path) -> None:
+    """Scope guard: an outside-workspace absolute claim cannot be backed by ``touch``.
+
+    The bot's repro: ``task_cwd`` is a subdir, ``files_touched`` names a sibling
+    file outside it, and a ``touch <outside>`` command + exit 0 must NOT satisfy
+    the claim. ``files_touched`` is contractually workspace-scoped.
+    """
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "hello.py").write_text("x = 1\n")
+    outside = tmp_path / "outside.py"
+    executor = _file_scope_executor(str(workspace))
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="touch outside",
+                tool_name="Bash",
+                data={"tool_input": {"command": f"touch {outside}"}, "exit_code": 0},
+            ),
+            AgentMessage(
+                type="tool",
+                content="pytest",
+                tool_name="Bash",
+                data={"tool_input": {"command": "pytest"}, "exit_code": 0, "output": "1 passed"},
+            ),
+            AgentMessage(type="result", content="done", data={}),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": [str(outside)],
+                "commands_run": [f"touch {outside}", "pytest"],
+                "tests_passed": ["pytest"],
+            }
+        ),
+        ac_content="Implement the module.",
+    )
+
+    assert verdict.passed is False
+    assert "files_touched: " in verdict.reasons[0]
+
+
+def test_files_touched_rejects_parent_traversal_claim_escaping_cwd(tmp_path) -> None:
+    """Scope guard: a ``../`` claim escaping the workspace is rejected."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    executor = _file_scope_executor(str(workspace))
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="touch escape",
+                tool_name="Bash",
+                data={"tool_input": {"command": "touch ../outside.py"}, "exit_code": 0},
+            ),
+            AgentMessage(type="result", content="done", data={}),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["../outside.py"],
+                "commands_run": ["touch ../outside.py"],
+                "tests_passed": ["pytest"],
+            }
+        ),
+        ac_content="Implement the module.",
+    )
+
+    assert verdict.passed is False
+    assert "files_touched: ../outside.py" in verdict.reasons[0]
+
+
+def test_files_touched_accepts_in_workspace_relative_vs_absolute_edit(tmp_path) -> None:
+    """In-workspace relative claim matches an absolute Edit path (form mismatch)."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "hello.py").write_text("def greet(name):\n    return f'Hello, {name}!'\n")
+    edit = AgentMessage(
+        type="tool",
+        content="edit",
+        tool_name="Edit",
+        data={"tool_input": {"file_path": str(workspace / "hello.py")}},
+    )
+
+    assert _runtime_messages_support_file_claim("hello.py", (edit,), task_cwd=str(workspace))
+
+
+def test_files_touched_task_cwd_none_rejects_touch_command_text() -> None:
+    """Workspace unknown: only structured Edit/Write proves files, not ``touch`` text."""
+    touch = AgentMessage(
+        type="tool",
+        content="touch outside",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch /tmp/evil/outside.py"}, "exit_code": 0},
+    )
+    # Command-text mutation is not trusted when the workspace is unknown.
+    assert not _runtime_messages_support_file_claim("outside.py", (touch,), task_cwd=None)
+    # But a structured Edit/Write event under an unknown-cwd absolute path IS
+    # matched by basename+parent suffix (the original live-fix shape).
+    edit = AgentMessage(
+        type="tool",
+        content="edit",
+        tool_name="Edit",
+        data={"tool_input": {"file_path": "/private/tmp/ooo-run/hello.py"}},
+    )
+    assert _runtime_messages_support_file_claim("hello.py", (edit,), task_cwd=None)
+    assert not _runtime_messages_support_file_claim("goodbye.py", (edit,), task_cwd=None)
 
 
 def test_atomic_verifier_accepts_prose_tests_passed_backed_by_declared_verify_command() -> None:
