@@ -140,6 +140,112 @@ async def test_wait_reflects_failed_run_job_verdict(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wait_paused_run_is_not_complete_and_stays_resumable(tmp_path) -> None:
+    """JobStatus.COMPLETED + result_meta status 'paused' must NOT read as success.
+
+    ``ExecuteSeedHandler`` maps ``SessionStatus.PAUSED`` (e.g. usage-limit
+    pause) to a job result of ``status="paused", success=None`` while the JOB
+    itself completes. The complete-product resume gate blocks paused runs; the
+    CLI wait path must preserve that contract: paused surfaces as blocked with
+    the run handle and resume capability preserved — never complete.
+    """
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+
+        async def _runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="Seed Execution PAUSED"),),
+                is_error=False,
+                meta={"status": "paused", "success": None},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        result = _handoff_only_result(started.job_id)
+
+        reconciled = await _await_run_handoff_terminal(
+            result,
+            job_manager=manager,
+            event_store=store,
+            quiet=True,
+        )
+
+        # The JOB reached COMPLETED, but the EXECUTION paused.
+        snapshot = await manager.get_snapshot(started.job_id)
+        assert snapshot.status is JobStatus.COMPLETED
+        assert snapshot.result_meta.get("status") == "paused"
+
+        # NOT successful completion.
+        assert reconciled.status == "blocked"
+        assert reconciled.blocker is not None and "paused" in reconciled.blocker
+        # Resume capability and the run handle are preserved.
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+        assert reconciled.job_id == started.job_id
+        assert reconciled.execution_id == "exec_wait"
+        assert reconciled.run_session_id == "orch_wait"
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_completed_job_without_success_meta_is_not_complete(tmp_path) -> None:
+    """Allowlist parity: unknown terminal meta must not pass as run success."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+
+        async def _runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="weird terminal"),),
+                is_error=False,
+                meta={"status": "unknown"},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        result = _handoff_only_result(started.job_id)
+
+        reconciled = await _await_run_handoff_terminal(
+            result,
+            job_manager=manager,
+            event_store=store,
+            quiet=True,
+        )
+
+        assert reconciled.status == "blocked"
+        assert reconciled.blocker is not None
+        assert "without confirming terminal run success" in reconciled.blocker
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+def test_paused_run_exit_code_reflects_non_complete() -> None:
+    """CLI exit code is non-zero when the waited run reconciles to paused/blocked."""
+    from dataclasses import replace as dc_replace
+
+    async def fake_run_auto(**_kwargs: object) -> AutoPipelineResult:
+        return dc_replace(
+            _handoff_only_result("job_paused"),
+            status="blocked",
+            blocker="run execution paused before completion; resume the paused run",
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(auto_command, "_run_auto", fake_run_auto)
+        result = runner.invoke(app, ["auto", "safe paused goal"])
+
+    assert result.exit_code == 1
+    output = _plain(result.output)
+    assert "paused" in output
+
+
+@pytest.mark.asyncio
 async def test_wait_is_noop_when_job_not_owned(tmp_path) -> None:
     """An unknown/plugin-dispatch job handle leaves the result untouched."""
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")

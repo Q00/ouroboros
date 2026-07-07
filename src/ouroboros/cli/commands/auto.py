@@ -900,22 +900,80 @@ async def _cancel_run_handoff_job(job_manager: JobManager, job_id: str) -> None:
         await cancel_job(job_id)
 
 
+_FAILED_RUN_META_STATUSES = frozenset({"failed", "cancelled", "interrupted"})
+
+
+def _run_meta_verdict(snapshot: JobSnapshot) -> tuple[str, bool | None]:
+    """Extract the execution-level (status, success) verdict from a job snapshot.
+
+    ``ExecuteSeedHandler`` maps the reconstructed session status into the tool
+    result meta (``_classify_synchronous_execution_status``): a PAUSED
+    execution — e.g. a usage-limit pause — completes the JOB with
+    ``result_meta={"status": "paused", "success": None}``. The job lifecycle
+    status alone is therefore not a run verdict. Mirrors the meta fallback of
+    ``auto/adapters._wait_for_job_terminal`` (``status`` defaults to the job's
+    own terminal status when the inner result did not provide one).
+    """
+    meta = snapshot.result_meta or {}
+    raw_status = meta.get("status")
+    status = (
+        raw_status.strip().lower()
+        if isinstance(raw_status, str) and raw_status.strip()
+        else snapshot.status.value
+    )
+    raw_success = meta.get("success")
+    success = raw_success if isinstance(raw_success, bool) else None
+    return status, success
+
+
 def _reconcile_run_handoff_result(
     result: AutoPipelineResult, snapshot: JobSnapshot
 ) -> AutoPipelineResult:
     """Project a terminal execute-job snapshot back onto the auto result.
 
-    Mirrors ``mcp/tools/auto_handler._reconcile_execution_job_snapshot`` so the
-    CLI wait path and the MCP resume path report the same verdict, but reuses
-    the live job manager's snapshot instead of re-opening the event store.
+    Mirrors ``mcp/tools/auto_handler._reconcile_execution_job_snapshot`` for
+    the job lifecycle, and the complete-product resume gate in
+    ``auto/pipeline.py`` (persisted-handle branch) for the execution-level
+    verdict carried in ``result_meta``: a COMPLETED job is only a successful
+    run when its meta confirms terminal success; ``status == "paused"`` keeps
+    the session resumable and never reports complete.
     """
     status = result.status
     blocker = result.blocker
     resume_capability = result.resume_capability
     if snapshot.status is JobStatus.COMPLETED:
-        status = "complete"
-        blocker = None
-        resume_capability = AutoResumeCapability.NONE
+        run_status, run_success = _run_meta_verdict(snapshot)
+        if run_status == "paused":
+            # The JOB completed but the EXECUTION paused (usage-limit etc.).
+            # Same contract as the pipeline's resume gate: block with resume
+            # guidance and keep the persisted run handle resumable.
+            status = "blocked"
+            blocker = (
+                "run execution paused before completion; resume the paused "
+                f"run before continuing (auto session {result.auto_session_id}, "
+                f"job {snapshot.job_id})"
+            )
+        elif run_success is False or run_status in _FAILED_RUN_META_STATUSES:
+            detail = snapshot.error or snapshot.result_text or snapshot.message
+            blocker = f"run execution finished unsuccessfully: {run_status}" + (
+                f" — {detail}" if detail else ""
+            )
+            status = "failed"
+            resume_capability = AutoResumeCapability.NONE
+        elif run_success is not True and run_status != "completed":
+            # Allowlist gate (pipeline parity): terminal job metadata without
+            # an explicit success signal is NOT evidence of run success.
+            status = "blocked"
+            blocker = (
+                "execution job completed without confirming terminal run "
+                f"success (status={run_status!r}, success={run_success!r}); "
+                "inspect the run before treating the product as complete "
+                f"(job {snapshot.job_id})"
+            )
+        else:
+            status = "complete"
+            blocker = None
+            resume_capability = AutoResumeCapability.NONE
     elif snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
         detail = snapshot.error or snapshot.result_text or snapshot.message
         blocker = (
