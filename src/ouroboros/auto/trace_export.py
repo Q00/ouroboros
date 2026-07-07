@@ -28,6 +28,7 @@ Two entry points:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -103,6 +104,17 @@ _FLAG_MARKERS: tuple[str, ...] = (
 # trace file. The ledger already truncates its own text; this bounds anything
 # passed straight through from event payloads.
 _MAX_TEXT = 2000
+
+# Hard wall-clock bound for the *finalize* trace projection. The finalize hook
+# awaits ``export_trace_from_state`` — which fans out to up to two unbounded
+# ``event_store.query_events`` aggregate scans plus filesystem writes — right
+# before the pipeline returns its already-computed terminal result. A slow or
+# hung EventStore / filesystem must never delay (or hang) a COMPLETE / BLOCKED
+# / FAILED return: trace generation is best-effort and cannot affect the run
+# outcome. This deadline caps the worst case; on breach the projection is
+# dropped like any other swallowed failure. 30s is generous for a healthy
+# store yet bounds the terminal-return delay to a predictable ceiling.
+TRACE_EXPORT_DEADLINE_SECONDS = 30.0
 
 
 def _clip(value: Any) -> Any:
@@ -580,14 +592,41 @@ async def best_effort_export_trace(
 
     Any failure — event-store query, filesystem, serialization — is logged and
     swallowed so trace generation cannot affect the auto pipeline's outcome.
+
+    The projection is additionally **time-bounded** by
+    :data:`TRACE_EXPORT_DEADLINE_SECONDS` via :func:`asyncio.wait_for`, so a
+    slow or hung EventStore / filesystem can drop the trace but never delay the
+    caller's terminal return past the deadline. A deadline breach surfaces as
+    :class:`TimeoutError` and is swallowed like any other projection failure.
+
+    Cancellation semantics follow the driver's established
+    ``wait_for`` / ``CancelledError`` idiom: ``asyncio.wait_for`` converts its
+    *own* timeout into ``TimeoutError``, so any :class:`asyncio.CancelledError`
+    reaching this frame is a **genuine outer cancellation** (the pipeline task
+    itself being torn down) — it is re-raised, never swallowed.
     """
     try:
-        return await export_trace_from_state(
-            state,
-            ledger,
-            event_store=event_store,
-            out_root=out_root,
+        return await asyncio.wait_for(
+            export_trace_from_state(
+                state,
+                ledger,
+                event_store=event_store,
+                out_root=out_root,
+            ),
+            timeout=TRACE_EXPORT_DEADLINE_SECONDS,
         )
+    except TimeoutError:
+        # Our own deadline fired: the export overran the best-effort budget.
+        log.warning(
+            "auto.trace_export.deadline_exceeded",
+            auto_session_id=getattr(state, "auto_session_id", None),
+            deadline_seconds=TRACE_EXPORT_DEADLINE_SECONDS,
+        )
+        return None
+    except asyncio.CancelledError:
+        # Genuine outer cancellation — the pipeline task is being cancelled.
+        # Never swallow: propagate so cancellation semantics are preserved.
+        raise
     except Exception as exc:  # noqa: BLE001 - best-effort by contract
         log.warning(
             "auto.trace_export.failed",

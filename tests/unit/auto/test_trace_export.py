@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import time
 import types
 
 import pytest
 
+from ouroboros.auto import trace_export
 from ouroboros.auto.ledger import (
     DecisionProvenance,
     LedgerEntry,
@@ -316,6 +319,97 @@ async def test_best_effort_swallows_failure(tmp_path: Path) -> None:
 
     result = await best_effort_export_trace(state, ledger, event_store=None)
     assert result is None  # swallowed, no raise
+
+
+class _HangingEventStore:
+    """EventStore stand-in whose ``query_events`` never returns.
+
+    Models a slow / hung store or a blocked filesystem behind the projection:
+    once the export enters the query it stays there until the awaiting frame is
+    cancelled (by the finalize deadline or by an outer cancel).
+    """
+
+    def __init__(self) -> None:
+        # Set the instant we enter the query so a test can deterministically
+        # cancel *after* the export is genuinely blocked inside the store.
+        self.entered = asyncio.Event()
+
+    async def query_events(
+        self,
+        aggregate_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[BaseEvent]:
+        self.entered.set()
+        await asyncio.Event().wait()  # never resolves
+        return []  # pragma: no cover - unreachable
+
+
+@pytest.mark.asyncio
+async def test_best_effort_bounded_by_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hung store must not pin the finalize hook: the export is dropped once
+    # the (monkeypatched-small) deadline fires, and None is returned promptly.
+    monkeypatch.setattr(trace_export, "TRACE_EXPORT_DEADLINE_SECONDS", 0.05)
+    state = _terminal_state(tmp_path)
+    ledger = _populated_ledger()
+    store = _HangingEventStore()
+
+    start = time.monotonic()
+    result = await best_effort_export_trace(state, ledger, event_store=store)
+    elapsed = time.monotonic() - start
+
+    assert result is None  # deadline breach swallowed like any failure
+    assert elapsed < 2.0  # bounded well under the hung store's forever-await
+    # Projection aborted mid-query, so no trace files were materialized.
+    out_dir = tmp_path / ".ouroboros" / "traces" / state.auto_session_id
+    assert not (out_dir / "outcome.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_finalize_survives_hung_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pipeline's already-computed terminal result must still return even if
+    # the finalize trace export hangs on a wedged store.
+    monkeypatch.setattr(trace_export, "TRACE_EXPORT_DEADLINE_SECONDS", 0.05)
+    state = _terminal_state(tmp_path)
+    state.ledger = _populated_ledger().to_dict()
+    store = _HangingEventStore()
+    driver = types.SimpleNamespace(event_store=store, progress_callback=None)
+    pipeline = AutoPipeline(
+        interview_driver=driver,  # type: ignore[arg-type]
+        seed_generator=lambda _sid: None,  # type: ignore[arg-type]
+    )
+
+    # An unbounded finalize would hang here forever; the 5s guard proves the
+    # deadline (not the guard) is what releases the terminal return.
+    result = await asyncio.wait_for(pipeline.run(state), timeout=5.0)
+
+    assert result.status == "complete"
+    out_dir = tmp_path / ".ouroboros" / "traces" / state.auto_session_id
+    assert not (out_dir / "outcome.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_outer_cancellation_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine *outer* cancel (pipeline task torn down) must surface as
+    # CancelledError — never swallowed by the best-effort guard. Keep the
+    # deadline long so the timeout path cannot fire before we cancel.
+    monkeypatch.setattr(trace_export, "TRACE_EXPORT_DEADLINE_SECONDS", 30.0)
+    state = _terminal_state(tmp_path)
+    ledger = _populated_ledger()
+    store = _HangingEventStore()
+
+    task = asyncio.ensure_future(best_effort_export_trace(state, ledger, event_store=store))
+    await store.entered.wait()  # cancel only once genuinely blocked in-query
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
