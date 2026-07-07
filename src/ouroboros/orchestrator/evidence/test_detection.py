@@ -13,6 +13,7 @@ from ouroboros.orchestrator.evidence.claims import (
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.shell_parsing import (
+    _commands_are_equivalent,
     _has_trailing_output_filter_pipeline,
     _looks_like_test_command,
     _looks_like_unittest_command,
@@ -334,11 +335,17 @@ def _runtime_messages_support_test_claim(
     # which arbitrary inline command "counts" (a losing game — ``python3 -c
     # "assert True"`` passes a keyword check while testing nothing), bind
     # acceptance to the AC's own declared contract: accept a ``tests_passed``
-    # claim only when a transcript command MATCHES the declared ``verify_command``
-    # (reusing the wrapper-unwrap + normalization command matcher) AND that run
-    # shows a runtime success signal. The declared command is the oracle, so
-    # ``python3 -c "assert True"`` cannot satisfy an AC whose contract is
+    # claim only when a transcript command IS the declared ``verify_command`` AND
+    # that run shows a runtime success signal. The declared command is the oracle,
+    # so ``python3 -c "assert True"`` cannot satisfy an AC whose contract is
     # ``python3 -c "from hello import greet; assert greet('x')=='Hello, x'; ..."``.
+    #
+    # The oracle match uses ``_commands_are_equivalent`` — normalized EQUALITY
+    # (wrapper-unwrapped, quote/whitespace-insensitive), NOT the loose
+    # prefix/startswith fallback in ``_runtime_message_supports_command_claim``.
+    # Prefix matching would let ``pytest`` be "satisfied" by ``pytest
+    # --collect-only`` / ``--help`` / ``-k nope`` (all exit 0, run no tests), so a
+    # mode-changing flag makes it a DIFFERENT command that is rejected.
     #
     # Legacy ACs that declare NO ``verify_command`` never reach this branch: they
     # keep the pre-existing strict behavior (formal runners only), so no arbitrary
@@ -347,7 +354,10 @@ def _runtime_messages_support_test_claim(
         for index, message in enumerate(messages):
             if message.tool_name != "Bash":
                 continue
-            if not _runtime_message_supports_command_claim(verify_command, message):
+            if not any(
+                _commands_are_equivalent(verify_command, runtime_command)
+                for runtime_command in _runtime_message_command_values(message)
+            ):
                 continue
             chunk = [message]
             for following in messages[index + 1 :]:

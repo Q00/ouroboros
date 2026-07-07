@@ -2107,6 +2107,77 @@ def test_atomic_verifier_accepts_declared_verify_command_with_tool_result_succes
     assert verdict.passed is True, verdict.reasons
 
 
+def _pytest_oracle_verdict(runtime_command: str):
+    """Run the verifier for a declared ``pytest`` oracle against one transcript command."""
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+    return executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="Edit src/mod.py",
+                tool_name="Edit",
+                data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/src/mod.py"}},
+            ),
+            AgentMessage(
+                type="assistant",
+                content="run",
+                tool_name="Bash",
+                data={"tool_input": {"command": runtime_command}, "exit_code": 0},
+            ),
+            AgentMessage(type="result", content="done", data={}),
+        ),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["src/mod.py"],
+                "commands_run": [runtime_command],
+                "tests_passed": ["the pytest suite passed"],
+            }
+        ),
+        ac_content="Implement src/mod.py and run the pytest suite.",
+        verify_command="pytest",
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime_command",
+    (
+        "pytest --collect-only",
+        "pytest --help",
+        "pytest -k nope",
+        "pytest --fixtures",
+        "pytest -n 4 --collect-only",
+    ),
+)
+def test_atomic_verifier_rejects_pytest_oracle_prefix_or_mode_variants(
+    runtime_command: str,
+) -> None:
+    """Declared ``pytest`` is NOT satisfied by a prefix / mode-changing variant.
+
+    Prefix matching would let a command that runs no tests (``--collect-only``,
+    ``--help``, ``-k nope``, ``--fixtures``) satisfy the declared oracle. The
+    oracle requires the SAME command, so each of these is rejected even though it
+    exits 0.
+    """
+    verdict = _pytest_oracle_verdict(runtime_command)
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "tests_passed:" in verdict.reasons[0]
+
+
+def test_atomic_verifier_accepts_pytest_oracle_exact_and_wrapped() -> None:
+    """Declared ``pytest`` IS satisfied by an exact (or shell-wrapped) ``pytest`` run."""
+    assert _pytest_oracle_verdict("pytest").passed is True
+    assert _pytest_oracle_verdict("/bin/zsh -lc 'pytest'").passed is True
+
+
 @pytest.mark.parametrize(
     ("runtime_command", "claimed_command"),
     (

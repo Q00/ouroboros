@@ -17,6 +17,47 @@ def _looks_like_test_command(command: str) -> bool:
     return _test_command_invocation(command) is not None
 
 
+def _command_equality_forms(command: str) -> frozenset[str]:
+    """Return normalized forms of a command for EXACT (non-prefix) equality.
+
+    Used only by the declared-``verify_command`` oracle match, which must accept
+    the SAME command — not a prefix or a different mode. Each form collapses
+    whitespace and lowercases; a shell wrapper (``zsh/bash/sh -lc/-c``) is
+    unwrapped so the inner command compares equal, and an argv-normalized spelling
+    is added so quote-only differences (``--tests "X"`` vs ``--tests X``) still
+    compare equal. Deliberately no prefix/plumbing tolerance: ``pytest`` and
+    ``pytest --collect-only`` produce disjoint form sets.
+    """
+    forms: set[str] = set()
+
+    def add(text: str | None) -> None:
+        if not text:
+            return
+        normalized = _normalized_evidence_text(text)
+        if normalized:
+            forms.add(normalized)
+        argv = _normalized_shell_words_text(text)
+        if argv:
+            forms.add(argv)
+
+    add(command)
+    add(_shell_command_body(command))
+    # Inner command after only safe setup preambles (``cd x && <cmd>``); already
+    # normalized. Keeps equality robust to a benign ``cd``/env preamble without
+    # widening to prefixes or mode-changing flags.
+    inner = _single_command_after_safe_shell_preamble(command)
+    if inner:
+        forms.add(inner)
+    return frozenset(forms)
+
+
+def _commands_are_equivalent(declared: str, runtime_command: str) -> bool:
+    """Return True when a runtime command IS the declared command (not a prefix)."""
+    declared_forms = _command_equality_forms(declared)
+    runtime_forms = _command_equality_forms(runtime_command)
+    return bool(declared_forms and runtime_forms and (declared_forms & runtime_forms))
+
+
 def _test_command_invocation(command: str) -> str | None:
     """Return the backed inner test invocation for a direct or wrapped command.
 
