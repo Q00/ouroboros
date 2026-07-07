@@ -160,6 +160,31 @@ def _is_tool_result_message(message: AgentMessage) -> bool:
     return message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
 
 
+def _message_has_runtime_success_signal(message: AgentMessage) -> bool:
+    """Return True when a message carries RUNTIME-PRODUCED success evidence.
+
+    Unlike ``_message_contains_test_success`` this never trusts free-text
+    ``AgentMessage.content`` from an assistant turn — a worker saying "the tests
+    passed" after invoking a command is self-reported evidence, exactly what
+    fat-harness exists to reject. Success must come from the runtime: a
+    structured non-error ``exit_code == 0`` / ``status`` / ``subtype`` signal, or
+    test-success text found only in runtime output fields (``_runtime_message_
+    test_proof_text`` includes ``content`` solely for tool-result messages the
+    runtime emits, never for assistant narration).
+    """
+    if message.is_error:
+        return False
+    exit_code = message.data.get("exit_code")
+    if type(exit_code) is int:
+        return exit_code == 0
+    if message.data.get("subtype") == "success":
+        return True
+    status = message.data.get("status")
+    if isinstance(status, str) and status.strip().lower() in {"completed", "success", "succeeded"}:
+        return True
+    return _text_contains_test_success(_runtime_message_test_proof_text(message))
+
+
 def _test_claim_file_part(value: str) -> str | None:
     """Return the file path portion of a pytest node-id style claim."""
     stripped = value.strip()
@@ -301,7 +326,12 @@ def _runtime_messages_support_test_claim(
                 if following.tool_name and not _is_tool_result_message(following):
                     break
                 chunk.append(following)
-            if any(_message_contains_test_success(item) for item in chunk):
+            # Success MUST come from runtime-produced evidence (the Bash message's
+            # own structured exit_code/status or a tool-result message), never
+            # from assistant narration in ``AgentMessage.content`` — otherwise a
+            # worker could run the declared command and let prose ("the tests
+            # passed") self-report the result.
+            if any(_message_has_runtime_success_signal(item) for item in chunk):
                 return True
 
     for index, message in enumerate(messages):

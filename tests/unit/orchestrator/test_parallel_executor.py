@@ -1881,6 +1881,123 @@ def test_atomic_verifier_rejects_inline_command_for_legacy_ac_without_verify_com
     assert "tests_passed:" in verdict.reasons[0]
 
 
+_GREETING_WRAPPED_VERIFY = (
+    '/bin/zsh -lc "python3 -c \\"from hello import greet; '
+    "assert greet('World') == 'Hello, World!'; print('OK')\\\"\""
+)
+
+
+def test_atomic_verifier_accepts_declared_verify_command_with_structured_exit_code() -> None:
+    """The declared verify_command run + a structured runtime exit_code 0 → accept.
+
+    Success comes from the Bash message's own ``exit_code == 0`` (runtime signal),
+    not from any assistant narration.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+        ),
+        AgentMessage(
+            type="assistant",
+            content="run verification",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": _GREETING_WRAPPED_VERIFY},
+                "exit_code": 0,
+                "status": "completed",
+            },
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": ["greet('World') returned 'Hello, World!'"],
+            }
+        ),
+        ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
+    )
+
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_atomic_verifier_rejects_declared_verify_command_success_only_via_narration() -> None:
+    """Assistant narration cannot satisfy the declared-command success signal.
+
+    The bot's repro: the declared ``verify_command`` matches a Bash event, but the
+    Bash message carries NO ``exit_code`` / no tool result — the only "passed"
+    signal is a following assistant ``content`` message. Self-reported prose must
+    not prove the run succeeded, so ``tests_passed`` is rejected.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+        ),
+        AgentMessage(
+            type="assistant",
+            content="run verification",
+            tool_name="Bash",
+            # No exit_code, no status — no runtime success signal on the command.
+            data={"tool_input": {"command": _GREETING_WRAPPED_VERIFY}},
+        ),
+        AgentMessage(
+            type="assistant",
+            content="Great — the verification command passed and printed OK.",
+            tool_name=None,
+            data={},
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": ["greet('World') returned 'Hello, World!'"],
+            }
+        ),
+        ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "tests_passed:" in verdict.reasons[0]
+
+
 @pytest.mark.parametrize(
     ("runtime_command", "claimed_command"),
     (
