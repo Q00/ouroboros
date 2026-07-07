@@ -782,6 +782,41 @@ class AutoPipelineState:
         self.last_authoring_backend = None
         return True
 
+    def close_completed_run_handoff_as_failed(self, message: str) -> bool:
+        """Correct a prematurely-COMPLETE run handoff into a FAILED terminal.
+
+        Companion to :meth:`reopen_completed_run_handoff_to_run` for the
+        *genuine failure* case (the owned execute job reached a FAILED terminal
+        or reported ``success is False``). Unlike a paused / cancelled /
+        deadline outcome — which is resumable and re-opens to ``RUN`` — a
+        genuine failure must preserve a non-resumable failed terminal contract:
+        ``--resume`` must NOT retry it and must NOT report the run as complete.
+
+        Sets the phase directly to ``FAILED`` (``COMPLETE`` has no forward
+        transition edge, matching :meth:`reopen_completed_run_handoff_to_run`)
+        and sets ``last_tool_name = None`` so :meth:`resume_capability`
+        classifies the state as :attr:`AutoResumeCapability.NONE`
+        (``_recoverable_phase_for_tool(None)`` is ``None``). The run handles are
+        left intact for diagnostics. No-op (returns ``False``) unless the state
+        is currently ``COMPLETE``.
+        """
+        if self.phase is not AutoPhase.COMPLETE:
+            return False
+        now = utc_now_iso()
+        self.phase = AutoPhase.FAILED
+        self.phase_started_at = now
+        self.last_progress_at = now
+        self.updated_at = now
+        self.last_progress_message = message
+        self.last_error = message
+        self.last_error_code = None
+        # Intentionally not "run_starter": a genuine run failure is a terminal
+        # dead end, not a RUN-recoverable blocker, so resume_capability() must
+        # resolve to NONE rather than routing back into the RUN phase.
+        self.last_tool_name = None
+        self.last_authoring_backend = None
+        return True
+
     def is_terminal(self) -> bool:
         """Return True when the state cannot continue automatically."""
         return self.phase in TERMINAL_PHASES

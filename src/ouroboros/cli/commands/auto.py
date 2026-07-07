@@ -1098,26 +1098,50 @@ def _persist_resumable_run_verdict(
     """Persist a non-success run verdict onto the durable auto state.
 
     ``AutoPipeline.run`` saved the durable state as ``AutoPhase.COMPLETE`` when
-    the run handoff started. If the wait then observed the run finish paused /
-    unsuccessfully / deadline-cancelled, the in-memory ``result`` is corrected
-    but the DURABLE state is still COMPLETE — so a later plain
-    ``ouroboros auto --resume`` would hit the ``pipeline.run`` COMPLETE
-    fast-path and return the stale product-complete. Reopen the durable state
-    back to the RUN phase (and save via the same store the pipeline uses) so
-    ``--resume`` reconciles the owned run job instead. Genuine success stays
-    COMPLETE (no reopen). The in-memory ``resume_capability`` is then taken from
-    the durable state so it matches what ``--resume`` will actually do.
+    the run handoff started. If the wait then observed the run finish in a
+    non-success terminal, the in-memory ``result`` is corrected but the DURABLE
+    state is still COMPLETE — so a later plain ``ouroboros auto --resume`` would
+    hit the ``pipeline.run`` COMPLETE fast-path and return the stale
+    product-complete. Correct the durable state so the two disagree no more,
+    distinguishing the two kinds of non-success outcome:
+
+    * ``status == "blocked"`` — a *resumable* outcome (paused execution,
+      deadline-cancelled, interrupt-cancelled, cancelled/interrupted job, or an
+      unknown-success handle). Reopen the durable state to ``RUN`` so
+      ``--resume`` reconciles the owned job, and take the in-memory
+      ``resume_capability`` from the durable state (RESUME).
+    * ``status == "failed"`` — a *genuine* run failure (job ``FAILED`` /
+      ``success is False``). Preserve the failed terminal contract: persist a
+      durable ``FAILED`` phase (NOT reopened to RUN), and keep the reconciled
+      capability (``NONE``) — ``--resume`` must not retry an already-failed run.
+
+    Genuine success (``status == "complete"``) leaves the durable state
+    COMPLETE and is returned unchanged (fast-path intact).
     """
-    if result.status == "complete" or state is None:
+    if state is None:
         return result
-    reopened = state.reopen_completed_run_handoff_to_run(
-        result.blocker or "run handoff started but not verified complete"
-    )
-    if not reopened:
+    if result.status == "blocked":
+        reopened = state.reopen_completed_run_handoff_to_run(
+            result.blocker or "run handoff started but not verified complete"
+        )
+        if not reopened:
+            return result
+        if store is not None:
+            store.save(state)
+        return replace(result, resume_capability=state.resume_capability())
+    if result.status == "failed":
+        # Genuine failure: persist a durable FAILED terminal so --resume/--status
+        # never report success, but do NOT reopen to RUN and do NOT advertise
+        # resume — the reconciled NONE capability is authoritative for failures.
+        if (
+            state.close_completed_run_handoff_as_failed(
+                result.blocker or "run execution finished unsuccessfully"
+            )
+            and store is not None
+        ):
+            store.save(state)
         return result
-    if store is not None:
-        store.save(state)
-    return replace(result, resume_capability=state.resume_capability())
+    return result
 
 
 async def _await_run_handoff_terminal(

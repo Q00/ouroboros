@@ -153,6 +153,66 @@ async def test_wait_reflects_failed_run_job_verdict(tmp_path) -> None:
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_wait_failed_run_preserves_failed_terminal_durably(tmp_path) -> None:
+    """A GENUINE failure must NOT be reopened to RUN / advertised as resumable.
+
+    Production-shaped: passes ``state`` AND ``store`` (unlike the in-memory-only
+    failed test above) so the durable-persistence path actually runs. A failed
+    execute job must (a) stay non-resumable (NONE), (b) NOT be reopened to RUN
+    in the durable store — it persists a FAILED terminal, and (c) a later
+    ``--resume`` preserves failed (never a retryable RUN), unlike the
+    paused/deadline/interrupt outcomes which SHOULD reopen to RUN.
+    """
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    auto_store = AutoStore(tmp_path / "auto")
+    try:
+
+        async def _runner() -> MCPToolResult:
+            raise RuntimeError("boom in executor")
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        state = _completed_handoff_state(tmp_path, started.job_id)
+        auto_store.save(state)
+        assert auto_store.load(state.auto_session_id).phase is AutoPhase.COMPLETE
+
+        result = AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            job_id=started.job_id,
+            run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.NONE,
+        )
+
+        reconciled = await _await_run_handoff_terminal(
+            result,
+            job_manager=manager,
+            event_store=jobs,
+            quiet=True,
+            state=state,
+            store=auto_store,
+        )
+
+        # (a) In-memory verdict stays failed + non-resumable.
+        assert reconciled.status == "failed"
+        assert reconciled.resume_capability is AutoResumeCapability.NONE
+
+        # (b) DURABLE state, loaded fresh: NOT reopened to RUN, and not COMPLETE.
+        reloaded = AutoStore(tmp_path / "auto").load(state.auto_session_id)
+        assert reloaded.phase is not AutoPhase.RUN
+        assert reloaded.phase is not AutoPhase.COMPLETE
+        assert reloaded.phase is AutoPhase.FAILED
+        # (c) --resume preserves failed, not retryable: capability is NONE.
+        assert reloaded.resume_capability() is AutoResumeCapability.NONE
+    finally:
+        await _cancel_manager_tasks(manager)
+        await jobs.close()
+
+
 def _completed_handoff_state(tmp_path, job_id: str) -> AutoPipelineState:
     """Build the durable state exactly as ``AutoPipeline.run`` leaves it after a
     run handoff: phase COMPLETE, with the persisted run handle."""
