@@ -412,6 +412,81 @@ async def test_outer_cancellation_propagates(
         await task
 
 
+def _install_blocking_write_text(monkeypatch: pytest.MonkeyPatch, *, block_seconds: float) -> None:
+    """Make the *first* ``Path.write_text`` a blocking synchronous stall.
+
+    Models a hung/slow filesystem during finalization. A plain ``time.sleep``
+    holds the calling OS thread without yielding to the event loop — exactly
+    the class of blocking syscall ``asyncio.wait_for`` cannot interrupt if it
+    runs on the loop. Only the first call blocks (then delegates to the real
+    method) so the abandoned worker thread drains within ``block_seconds``
+    instead of stacking one stall per written file.
+    """
+    real_write_text = Path.write_text
+    blocked = {"done": False}
+
+    def _blocking_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if not blocked["done"]:
+            blocked["done"] = True
+            time.sleep(block_seconds)
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _blocking_write_text)
+
+
+@pytest.mark.asyncio
+async def test_best_effort_bounded_when_filesystem_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for review 4641826210 finding #1: `wait_for` only bounds
+    # cooperative awaits, so a *blocking synchronous* filesystem stall in the
+    # write phase used to freeze the loop past the deadline. With the
+    # filesystem tail off-loop (asyncio.to_thread), the caller must get its
+    # None back at the deadline while the stalled write is abandoned to the
+    # worker thread.
+    monkeypatch.setattr(trace_export, "TRACE_EXPORT_DEADLINE_SECONDS", 0.05)
+    _install_blocking_write_text(monkeypatch, block_seconds=1.0)
+    state = _terminal_state(tmp_path)
+    ledger = _populated_ledger()
+
+    start = time.monotonic()
+    result = await best_effort_export_trace(state, ledger, event_store=None)
+    elapsed = time.monotonic() - start
+
+    assert result is None  # deadline breach swallowed like any failure
+    # Returned at the ~0.05s deadline — NOT after the 1.0s blocking write. If
+    # the write ran on the loop the sleep would pin elapsed >= 1.0s.
+    assert elapsed < 0.75
+
+
+@pytest.mark.asyncio
+async def test_pipeline_finalize_survives_blocking_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pipeline's already-computed terminal result must still return when
+    # finalization hits a blocking synchronous filesystem stall.
+    monkeypatch.setattr(trace_export, "TRACE_EXPORT_DEADLINE_SECONDS", 0.05)
+    _install_blocking_write_text(monkeypatch, block_seconds=1.0)
+    state = _terminal_state(tmp_path)
+    state.ledger = _populated_ledger().to_dict()
+    driver = types.SimpleNamespace(
+        event_store=_FakeEventStore(_events_for(state)), progress_callback=None
+    )
+    pipeline = AutoPipeline(
+        interview_driver=driver,  # type: ignore[arg-type]
+        seed_generator=lambda _sid: None,  # type: ignore[arg-type]
+    )
+
+    # The 5s guard is diagnostic only: the finalize deadline (0.05s), not this
+    # guard, is what must release the terminal return.
+    start = time.monotonic()
+    result = await asyncio.wait_for(pipeline.run(state), timeout=5.0)
+    elapsed = time.monotonic() - start
+
+    assert result.status == "complete"
+    assert elapsed < 0.75  # returned at the deadline, not after the 1.0s stall
+
+
 @pytest.mark.asyncio
 async def test_pipeline_finalize_writes_trace_once(tmp_path: Path) -> None:
     state = _terminal_state(tmp_path)

@@ -105,15 +105,21 @@ _FLAG_MARKERS: tuple[str, ...] = (
 # passed straight through from event payloads.
 _MAX_TEXT = 2000
 
-# Hard wall-clock bound for the *finalize* trace projection. The finalize hook
-# awaits ``export_trace_from_state`` — which fans out to up to two unbounded
-# ``event_store.query_events`` aggregate scans plus filesystem writes — right
-# before the pipeline returns its already-computed terminal result. A slow or
-# hung EventStore / filesystem must never delay (or hang) a COMPLETE / BLOCKED
-# / FAILED return: trace generation is best-effort and cannot affect the run
-# outcome. This deadline caps the worst case; on breach the projection is
-# dropped like any other swallowed failure. 30s is generous for a healthy
-# store yet bounds the terminal-return delay to a predictable ceiling.
+# Hard wall-clock bound on the *caller's wait* for the finalize trace
+# projection. The finalize hook awaits ``export_trace_from_state`` — up to two
+# unbounded ``event_store.query_events`` aggregate scans (cooperative awaits)
+# plus the filesystem tail, which runs off-loop in a worker thread via
+# ``asyncio.to_thread`` (see ``_write_trace_files``) — right before the
+# pipeline returns its already-computed terminal result. A slow or hung
+# EventStore / filesystem must never delay (or hang) a COMPLETE / BLOCKED /
+# FAILED return: trace generation is best-effort and cannot affect the run
+# outcome. On breach the caller stops waiting and the projection is dropped
+# like any other swallowed failure. Precisely: the deadline bounds only the
+# caller-visible wait — an abandoned worker thread may still finish its writes
+# (or stay wedged against the hung filesystem) in the background, which is the
+# standard, acceptable trade for best-effort observability. 30s is generous
+# for a healthy store yet keeps the terminal-return delay to a predictable
+# ceiling.
 TRACE_EXPORT_DEADLINE_SECONDS = 30.0
 
 
@@ -482,6 +488,36 @@ def _resolve_out_root(state: AutoPipelineState, out_root: Path | None) -> Path:
     return base / ".ouroboros" / "traces" / state.auto_session_id
 
 
+def _write_trace_files(
+    out_dir: Path,
+    streams: dict[str, list[dict[str, Any]]],
+    outcome: dict[str, Any],
+    summary_md: str,
+) -> None:
+    """Synchronous filesystem tail of the export: mkdir + every write.
+
+    Deliberately a plain sync function with **no** await points, executed off
+    the event loop via ``asyncio.to_thread`` by :func:`export_trace_from_state`.
+    ``mkdir`` / ``write_text`` / ``unlink`` are blocking syscalls; run on the
+    loop they would stall *every* coroutine — including the ``asyncio.wait_for``
+    deadline in :func:`best_effort_export_trace`, which can only interrupt
+    cooperative awaits. In a worker thread, a hung or slow filesystem blocks
+    only that thread and the deadline still releases the caller.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for filename, rows in streams.items():
+        path = out_dir / filename
+        if rows:
+            _write_jsonl(path, rows)
+        else:
+            _remove_if_exists(path)
+    (out_dir / OUTCOME_FILE).write_text(
+        json.dumps(outcome, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (out_dir / SUMMARY_FILE).write_text(summary_md, encoding="utf-8")
+
+
 async def export_trace_from_state(
     state: AutoPipelineState,
     ledger: SeedDraftLedger,
@@ -495,6 +531,10 @@ async def export_trace_from_state(
     and returns that directory. Empty streams omit (and clear any stale) file.
     Idempotent: content is derived only from persisted state and stored
     events, so re-export is byte-identical.
+
+    The filesystem phase (:func:`_write_trace_files`) runs in a worker thread
+    via ``asyncio.to_thread`` so blocking syscalls never stall the event loop;
+    only the cooperative event queries and pure data-shaping run on the loop.
     """
     aggregate_ids: tuple[str, ...] = tuple(
         agg for agg in (state.auto_session_id, state.interview_session_id) if agg
@@ -521,8 +561,6 @@ async def export_trace_from_state(
     summary_md = _build_summary_md(outcome, counts)
 
     out_dir = _resolve_out_root(state, out_root)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     streams: dict[str, list[dict[str, Any]]] = {
         QUESTIONS_FILE: question_lines,
         AMBIGUITY_FILE: ambiguity_lines,
@@ -530,18 +568,7 @@ async def export_trace_from_state(
         DECISIONS_FILE: decision_lines,
         FLAGS_FILE: flag_lines,
     }
-    for filename, rows in streams.items():
-        path = out_dir / filename
-        if rows:
-            _write_jsonl(path, rows)
-        else:
-            _remove_if_exists(path)
-
-    (out_dir / OUTCOME_FILE).write_text(
-        json.dumps(outcome, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    (out_dir / SUMMARY_FILE).write_text(summary_md, encoding="utf-8")
+    await asyncio.to_thread(_write_trace_files, out_dir, streams, outcome, summary_md)
 
     log.info(
         "auto.trace_export.written",
@@ -593,17 +620,25 @@ async def best_effort_export_trace(
     Any failure — event-store query, filesystem, serialization — is logged and
     swallowed so trace generation cannot affect the auto pipeline's outcome.
 
-    The projection is additionally **time-bounded** by
-    :data:`TRACE_EXPORT_DEADLINE_SECONDS` via :func:`asyncio.wait_for`, so a
-    slow or hung EventStore / filesystem can drop the trace but never delay the
-    caller's terminal return past the deadline. A deadline breach surfaces as
-    :class:`TimeoutError` and is swallowed like any other projection failure.
+    The caller's wait is additionally **time-bounded** by
+    :data:`TRACE_EXPORT_DEADLINE_SECONDS` via :func:`asyncio.wait_for`. For the
+    bound to hold against *blocking* work — not just cooperative awaits — the
+    filesystem tail of the export runs in a worker thread
+    (``asyncio.to_thread`` in :func:`export_trace_from_state`); ``wait_for``
+    can only interrupt code that yields to the loop. The guarantee is therefore
+    exactly this: the caller resumes within the deadline. On breach the wait is
+    **abandoned**, surfacing as :class:`TimeoutError` and swallowed like any
+    other projection failure — while the abandoned worker thread may still
+    complete its writes (or stay wedged against a hung filesystem) in the
+    background. That is the standard trade for best-effort observability; the
+    trace may be partial or missing, the run outcome is unaffected.
 
     Cancellation semantics follow the driver's established
     ``wait_for`` / ``CancelledError`` idiom: ``asyncio.wait_for`` converts its
     *own* timeout into ``TimeoutError``, so any :class:`asyncio.CancelledError`
     reaching this frame is a **genuine outer cancellation** (the pipeline task
-    itself being torn down) — it is re-raised, never swallowed.
+    itself being torn down) — it is re-raised, never swallowed. An in-flight
+    worker thread is likewise abandoned on outer cancel.
     """
     try:
         return await asyncio.wait_for(
