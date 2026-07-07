@@ -252,36 +252,52 @@ def _is_validation_only_ac(ac_content: str) -> bool:
     )
 
 
+def _drop_required_evidence_field(schema: EvidenceSchema, field: str) -> EvidenceSchema:
+    """Return a schema copy with ``field`` removed from required and rejected_if."""
+    required = tuple(name for name in schema.required if name != field)
+    rejected_if = tuple(expr for expr in schema.rejected_if if not expr.strip().startswith(field))
+    return EvidenceSchema(required=required, rejected_if=rejected_if)
+
+
 def _effective_evidence_schema_for_ac(
     profile: ExecutionProfile,
     ac_content: str,
+    *,
+    has_success_contract: bool = False,
 ) -> EvidenceSchema:
-    """Return the active evidence schema for one atomic AC dispatch."""
+    """Return the active evidence schema for one atomic AC dispatch.
+
+    ``has_success_contract`` is True when the AC declares a ``verify_command``.
+    For such ACs ``tests_passed`` is dropped from the required evidence set: the
+    orchestrator itself runs the declared command via ``_run_ac_verify_gate``
+    (real subprocess, real exit code + output_assertion), which is an
+    authoritative, non-fabricatable check — strictly stronger than reconstructing
+    "did a test pass" from the worker's transcript. Legacy ACs (no
+    ``verify_command``) keep ``tests_passed`` required and verified as before.
+    """
     schema = profile.evidence_schema
     if _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
-        required = tuple(field for field in schema.required if field != "files_touched")
-        rejected_if = tuple(
-            expr for expr in schema.rejected_if if not expr.strip().startswith("files_touched")
-        )
-        return EvidenceSchema(required=required, rejected_if=rejected_if)
-    if not _is_documentation_only_ac(ac_content) or "tests_passed" not in schema.required:
-        return schema
-    required = tuple(field for field in schema.required if field != "tests_passed")
-    rejected_if = tuple(
-        expr for expr in schema.rejected_if if not expr.strip().startswith("tests_passed")
-    )
-    return EvidenceSchema(required=required, rejected_if=rejected_if)
+        schema = _drop_required_evidence_field(schema, "files_touched")
+    elif _is_documentation_only_ac(ac_content) and "tests_passed" in schema.required:
+        schema = _drop_required_evidence_field(schema, "tests_passed")
+    if has_success_contract and "tests_passed" in schema.required:
+        schema = _drop_required_evidence_field(schema, "tests_passed")
+    return schema
 
 
 def _out_of_scope_evidence_fields_for_ac(
     profile: ExecutionProfile,
     ac_content: str,
     record: EvidenceRecord | None,
+    *,
+    has_success_contract: bool = False,
 ) -> tuple[str, ...]:
     """Return non-empty evidence fields excluded by the AC-specific schema."""
     if record is None:
         return ()
-    effective_schema = _effective_evidence_schema_for_ac(profile, ac_content)
+    effective_schema = _effective_evidence_schema_for_ac(
+        profile, ac_content, has_success_contract=has_success_contract
+    )
     required_fields = set(effective_schema.required)
     return tuple(
         field
@@ -294,11 +310,15 @@ def _out_of_scope_evidence_values_for_ac(
     profile: ExecutionProfile,
     ac_content: str,
     record: EvidenceRecord | None,
+    *,
+    has_success_contract: bool = False,
 ) -> dict[str, Any]:
     """Return out-of-scope evidence values retained for audit metadata only."""
     if record is None:
         return {}
-    fields = _out_of_scope_evidence_fields_for_ac(profile, ac_content, record)
+    fields = _out_of_scope_evidence_fields_for_ac(
+        profile, ac_content, record, has_success_contract=has_success_contract
+    )
     return {field: record.data[field] for field in fields if field in record.data}
 
 
@@ -306,9 +326,13 @@ def _scoped_evidence_record_for_ac(
     profile: ExecutionProfile,
     ac_content: str,
     record: EvidenceRecord,
+    *,
+    has_success_contract: bool = False,
 ) -> EvidenceRecord:
     """Return only evidence fields inside the AC-specific schema."""
-    effective_schema = _effective_evidence_schema_for_ac(profile, ac_content)
+    effective_schema = _effective_evidence_schema_for_ac(
+        profile, ac_content, has_success_contract=has_success_contract
+    )
     allowed_fields = set(effective_schema.required)
     return EvidenceRecord(
         data={field: value for field, value in record.data.items() if field in allowed_fields},

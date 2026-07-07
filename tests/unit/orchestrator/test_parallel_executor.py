@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import (
@@ -1446,14 +1451,14 @@ _GREETING_INNER_COMMAND = (
 
 
 def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_without_cwd() -> None:
-    """Release blocker: worker's relative/inner claims match wrapped absolute transcript.
+    """Release blocker (files_touched half): relative claim matches wrapped absolute transcript.
 
-    Reproduces the maintainer's exact codex failure — ``files_touched: hello.py``
-    plus ``tests_passed: python3 -c "..."`` against an Edit event under
-    ``/private/tmp/...`` and a ``/bin/zsh -lc "..."`` Bash event — with no
-    workspace cwd threaded to the verifier (``task_cwd`` and adapter working
-    directory both None). Before the fix this produced ``unsupported evidence
-    claims: files_touched: hello.py; tests_passed: python3 -c "..."``.
+    The worker claims ``files_touched: hello.py`` while the transcript Edit event
+    records ``/private/tmp/.../hello.py`` and no workspace cwd was threaded
+    (``task_cwd`` None). ``commands_run`` is a shell-wrapped inline command. On a
+    contract-carrying AC (``has_success_contract=True``) ``tests_passed`` is
+    delegated to the orchestrator verify-gate, so only files_touched +
+    commands_run are gated here — both must back cleanly.
     """
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory=None),
@@ -1471,11 +1476,10 @@ def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_with
             data={
                 "files_touched": ["hello.py"],
                 "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": [_GREETING_INNER_COMMAND],
             }
         ),
         ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
+        has_success_contract=True,
     )
 
     assert verdict.passed is True, verdict.reasons
@@ -1520,11 +1524,10 @@ def test_atomic_verifier_accepts_symlinked_cwd_against_resolved_transcript_path(
             data={
                 "files_touched": ["hello.py"],
                 "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": [_GREETING_INNER_COMMAND],
             }
         ),
         ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
+        has_success_contract=True,
     )
     assert verdict.passed is True, verdict.reasons
 
@@ -1684,185 +1687,52 @@ def test_files_touched_task_cwd_none_rejects_touch_command_text() -> None:
     assert not _runtime_messages_support_file_claim("goodbye.py", (edit,), task_cwd=None)
 
 
-def test_atomic_verifier_accepts_prose_tests_passed_backed_by_declared_verify_command() -> None:
-    """Release blocker (live shape): prose ``tests_passed`` + the declared verify_command run.
+def test_effective_schema_drops_tests_passed_for_contract_ac() -> None:
+    """A declared verify_command drops tests_passed from the required evidence set."""
+    profile = load_profile("code")
+    assert "tests_passed" in profile.evidence_schema.required
 
-    The live codex worker recorded ``tests_passed`` as a natural-language
-    description ("greet('World') returned 'Hello, World!' and command output was
-    OK") rather than restating the command. It is accepted because the AC's
-    DECLARED ``verify_command`` matched the wrapped Bash event and ran with exit
-    code 0 — the declared contract is the oracle, not the prose text.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
+    legacy = _effective_evidence_schema_for_ac(profile, "Implement the module.")
+    assert "tests_passed" in legacy.required
+
+    contract = _effective_evidence_schema_for_ac(
+        profile, "Implement the module.", has_success_contract=True
     )
+    assert "tests_passed" not in contract.required
+    # files_touched + commands_run stay gated by the transcript verifier.
+    assert "files_touched" in contract.required
+    assert "commands_run" in contract.required
 
+
+def test_contract_ac_verifier_delegates_tests_passed() -> None:
+    """Contract AC: the transcript verifier does not gate tests_passed at all.
+
+    Only files_touched + commands_run are checked; the tests_passed check is
+    delegated to the orchestrator verify-gate. Evidence with no tests_passed field
+    still passes the transcript verifier, so worker sample-input variance in the
+    verification command is irrelevant here.
+    """
+    executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
     verdict = executor._verify_atomic_evidence_against_runtime_messages(
         messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
         typed_evidence=EvidenceRecord(
             data={
                 "files_touched": ["hello.py"],
                 "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": [
-                    "greet('World') returned 'Hello, World!' and command output was OK"
-                ],
             }
         ),
         ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
+        has_success_contract=True,
     )
-
     assert verdict.passed is True, verdict.reasons
 
 
-def test_atomic_verifier_rejects_tests_passed_when_declared_verify_command_not_run() -> None:
-    """Contract AC whose declared verify_command was never run still fails.
+def test_legacy_ac_verifier_keeps_strict_formal_runner_tests_passed() -> None:
+    """Legacy AC (no verify_command): tests_passed keeps strict formal-runner semantics."""
+    executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
 
-    Fabrication guard: the transcript contains only a read-only ``cat`` — the
-    declared ``verify_command`` never executed — so the prose claim of a passing
-    test is not anchored to the AC's oracle command.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
-    messages = (
-        AgentMessage(
-            type="tool",
-            content="Edit hello.py",
-            tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
-        ),
-        AgentMessage(
-            type="tool",
-            content="read file",
-            tool_name="Bash",
-            data={
-                "tool_input": {"command": "/bin/zsh -lc 'cat hello.py'"},
-                "exit_code": 0,
-                "status": "completed",
-            },
-        ),
-        AgentMessage(type="result", content="done", data={}),
-    )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
-        messages=messages,
-        typed_evidence=EvidenceRecord(
-            data={
-                "files_touched": ["hello.py"],
-                # A verification command the transcript never actually ran.
-                "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": ["greet('x') returned 'Hello, x' and command output was OK"],
-            }
-        ),
-        ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
-    )
-
-    assert verdict.passed is False
-    assert verdict.failure_class == "FABRICATION_SUSPECTED"
-    reason = verdict.reasons[0]
-    assert "commands_run" in reason and "tests_passed" in reason
-
-
-def test_atomic_verifier_rejects_inline_command_that_does_not_match_declared_verify_command() -> (
-    None
-):
-    """The declared verify_command is the oracle — a stand-in inline check is rejected.
-
-    The bot's fabrication repro: the transcript ran a trivial ``python3 -c
-    "assert True"`` (a "real construct" that tests nothing relevant) and the
-    worker fabricated a prose ``tests_passed`` claim about the greeting. The AC
-    declares a DIFFERENT ``verify_command`` (the real greeting assertion), which
-    was never run, so the claim must be rejected.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
-    trivial_command = 'python3 -c "assert True"'
-    messages = (
-        AgentMessage(
-            type="tool",
-            content="Edit hello.py",
-            tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
-        ),
-        AgentMessage(
-            type="tool",
-            content="run trivial check",
-            tool_name="Bash",
-            data={
-                "tool_input": {"command": f'/bin/zsh -lc "{trivial_command}"'},
-                "exit_code": 0,
-                "status": "completed",
-            },
-        ),
-        AgentMessage(
-            type="tool_result",
-            content="",
-            tool_name=None,
-            data={"subtype": "tool_result", "output": "", "exit_code": 0},
-        ),
-        AgentMessage(type="result", content="done", data={}),
-    )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
-        messages=messages,
-        typed_evidence=EvidenceRecord(
-            data={
-                "files_touched": ["hello.py"],
-                "commands_run": [trivial_command],
-                "tests_passed": ['greet("World") returned "Hello, World!"'],
-            }
-        ),
-        ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
-    )
-
-    assert verdict.passed is False
-    assert verdict.failure_class == "FABRICATION_SUSPECTED"
-    assert "tests_passed:" in verdict.reasons[0]
-
-
-def test_atomic_verifier_rejects_inline_command_for_legacy_ac_without_verify_command() -> None:
-    """Legacy AC (no declared verify_command) keeps strict-runner-only behavior.
-
-    Even though the inline ``python3 -c "...assert..."`` command actually ran and
-    succeeded, without a declared ``verify_command`` there is no oracle to bind
-    to, so ``tests_passed`` requires a formal test runner exactly as before this
-    PR — no arbitrary inline command is accepted.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+    # Inline python3 -c is not a formal test runner -> tests_passed unsupported.
+    rejected = executor._verify_atomic_evidence_against_runtime_messages(
         messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
         typed_evidence=EvidenceRecord(
             data={
@@ -1872,310 +1742,108 @@ def test_atomic_verifier_rejects_inline_command_for_legacy_ac_without_verify_com
             }
         ),
         ac_content=_GREETING_AC,
-        # No verify_command declared -> legacy strict behavior.
-        verify_command=None,
+        has_success_contract=False,
     )
+    assert rejected.passed is False
+    assert "tests_passed:" in rejected.reasons[0]
 
-    assert verdict.passed is False
-    assert verdict.failure_class == "FABRICATION_SUSPECTED"
-    assert "tests_passed:" in verdict.reasons[0]
-
-
-_GREETING_WRAPPED_VERIFY = (
-    '/bin/zsh -lc "python3 -c \\"from hello import greet; '
-    "assert greet('World') == 'Hello, World!'; print('OK')\\\"\""
-)
-
-
-def test_atomic_verifier_accepts_declared_verify_command_with_structured_exit_code() -> None:
-    """The declared verify_command run + a structured runtime exit_code 0 → accept.
-
-    Success comes from the Bash message's own ``exit_code == 0`` (runtime signal),
-    not from any assistant narration.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
+    # A real pytest run with success output backs tests_passed for a legacy AC.
     messages = (
         AgentMessage(
             type="tool",
-            content="Edit hello.py",
+            content="edit",
             tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/src/mod.py"}},
         ),
         AgentMessage(
-            type="assistant",
-            content="run verification",
+            type="tool",
+            content="pytest",
             tool_name="Bash",
             data={
-                "tool_input": {"command": _GREETING_WRAPPED_VERIFY},
+                "tool_input": {"command": "pytest tests/test_mod.py"},
                 "exit_code": 0,
-                "status": "completed",
+                "output": "1 passed in 0.01s",
             },
         ),
         AgentMessage(type="result", content="done", data={}),
     )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+    accepted = executor._verify_atomic_evidence_against_runtime_messages(
         messages=messages,
-        typed_evidence=EvidenceRecord(
-            data={
-                "files_touched": ["hello.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": ["greet('World') returned 'Hello, World!'"],
-            }
-        ),
-        ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
-    )
-
-    assert verdict.passed is True, verdict.reasons
-
-
-def test_atomic_verifier_rejects_declared_verify_command_success_only_via_narration() -> None:
-    """Assistant narration cannot satisfy the declared-command success signal.
-
-    The bot's repro: the declared ``verify_command`` matches a Bash event, but the
-    Bash message carries NO ``exit_code`` / no tool result — the only "passed"
-    signal is a following assistant ``content`` message. Self-reported prose must
-    not prove the run succeeded, so ``tests_passed`` is rejected.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
-    messages = (
-        AgentMessage(
-            type="tool",
-            content="Edit hello.py",
-            tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
-        ),
-        AgentMessage(
-            type="assistant",
-            content="run verification",
-            tool_name="Bash",
-            # No exit_code, no status — no runtime success signal on the command.
-            data={"tool_input": {"command": _GREETING_WRAPPED_VERIFY}},
-        ),
-        AgentMessage(
-            type="assistant",
-            content="Great — the verification command passed and printed OK.",
-            tool_name=None,
-            data={},
-        ),
-        AgentMessage(type="result", content="done", data={}),
-    )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
-        messages=messages,
-        typed_evidence=EvidenceRecord(
-            data={
-                "files_touched": ["hello.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": ["greet('World') returned 'Hello, World!'"],
-            }
-        ),
-        ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
-    )
-
-    assert verdict.passed is False
-    assert verdict.failure_class == "FABRICATION_SUSPECTED"
-    assert "tests_passed:" in verdict.reasons[0]
-
-
-def test_atomic_verifier_rejects_declared_verify_command_completed_status_with_failure() -> None:
-    """``status="completed"`` on a FAILING verify_command is not success.
-
-    The bot's repro: the declared command matches a Bash event and the adapter
-    recorded a generic ``status="completed"`` (the command finished) with NO
-    ``exit_code``, but the runtime output contains ``AssertionError`` — the check
-    failed. ``completed`` means "ran", not "passed", so ``tests_passed`` is
-    rejected. Success requires positive proof (exit 0 / success subtype), never a
-    bare completion status.
-    """
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
-    messages = (
-        AgentMessage(
-            type="tool",
-            content="Edit hello.py",
-            tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
-        ),
-        AgentMessage(
-            type="assistant",
-            content="run verification",
-            tool_name="Bash",
-            data={
-                "tool_input": {"command": _GREETING_WRAPPED_VERIFY},
-                # Command finished, but with a failing assertion and no exit_code.
-                "status": "completed",
-                "output": "Traceback (most recent call last):\n  ...\nAssertionError",
-            },
-        ),
-        AgentMessage(type="result", content="done", data={}),
-    )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
-        messages=messages,
-        typed_evidence=EvidenceRecord(
-            data={
-                "files_touched": ["hello.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": ["greet('World') returned 'Hello, World!'"],
-            }
-        ),
-        ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
-    )
-
-    assert verdict.passed is False
-    assert verdict.failure_class == "FABRICATION_SUSPECTED"
-    assert "tests_passed:" in verdict.reasons[0]
-
-
-def test_atomic_verifier_accepts_declared_verify_command_with_tool_result_success_subtype() -> None:
-    """A trusted tool-result success subtype (no exit_code) satisfies the oracle."""
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-
-    messages = (
-        AgentMessage(
-            type="tool",
-            content="Edit hello.py",
-            tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
-        ),
-        AgentMessage(
-            type="assistant",
-            content="run verification",
-            tool_name="Bash",
-            data={"tool_input": {"command": _GREETING_WRAPPED_VERIFY}},
-        ),
-        AgentMessage(
-            type="tool_result",
-            content="OK",
-            tool_name=None,
-            data={"subtype": "success", "output": "OK"},
-        ),
-        AgentMessage(type="result", content="done", data={}),
-    )
-
-    verdict = executor._verify_atomic_evidence_against_runtime_messages(
-        messages=messages,
-        typed_evidence=EvidenceRecord(
-            data={
-                "files_touched": ["hello.py"],
-                "commands_run": [_GREETING_INNER_COMMAND],
-                "tests_passed": ["greet('World') returned 'Hello, World!'"],
-            }
-        ),
-        ac_content=_GREETING_AC,
-        verify_command=_GREETING_INNER_COMMAND,
-    )
-
-    assert verdict.passed is True, verdict.reasons
-
-
-def _pytest_oracle_verdict(runtime_command: str):
-    """Run the verifier for a declared ``pytest`` oracle against one transcript command."""
-    executor = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
-        event_store=AsyncMock(),
-        console=MagicMock(),
-        enable_decomposition=False,
-        execution_profile=load_profile("code"),
-        fat_harness_mode=True,
-        task_cwd="/private/tmp/ooo-repro-blos",
-    )
-    return executor._verify_atomic_evidence_against_runtime_messages(
-        messages=(
-            AgentMessage(
-                type="tool",
-                content="Edit src/mod.py",
-                tool_name="Edit",
-                data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/src/mod.py"}},
-            ),
-            AgentMessage(
-                type="assistant",
-                content="run",
-                tool_name="Bash",
-                data={"tool_input": {"command": runtime_command}, "exit_code": 0},
-            ),
-            AgentMessage(type="result", content="done", data={}),
-        ),
         typed_evidence=EvidenceRecord(
             data={
                 "files_touched": ["src/mod.py"],
-                "commands_run": [runtime_command],
-                "tests_passed": ["the pytest suite passed"],
+                "commands_run": ["pytest tests/test_mod.py"],
+                "tests_passed": ["pytest tests/test_mod.py"],
             }
         ),
-        ac_content="Implement src/mod.py and run the pytest suite.",
-        verify_command="pytest",
+        ac_content="Implement src/mod.py and run pytest.",
+        has_success_contract=False,
+    )
+    assert accepted.passed is True, accepted.reasons
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_flips_contract_ac_to_failed_when_declared_command_fails(
+    tmp_path,
+) -> None:
+    """Delegation is ENFORCED: a broken contract AC fails via the orchestrator gate.
+
+    A successful AC result whose declared verify_command exits non-zero is flipped
+    to FAILED by ``_apply_verify_gate`` — the orchestrator runs the real command,
+    so a fabricated tests_passed claim cannot pass a broken implementation.
+    """
+    executor = _file_scope_executor(str(tmp_path))
+    passing_result = ACExecutionResult(
+        ac_index=0,
+        ac_content="greet works",
+        success=True,
+        outcome=ACExecutionOutcome.SUCCEEDED,
     )
 
+    failing_seed = Seed(
+        goal="greeting",
+        constraints=(),
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="greet works",
+                verify_command='python3 -c "import sys; sys.exit(1)"',
+            ),
+        ),
+        ontology_schema=OntologySchema(name="Greeting", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.1),
+    )
+    gated = await executor._apply_verify_gate(
+        seed=failing_seed,
+        ac_index=0,
+        result=passing_result,
+        session_id="s",
+        execution_id="e",
+    )
+    assert gated.success is False
+    assert gated.outcome == ACExecutionOutcome.FAILED
+    assert "Verify gate failed" in (gated.error or "")
 
-@pytest.mark.parametrize(
-    "runtime_command",
-    (
-        "pytest --collect-only",
-        "pytest --help",
-        "pytest -k nope",
-        "pytest --fixtures",
-        "pytest -n 4 --collect-only",
-    ),
-)
-def test_atomic_verifier_rejects_pytest_oracle_prefix_or_mode_variants(
-    runtime_command: str,
-) -> None:
-    """Declared ``pytest`` is NOT satisfied by a prefix / mode-changing variant.
-
-    Prefix matching would let a command that runs no tests (``--collect-only``,
-    ``--help``, ``-k nope``, ``--fixtures``) satisfy the declared oracle. The
-    oracle requires the SAME command, so each of these is rejected even though it
-    exits 0.
-    """
-    verdict = _pytest_oracle_verdict(runtime_command)
-    assert verdict.passed is False
-    assert verdict.failure_class == "FABRICATION_SUSPECTED"
-    assert "tests_passed:" in verdict.reasons[0]
-
-
-def test_atomic_verifier_accepts_pytest_oracle_exact_and_wrapped() -> None:
-    """Declared ``pytest`` IS satisfied by an exact (or shell-wrapped) ``pytest`` run."""
-    assert _pytest_oracle_verdict("pytest").passed is True
-    assert _pytest_oracle_verdict("/bin/zsh -lc 'pytest'").passed is True
+    passing_seed = Seed(
+        goal="greeting",
+        constraints=(),
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="greet works",
+                verify_command="python3 -c \"print('OK')\"",
+                output_assertion="OK",
+            ),
+        ),
+        ontology_schema=OntologySchema(name="Greeting", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.1),
+    )
+    kept = await executor._apply_verify_gate(
+        seed=passing_seed,
+        ac_index=0,
+        result=passing_result,
+        session_id="s",
+        execution_id="e",
+    )
+    assert kept.success is True
 
 
 @pytest.mark.parametrize(

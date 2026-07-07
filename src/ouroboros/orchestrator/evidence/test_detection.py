@@ -13,7 +13,6 @@ from ouroboros.orchestrator.evidence.claims import (
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.shell_parsing import (
-    _commands_are_equivalent,
     _has_trailing_output_filter_pipeline,
     _looks_like_test_command,
     _looks_like_unittest_command,
@@ -161,59 +160,6 @@ def _is_tool_result_message(message: AgentMessage) -> bool:
     return message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
 
 
-# Runtime output that positively proves the command FAILED, even if some generic
-# completion status is also present. ``completed`` means "ran", not "passed", so a
-# failing verify_command whose adapter records a bare completion status must not
-# satisfy success. ``\berror\b`` intentionally does not appear here (it would
-# reject "0 errors" / "Errors: 0" zero-failure summaries); the exception-shaped
-# markers below are the ones ``_text_contains_test_success`` does not already
-# catch (its ``\berror\b`` word-boundary scan misses ``AssertionError``).
-_RUNTIME_FAILURE_MARKER_RE = re.compile(
-    r"assertion(?:error|failed)"
-    r"|\btraceback\b"
-    r"|\bexception\b"
-    r"|\bpanic\b"
-    r"|exit\s*(?:code|status)\s*[1-9]"
-    r"|non-?zero\s+exit",
-    re.IGNORECASE,
-)
-
-
-def _message_has_runtime_success_signal(message: AgentMessage) -> bool:
-    """Return True when a message carries an UNAMBIGUOUS runtime success signal.
-
-    Success requires positive proof from the runtime, never assistant narration
-    (``AgentMessage.content`` from an assistant turn is self-reported evidence —
-    exactly what fat-harness exists to reject) and never a generic completion
-    status (``status == "completed"`` means the command RAN, not that it PASSED,
-    so a failing command with a "completed" status is not success). Accepted:
-
-    - a structured non-error ``exit_code == 0`` (a non-zero exit is an explicit
-      failure);
-    - a trusted tool-result success subtype (``subtype == "success"``);
-    - test-success text found only in runtime output fields
-      (``_runtime_message_test_proof_text`` includes ``content`` solely for
-      tool-result messages, never assistant narration),
-
-    and only when the runtime output carries no failure marker (``AssertionError``,
-    ``Traceback``, non-zero exit, ...).
-    """
-    if message.is_error:
-        return False
-    exit_code = message.data.get("exit_code")
-    if type(exit_code) is int:
-        # Non-zero exit is an explicit failure; exit 0 is the strongest signal.
-        return exit_code == 0
-    # No structured exit code: a completion status alone proves nothing. Require
-    # positive runtime evidence AND the absence of failure markers.
-    proof_text = _runtime_message_test_proof_text(message)
-    if _RUNTIME_FAILURE_MARKER_RE.search(proof_text):
-        return False
-    if message.data.get("subtype") == "success":
-        return True
-    return _text_contains_test_success(proof_text)
-
-
 def _test_claim_file_part(value: str) -> str | None:
     """Return the file path portion of a pytest node-id style claim."""
     stripped = value.strip()
@@ -318,60 +264,11 @@ def _runtime_messages_support_test_claim(
     backed_commands: tuple[str, ...],
     messages: tuple[AgentMessage, ...],
     task_cwd: str | None,
-    verify_command: str | None = None,
 ) -> bool:
     """Return True when a backed test command chunk proves one test claim."""
     needle = value.strip().lower()
     if not needle:
         return False
-
-    # Contract-carrying AC: the DECLARED ``verify_command`` is the oracle.
-    #
-    # The strict per-runner path below only recognizes formal runners
-    # (pytest/unittest/gradle/mvn/npm test), so an AC that verifies itself with an
-    # inline command such as
-    # ``python3 -c "from hello import greet; assert ...; print('OK')"`` could not
-    # be proven — the release-blocker symptom. Rather than heuristically guessing
-    # which arbitrary inline command "counts" (a losing game — ``python3 -c
-    # "assert True"`` passes a keyword check while testing nothing), bind
-    # acceptance to the AC's own declared contract: accept a ``tests_passed``
-    # claim only when a transcript command IS the declared ``verify_command`` AND
-    # that run shows a runtime success signal. The declared command is the oracle,
-    # so ``python3 -c "assert True"`` cannot satisfy an AC whose contract is
-    # ``python3 -c "from hello import greet; assert greet('x')=='Hello, x'; ..."``.
-    #
-    # The oracle match uses ``_commands_are_equivalent`` — normalized EQUALITY
-    # (wrapper-unwrapped, quote/whitespace-insensitive), NOT the loose
-    # prefix/startswith fallback in ``_runtime_message_supports_command_claim``.
-    # Prefix matching would let ``pytest`` be "satisfied" by ``pytest
-    # --collect-only`` / ``--help`` / ``-k nope`` (all exit 0, run no tests), so a
-    # mode-changing flag makes it a DIFFERENT command that is rejected.
-    #
-    # Legacy ACs that declare NO ``verify_command`` never reach this branch: they
-    # keep the pre-existing strict behavior (formal runners only), so no arbitrary
-    # inline command is ever accepted without an oracle to match against.
-    if verify_command and verify_command.strip():
-        for index, message in enumerate(messages):
-            if message.tool_name != "Bash":
-                continue
-            if not any(
-                _commands_are_equivalent(verify_command, runtime_command)
-                for runtime_command in _runtime_message_command_values(message)
-            ):
-                continue
-            chunk = [message]
-            for following in messages[index + 1 :]:
-                if following.tool_name and not _is_tool_result_message(following):
-                    break
-                chunk.append(following)
-            # Success MUST come from runtime-produced evidence (the Bash message's
-            # own structured exit_code/status or a tool-result message), never
-            # from assistant narration in ``AgentMessage.content`` — otherwise a
-            # worker could run the declared command and let prose ("the tests
-            # passed") self-report the result.
-            if any(_message_has_runtime_success_signal(item) for item in chunk):
-                return True
-
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
