@@ -16,10 +16,12 @@ from ouroboros.evaluation.models import (
     REWARD_HACKING_VETO_THRESHOLD,
     CheckResult,
     CheckType,
+    ConsensusResult,
     EvaluationContext,
     EvaluationResult,
     MechanicalResult,
     SemanticResult,
+    Vote,
 )
 from ouroboros.evaluation.pipeline import EvaluationPipeline, PipelineConfig
 
@@ -135,3 +137,90 @@ class TestFailureReasonSurface:
             final_approved=True,
         )
         assert result.failure_reason is None
+
+
+def _consensus_result(approved: bool) -> ConsensusResult:
+    return ConsensusResult(
+        approved=approved,
+        votes=(
+            Vote(model="m1", approved=approved, confidence=0.9, reasoning="ok"),
+            Vote(model="m2", approved=approved, confidence=0.8, reasoning="ok"),
+            Vote(model="m3", approved=not approved, confidence=0.6, reasoning="dissent"),
+        ),
+        majority_ratio=0.67 if approved else 0.33,
+    )
+
+
+def _consensus_context() -> EvaluationContext:
+    return EvaluationContext(
+        execution_id="veto-consensus-exec",
+        seed_id="seed-1",
+        current_ac="Test AC",
+        artifact="def f(): pass",
+        artifact_type="code",
+        goal="Test goal",
+        constraints=(),
+        trigger_consensus=True,
+    )
+
+
+async def _run_consensus(*, risk: float, consensus_approved: bool) -> EvaluationResult:
+    """Drive the real Stage 3 consensus approval path with mocked stages."""
+    pipeline = EvaluationPipeline(
+        AsyncMock(),
+        PipelineConfig(stage1_enabled=False, stage2_enabled=True, stage3_enabled=True),
+    )
+    with (
+        patch(
+            "ouroboros.evaluation.semantic.SemanticEvaluator.evaluate",
+            new_callable=AsyncMock,
+            return_value=Result.ok((_semantic(reward_hacking_risk=risk), [])),
+        ),
+        patch(
+            "ouroboros.evaluation.consensus.ConsensusEvaluator.evaluate",
+            new_callable=AsyncMock,
+            return_value=Result.ok((_consensus_result(consensus_approved), [])),
+        ),
+    ):
+        result = await pipeline.evaluate(_consensus_context())
+    assert result.is_ok
+    return result.value
+
+
+class TestConsensusApprovalVeto:
+    """The veto must apply after Stage 3 consensus approval, not only the
+    no-consensus branch (the #1572 consensus-bypass finding)."""
+
+    async def test_consensus_approval_is_vetoed_by_high_risk(self) -> None:
+        """trigger_consensus + approving Stage 3 + risk 0.95 → NOT approved."""
+        eval_result = await _run_consensus(risk=0.95, consensus_approved=True)
+
+        assert eval_result.stage3_result is not None
+        assert eval_result.stage3_result.approved is True  # consensus DID approve
+        assert eval_result.final_approved is False  # ...but the veto flipped it
+
+        reason = eval_result.failure_reason
+        assert reason is not None
+        assert "reward-hacking" in reason.lower()
+        assert "veto" in reason.lower()
+        assert "0.95" in reason
+
+    async def test_consensus_approval_stands_when_risk_low(self) -> None:
+        """Same consensus path but risk 0.0 → approved (unchanged behavior)."""
+        eval_result = await _run_consensus(risk=0.0, consensus_approved=True)
+
+        assert eval_result.stage3_result is not None
+        assert eval_result.final_approved is True
+        assert eval_result.failure_reason is None
+
+    async def test_consensus_rejection_stays_rejected(self) -> None:
+        """Consensus rejects + low risk → still rejected (veto never rescues)."""
+        eval_result = await _run_consensus(risk=0.0, consensus_approved=False)
+
+        assert eval_result.stage3_result is not None
+        assert eval_result.stage3_result.approved is False
+        assert eval_result.final_approved is False
+
+        reason = eval_result.failure_reason
+        assert reason is not None
+        assert "Stage 3 failed" in reason  # consensus rejection reason preserved

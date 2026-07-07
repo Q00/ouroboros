@@ -240,16 +240,12 @@ class EvaluationPipeline:
                 )
 
         # No consensus triggered - approve based on Stage 2.
-        # The reward-hacking veto (REWARD_HACKING_VETO_THRESHOLD) blocks an
-        # otherwise-passing artifact only on a *high-confidence* gaming signal,
-        # so a merely uncertain evaluator never vetoes a genuine pass.
+        # The reward-hacking veto is applied uniformly in ``_build_result``
+        # (the single final gate), so it is intentionally NOT duplicated
+        # here — this branch only decides the Stage 2 pass conditions.
         final_approved = True
         if stage2_result:
-            final_approved = (
-                stage2_result.ac_compliance
-                and stage2_result.score >= 0.8
-                and stage2_result.reward_hacking_risk < REWARD_HACKING_VETO_THRESHOLD
-            )
+            final_approved = stage2_result.ac_compliance and stage2_result.score >= 0.8
 
         return self._build_result(
             context.execution_id,
@@ -281,6 +277,19 @@ class EvaluationPipeline:
         Returns:
             Result containing EvaluationResult
         """
+        # Single reward-hacking veto gate.  Applied here — the one place
+        # every approval source funnels through — so no approval branch
+        # (no-consensus Stage 2 pass OR Stage 3 consensus approval) can
+        # launder a high-confidence gaming signal.  The veto only flips
+        # approve→reject; it never rescues an already-rejected result, so
+        # consensus rejections stay rejections.
+        if (
+            final_approved
+            and stage2_result is not None
+            and stage2_result.reward_hacking_risk >= REWARD_HACKING_VETO_THRESHOLD
+        ):
+            final_approved = False
+
         # Calculate highest stage before creating immutable result
         highest_stage = 0
         if stage1_result is not None:
