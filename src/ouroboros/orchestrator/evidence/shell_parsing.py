@@ -17,6 +17,96 @@ def _looks_like_test_command(command: str) -> bool:
     return _test_command_invocation(command) is not None
 
 
+# Executables that identify a formal test-runner invocation. Unlike
+# ``_looks_like_test_command`` this recognizes the runner even when the command
+# disables tests (``mvn -DskipTests``): those must keep flowing through the
+# strict test-runner semantics so a skip invocation stays rejected, rather than
+# being accepted as a directly-executed verification command.
+_TEST_RUNNER_EXECUTABLES = frozenset(
+    {"pytest", "py.test", "tox", "nox", "gradle", "gradlew", "mvn", "mvnw", "unittest"}
+)
+
+
+def _command_executable_names(command: str) -> tuple[str, ...]:
+    """Return executable names invoked by a command, unwrapping shell + preamble."""
+    normalized = command.strip().lower()
+    if not normalized:
+        return ()
+    shell_body = _shell_command_body(normalized)
+    body = shell_body if shell_body else normalized
+    segments = _segments_after_safe_shell_preamble(body) or (body,)
+    executables: list[str] = []
+    for segment in segments:
+        try:
+            parts = shlex.split(segment)
+        except ValueError:
+            parts = segment.split()
+        parts = _strip_env_prefix(parts)
+        if not parts:
+            continue
+        executable = Path(parts[0]).name
+        executables.append(executable)
+        if executable in {"python", "python3"} and len(parts) >= 3 and parts[1] == "-m":
+            executables.append(parts[2])
+        if executable == "uv" and len(parts) >= 3 and parts[1] == "run":
+            executables.append(Path(parts[2]).name)
+    return tuple(executables)
+
+
+_INLINE_CODE_INTERPRETERS = frozenset(
+    {"python", "python3", "python2", "node", "nodejs", "deno", "bun", "ruby", "perl", "php"}
+)
+_INLINE_CODE_FLAGS = frozenset({"-c", "-e", "--eval"})
+
+
+def _is_inline_verification_command(command: str) -> bool:
+    """Return True for an interpreter running inline code (``python3 -c "..."``).
+
+    Such a command executes code whose non-zero exit meaningfully signals a
+    failed check (a failed ``assert`` raises and exits non-zero), so a successful
+    run can back a ``tests_passed`` claim even without a formal test runner. This
+    is deliberately narrow: read-only / print commands (``cat``, ``echo``, that
+    can emit a fake "passed" line) and formal test runners are excluded — the
+    former carry no verification semantics and the latter must keep flowing
+    through the strict node-id / no-tests-ran path.
+    """
+    normalized = command.strip().lower()
+    if not normalized:
+        return False
+    shell_body = _shell_command_body(normalized)
+    body = shell_body if shell_body else normalized
+    for segment in _segments_after_safe_shell_preamble(body) or (body,):
+        try:
+            parts = shlex.split(segment)
+        except ValueError:
+            parts = segment.split()
+        parts = _strip_env_prefix(parts)
+        if not parts:
+            continue
+        if Path(parts[0]).name in _INLINE_CODE_INTERPRETERS and any(
+            flag in _INLINE_CODE_FLAGS for flag in parts[1:]
+        ):
+            return True
+    return False
+
+
+def _is_test_runner_family_command(command: str) -> bool:
+    """Return True when a command invokes a known test-runner executable.
+
+    Used by ``tests_passed`` matching to decide whether a claim must go through
+    the strict test-runner semantics (which reject skip-test invocations) or may
+    be treated as a directly-executed verification command. Recognizes the
+    executable regardless of skip flags, after unwrapping a leading shell wrapper
+    and setup preambles.
+    """
+    if any(name in _TEST_RUNNER_EXECUTABLES for name in _command_executable_names(command)):
+        return True
+    for name in {"npm", "pnpm", "yarn"}:
+        if re.search(rf"(?<![\w.-]){name}\s+test\b", command.lower()):
+            return True
+    return False
+
+
 def _test_command_invocation(command: str) -> str | None:
     """Return the backed inner test invocation for a direct or wrapped command.
 

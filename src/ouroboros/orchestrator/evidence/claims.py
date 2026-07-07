@@ -269,33 +269,58 @@ def _runtime_messages_support_file_claim(
     tool outputs that report ``generated.py`` instead of ``src/generated.py``.
     """
     relative_claim = _workspace_relative_file_claim(value, task_cwd=task_cwd)
-    if relative_claim is None:
+    if relative_claim is not None:
+        candidate = Path(relative_claim)
+        base = Path(task_cwd).resolve()
+        resolved = (base / candidate).resolve()
+        if any(
+            _runtime_message_supports_file_reference(
+                relative_claim,
+                message,
+                messages=messages,
+                index=index,
+                task_cwd=task_cwd,
+            )
+            for index, message in enumerate(messages)
+        ):
+            return True
+        if resolved.exists():
+            basename = candidate.name.strip().lower()
+            if basename and any(
+                _runtime_message_supports_file_reference(
+                    basename,
+                    message,
+                    messages=messages,
+                    index=index,
+                    task_cwd=task_cwd,
+                    allow_bash_command_text=False,
+                )
+                for index, message in enumerate(messages)
+            ):
+                return True
+
+    # Most permissive tier: match the raw claim against a structured mutation
+    # event (Edit/Write/NotebookEdit path, or an explicit shell write) by
+    # basename-with-parent-dir suffix. This rescues the common live shape where
+    # the worker claims a workspace-relative path (``hello.py``) while the
+    # transcript records the same real file under an absolute disposable-repo
+    # path (``/private/tmp/<run>/hello.py``) and no workspace cwd was threaded to
+    # the verifier (``task_cwd`` is None). ``_file_claim_matches_runtime_path``
+    # resolves both sides, so macOS ``/tmp`` <-> ``/private/tmp`` and other
+    # symlink forms compare equal. Anti-fabrication is preserved: a real
+    # mutation event for the claimed file must exist in the transcript, so a
+    # fabricated claim with no matching event (or a near-miss filename) is still
+    # rejected.
+    raw_claim = value.strip()
+    if not raw_claim:
         return False
-    candidate = Path(relative_claim)
-    base = Path(task_cwd).resolve()
-    resolved = (base / candidate).resolve()
-    if any(
+    return any(
         _runtime_message_supports_file_reference(
-            relative_claim,
+            raw_claim,
             message,
             messages=messages,
             index=index,
             task_cwd=task_cwd,
-        )
-        for index, message in enumerate(messages)
-    ):
-        return True
-    if not resolved.exists():
-        return False
-    basename = candidate.name.strip().lower()
-    return bool(basename) and any(
-        _runtime_message_supports_file_reference(
-            basename,
-            message,
-            messages=messages,
-            index=index,
-            task_cwd=task_cwd,
-            allow_bash_command_text=False,
         )
         for index, message in enumerate(messages)
     )

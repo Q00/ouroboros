@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1401,6 +1403,238 @@ def test_atomic_verifier_classifies_dependent_masked_test_evidence_as_form_misma
         in (verdict.reasons[0])
     )
     assert "tests_passed: com.example.app.unit.SomeNewTest" in verdict.reasons[0]
+
+
+def _greeting_repro_messages(edit_path: str) -> tuple[AgentMessage, ...]:
+    """Build the maintainer's live codex transcript for the greeting seed.
+
+    The Edit event records an absolute disposable-repo path while the Bash test
+    command is wrapped in ``/bin/zsh -lc "..."`` with the inner ``python3 -c``
+    payload requoted, matching the exact shapes that broke fat-harness matching.
+    """
+    wrapped_command = (
+        '/bin/zsh -lc "python3 -c \\"from hello import greet; '
+        "assert greet('World') == 'Hello, World!'; print('OK')\\\"\""
+    )
+    return (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": edit_path}},
+        ),
+        AgentMessage(
+            type="tool",
+            content="run verification",
+            tool_name="Bash",
+            data={"tool_input": {"command": wrapped_command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="OK",
+            tool_name=None,
+            data={"subtype": "tool_result", "output": "OK", "exit_code": 0},
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+
+_GREETING_AC = "hello.py defines greet(name) returning the string Hello, <name>"
+_GREETING_INNER_COMMAND = (
+    "python3 -c \"from hello import greet; assert greet('World') == 'Hello, World!'; print('OK')\""
+)
+
+
+def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_without_cwd() -> None:
+    """Release blocker: worker's relative/inner claims match wrapped absolute transcript.
+
+    Reproduces the maintainer's exact codex failure — ``files_touched: hello.py``
+    plus ``tests_passed: python3 -c "..."`` against an Edit event under
+    ``/private/tmp/...`` and a ``/bin/zsh -lc "..."`` Bash event — with no
+    workspace cwd threaded to the verifier (``task_cwd`` and adapter working
+    directory both None). Before the fix this produced ``unsupported evidence
+    claims: files_touched: hello.py; tests_passed: python3 -c "..."``.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory=None),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd=None,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": [_GREETING_INNER_COMMAND],
+            }
+        ),
+        ac_content=_GREETING_AC,
+    )
+
+    assert verdict.passed is True, verdict.reasons
+    assert verdict.failure_class is None
+
+
+def test_atomic_verifier_accepts_greeting_repro_with_tmp_private_tmp_symlink(tmp_path) -> None:
+    """The claim matches even when task_cwd is /tmp and the transcript is /private/tmp."""
+    workspace = Path("/tmp") / f"ooo-repro-{tmp_path.name}"
+    workspace.mkdir(parents=True, exist_ok=True)
+    try:
+        (workspace / "hello.py").write_text("def greet(name):\n    return f'Hello, {name}!'\n")
+        executor = ParallelACExecutor(
+            adapter=MagicMock(working_directory=str(workspace)),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(workspace),
+        )
+        verdict = executor._verify_atomic_evidence_against_runtime_messages(
+            messages=_greeting_repro_messages(f"/private/tmp/{workspace.name}/hello.py"),
+            typed_evidence=EvidenceRecord(
+                data={
+                    "files_touched": ["hello.py"],
+                    "commands_run": [_GREETING_INNER_COMMAND],
+                    "tests_passed": [_GREETING_INNER_COMMAND],
+                }
+            ),
+            ac_content=_GREETING_AC,
+        )
+        assert verdict.passed is True, verdict.reasons
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_atomic_verifier_rejects_fabricated_greeting_claims_without_transcript() -> None:
+    """A near-miss filename and a near-miss command payload still fail (no real event)."""
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory=None),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd=None,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
+        typed_evidence=EvidenceRecord(
+            data={
+                # Different filename than the transcript Edit event.
+                "files_touched": ["goodbye.py"],
+                # Different command payload than the transcript Bash event.
+                "commands_run": ["python3 -c \"from hello import greet; print(greet('x'))\""],
+                "tests_passed": [
+                    "python3 -c \"from hello import greet; assert greet('World') == 'WRONG'\""
+                ],
+            }
+        ),
+        ac_content=_GREETING_AC,
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "files_touched: goodbye.py" in verdict.reasons[0]
+
+
+def test_atomic_verifier_accepts_prose_tests_passed_backed_by_run_command() -> None:
+    """Release blocker (live shape): prose ``tests_passed`` + a real successful command.
+
+    The live codex worker recorded ``tests_passed`` as a natural-language
+    description ("greet('x') returned 'Hello, x' and command output was OK")
+    rather than restating the inline verify command. It is accepted because the
+    ``commands_run`` verification command matched the wrapped Bash event and ran
+    with exit code 0 — anchoring the prose to a real, successful execution.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": [
+                    "greet('World') returned 'Hello, World!' and command output was OK"
+                ],
+            }
+        ),
+        ac_content=_GREETING_AC,
+    )
+
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_atomic_verifier_rejects_prose_tests_passed_without_successful_command() -> None:
+    """Prose ``tests_passed`` with no successfully-run backed command still fails.
+
+    Fabrication guard: the transcript contains only a read-only ``cat`` and no
+    verification command matching the ``commands_run`` claim, so the prose claim
+    of a passing test is not anchored to any real successful execution.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+        ),
+        AgentMessage(
+            type="tool",
+            content="read file",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": "/bin/zsh -lc 'cat hello.py'"},
+                "exit_code": 0,
+                "status": "completed",
+            },
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                # A verification command the transcript never actually ran.
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": ["greet('x') returned 'Hello, x' and command output was OK"],
+            }
+        ),
+        ac_content=_GREETING_AC,
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    reason = verdict.reasons[0]
+    assert "commands_run" in reason and "tests_passed" in reason
 
 
 @pytest.mark.parametrize(

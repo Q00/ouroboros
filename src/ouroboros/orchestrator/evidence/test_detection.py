@@ -14,6 +14,8 @@ from ouroboros.orchestrator.evidence.claims import (
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
+    _is_inline_verification_command,
+    _is_test_runner_family_command,
     _looks_like_test_command,
     _looks_like_unittest_command,
     _normalized_command_claim_aliases,
@@ -269,6 +271,54 @@ def _runtime_messages_support_test_claim(
     needle = value.strip().lower()
     if not needle:
         return False
+
+    # Directly-executed verification command claimed as ``tests_passed``.
+    #
+    # The strict per-runner path below only recognizes formal runners
+    # (pytest/unittest/gradle/mvn/npm test). A live AC may instead verify itself
+    # with an inline command such as
+    # ``python3 -c "from hello import greet; assert ...; print('OK')"`` — a real
+    # pass/fail signal (exit 0 == passed) but not a formal test runner. Workers
+    # also sometimes record the outcome in prose (``greet('x') returned
+    # 'Hello, x' and command output was OK``) instead of restating the command.
+    #
+    # Accept such a claim only when an INLINE-CODE verification command
+    # (``python3 -c "..."`` / ``node -e "..."`` — an interpreter whose non-zero
+    # exit means a real failed check) that is grounded in the transcript actually
+    # executed with a runtime success signal. The candidate is either (i) the
+    # claim itself, when it names such a command matching a Bash event, or (ii)
+    # an already-backed ``commands_run`` entry (matched against the transcript by
+    # the caller) — so a prose claim is anchored to a command the worker itself
+    # recorded and that really ran.
+    #
+    # Anti-fabrication is preserved: with no successfully-run inline-verification
+    # command the claim fails; read-only/print commands (``cat``/``echo`` emitting
+    # a fake "passed" line) and formal test runners are NOT inline-verification
+    # commands, so a bare ``pytest`` cannot back an unmentioned stale node-id and
+    # a ``cat fake_results.txt`` cannot back a node-id claim — those stay on the
+    # strict node-id path. Test-runner-family claims also stay on the strict path
+    # so skip-test invocations (``mvn -DskipTests``) remain rejected.
+    if not _is_test_runner_family_command(value):
+        for index, message in enumerate(messages):
+            if message.tool_name != "Bash":
+                continue
+            candidate_commands = (value, *backed_commands)
+            qualifying = tuple(
+                command
+                for command in candidate_commands
+                if _is_inline_verification_command(command)
+                and _runtime_message_supports_command_claim(command, message)
+            )
+            if not qualifying:
+                continue
+            chunk = [message]
+            for following in messages[index + 1 :]:
+                if following.tool_name and not _is_tool_result_message(following):
+                    break
+                chunk.append(following)
+            if any(_message_contains_test_success(item) for item in chunk):
+                return True
+
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
