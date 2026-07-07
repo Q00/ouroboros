@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from dataclasses import replace
 from enum import Enum
 import os
 from pathlib import Path
@@ -50,17 +52,25 @@ from ouroboros.auto.state import (
     AutoCommitPolicy,
     AutoPhase,
     AutoPipelineState,
+    AutoResumeCapability,
     AutoStore,
     parse_auto_worktree_policy,
     validate_complete_product_timeout,
 )
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.cli.formatters import console
-from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.cli.formatters.panels import (
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+)
 from ouroboros.config import get_opencode_mode
+from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
@@ -167,6 +177,20 @@ def auto_command(
     skip_run: Annotated[
         bool, typer.Option("--skip-run", help="Stop after A-grade Seed creation.")
     ] = False,
+    no_wait: Annotated[
+        bool,
+        typer.Option(
+            "--no-wait",
+            help=(
+                "Fire-and-forget: return as soon as the execute run-handoff job is "
+                "started instead of waiting for it to finish. WARNING: in direct CLI "
+                "mode the in-process job dies with the CLI, so detached execution does "
+                "NOT survive process exit unless a persistent owner (e.g. a running "
+                "'ouroboros mcp serve') holds it. Default off: auto waits for the run "
+                "job to reach a terminal state and reports the verdict."
+            ),
+        ),
+    ] = False,
     show_ledger: Annotated[
         bool, typer.Option("--show-ledger", help="Print assumptions and non-goals.")
     ] = False,
@@ -265,8 +289,10 @@ def auto_command(
 ) -> None:
     """Run an A-grade-gated auto pipeline.
 
-    The command returns execution IDs after the run starts; it does not wait
-    indefinitely for long-running execution completion.
+    By default the command waits for the execute run-handoff job to reach a
+    terminal state and reports the run verdict, because in direct CLI mode the
+    in-process job manager dies with the process and would otherwise cancel the
+    run on exit. Pass ``--no-wait`` to restore fire-and-forget behaviour.
     """
     if status:
         if not resume:
@@ -311,6 +337,7 @@ def auto_command(
                 commit_policy=commit_policy,
                 worktree_policy=worktree_policy,
                 progress_callback=_make_progress_renderer(quiet=quiet),
+                wait=not no_wait,
             )
         )
     except typer.Exit:
@@ -320,6 +347,13 @@ def auto_command(
         raise typer.Exit(1) from exc
 
     _print_result(result, show_ledger=show_ledger)
+    if no_wait and _is_run_handoff_only_completion(result) and result.job_id:
+        print_warning(
+            "Detached with --no-wait: the execute job runs in this CLI process only. "
+            "It will NOT survive process exit unless a persistent owner (e.g. a running "
+            "'ouroboros mcp serve') holds it. Re-run without --no-wait to wait for the "
+            f"run verdict, or track it with: ouroboros job wait {result.job_id}"
+        )
     if result.status in {"blocked", "failed"}:
         raise typer.Exit(1)
 
@@ -359,6 +393,7 @@ async def _run_auto(
     commit_policy: str | None = None,
     worktree_policy: str | None = None,
     progress_callback: AutoProgressCallback | None = None,
+    wait: bool = True,
 ) -> AutoPipelineResult:
     store = AutoStore()
     runtime_override = runtime
@@ -647,6 +682,19 @@ async def _run_auto(
     )
     try:
         result = await pipeline.run(state)
+        if wait and _is_run_handoff_only_completion(result) and result.job_id:
+            # Direct CLI mode has no long-lived owner for the in-process job:
+            # once _run_auto returns, ``asyncio.run`` teardown cancels the
+            # pending execute-job task (see mcp/job_manager.py drain docstring
+            # + the _run_job CancelledError handler), so the run would die at
+            # ~200ms without ever executing. Keep the event loop alive and
+            # stream the run to a terminal verdict before returning.
+            result = await _await_run_handoff_terminal(
+                result,
+                job_manager=getattr(start_execute, "_job_manager", None),
+                event_store=getattr(start_execute, "_event_store", None),
+                quiet=progress_callback is None,
+            )
     finally:
         release_auto_worktree(auto_workspace)
         await watchdog_event_store.close()
@@ -834,6 +882,133 @@ def _is_completed_ralph_product(result: AutoPipelineResult) -> bool:
 def _is_external_ralph_plugin_completion(result: AutoPipelineResult) -> bool:
     """True when auto is complete but product work lives in an OpenCode child."""
     return result.status == "complete" and result.ralph_dispatch_mode == "plugin"
+
+
+# Long-poll window (seconds) for each ``JobWaitHandler`` call while streaming
+# the run-handoff job to a terminal verdict. The handler returns early on any
+# AC/phase progress or terminal status, so this is only an upper bound on how
+# long a fully-idle poll blocks before we re-check the snapshot.
+_RUN_HANDOFF_WAIT_POLL_SECONDS = 5
+
+
+async def _cancel_run_handoff_job(job_manager: JobManager, job_id: str) -> None:
+    """Best-effort cancel of the in-process run job (Ctrl-C / teardown path)."""
+    cancel_job = getattr(job_manager, "cancel_job", None)
+    if cancel_job is None:
+        return
+    with contextlib.suppress(Exception):
+        await cancel_job(job_id)
+
+
+def _reconcile_run_handoff_result(
+    result: AutoPipelineResult, snapshot: JobSnapshot
+) -> AutoPipelineResult:
+    """Project a terminal execute-job snapshot back onto the auto result.
+
+    Mirrors ``mcp/tools/auto_handler._reconcile_execution_job_snapshot`` so the
+    CLI wait path and the MCP resume path report the same verdict, but reuses
+    the live job manager's snapshot instead of re-opening the event store.
+    """
+    status = result.status
+    blocker = result.blocker
+    resume_capability = result.resume_capability
+    if snapshot.status is JobStatus.COMPLETED:
+        status = "complete"
+        blocker = None
+        resume_capability = AutoResumeCapability.NONE
+    elif snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
+        detail = snapshot.error or snapshot.result_text or snapshot.message
+        blocker = (
+            f"execution job {snapshot.status.value}: {detail}"
+            if detail
+            else f"execution job {snapshot.status.value}"
+        )
+        status = "failed" if snapshot.status is JobStatus.FAILED else "blocked"
+        resume_capability = AutoResumeCapability.NONE
+    else:
+        # Non-terminal snapshot (should not happen after a terminal wait): keep
+        # the handoff-only result intact and only surface the live status.
+        return replace(result, execution_job_status=snapshot.status.value)
+    return replace(
+        result,
+        status=status,
+        phase="complete" if status == "complete" else result.phase,
+        blocker=blocker,
+        resume_capability=resume_capability,
+        execution_job_status=snapshot.status.value,
+        execution_job_error=snapshot.error,
+        execution_job_message=snapshot.message,
+    )
+
+
+async def _await_run_handoff_terminal(
+    result: AutoPipelineResult,
+    *,
+    job_manager: JobManager | None,
+    event_store: EventStore | None,
+    quiet: bool,
+) -> AutoPipelineResult:
+    """Wait for the started execute job to finish, streaming run progress.
+
+    Returns the original ``result`` unchanged when there is nothing to wait on
+    (no job handle, or the job is not owned by this manager — e.g. a plugin
+    dispatch). Otherwise polls the live job manager to a terminal state, prints
+    the run receipt via the existing ``ouroboros_job_result`` renderer, and
+    reconciles the run verdict onto the returned result.
+    """
+    job_id = result.job_id
+    if not job_id or job_manager is None or event_store is None:
+        return result
+    try:
+        snapshot = await job_manager.get_snapshot(job_id)
+    except ValueError:
+        # Job handle not owned by this manager (e.g. plugin-mode dispatch):
+        # honestly leave the handoff-only result as-is for the caller to render.
+        return result
+
+    if not quiet:
+        print_info(
+            f"Waiting for run job {job_id} to finish (Ctrl-C to cancel the run and detach)..."
+        )
+    wait_handler = JobWaitHandler(job_manager=job_manager, event_store=event_store)
+    cursor = 0
+    last_line = ""
+    try:
+        while not snapshot.is_terminal:
+            wait_result = await wait_handler.handle(
+                {
+                    "job_id": job_id,
+                    "cursor": cursor,
+                    "timeout_seconds": _RUN_HANDOFF_WAIT_POLL_SECONDS,
+                    "view": "compact",
+                    "wait_for": "ac_change",
+                }
+            )
+            if wait_result.is_err:
+                break
+            value = wait_result.value
+            meta = value.meta or {}
+            with contextlib.suppress(TypeError, ValueError):
+                cursor = int(meta.get("cursor", cursor))
+            line = (value.text_content or "").strip()
+            if not quiet and meta.get("changed") and line and line != last_line:
+                last_line = line
+                console.print(rf"[dim]\[run][/] {_rich_escape(line)}")
+            if meta.get("is_terminal"):
+                break
+            snapshot = await job_manager.get_snapshot(job_id)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        await _cancel_run_handoff_job(job_manager, job_id)
+        print_warning(f"Interrupted — cancelled run job {job_id}")
+        raise
+
+    snapshot = await job_manager.get_snapshot(job_id)
+    if not quiet:
+        result_handler = JobResultHandler(job_manager=job_manager, event_store=event_store)
+        receipt = await result_handler.handle({"job_id": job_id})
+        if receipt.is_ok and receipt.value.text_content:
+            console.print(receipt.value.text_content)
+    return _reconcile_run_handoff_result(result, snapshot)
 
 
 def _print_detached_guidance(result: AutoPipelineResult) -> None:
