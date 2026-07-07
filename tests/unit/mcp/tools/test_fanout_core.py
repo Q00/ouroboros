@@ -11,12 +11,16 @@ Covers PR-J:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
 
 from ouroboros.backends.capabilities import SubagentDispatchMode
-from ouroboros.mcp.tools.authoring_handlers import _attach_question_assist_requests
+from ouroboros.mcp.tools.authoring_handlers import (
+    InterviewHandler,
+    _attach_question_assist_requests,
+)
 from ouroboros.mcp.tools.evaluation_handlers import (
     LateralThinkHandler,
     SubmitFanoutResultsHandler,
@@ -24,10 +28,12 @@ from ouroboros.mcp.tools.evaluation_handlers import (
 from ouroboros.mcp.tools.subagent import (
     FANOUT_KIND_CODE_INVESTIGATION,
     FANOUT_KIND_LATERAL_PERSONA_PANEL,
+    FANOUT_KIND_QUESTION_ADVISORY,
     FanoutRecord,
     FanoutRegistry,
     build_fanout_subagents,
     build_subagent_payload,
+    register_code_investigation_fanout,
     register_lateral_persona_fanout,
     stamp_fanout_meta,
     submit_fanout_results,
@@ -312,6 +318,10 @@ def _code_fact_output(session_id: str, question: str) -> dict[str, Any]:
 
 
 def test_submit_complete_code_investigation_routes_to_synthesizer(tmp_path: Any) -> None:
+    # The advisory producer no longer registers a code-investigation record
+    # (#1578 follow-up: it registered `code_facts` while stamping
+    # `context.lane_id`, so contract-following hosts were rejected). The
+    # code-investigation kind is now registered directly from its request.
     registry = FanoutRegistry(tmp_path)
     question = "Which manifest declares the package?"
     session_id = "sess-code"
@@ -324,9 +334,12 @@ def test_submit_complete_code_investigation_routes_to_synthesizer(tmp_path: Any)
         score=None,
         dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
         runtime_backend="codex",
-        fanout_registry=registry,
     )
-    fanout_id = meta["question_advisory_fanout_id"]
+    fanout_id = register_code_investigation_fanout(
+        registry,
+        session_id=session_id,
+        request=meta["code_investigation_request"],
+    )
     out = submit_fanout_results(
         registry,
         session_id=session_id,
@@ -340,6 +353,133 @@ def test_submit_complete_code_investigation_routes_to_synthesizer(tmp_path: Any)
     assert result["ready_for_synthesis"] is True
     assert result["ready_for_forward"] is True
     assert result["contract_violations"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Advisory re-entry regression (#1578 follow-up): the STAMPED contract works
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_correlated_key(payload: Mapping[str, Any], dotted_key: str) -> str:
+    """Resolve a payload's correlation value by walking the stamped dotted path."""
+    node: Any = payload
+    for part in dotted_key.split("."):
+        assert isinstance(node, Mapping), f"cannot traverse {dotted_key!r} at {part!r}"
+        node = node[part]
+    return str(node)
+
+
+def _emitted_advisory_contract(
+    registry: FanoutRegistry, session_id: str
+) -> tuple[str, str, list[str]]:
+    """Emit an advisory response and read the re-entry contract FROM its meta.
+
+    Returns ``(fanout_id, correlation_key, lane_keys)`` exactly as a
+    contract-following host would obtain them: the stamped fan-out id, the
+    stamped correlation key, and the per-lane keys resolved by walking that
+    dotted key against each emitted advisory payload.
+    """
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id=session_id,
+        question="Which rollout strategy should we pick?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+        fanout_registry=registry,
+    )
+    fanout_id = meta["question_advisory_fanout_id"]
+    correlation_key = meta["question_advisory_result_correlation_key"]
+    lane_keys = [
+        _resolve_correlated_key(payload, correlation_key)
+        for payload in meta["question_advisory_subagents"]
+    ]
+    assert lane_keys, "advisory fan-out emitted no lanes"
+    return fanout_id, correlation_key, lane_keys
+
+
+@pytest.mark.asyncio
+async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> None:
+    """Regression (#1578): a host following the STAMPED contract must succeed.
+
+    The producer stamped ``question_advisory_result_correlation_key=
+    "context.lane_id"`` but registered a ``code_facts`` code-investigation
+    record, so submitting with the stamped key + per-lane keys was rejected
+    with ``correlation_mismatch``. Everything submitted here is read from the
+    emitted meta/payloads — nothing is hardcoded from server internals.
+    """
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-advisory-contract"
+    fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
+
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit_result = await submit.handle(
+        {
+            "session_id": session_id,
+            "fanout_id": fanout_id,
+            "correlation_key": correlation_key,
+            "results": [{"key": key, "content": f"{key}-advice"} for key in lane_keys],
+        }
+    )
+    assert submit_result.is_ok, submit_result
+    out = submit_result.unwrap().meta
+    assert out["status"] == "complete"
+    assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
+    assert out["correlation_key"] == correlation_key
+    aggregated = out["result"]["aggregated_outputs"]
+    assert [item["lane_id"] for item in aggregated] == lane_keys
+    assert [item["output"] for item in aggregated] == [f"{key}-advice" for key in lane_keys]
+
+
+@pytest.mark.asyncio
+async def test_advisory_reentry_partial_set_lists_missing_lane_ids(tmp_path: Any) -> None:
+    """Submitting a subset of the emitted lanes reports the missing lane ids."""
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-advisory-partial"
+    fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
+    assert len(lane_keys) > 1, "partial-set case needs multiple advisory lanes"
+
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit_result = await submit.handle(
+        {
+            "session_id": session_id,
+            "fanout_id": fanout_id,
+            "correlation_key": correlation_key,
+            "results": [{"key": lane_keys[0], "content": f"{lane_keys[0]}-advice"}],
+        }
+    )
+    assert submit_result.is_ok, submit_result
+    out = submit_result.unwrap().meta
+    assert out["status"] == "partial"
+    assert out["missing_keys"] == lane_keys[1:]
+    assert out["received_keys"] == [lane_keys[0]]
+
+
+# --------------------------------------------------------------------------- #
+# Registry state-dir threading (#1578 follow-up, MEDIUM)
+# --------------------------------------------------------------------------- #
+
+
+def test_registry_rebase_default_moves_default_location_only(tmp_path: Any) -> None:
+    default_registry = FanoutRegistry()
+    default_registry.rebase_default(tmp_path / "fanout")
+    assert default_registry.directory == tmp_path / "fanout"
+    # A second rebase is a no-op: the registry is no longer default-located.
+    default_registry.rebase_default(tmp_path / "other")
+    assert default_registry.directory == tmp_path / "fanout"
+
+    explicit = FanoutRegistry(tmp_path / "explicit")
+    explicit.rebase_default(tmp_path / "fanout")
+    assert explicit.directory == tmp_path / "explicit"
+
+
+def test_interview_handler_threads_state_dir_into_registry(tmp_path: Any) -> None:
+    handler = InterviewHandler(data_dir=tmp_path, fanout_registry=FanoutRegistry())
+    registry = handler._resolved_fanout_registry()
+    assert registry is not None
+    assert registry.directory == tmp_path / "fanout"
 
 
 # --------------------------------------------------------------------------- #

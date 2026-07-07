@@ -54,7 +54,7 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
-    register_code_investigation_fanout,
+    register_question_advisory_fanout,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
     stamp_fanout_meta,
@@ -718,9 +718,11 @@ def _attach_question_assist_requests(
     ``host_action=spawn_subagents`` cue for the host model to fan the advisory
     lanes out itself.
 
-    When ``fanout_registry`` is provided the code-investigation lane is
-    registered for result re-entry and its ``fanout_id`` is stamped as
-    ``question_advisory_fanout_id`` so a later
+    When ``fanout_registry`` is provided the advisory fan-out is registered for
+    result re-entry — keyed by ``context.lane_id`` with the emitted payloads'
+    lane ids as expected keys, matching the stamped
+    ``question_advisory_result_correlation_key`` — and its ``fanout_id`` is
+    stamped as ``question_advisory_fanout_id`` so a later
     ``ouroboros_submit_fanout_results`` submission can be matched. With no
     registry the emitted meta is byte-identical to the pre-registry contract.
     """
@@ -776,10 +778,17 @@ def _attach_question_assist_requests(
         correlation_key="context.lane_id",
     )
     if fanout_registry is not None:
-        meta["question_advisory_fanout_id"] = register_code_investigation_fanout(
+        # Register with the SAME contract this response stamps: the record's
+        # correlation key is ``context.lane_id`` and its expected keys are the
+        # lane ids carried on the emitted advisory payloads, so a host that
+        # follows the stamped ``question_advisory_result_correlation_key``
+        # round-trips through ``ouroboros_submit_fanout_results`` successfully
+        # (#1578 registered a ``code_facts`` code-investigation record here,
+        # which rejected contract-following submissions as a mismatch).
+        meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
             fanout_registry,
             session_id=session_id,
-            request=code_request,
+            payloads=advisory_payloads,
         )
 
 
@@ -1660,6 +1669,21 @@ class InterviewHandler:
         if self.interview_engine is not None:
             return self.interview_engine.state_dir
         return self.data_dir or _DATA_DIR
+
+    def _resolved_fanout_registry(self) -> FanoutRegistry | None:
+        """Return the fan-out registry rooted under the handler's real data dir.
+
+        The server factory constructs the shared ``FanoutRegistry`` before the
+        interview state dir is known, so a default-located registry is re-rooted
+        onto ``resolved_state_dir()/fanout`` here — the same substrate interview
+        state JSON is written to. Explicitly-located registries (tests, custom
+        wiring) are left untouched, and since producers and the submit handler
+        share one instance, re-entry reads the same directory.
+        """
+        registry = self.fanout_registry
+        if registry is not None:
+            registry.rebase_default(self.resolved_state_dir() / "fanout")
+        return registry
 
     async def _emit_event(self, event: Any) -> None:
         """Emit event to store. Swallows errors to not break interview flow."""
@@ -2617,7 +2641,7 @@ class InterviewHandler:
                         ),
                         runtime_backend=self.agent_runtime_backend,
                         opencode_mode=self.opencode_mode,
-                        fanout_registry=self.fanout_registry,
+                        fanout_registry=self._resolved_fanout_registry(),
                     )
 
                 start_response_text = (
@@ -3151,7 +3175,7 @@ class InterviewHandler:
                         ),
                         runtime_backend=self.agent_runtime_backend,
                         opencode_mode=self.opencode_mode,
-                        fanout_registry=self.fanout_registry,
+                        fanout_registry=self._resolved_fanout_registry(),
                     )
 
                 resume_response_text = f"Session {session_id}\n\n{display_question}"
@@ -3394,7 +3418,7 @@ class InterviewHandler:
                 ),
                 runtime_backend=self.agent_runtime_backend,
                 opencode_mode=self.opencode_mode,
-                fanout_registry=self.fanout_registry,
+                fanout_registry=self._resolved_fanout_registry(),
             )
 
         if lateral_review_dispatch_meta is not None:

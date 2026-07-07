@@ -155,6 +155,21 @@ def _payload_persona(payload: Mapping[str, Any]) -> str:
     return "unknown"
 
 
+def _payload_lane_id(payload: Mapping[str, Any]) -> str:
+    """Return the ``context.lane_id`` a fan-out payload correlates by, or ``""``.
+
+    Advisory lanes correlate by ``context.lane_id`` (their persona is absent on
+    some lanes, e.g. ``code_context`` / ``web_context``), so re-entry matches a
+    submitted result to its originating payload by this lane id.
+    """
+    context = payload.get("context")
+    if isinstance(context, Mapping):
+        lane_id = context.get("lane_id")
+        if lane_id:
+            return str(lane_id)
+    return ""
+
+
 def _response_text_json_payload(result: MCPToolResult) -> dict[str, Any] | None:
     text = result.text_content.strip()
     if not text or not text.startswith("{"):
@@ -2401,6 +2416,7 @@ _DEFAULT_FANOUT_DIR = Path.home() / ".ouroboros" / "data" / "fanout"
 # Fan-out re-entry kinds — each routes to one revived synthesizer.
 FANOUT_KIND_LATERAL_PERSONA_PANEL = "lateral_persona_panel"
 FANOUT_KIND_CODE_INVESTIGATION = "code_investigation"
+FANOUT_KIND_QUESTION_ADVISORY = "question_advisory"
 
 
 def _fanout_meta_key(prefix: str, key: str) -> str:
@@ -2554,7 +2570,10 @@ class FanoutRegistry:
     """File-backed store for pending fan-out expected-key state.
 
     Reuses the interview data directory as the persistence substrate (the same
-    place interview state JSON is written) rather than inventing a new layer.
+    place interview state JSON is written) rather than inventing a new layer:
+    handlers that know the resolved interview state dir thread it in via
+    :meth:`rebase_default`; until then the zero-arg default falls back to
+    ``~/.ouroboros/data/fanout``.
     Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
     a persistence failure degrades re-entry (submissions report the fan-out as
     unknown) but never breaks the fan-out request path.
@@ -2566,6 +2585,20 @@ class FanoutRegistry:
     @property
     def directory(self) -> Path:
         return self._dir
+
+    def rebase_default(self, directory: Path) -> None:
+        """Re-root a default-located registry onto the server's real data dir.
+
+        The zero-arg constructor falls back to ``~/.ouroboros/data/fanout``
+        because the server factory does not know the resolved interview state
+        dir at construction time. Handlers that DO know it (via
+        ``resolved_state_dir()``) call this to thread the actual data dir in.
+        A registry constructed with an explicit directory (e.g. tests injecting
+        ``tmp_path``) is never re-rooted, and because producer + submit handlers
+        share one registry instance, both sides observe the same directory.
+        """
+        if self._dir == _DEFAULT_FANOUT_DIR:
+            self._dir = directory
 
     def _path(self, fanout_id: str) -> Path:
         return self._dir / f"{fanout_id}.json"
@@ -2705,6 +2738,44 @@ def register_code_investigation_fanout(
     )
 
 
+def register_question_advisory_fanout(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    payloads: list[SubagentPayload],
+    correlation_key: str = "context.lane_id",
+    fanout_id: str | None = None,
+) -> str:
+    """Register an interview question-advisory fan-out for later result re-entry.
+
+    The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
+    persona is absent on the ``code_context`` / ``web_context`` lanes), so the
+    expected keys are the lane ids carried on the emitted payloads — exactly the
+    keys the stamped ``question_advisory_result_correlation_key`` tells the host
+    to submit under. This is the invariant #1578 broke: the producer stamped
+    ``context.lane_id`` but registered a ``code_facts`` record, so a
+    contract-following host was rejected with ``correlation_mismatch``.
+
+    Advisory lanes have no gating synthesizer (each is independent advice to make
+    the human's answer easier), so submission routes to a deterministic
+    aggregation that returns the correlated lane outputs in dispatch order for
+    the host to synthesize.
+    """
+    expected_keys: list[str] = []
+    for payload in payloads:
+        lane_id = _payload_lane_id(payload.to_dict())
+        if lane_id and lane_id not in expected_keys:
+            expected_keys.append(lane_id)
+    return registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        expected_keys=expected_keys,
+        synthesizer_input={"lane_ids": list(expected_keys)},
+        fanout_id=fanout_id,
+    )
+
+
 def submit_fanout_results(
     registry: FanoutRegistry,
     *,
@@ -2788,6 +2859,25 @@ def submit_fanout_results(
             provided,
             _fanout_identity_synthesis,
         )
+        return {
+            "status": "complete",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "correlation_key": record.correlation_key,
+            "result": outcome,
+        }
+
+    if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
+        # Advisory lanes are independent advice with no gating synthesizer, so
+        # aggregate the correlated outputs deterministically in dispatch (lane)
+        # order and hand them back for the host to synthesize.
+        lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
+        aggregated = [
+            {"lane_id": lane_id, "output": provided[lane_id]}
+            for lane_id in lane_ids
+            if lane_id in provided
+        ]
+        outcome = _fanout_identity_synthesis(aggregated)
         return {
             "status": "complete",
             "fanout_id": fanout_id,
