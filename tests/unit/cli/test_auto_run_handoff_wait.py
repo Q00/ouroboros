@@ -232,6 +232,71 @@ async def test_wait_blocked_verdict_persists_resumable_durable_state(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_wait_interrupt_persists_resumable_durable_state(tmp_path) -> None:
+    """An operator interrupt mid-wait must correct the DURABLE state too.
+
+    Cancelling the wait cancels the execute job; the durable auto session must
+    NOT be left as COMPLETE (which would make a later ``ooo auto --resume``
+    report success for a run that was actually cancelled). Same durability
+    proof shape as the deadline/paused tests: load fresh from the store and
+    assert not COMPLETE / resumable.
+    """
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    auto_store = AutoStore(tmp_path / "auto")
+    try:
+        started_running = asyncio.Event()
+
+        async def _wedged_runner() -> MCPToolResult:
+            started_running.set()
+            await asyncio.sleep(3600)  # never terminates
+            raise AssertionError("unreachable")
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_wedged_runner()
+        )
+        await asyncio.wait_for(started_running.wait(), timeout=5)
+        state = _completed_handoff_state(tmp_path, started.job_id)
+        auto_store.save(state)
+        assert auto_store.load(state.auto_session_id).phase is AutoPhase.COMPLETE
+
+        result = AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            job_id=started.job_id,
+            run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.NONE,
+        )
+
+        wait_task = asyncio.create_task(
+            _await_run_handoff_terminal(
+                result,
+                job_manager=manager,
+                event_store=jobs,
+                quiet=True,
+                state=state,
+                store=auto_store,
+            )
+        )
+        # Let the wait enter its poll loop, then deliver the interrupt.
+        await asyncio.sleep(0.2)
+        wait_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await wait_task
+
+        # DURABLE state, loaded fresh as --resume would: NOT COMPLETE, resumable.
+        reloaded = AutoStore(tmp_path / "auto").load(state.auto_session_id)
+        assert reloaded.phase is not AutoPhase.COMPLETE
+        assert reloaded.phase is AutoPhase.RUN
+        assert reloaded.job_id == started.job_id
+        assert reloaded.resume_capability() is AutoResumeCapability.RESUME
+    finally:
+        await _cancel_manager_tasks(manager)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
 async def test_wait_success_keeps_durable_state_complete(tmp_path) -> None:
     """Genuine success must leave the durable state COMPLETE (fast-path intact)."""
     jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")

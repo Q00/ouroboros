@@ -1170,7 +1170,8 @@ async def _await_run_handoff_terminal(
     )
     if not quiet:
         print_info(
-            f"Waiting for run job {job_id} to finish (Ctrl-C to cancel the run and detach)..."
+            f"Waiting for run job {job_id} to finish "
+            "(Ctrl-C cancels the run; resumable with ooo auto --resume)..."
         )
     wait_handler = JobWaitHandler(job_manager=job_manager, event_store=event_store)
     cursor = 0
@@ -1213,8 +1214,30 @@ async def _await_run_handoff_terminal(
                 break
             snapshot = await job_manager.get_snapshot(job_id)
     except (asyncio.CancelledError, KeyboardInterrupt):
+        # Interrupt cancels the run mid-flight — the same non-success boundary
+        # as the deadline/paused/terminal-failure paths. Correct the durable
+        # state FIRST (synchronous, so it always lands even if the cancel await
+        # below is itself interrupted) so a later ``ouroboros auto --resume``
+        # reconciles the cancelled run instead of returning the pipeline's
+        # premature COMPLETE. Best-effort: never let a persistence hiccup mask
+        # the operator's interrupt.
+        with contextlib.suppress(Exception):
+            interrupted_result = replace(
+                result,
+                status="blocked",
+                blocker=(
+                    f"run cancelled by interrupt; cancelled run job {job_id}. "
+                    "The product run did NOT complete. Resume with: "
+                    f"ouroboros auto --resume {result.auto_session_id}"
+                ),
+                resume_capability=AutoResumeCapability.RESUME,
+            )
+            _persist_resumable_run_verdict(interrupted_result, state, store)
         await _cancel_run_handoff_job(job_manager, job_id)
-        print_warning(f"Interrupted — cancelled run job {job_id}")
+        print_warning(
+            f"Interrupted — cancelled run job {job_id}. "
+            f"Resume with: ouroboros auto --resume {result.auto_session_id}"
+        )
         raise
 
     snapshot = await job_manager.get_snapshot(job_id)
