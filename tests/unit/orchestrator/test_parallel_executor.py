@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
-import shutil
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1481,35 +1480,50 @@ def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_with
     assert verdict.failure_class is None
 
 
-def test_atomic_verifier_accepts_greeting_repro_with_tmp_private_tmp_symlink(tmp_path) -> None:
-    """The claim matches even when task_cwd is /tmp and the transcript is /private/tmp."""
-    workspace = Path("/tmp") / f"ooo-repro-{tmp_path.name}"
-    workspace.mkdir(parents=True, exist_ok=True)
+def test_atomic_verifier_accepts_symlinked_cwd_against_resolved_transcript_path(
+    tmp_path,
+) -> None:
+    """The resolve tier matches a symlinked run cwd against a resolved transcript path.
+
+    Portable stand-in for the macOS ``/tmp`` -> ``/private/tmp`` layout: create a
+    real symlink inside ``tmp_path``, run with ``task_cwd`` set to the symlinked
+    directory, and have the transcript record the Edit under the resolved real
+    directory. ``Path.resolve`` on both sides must treat them as the same file.
+    """
+    real_dir = tmp_path / "real_workspace"
+    real_dir.mkdir()
+    (real_dir / "hello.py").write_text("def greet(name):\n    return f'Hello, {name}!'\n")
+    link_dir = tmp_path / "linked_workspace"
     try:
-        (workspace / "hello.py").write_text("def greet(name):\n    return f'Hello, {name}!'\n")
-        executor = ParallelACExecutor(
-            adapter=MagicMock(working_directory=str(workspace)),
-            event_store=AsyncMock(),
-            console=MagicMock(),
-            enable_decomposition=False,
-            execution_profile=load_profile("code"),
-            fat_harness_mode=True,
-            task_cwd=str(workspace),
-        )
-        verdict = executor._verify_atomic_evidence_against_runtime_messages(
-            messages=_greeting_repro_messages(f"/private/tmp/{workspace.name}/hello.py"),
-            typed_evidence=EvidenceRecord(
-                data={
-                    "files_touched": ["hello.py"],
-                    "commands_run": [_GREETING_INNER_COMMAND],
-                    "tests_passed": [_GREETING_INNER_COMMAND],
-                }
-            ),
-            ac_content=_GREETING_AC,
-        )
-        assert verdict.passed is True, verdict.reasons
-    finally:
-        shutil.rmtree(workspace, ignore_errors=True)
+        os.symlink(real_dir, link_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+
+    assert link_dir.resolve() == real_dir.resolve()
+    assert str(link_dir) != str(real_dir)
+
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory=str(link_dir)),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        # Run cwd is the symlink; the transcript path below is under the real dir.
+        task_cwd=str(link_dir),
+    )
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=_greeting_repro_messages(str(real_dir / "hello.py")),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": [_GREETING_INNER_COMMAND],
+            }
+        ),
+        ac_content=_GREETING_AC,
+    )
+    assert verdict.passed is True, verdict.reasons
 
 
 def test_atomic_verifier_rejects_fabricated_greeting_claims_without_transcript() -> None:
@@ -1635,6 +1649,71 @@ def test_atomic_verifier_rejects_prose_tests_passed_without_successful_command()
     assert verdict.failure_class == "FABRICATION_SUSPECTED"
     reason = verdict.reasons[0]
     assert "commands_run" in reason and "tests_passed" in reason
+
+
+def test_atomic_verifier_rejects_inline_command_without_a_real_check() -> None:
+    """A successfully-run ``python3 -c "print('OK')"`` cannot back tests_passed.
+
+    Anti-fabrication boundary: the inline command performs no assertion — its
+    exit 0 is meaningless as test evidence — so a prose ``tests_passed`` claim
+    about the AC behaviour must NOT be satisfied even though the command really
+    ran and printed a success-looking line. Contrast with the real inline
+    assertion accepted by
+    ``test_atomic_verifier_accepts_prose_tests_passed_backed_by_run_command``.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    print_only_command = "python3 -c \"print('OK')\""
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+        ),
+        AgentMessage(
+            type="tool",
+            content="run print",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": f'/bin/zsh -lc "{print_only_command}"'},
+                "exit_code": 0,
+                "status": "completed",
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="OK",
+            tool_name=None,
+            data={"subtype": "tool_result", "output": "OK", "exit_code": 0},
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                # A real, backed command — but it only prints, it never checks.
+                "commands_run": [print_only_command],
+                "tests_passed": ["greet('x') returned 'Hello, x' and command output was OK"],
+            }
+        ),
+        ac_content=_GREETING_AC,
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "tests_passed:" in verdict.reasons[0]
 
 
 @pytest.mark.parametrize(

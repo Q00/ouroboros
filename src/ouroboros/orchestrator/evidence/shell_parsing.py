@@ -58,17 +58,46 @@ _INLINE_CODE_INTERPRETERS = frozenset(
 )
 _INLINE_CODE_FLAGS = frozenset({"-c", "-e", "--eval"})
 
+# A raised/aborting check whose failure would make the interpreter exit non-zero.
+# This is what separates a real inline verification (``assert greet('x') == ...``)
+# from a bare ``print('OK')`` that always succeeds regardless of correctness.
+# ``sys.exit``/``os._exit``/``process.exit`` are included because an inline check
+# commonly gates the exit code that way; a bare ``exit(0)`` is not a check but is
+# also not something a worker writes to *prove* a test, and requiring one of these
+# keyword-level constructs keeps the boundary conservative.
+_INLINE_VERIFICATION_CONSTRUCT_RE = re.compile(
+    r"\b(assert|assertequal|asserttrue|raise|throw|die|unittest|pytest|expect)\b"
+    r"|\b(sys\.exit|os\._exit|process\.exit)\s*\(",
+)
+
+
+def _inline_code_payload(parts: list[str]) -> str | None:
+    """Return the inline code string following a ``-c`` / ``-e`` / ``--eval`` flag."""
+    for index, part in enumerate(parts):
+        if part in _INLINE_CODE_FLAGS and index + 1 < len(parts):
+            return parts[index + 1]
+    return None
+
 
 def _is_inline_verification_command(command: str) -> bool:
-    """Return True for an interpreter running inline code (``python3 -c "..."``).
+    """Return True for an interpreter running inline code that performs a real check.
 
     Such a command executes code whose non-zero exit meaningfully signals a
     failed check (a failed ``assert`` raises and exits non-zero), so a successful
-    run can back a ``tests_passed`` claim even without a formal test runner. This
-    is deliberately narrow: read-only / print commands (``cat``, ``echo``, that
-    can emit a fake "passed" line) and formal test runners are excluded — the
-    former carry no verification semantics and the latter must keep flowing
-    through the strict node-id / no-tests-ran path.
+    run can back a ``tests_passed`` claim even without a formal test runner.
+
+    Deliberately narrow on TWO axes so it cannot widen the anti-fabrication
+    boundary:
+
+    - Interpreter form: only an inline-code interpreter invocation
+      (``python3 -c "..."``, ``node -e "..."``). Read-only / print commands
+      (``cat``, ``echo``) and formal test runners are excluded — the former
+      carry no verification semantics and the latter must keep flowing through
+      the strict node-id / no-tests-ran path.
+    - Payload substance: the inline code must contain an assertion / verification
+      construct (``assert``, ``raise``, ``throw``, ``unittest``, ``sys.exit(``,
+      ...). A bare ``python3 -c "print('OK')"`` performs no check — its exit 0 is
+      meaningless as test evidence — so it does NOT qualify.
     """
     normalized = command.strip().lower()
     if not normalized:
@@ -81,11 +110,10 @@ def _is_inline_verification_command(command: str) -> bool:
         except ValueError:
             parts = segment.split()
         parts = _strip_env_prefix(parts)
-        if not parts:
+        if not parts or Path(parts[0]).name not in _INLINE_CODE_INTERPRETERS:
             continue
-        if Path(parts[0]).name in _INLINE_CODE_INTERPRETERS and any(
-            flag in _INLINE_CODE_FLAGS for flag in parts[1:]
-        ):
+        payload = _inline_code_payload(parts)
+        if payload is not None and _INLINE_VERIFICATION_CONSTRUCT_RE.search(payload):
             return True
     return False
 
