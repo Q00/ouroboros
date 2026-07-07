@@ -225,6 +225,96 @@ async def test_wait_completed_job_without_success_meta_is_not_complete(tmp_path)
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_wait_deadline_cancels_wedged_job_and_reports_bounded_verdict(tmp_path) -> None:
+    """A never-terminal execute job must not outlive the pipeline deadline.
+
+    The default wait is bounded by the same top-level ``--timeout`` budget the
+    pipeline advertises: on expiry the job is cancelled cleanly (cancellation
+    event written) and the CLI reports blocked/timeout with the resume handle
+    preserved — never complete, never waiting past the bound.
+    """
+    import time as time_module
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+        started_running = asyncio.Event()
+
+        async def _wedged_runner() -> MCPToolResult:
+            started_running.set()
+            await asyncio.sleep(3600)  # never terminates within the test
+            raise AssertionError("unreachable")
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_wedged_runner()
+        )
+        await asyncio.wait_for(started_running.wait(), timeout=5)
+        result = _handoff_only_result(started.job_id)
+
+        wait_started = time_module.monotonic()
+        reconciled = await asyncio.wait_for(
+            _await_run_handoff_terminal(
+                result,
+                job_manager=manager,
+                event_store=store,
+                quiet=True,
+                deadline_at=time_module.monotonic() + 0.5,
+            ),
+            # Outer guard: bound (0.5s) + cancel grace (5s) + margin. The wait
+            # must return on its own well within this.
+            timeout=15,
+        )
+        elapsed = time_module.monotonic() - wait_started
+
+        # Returned within the bound (deadline + cancel grace), not wedged.
+        assert elapsed < 10
+
+        # NOT complete: blocked/timeout verdict with resume guidance.
+        assert reconciled.status == "blocked"
+        assert reconciled.blocker is not None
+        assert "deadline" in reconciled.blocker
+        assert "--resume auto_wait" in reconciled.blocker
+        # Resume capability and the run handle are preserved.
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+        assert reconciled.job_id == started.job_id
+
+        # The job was cancelled cleanly via the existing cancel path.
+        snapshot = await manager.get_snapshot(started.job_id)
+        assert snapshot.status in {JobStatus.CANCELLED, JobStatus.CANCEL_REQUESTED}
+        for _ in range(100):
+            snapshot = await manager.get_snapshot(started.job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.05)
+        assert snapshot.status is JobStatus.CANCELLED
+        events, _cursor = await store.get_events_after("job", started.job_id, 0)
+        assert any(event.type == "mcp.job.cancelled" for event in events)
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+def test_deadline_blocked_result_exit_code_is_nonzero() -> None:
+    """CLI exit code is non-zero for the bounded deadline/blocked verdict."""
+    from dataclasses import replace as dc_replace
+
+    async def fake_run_auto(**_kwargs: object) -> AutoPipelineResult:
+        return dc_replace(
+            _handoff_only_result("job_wedged"),
+            status="blocked",
+            blocker="run wait deadline exhausted (top-level pipeline --timeout budget)",
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(auto_command, "_run_auto", fake_run_auto)
+        result = runner.invoke(app, ["auto", "safe wedged goal"])
+
+    assert result.exit_code == 1
+    output = _plain(result.output)
+    assert "deadline" in output
+
+
 def test_paused_run_exit_code_reflects_non_complete() -> None:
     """CLI exit code is non-zero when the waited run reconciles to paused/blocked."""
     from dataclasses import replace as dc_replace

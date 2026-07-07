@@ -8,6 +8,7 @@ from dataclasses import replace
 from enum import Enum
 import os
 from pathlib import Path
+import time
 from typing import Annotated
 
 from rich.markup import escape as _rich_escape
@@ -242,6 +243,9 @@ def auto_command(
                 "Top-level pipeline deadline in seconds. Defaults to "
                 f"{DEFAULT_PIPELINE_TIMEOUT_SECONDS:g}s (2h) for new sessions. "
                 f"Range: {MIN_PIPELINE_TIMEOUT_SECONDS:g}-{MAX_PIPELINE_TIMEOUT_SECONDS:g}. "
+                "The same deadline also bounds the default run-handoff wait: "
+                "on expiry the run job is cancelled cleanly and auto reports a "
+                "blocked (resumable) verdict. "
                 "On resume the deadline is preserved across process restarts; "
                 "passing --timeout on resume is rejected."
             ),
@@ -694,6 +698,13 @@ async def _run_auto(
                 job_manager=getattr(start_execute, "_job_manager", None),
                 event_store=getattr(start_execute, "_event_store", None),
                 quiet=progress_callback is None,
+                # Bound the wait by the SAME top-level pipeline deadline the
+                # CLI --timeout contract advertises: the pipeline consumed
+                # part of the budget, the wait gets the remainder. When the
+                # deadline was never armed (defensive), a fresh
+                # pipeline_timeout_seconds window applies — never unbounded.
+                deadline_at=state.deadline_at,
+                fallback_timeout_seconds=float(state.pipeline_timeout_seconds),
             )
     finally:
         release_auto_worktree(auto_workspace)
@@ -937,6 +948,11 @@ def _reconcile_run_handoff_result(
     verdict carried in ``result_meta``: a COMPLETED job is only a successful
     run when its meta confirms terminal success; ``status == "paused"`` keeps
     the session resumable and never reports complete.
+
+    TODO(Q00/ouroboros#1590): extract a shared job→auto-result reconciliation
+    helper with ``mcp/tools/auto_handler._reconcile_execution_job_snapshot``
+    instead of mirroring its semantics here (kept out of this PR to avoid
+    touching the MCP path).
     """
     status = result.status
     blocker = result.blocker
@@ -999,12 +1015,66 @@ def _reconcile_run_handoff_result(
     )
 
 
+# Grace window (seconds) after a deadline-driven cancel for the job's
+# CancelledError handler to persist its terminal ``mcp.job.cancelled`` event,
+# so the bounded verdict reports the post-cancel terminal status.
+_RUN_HANDOFF_CANCEL_GRACE_SECONDS = 5.0
+
+
+def _run_wait_deadline_result(
+    result: AutoPipelineResult, snapshot: JobSnapshot
+) -> AutoPipelineResult:
+    """Bounded verdict for a run wait that exhausted the pipeline deadline.
+
+    Same shape as the paused reconciliation: NOT complete, blocked with the
+    resume handle and guidance, resume capability preserved.
+    """
+    return replace(
+        result,
+        status="blocked",
+        blocker=(
+            "run wait deadline exhausted (top-level pipeline --timeout budget); "
+            f"cancelled run job {snapshot.job_id}. The product run did NOT "
+            "complete. Resume with: ouroboros auto --resume "
+            f"{result.auto_session_id}"
+        ),
+        execution_job_status=snapshot.status.value,
+        execution_job_error=snapshot.error,
+        execution_job_message=snapshot.message,
+    )
+
+
+async def _cancel_run_and_build_deadline_result(
+    result: AutoPipelineResult,
+    job_manager: JobManager,
+    job_id: str,
+    snapshot: JobSnapshot,
+) -> AutoPipelineResult:
+    """Cancel the run job on deadline expiry and return the bounded verdict."""
+    await _cancel_run_handoff_job(job_manager, job_id)
+    print_warning(
+        f"Run wait deadline reached — cancelled run job {job_id}. "
+        f"Resume with: ouroboros auto --resume {result.auto_session_id}"
+    )
+    # Short grace so the cancel lands as a terminal event before reporting.
+    grace_deadline = time.monotonic() + _RUN_HANDOFF_CANCEL_GRACE_SECONDS
+    with contextlib.suppress(Exception):
+        while time.monotonic() < grace_deadline:
+            snapshot = await job_manager.get_snapshot(job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.05)
+    return _run_wait_deadline_result(result, snapshot)
+
+
 async def _await_run_handoff_terminal(
     result: AutoPipelineResult,
     *,
     job_manager: JobManager | None,
     event_store: EventStore | None,
     quiet: bool,
+    deadline_at: float | None = None,
+    fallback_timeout_seconds: float = DEFAULT_PIPELINE_TIMEOUT_SECONDS,
 ) -> AutoPipelineResult:
     """Wait for the started execute job to finish, streaming run progress.
 
@@ -1013,6 +1083,15 @@ async def _await_run_handoff_terminal(
     dispatch). Otherwise polls the live job manager to a terminal state, prints
     the run receipt via the existing ``ouroboros_job_result`` renderer, and
     reconciles the run verdict onto the returned result.
+
+    The wait is bounded by ``deadline_at`` — the pipeline's armed monotonic
+    deadline (``state.deadline_at``), i.e. the SAME budget the CLI's top-level
+    ``--timeout`` contract advertises; the pipeline consumed part of it and the
+    wait gets the remainder. When no deadline was armed (defensive), a fresh
+    ``fallback_timeout_seconds`` window (the pipeline's own default budget)
+    applies — the wait is never unbounded. On expiry the job is cancelled
+    cleanly via the existing cancel path and a bounded blocked/timeout verdict
+    is returned, mirroring the Ctrl-C semantics.
     """
     job_id = result.job_id
     if not job_id or job_manager is None or event_store is None:
@@ -1024,6 +1103,11 @@ async def _await_run_handoff_terminal(
         # honestly leave the handoff-only result as-is for the caller to render.
         return result
 
+    deadline = (
+        deadline_at
+        if deadline_at is not None
+        else time.monotonic() + max(0.0, fallback_timeout_seconds)
+    )
     if not quiet:
         print_info(
             f"Waiting for run job {job_id} to finish (Ctrl-C to cancel the run and detach)..."
@@ -1033,15 +1117,27 @@ async def _await_run_handoff_terminal(
     last_line = ""
     try:
         while not snapshot.is_terminal:
-            wait_result = await wait_handler.handle(
-                {
-                    "job_id": job_id,
-                    "cursor": cursor,
-                    "timeout_seconds": _RUN_HANDOFF_WAIT_POLL_SECONDS,
-                    "view": "compact",
-                    "wait_for": "ac_change",
-                }
-            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return await _cancel_run_and_build_deadline_result(
+                    result, job_manager, job_id, snapshot
+                )
+            try:
+                wait_result = await asyncio.wait_for(
+                    wait_handler.handle(
+                        {
+                            "job_id": job_id,
+                            "cursor": cursor,
+                            "timeout_seconds": _RUN_HANDOFF_WAIT_POLL_SECONDS,
+                            "view": "compact",
+                            "wait_for": "ac_change",
+                        }
+                    ),
+                    timeout=min(float(_RUN_HANDOFF_WAIT_POLL_SECONDS), remaining),
+                )
+            except TimeoutError:
+                # Poll window clipped by the deadline; loop re-checks it.
+                continue
             if wait_result.is_err:
                 break
             value = wait_result.value
