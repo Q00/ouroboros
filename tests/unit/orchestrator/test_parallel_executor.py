@@ -1998,6 +1998,115 @@ def test_atomic_verifier_rejects_declared_verify_command_success_only_via_narrat
     assert "tests_passed:" in verdict.reasons[0]
 
 
+def test_atomic_verifier_rejects_declared_verify_command_completed_status_with_failure() -> None:
+    """``status="completed"`` on a FAILING verify_command is not success.
+
+    The bot's repro: the declared command matches a Bash event and the adapter
+    recorded a generic ``status="completed"`` (the command finished) with NO
+    ``exit_code``, but the runtime output contains ``AssertionError`` — the check
+    failed. ``completed`` means "ran", not "passed", so ``tests_passed`` is
+    rejected. Success requires positive proof (exit 0 / success subtype), never a
+    bare completion status.
+    """
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+        ),
+        AgentMessage(
+            type="assistant",
+            content="run verification",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": _GREETING_WRAPPED_VERIFY},
+                # Command finished, but with a failing assertion and no exit_code.
+                "status": "completed",
+                "output": "Traceback (most recent call last):\n  ...\nAssertionError",
+            },
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": ["greet('World') returned 'Hello, World!'"],
+            }
+        ),
+        ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
+    )
+
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "tests_passed:" in verdict.reasons[0]
+
+
+def test_atomic_verifier_accepts_declared_verify_command_with_tool_result_success_subtype() -> None:
+    """A trusted tool-result success subtype (no exit_code) satisfies the oracle."""
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/private/tmp/ooo-repro-blos"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+        task_cwd="/private/tmp/ooo-repro-blos",
+    )
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Edit hello.py",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/hello.py"}},
+        ),
+        AgentMessage(
+            type="assistant",
+            content="run verification",
+            tool_name="Bash",
+            data={"tool_input": {"command": _GREETING_WRAPPED_VERIFY}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="OK",
+            tool_name=None,
+            data={"subtype": "success", "output": "OK"},
+        ),
+        AgentMessage(type="result", content="done", data={}),
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=messages,
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["hello.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+                "tests_passed": ["greet('World') returned 'Hello, World!'"],
+            }
+        ),
+        ac_content=_GREETING_AC,
+        verify_command=_GREETING_INNER_COMMAND,
+    )
+
+    assert verdict.passed is True, verdict.reasons
+
+
 @pytest.mark.parametrize(
     ("runtime_command", "claimed_command"),
     (

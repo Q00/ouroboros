@@ -160,29 +160,57 @@ def _is_tool_result_message(message: AgentMessage) -> bool:
     return message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
 
 
-def _message_has_runtime_success_signal(message: AgentMessage) -> bool:
-    """Return True when a message carries RUNTIME-PRODUCED success evidence.
+# Runtime output that positively proves the command FAILED, even if some generic
+# completion status is also present. ``completed`` means "ran", not "passed", so a
+# failing verify_command whose adapter records a bare completion status must not
+# satisfy success. ``\berror\b`` intentionally does not appear here (it would
+# reject "0 errors" / "Errors: 0" zero-failure summaries); the exception-shaped
+# markers below are the ones ``_text_contains_test_success`` does not already
+# catch (its ``\berror\b`` word-boundary scan misses ``AssertionError``).
+_RUNTIME_FAILURE_MARKER_RE = re.compile(
+    r"assertion(?:error|failed)"
+    r"|\btraceback\b"
+    r"|\bexception\b"
+    r"|\bpanic\b"
+    r"|exit\s*(?:code|status)\s*[1-9]"
+    r"|non-?zero\s+exit",
+    re.IGNORECASE,
+)
 
-    Unlike ``_message_contains_test_success`` this never trusts free-text
-    ``AgentMessage.content`` from an assistant turn — a worker saying "the tests
-    passed" after invoking a command is self-reported evidence, exactly what
-    fat-harness exists to reject. Success must come from the runtime: a
-    structured non-error ``exit_code == 0`` / ``status`` / ``subtype`` signal, or
-    test-success text found only in runtime output fields (``_runtime_message_
-    test_proof_text`` includes ``content`` solely for tool-result messages the
-    runtime emits, never for assistant narration).
+
+def _message_has_runtime_success_signal(message: AgentMessage) -> bool:
+    """Return True when a message carries an UNAMBIGUOUS runtime success signal.
+
+    Success requires positive proof from the runtime, never assistant narration
+    (``AgentMessage.content`` from an assistant turn is self-reported evidence —
+    exactly what fat-harness exists to reject) and never a generic completion
+    status (``status == "completed"`` means the command RAN, not that it PASSED,
+    so a failing command with a "completed" status is not success). Accepted:
+
+    - a structured non-error ``exit_code == 0`` (a non-zero exit is an explicit
+      failure);
+    - a trusted tool-result success subtype (``subtype == "success"``);
+    - test-success text found only in runtime output fields
+      (``_runtime_message_test_proof_text`` includes ``content`` solely for
+      tool-result messages, never assistant narration),
+
+    and only when the runtime output carries no failure marker (``AssertionError``,
+    ``Traceback``, non-zero exit, ...).
     """
     if message.is_error:
         return False
     exit_code = message.data.get("exit_code")
     if type(exit_code) is int:
+        # Non-zero exit is an explicit failure; exit 0 is the strongest signal.
         return exit_code == 0
+    # No structured exit code: a completion status alone proves nothing. Require
+    # positive runtime evidence AND the absence of failure markers.
+    proof_text = _runtime_message_test_proof_text(message)
+    if _RUNTIME_FAILURE_MARKER_RE.search(proof_text):
+        return False
     if message.data.get("subtype") == "success":
         return True
-    status = message.data.get("status")
-    if isinstance(status, str) and status.strip().lower() in {"completed", "success", "succeeded"}:
-        return True
-    return _text_contains_test_success(_runtime_message_test_proof_text(message))
+    return _text_contains_test_success(proof_text)
 
 
 def _test_claim_file_part(value: str) -> str | None:
