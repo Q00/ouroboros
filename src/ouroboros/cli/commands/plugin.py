@@ -1186,7 +1186,7 @@ def list_command(
 # command namespace. The reserved set is the union of:
 #   - first-party UserLevel programs (`auto`, `run`, `pm`, `plugin`,
 #     `init`, `cancel`, `codex`, `config`, `detect`, `mcp`, `setup`,
-#     `status`, `tui`, `resume`, `uninstall`),
+#     `status`, `tui`, `resume`, `uninstall`, `interview`, `seed`),
 #   - top-level `ooo` built-ins / aliases that are not first-party
 #     programs (`help`, `version`, `monitor`).
 #
@@ -1200,6 +1200,8 @@ _RESERVED_TOP_LEVEL_NAMES: frozenset[str] = frozenset(
         # First-party UserLevel programs
         "auto",
         "init",
+        "interview",
+        "seed",
         "run",
         "config",
         "status",

@@ -70,6 +70,18 @@ class TestCommandGroups:
         assert result.exit_code == 0
         assert "Check Ouroboros system status" in result.output
 
+    def test_interview_alias_registered(self) -> None:
+        """Test that interview is registered as a top-level init alias."""
+        result = runner.invoke(app, ["interview", "--help"])
+        assert result.exit_code == 0
+        assert "Start interactive interview" in result.output
+
+    def test_seed_command_registered(self) -> None:
+        """Test that seed command is registered."""
+        result = runner.invoke(app, ["seed", "--help"])
+        assert result.exit_code == 0
+        assert "Seed" in result.output
+
 
 class TestRunCommands:
     """Tests for run command group."""
