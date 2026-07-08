@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import math
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -30,6 +31,11 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
+
+_OUTPUT_ASSERTION_CONDITION_RE = re.compile(
+    r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
+    re.IGNORECASE,
+)
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -223,12 +229,24 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             return value.strip()
         return value
 
-    @field_validator("verify_command", "output_assertion", mode="before")
+    @field_validator("verify_command", mode="before")
     @classmethod
     def _strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped or stripped.upper() == "NONE":
+                return None
+            return stripped
+        return value
+
+    @field_validator("output_assertion", mode="before")
+    @classmethod
+    def _normalize_output_assertion(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or stripped.upper() == "NONE":
+                return None
+            if _OUTPUT_ASSERTION_CONDITION_RE.fullmatch(stripped):
                 return None
             return stripped
         return value

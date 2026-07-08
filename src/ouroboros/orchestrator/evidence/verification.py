@@ -30,6 +30,7 @@ def _verify_atomic_evidence_against_runtime_messages(
     task_cwd: str | None,
     adapter_working_directory: str | None,
     has_success_contract: bool = False,
+    has_expected_artifacts: bool = False,
 ) -> VerifierVerdict:
     """Verify leaf evidence is backed by runtime transcript events.
 
@@ -37,7 +38,8 @@ def _verify_atomic_evidence_against_runtime_messages(
     accepted evidence cannot be supported only by the leaf's self-report.
 
     ``has_success_contract`` (the AC declares a ``verify_command``) drops
-    ``tests_passed`` from the required set — that check is delegated to the
+    ``tests_passed`` from the required set, and contract ACs with declared
+    artifacts also drop ``files_touched``. Both checks are delegated to the
     orchestrator's authoritative ``_run_ac_verify_gate`` execution.
     """
     support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
@@ -59,7 +61,10 @@ def _verify_atomic_evidence_against_runtime_messages(
         )
     )
     effective_schema = _effective_evidence_schema_for_ac(
-        execution_profile, ac_content, has_success_contract=has_success_contract
+        execution_profile,
+        ac_content,
+        has_success_contract=has_success_contract,
+        has_expected_artifacts=has_expected_artifacts,
     )
     required_fields = set(effective_schema.required)
     fields_to_verify = list(effective_schema.required)

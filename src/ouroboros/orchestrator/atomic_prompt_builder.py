@@ -50,7 +50,7 @@ def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
         lines.append(
             "- Expected artifacts: "
             + ", ".join(spec.expected_artifacts)
-            + " — report them in files_touched"
+            + " — ensure they exist in the workspace"
         )
     if spec.output_assertion:
         lines.append(f"- Expected output: {spec.output_assertion}")
@@ -207,8 +207,17 @@ class AtomicPromptBuilder:
             file_listing = "(unable to list)"
 
         if executor._fat_harness_mode and executor._execution_profile is not None:
+            has_success_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
+                ac_spec.verify_command
+            )
+            has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
+                ac_spec.expected_artifacts
+            )
             effective_schema = _effective_evidence_schema_for_ac(
-                executor._execution_profile, ac_content
+                executor._execution_profile,
+                ac_content,
+                has_success_contract=has_success_contract,
+                has_expected_artifacts=has_expected_artifacts,
             )
             required_fields = ", ".join(effective_schema.required)
             doc_only_note = ""

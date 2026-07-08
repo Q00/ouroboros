@@ -264,6 +264,7 @@ def _effective_evidence_schema_for_ac(
     ac_content: str,
     *,
     has_success_contract: bool = False,
+    has_expected_artifacts: bool = False,
 ) -> EvidenceSchema:
     """Return the active evidence schema for one atomic AC dispatch.
 
@@ -274,6 +275,12 @@ def _effective_evidence_schema_for_ac(
     authoritative, non-fabricatable check — strictly stronger than reconstructing
     "did a test pass" from the worker's transcript. Legacy ACs (no
     ``verify_command``) keep ``tests_passed`` required and verified as before.
+
+    ``has_expected_artifacts`` is True when the AC declares filesystem artifacts.
+    For contract ACs that also declare artifacts, ``files_touched`` is likewise
+    delegated to the verify gate's real filesystem existence check. Contract ACs
+    without artifacts keep transcript-backed ``files_touched`` evidence because
+    there is no filesystem oracle to replace it.
     """
     schema = profile.evidence_schema
     if _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
@@ -282,6 +289,8 @@ def _effective_evidence_schema_for_ac(
         schema = _drop_required_evidence_field(schema, "tests_passed")
     if has_success_contract and "tests_passed" in schema.required:
         schema = _drop_required_evidence_field(schema, "tests_passed")
+    if has_success_contract and has_expected_artifacts and "files_touched" in schema.required:
+        schema = _drop_required_evidence_field(schema, "files_touched")
     return schema
 
 
@@ -291,12 +300,16 @@ def _out_of_scope_evidence_fields_for_ac(
     record: EvidenceRecord | None,
     *,
     has_success_contract: bool = False,
+    has_expected_artifacts: bool = False,
 ) -> tuple[str, ...]:
     """Return non-empty evidence fields excluded by the AC-specific schema."""
     if record is None:
         return ()
     effective_schema = _effective_evidence_schema_for_ac(
-        profile, ac_content, has_success_contract=has_success_contract
+        profile,
+        ac_content,
+        has_success_contract=has_success_contract,
+        has_expected_artifacts=has_expected_artifacts,
     )
     required_fields = set(effective_schema.required)
     return tuple(
@@ -312,12 +325,17 @@ def _out_of_scope_evidence_values_for_ac(
     record: EvidenceRecord | None,
     *,
     has_success_contract: bool = False,
+    has_expected_artifacts: bool = False,
 ) -> dict[str, Any]:
     """Return out-of-scope evidence values retained for audit metadata only."""
     if record is None:
         return {}
     fields = _out_of_scope_evidence_fields_for_ac(
-        profile, ac_content, record, has_success_contract=has_success_contract
+        profile,
+        ac_content,
+        record,
+        has_success_contract=has_success_contract,
+        has_expected_artifacts=has_expected_artifacts,
     )
     return {field: record.data[field] for field in fields if field in record.data}
 
@@ -328,10 +346,14 @@ def _scoped_evidence_record_for_ac(
     record: EvidenceRecord,
     *,
     has_success_contract: bool = False,
+    has_expected_artifacts: bool = False,
 ) -> EvidenceRecord:
     """Return only evidence fields inside the AC-specific schema."""
     effective_schema = _effective_evidence_schema_for_ac(
-        profile, ac_content, has_success_contract=has_success_contract
+        profile,
+        ac_content,
+        has_success_contract=has_success_contract,
+        has_expected_artifacts=has_expected_artifacts,
     )
     allowed_fields = set(effective_schema.required)
     return EvidenceRecord(

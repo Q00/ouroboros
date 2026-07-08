@@ -407,6 +407,49 @@ class TestSeed:
         assert second.description == "Tasks can be created"
         assert second.verify_command is None
 
+    def test_output_assertion_normalizes_exit_status_conditions_to_none(self) -> None:
+        """Exit-code success phrases are redundant with verify_command exit status."""
+        for phrase in (
+            "exit code 0",
+            "exit status 0",
+            "exit 0",
+            "returns 0",
+            "return 0",
+            "success",
+            "succeeds",
+            "passed",
+            "passes",
+            "ok exit",
+            "no error",
+            "no errors",
+        ):
+            spec = AcceptanceCriterionSpec(
+                description="Command exits successfully",
+                verify_command="python -c 'pass'",
+                output_assertion=phrase,
+            )
+            assert spec.output_assertion is None
+            assert spec.to_seed_value() == {
+                "description": "Command exits successfully",
+                "verify_command": "python -c 'pass'",
+            }
+
+    def test_output_assertion_preserves_distinctive_stdout_literals(self) -> None:
+        """Real stdout literals survive normalization."""
+        ok = AcceptanceCriterionSpec(
+            description="Command prints OK",
+            verify_command="python -c \"print('OK')\"",
+            output_assertion="OK",
+        )
+        pytest_literal = AcceptanceCriterionSpec(
+            description="Pytest summary is asserted",
+            verify_command="pytest -q",
+            output_assertion="5 passed",
+        )
+
+        assert ok.output_assertion == "OK"
+        assert pytest_literal.output_assertion == "5 passed"
+
     def test_seed_acceptance_criteria_serialize_legacy_strings_stably(self) -> None:
         """Description-only ACs dump back to bare strings."""
         seed = Seed(
