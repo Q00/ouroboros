@@ -3058,12 +3058,18 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
             )
+            # Delegating tests_passed/files_touched to _run_ac_verify_gate is only
+            # valid when that gate actually runs. _apply_verify_gate returns early
+            # when run_verify_commands is disabled, so with the gate off we must
+            # retain the transcript-backed evidence rather than drop it.
+            verify_gate_active = self._run_verify_commands
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
                 success=success,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             verifier_verdict = self._run_atomic_verifier_pass(
                 ac_content=ac_content,
@@ -3074,6 +3080,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 typed_validation=typed_validation,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             fat_harness_error = self._fat_harness_acceptance_error(
                 runtime_success=success,
@@ -3135,6 +3142,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 enforcement_error=fat_harness_error,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             await self._emit_ac_runtime_event(
                 event_type=(
@@ -3162,6 +3170,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     typed_evidence,
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
                 )
 
             log.info(
@@ -3259,6 +3268,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         success: bool,
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
+        verify_gate_active: bool = False,
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
         """Parse and validate typed evidence at the atomic AC acceptance boundary.
 
@@ -3277,6 +3287,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 ac_content,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             validation = validate_evidence(
                 _profile_with_evidence_schema(self._execution_profile, effective_schema),
@@ -3803,6 +3814,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         typed_validation: ValidationResult | None,
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
+        verify_gate_active: bool = False,
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
@@ -3822,6 +3834,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 ac_content,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             effective_profile = _profile_with_evidence_schema(
                 self._execution_profile, effective_schema
@@ -3832,6 +3845,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 typed_evidence,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             verdict = (
                 verifier(
@@ -3847,6 +3861,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     ac_content=ac_content,
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
                 )
             )
         except VerifierContractError:
@@ -3866,6 +3881,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         ac_content: str,
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
+        verify_gate_active: bool = False,
     ) -> VerifierVerdict:
         return _verify_atomic_evidence_against_runtime_messages(
             messages=messages,
@@ -3876,6 +3892,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             adapter_working_directory=self._adapter.working_directory,
             has_success_contract=has_success_contract,
             has_expected_artifacts=has_expected_artifacts,
+            verify_gate_active=verify_gate_active,
         )
 
     async def _emit_atomic_typed_evidence_event(
@@ -3892,6 +3909,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         enforcement_error: str | None = None,
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
+        verify_gate_active: bool = False,
     ) -> None:
         """Persist typed-evidence metadata for atomic AC completion."""
         if self._execution_profile is None:
@@ -3910,6 +3928,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     ac_content,
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
                 ).required
             ),
             "observe_only": not self._fat_harness_mode,
@@ -3937,6 +3956,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     typed_evidence,
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
                 )
             )
             data["ignored_out_of_scope_evidence"] = _out_of_scope_evidence_values_for_ac(
@@ -3945,6 +3965,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 typed_evidence,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
         if typed_validation is not None:
             data["missing_fields"] = list(typed_validation.missing_fields)

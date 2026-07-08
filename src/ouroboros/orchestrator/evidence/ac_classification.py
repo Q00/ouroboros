@@ -265,6 +265,7 @@ def _effective_evidence_schema_for_ac(
     *,
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
+    verify_gate_active: bool = False,
 ) -> EvidenceSchema:
     """Return the active evidence schema for one atomic AC dispatch.
 
@@ -281,15 +282,31 @@ def _effective_evidence_schema_for_ac(
     delegated to the verify gate's real filesystem existence check. Contract ACs
     without artifacts keep transcript-backed ``files_touched`` evidence because
     there is no filesystem oracle to replace it.
+
+    ``verify_gate_active`` is True only when the orchestrator verify gate is
+    actually enabled (``run_verify_commands``). Delegation of ``tests_passed`` /
+    ``files_touched`` to the gate is *only* valid when the gate will run. When an
+    operator disables verify commands, the gate that would replace the transcript
+    check never fires (``_apply_verify_gate`` returns early), so we retain the
+    transcript-backed evidence — the pre-delegation behavior — as a fail-safe.
+    The default is ``False`` so we never delegate unless explicitly told the gate
+    is active. The content-based ``_is_validation_only_ac`` /
+    ``_is_documentation_only_ac`` drops are unaffected — those are not gate
+    delegations.
     """
     schema = profile.evidence_schema
     if _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
         schema = _drop_required_evidence_field(schema, "files_touched")
     elif _is_documentation_only_ac(ac_content) and "tests_passed" in schema.required:
         schema = _drop_required_evidence_field(schema, "tests_passed")
-    if has_success_contract and "tests_passed" in schema.required:
+    if has_success_contract and verify_gate_active and "tests_passed" in schema.required:
         schema = _drop_required_evidence_field(schema, "tests_passed")
-    if has_success_contract and has_expected_artifacts and "files_touched" in schema.required:
+    if (
+        has_success_contract
+        and has_expected_artifacts
+        and verify_gate_active
+        and "files_touched" in schema.required
+    ):
         schema = _drop_required_evidence_field(schema, "files_touched")
     return schema
 
@@ -301,6 +318,7 @@ def _out_of_scope_evidence_fields_for_ac(
     *,
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
+    verify_gate_active: bool = False,
 ) -> tuple[str, ...]:
     """Return non-empty evidence fields excluded by the AC-specific schema."""
     if record is None:
@@ -310,6 +328,7 @@ def _out_of_scope_evidence_fields_for_ac(
         ac_content,
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
+        verify_gate_active=verify_gate_active,
     )
     required_fields = set(effective_schema.required)
     return tuple(
@@ -326,6 +345,7 @@ def _out_of_scope_evidence_values_for_ac(
     *,
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
+    verify_gate_active: bool = False,
 ) -> dict[str, Any]:
     """Return out-of-scope evidence values retained for audit metadata only."""
     if record is None:
@@ -336,6 +356,7 @@ def _out_of_scope_evidence_values_for_ac(
         record,
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
+        verify_gate_active=verify_gate_active,
     )
     return {field: record.data[field] for field in fields if field in record.data}
 
@@ -347,6 +368,7 @@ def _scoped_evidence_record_for_ac(
     *,
     has_success_contract: bool = False,
     has_expected_artifacts: bool = False,
+    verify_gate_active: bool = False,
 ) -> EvidenceRecord:
     """Return only evidence fields inside the AC-specific schema."""
     effective_schema = _effective_evidence_schema_for_ac(
@@ -354,6 +376,7 @@ def _scoped_evidence_record_for_ac(
         ac_content,
         has_success_contract=has_success_contract,
         has_expected_artifacts=has_expected_artifacts,
+        verify_gate_active=verify_gate_active,
     )
     allowed_fields = set(effective_schema.required)
     return EvidenceRecord(

@@ -213,11 +213,16 @@ class AtomicPromptBuilder:
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
             )
+            # Only delegate tests_passed/files_touched to the verify gate when it
+            # will actually run; with run_verify_commands off the worker's
+            # displayed required-fields must still list them.
+            verify_gate_active = executor._run_verify_commands
             effective_schema = _effective_evidence_schema_for_ac(
                 executor._execution_profile,
                 ac_content,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
+                verify_gate_active=verify_gate_active,
             )
             required_fields = ", ".join(effective_schema.required)
             doc_only_note = ""
