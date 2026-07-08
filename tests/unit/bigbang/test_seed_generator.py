@@ -547,6 +547,91 @@ class TestSeedGeneratorExtraction:
             assert third.verify_command is None
 
     @pytest.mark.asyncio
+    async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:
+        """Generated contract assertions must be literal stdout, not status prose."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: CLI exits successfully | verify: python -m app | artifacts: NONE | "
+                "expect: exit code 0\n"
+                "AC: Test summary is visible | verify: pytest -q | artifacts: NONE | "
+                "expect: 5 passed\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            first, second = result.value.acceptance_criteria
+            assert isinstance(first, AcceptanceCriterionSpec)
+            assert first.output_assertion is None
+            assert first.to_seed_value() == {
+                "description": "CLI exits successfully",
+                "verify_command": "python -m app",
+            }
+            assert isinstance(second, AcceptanceCriterionSpec)
+            assert second.output_assertion == "5 passed"
+
+    @pytest.mark.asyncio
+    async def test_generate_retries_when_verify_command_uses_heredoc(self) -> None:
+        """Single-line AC contracts must reject heredoc commands before Seed build."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bad_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Import check prints OK | verify: python - <<'PY' | "
+                "artifacts: hello.py | expect: OK\n"
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Import check prints OK | "
+                'verify: python -c "from hello import greet; '
+                "assert greet('Alice') == 'Hello, Alice'; print('OK')\" | "
+                "artifacts: hello.py | expect: OK\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert mock_adapter.complete.await_count == 2
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command is not None
+            assert "<<'PY'" not in criterion.verify_command
+            assert "python -c" in criterion.verify_command
+
+    @pytest.mark.asyncio
     async def test_generate_extracts_ontology_schema(self) -> None:
         """SeedGenerator extracts ontology schema with fields."""
         mock_adapter = AsyncMock()
@@ -1125,6 +1210,8 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "ACCEPTANCE_CRITERIA:\nAC:" in prompt
         assert "verify: <command or NONE>" in prompt
         assert "artifacts: <comma-list or NONE>" in prompt
+        assert "heredoc" in prompt.lower()
+        assert "python -c" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
@@ -1133,3 +1220,5 @@ class TestAcceptanceCriteriaGranularityContract:
         system_prompt = load_agent_prompt("seed-architect")
         assert "3-7" in system_prompt
         assert "sub-step of a sibling" in system_prompt.lower()
+        assert "heredoc" in system_prompt.lower()
+        assert "python -c" in system_prompt

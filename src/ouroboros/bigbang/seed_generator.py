@@ -47,6 +47,7 @@ log = structlog.get_logger()
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
+_UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
 def _parse_acceptance_criteria_contracts(
@@ -103,6 +104,32 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
         elif normalized_key == "expect":
             fields["output_assertion"] = normalized_value
     return AcceptanceCriterionSpec.model_validate(fields)
+
+
+def _unsupported_verify_command_reason(command: str) -> str | None:
+    if "\n" in command or "\r" in command:
+        return "verify_command must be a single-line command"
+    if _UNSUPPORTED_VERIFY_HEREDOC_RE.search(command):
+        return "verify_command uses heredoc/multiline shell syntax; use python -c or pytest instead"
+    return None
+
+
+def _validate_acceptance_criteria_contract_lines(lines: object) -> None:
+    if not isinstance(lines, list | tuple):
+        return
+    for index, raw_line in enumerate(lines, start=1):
+        line = str(raw_line).strip()
+        if not line.startswith("AC:"):
+            continue
+        spec = _parse_acceptance_criterion_contract(line)
+        if spec is None or not spec.verify_command:
+            continue
+        reason = _unsupported_verify_command_reason(spec.verify_command)
+        if reason:
+            raise ValueError(
+                f"Unsupported verify_command in acceptance criterion {index}: {reason}. "
+                "The Seed AC format is one line; use a complete single-line command."
+            )
 
 
 @dataclass
@@ -508,6 +535,8 @@ Please try again. Extract requirements from this interview:
 You MUST respond with ONLY the following format, one field per line, no other text:
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
+ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
@@ -605,6 +634,8 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
+ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
+ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
@@ -704,6 +735,7 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
 
         if multiline_values.get("acceptance_criteria"):
             requirements["acceptance_criteria"] = multiline_values["acceptance_criteria"]
+            _validate_acceptance_criteria_contract_lines(requirements["acceptance_criteria"])
 
         # Validate required fields
         required_fields = [

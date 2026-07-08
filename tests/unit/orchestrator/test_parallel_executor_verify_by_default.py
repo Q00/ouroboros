@@ -107,6 +107,24 @@ async def test_verify_gate_output_assertion_match_and_mismatch(tmp_path: Any) ->
     assert "output_assertion" in (mismatch.reason or "")
 
 
+@pytest.mark.asyncio
+async def test_verify_gate_ignores_normalized_exit_code_output_assertion(
+    tmp_path: Any,
+) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(
+        description="exit code is already enforced by verify_command",
+        verify_command="exit 0",
+        output_assertion="exit code 0",
+    )
+
+    assert spec.output_assertion is None
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+    assert outcome.reason is None
+
+
 # ---------------------------------------------------------------------------
 # V1 gate integration — _apply_verify_gate
 # ---------------------------------------------------------------------------
@@ -803,7 +821,8 @@ class TestSuccessContractBlock:
         assert block.startswith("SUCCESS CONTRACT for this AC:")
         assert "- Run: make build and report it in commands_run" in block
         assert (
-            "- Expected artifacts: dist/app, dist/app.map — report them in files_touched" in block
+            "- Expected artifacts: dist/app, dist/app.map — ensure they exist in the workspace"
+            in block
         )
         assert "- Expected output: BUILD OK" in block
 

@@ -1480,6 +1480,7 @@ def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_with
         ),
         ac_content=_GREETING_AC,
         has_success_contract=True,
+        verify_gate_active=True,
     )
 
     assert verdict.passed is True, verdict.reasons
@@ -1528,6 +1529,7 @@ def test_atomic_verifier_accepts_symlinked_cwd_against_resolved_transcript_path(
         ),
         ac_content=_GREETING_AC,
         has_success_contract=True,
+        verify_gate_active=True,
     )
     assert verdict.passed is True, verdict.reasons
 
@@ -1696,12 +1698,78 @@ def test_effective_schema_drops_tests_passed_for_contract_ac() -> None:
     assert "tests_passed" in legacy.required
 
     contract = _effective_evidence_schema_for_ac(
-        profile, "Implement the module.", has_success_contract=True
+        profile,
+        "Implement the module.",
+        has_success_contract=True,
+        verify_gate_active=True,
     )
     assert "tests_passed" not in contract.required
-    # files_touched + commands_run stay gated by the transcript verifier.
+    # Without declared expected_artifacts, there is no filesystem oracle for
+    # files_touched, so it stays transcript-gated.
     assert "files_touched" in contract.required
     assert "commands_run" in contract.required
+
+    artifact_contract = _effective_evidence_schema_for_ac(
+        profile,
+        "Implement the module.",
+        has_success_contract=True,
+        has_expected_artifacts=True,
+        verify_gate_active=True,
+    )
+    assert artifact_contract.required == ("commands_run",)
+
+
+def test_legacy_ac_keeps_files_touched_required_even_with_expected_artifacts_flag() -> None:
+    """Expected artifacts only delegate files_touched when a verify command is present."""
+    profile = load_profile("code")
+
+    schema = _effective_evidence_schema_for_ac(
+        profile,
+        "Implement the module.",
+        has_success_contract=False,
+        has_expected_artifacts=True,
+    )
+
+    assert "files_touched" in schema.required
+    assert "tests_passed" in schema.required
+
+
+def test_contract_ac_retains_evidence_when_verify_gate_inactive() -> None:
+    """With the verify gate disabled there is no oracle to delegate to.
+
+    ``_apply_verify_gate`` returns early when ``run_verify_commands`` is False, so
+    dropping ``tests_passed`` / ``files_touched`` would leave a contract AC with an
+    unbacked, self-reported artifact and no check. The fail-safe default retains
+    the transcript-backed evidence.
+    """
+    profile = load_profile("code")
+
+    schema = _effective_evidence_schema_for_ac(
+        profile,
+        "Implement the module.",
+        has_success_contract=True,
+        has_expected_artifacts=True,
+        verify_gate_active=False,
+    )
+
+    assert "files_touched" in schema.required
+    assert "tests_passed" in schema.required
+    assert "commands_run" in schema.required
+
+
+def test_contract_ac_drops_delegated_fields_only_when_verify_gate_active() -> None:
+    """The delegation drop fires only once the verify gate is confirmed active."""
+    profile = load_profile("code")
+
+    schema = _effective_evidence_schema_for_ac(
+        profile,
+        "Implement the module.",
+        has_success_contract=True,
+        has_expected_artifacts=True,
+        verify_gate_active=True,
+    )
+
+    assert schema.required == ("commands_run",)
 
 
 def test_contract_ac_verifier_delegates_tests_passed() -> None:
@@ -1723,7 +1791,28 @@ def test_contract_ac_verifier_delegates_tests_passed() -> None:
         ),
         ac_content=_GREETING_AC,
         has_success_contract=True,
+        verify_gate_active=True,
     )
+    assert verdict.passed is True, verdict.reasons
+
+
+def test_contract_ac_with_expected_artifacts_verifier_delegates_files_touched() -> None:
+    """Contract AC artifacts are verified by the filesystem gate, not transcript claims."""
+    executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
+        typed_evidence=EvidenceRecord(
+            data={
+                "files_touched": ["not-backed-by-transcript.py"],
+                "commands_run": [_GREETING_INNER_COMMAND],
+            }
+        ),
+        ac_content=_GREETING_AC,
+        has_success_contract=True,
+        has_expected_artifacts=True,
+        verify_gate_active=True,
+    )
+
     assert verdict.passed is True, verdict.reasons
 
 
@@ -4383,6 +4472,153 @@ class TestParallelACExecutor:
             "tests_passed",
         ]
         assert evidence_event.data["verifier_ran"] is False
+
+    @pytest.mark.asyncio
+    async def test_contract_ac_with_artifacts_accepts_unbacked_files_touched_claim(
+        self,
+        tmp_path,
+    ) -> None:
+        """A contract AC delegates artifact proof to the verify gate filesystem oracle."""
+        command = "python -c \"print('OK')\""
+        command_json = command.replace("\\", "\\\\").replace('"', '\\"')
+        (tmp_path / "hello.py").write_text(
+            "def greet(name):\n    return f'Hello, {name}'\n",
+            encoding="utf-8",
+        )
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "Done.\n"
+            "```json\n"
+            "{"
+            '"files_touched":["not-backed-by-transcript.py"],'
+            f'"commands_run":["{command_json}"]'
+            "}\n"
+            "```",
+            native_session_id="codex-session-contract-artifact-delegation",
+            support_messages=(
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Bash: {command}",
+                    tool_name="Bash",
+                    data={"tool_input": {"command": command}},
+                ),
+            ),
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=_GREETING_AC,
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=AcceptanceCriterionSpec(
+                description=_GREETING_AC,
+                verify_command=command,
+                expected_artifacts=("hello.py",),
+            ),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data == {"commands_run": [command]}
+        assert runtime.last_prompt is not None
+        assert "directly (commands_run)" in runtime.last_prompt
+        assert "ensure they exist in the workspace" in runtime.last_prompt
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["commands_run"]
+        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == ["files_touched"]
+
+    @pytest.mark.asyncio
+    async def test_contract_ac_missing_artifact_rejected_when_verify_gate_disabled(
+        self,
+        tmp_path,
+    ) -> None:
+        """Reproduced blocker: with the verify gate off, delegation must not fire.
+
+        ``run_verify_commands=False`` makes ``_apply_verify_gate`` return early, so
+        the filesystem oracle never checks ``expected_artifacts``. If the schema
+        still dropped ``files_touched``/``tests_passed``, a contract AC could
+        complete with only ``commands_run`` evidence and no artifact on disk. The
+        verify-gate-active guard keeps those fields required (transcript-backed),
+        so the worker's self-reported evidence fails and the AC is not accepted.
+        """
+        command = "python -c \"print('OK')\""
+        command_json = command.replace("\\", "\\\\").replace('"', '\\"')
+        # Deliberately do NOT write hello.py: the artifact is missing on disk.
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            f'Done.\n```json\n{{"commands_run":["{command_json}"]}}\n```',
+            native_session_id="codex-session-verify-gate-off-missing-artifact",
+            support_messages=(
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Bash: {command}",
+                    tool_name="Bash",
+                    data={"tool_input": {"command": command}},
+                ),
+            ),
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            run_verify_commands=False,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=_GREETING_AC,
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=AcceptanceCriterionSpec(
+                description=_GREETING_AC,
+                verify_command=command,
+                expected_artifacts=("hello.py",),
+            ),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        # files_touched/tests_passed remain required because the gate is off.
+        assert "files_touched" in evidence_event.data["required_fields"]
+        assert "tests_passed" in evidence_event.data["required_fields"]
+        assert evidence_event.data["typed_evidence_valid"] is False
 
     @pytest.mark.asyncio
     async def test_fat_harness_mode_rejects_missing_typed_evidence(self) -> None:

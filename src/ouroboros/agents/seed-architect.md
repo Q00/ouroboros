@@ -22,6 +22,16 @@ Specific, measurable criteria for success.
 Format: one `AC:` line per criterion
 Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.py | artifacts: NONE | expect: created task"
 
+`verify` / `verify_command` semantics:
+- Use exactly one single-line shell command.
+- NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
+- For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
+
+`expect` / `output_assertion` semantics:
+- Use `expect` ONLY for a literal string that the verify command prints to stdout verbatim, such as `OK` or `5 passed`.
+- NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.
+- If the command has no distinctive stdout literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
+
 **Granularity contract (read carefully):**
 - Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.
 - Do **NOT** pre-decompose criteria into executable sub-tasks. Splitting work into atomic units is the execution engine's job at runtime; doing it here multiplies token cost with no benefit.
@@ -82,6 +92,7 @@ Few-shot examples:
 
 ```
 ACCEPTANCE_CRITERIA:
-AC: `python -m pytest tests/test_tasks.py` passes for task create/list flows | verify: python -m pytest tests/test_tasks.py | artifacts: NONE | expect: passed
+AC: Task create/list flows pass automated verification | verify: python -m pytest tests/test_tasks.py -q && echo OK | artifacts: NONE | expect: OK
+AC: Greeting import check prints OK | verify: python -c "from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')" | artifacts: hello.py | expect: OK
 AC: README documents the CLI usage examples | verify: NONE | artifacts: README.md | expect: NONE
 ```
