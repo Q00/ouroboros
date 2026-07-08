@@ -236,10 +236,13 @@ class TestScanHomeForRepos:
         paths = {r["path"] for r in result}
         assert paths == {str(linked.resolve())}
 
-    def test_includes_git_reported_worktrees_without_crawling_hidden_dirs(
+    def test_worktrees_under_hidden_dirs_are_not_expanded(
         self,
         tmp_path: Path,
     ) -> None:
+        # Git worktree families are no longer expanded. Worktrees that only the
+        # main repo's Git metadata knows about — here parked under a dot-prefixed
+        # ``.ouroboros`` dir the walk never enters — are intentionally left out.
         main = tmp_path / "projects" / "main"
         managed_worktree = tmp_path / ".ouroboros" / "worktrees" / "main" / "task"
         unlinked_hidden_repo = tmp_path / ".ouroboros" / "worktrees" / "unlinked"
@@ -251,7 +254,7 @@ class TestScanHomeForRepos:
         result = scan_home_for_repos(tmp_path)
 
         paths = {r["path"] for r in result}
-        assert paths == {str(main.resolve()), str(managed_worktree.resolve())}
+        assert paths == {str(main.resolve())}
 
     def test_finds_local_repos_without_remotes(self, tmp_path: Path) -> None:
         repo = tmp_path / "local-proj"
@@ -387,6 +390,33 @@ class TestScanHomeForRepos:
         assert set(entry.keys()) == {"path", "name"}
         assert isinstance(entry["path"], str)
         assert isinstance(entry["name"], str)
+
+    def test_finds_repo_at_depth_two(self, tmp_path: Path) -> None:
+        # A repo nested one group directory deep (~/group/repo) is within the
+        # depth-2 bound and must be found.
+        repo = tmp_path / "group" / "repo"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+
+        result = scan_home_for_repos(tmp_path)
+        assert [r["path"] for r in result] == [str(repo.resolve())]
+
+    def test_does_not_find_repo_beyond_max_depth(self, tmp_path: Path) -> None:
+        # A repo three levels below the root exceeds the depth-2 bound.
+        deep = tmp_path / "a" / "b" / "repo"
+        deep.mkdir(parents=True)
+        subprocess.run(["git", "init", str(deep)], capture_output=True)
+
+        result = scan_home_for_repos(tmp_path)
+        assert result == []
+
+    def test_max_depth_is_configurable(self, tmp_path: Path) -> None:
+        deep = tmp_path / "a" / "b" / "repo"
+        deep.mkdir(parents=True)
+        subprocess.run(["git", "init", str(deep)], capture_output=True)
+
+        result = scan_home_for_repos(tmp_path, max_depth=3)
+        assert [r["path"] for r in result] == [str(deep.resolve())]
 
 
 # ── _read_readme_content ───────────────────────────────────────────
