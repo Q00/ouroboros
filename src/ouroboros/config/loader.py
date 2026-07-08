@@ -91,6 +91,23 @@ _GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
 # configured default model, so generic Claude default ids map to the CLI's
 # own ``"default"`` sentinel, exactly like antigravity and grok above.
 _ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
+# Every backend whose default model is the backend-safe ``"default"`` sentinel
+# rather than a runnable shipped id, because the CLI selects its model via
+# config (not a ``--model`` flag). Roster-level normalization must cover the
+# same set as the element-wise mapping in ``_default_model_for_backend``;
+# otherwise a shipped default roster leaks unrunnable ids for any backend
+# added after the original Codex/Copilot/Hermes trio.
+_SENTINEL_DEFAULT_BACKENDS = (
+    _CODEX_LLM_BACKENDS
+    | _KIRO_LLM_BACKENDS
+    | _COPILOT_LLM_BACKENDS
+    | _HERMES_LLM_BACKENDS
+    | _PI_LLM_BACKENDS
+    | _GJC_LLM_BACKENDS
+    | _ANTIGRAVITY_LLM_BACKENDS
+    | _GROK_LLM_BACKENDS
+    | _ZCODE_LLM_BACKENDS
+)
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
@@ -2032,11 +2049,7 @@ def _normalize_configured_models_for_backend(
         candidate in recognized_shipped_defaults(default)
         for candidate, default in zip(normalized, default_models, strict=True)
     )
-    if (
-        _resolve_llm_backend_for_models(backend)
-        in (_CODEX_LLM_BACKENDS | _COPILOT_LLM_BACKENDS | _HERMES_LLM_BACKENDS)
-        and is_shipped_roster
-    ):
+    if _resolve_llm_backend_for_models(backend) in _SENTINEL_DEFAULT_BACKENDS and is_shipped_roster:
         return _default_models_for_backend(default_models, backend=backend)
 
     return normalized

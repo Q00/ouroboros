@@ -1717,6 +1717,45 @@ class TestLLMHelperLookups:
         ):
             assert get_consensus_models(backend="codex") == ("default", "default", "default")
 
+    @pytest.mark.parametrize("backend", ["zcode", "gjc", "kiro", "pi", "antigravity", "grok"])
+    def test_consensus_roster_normalizes_to_sentinel_for_all_cli_backends(
+        self, backend: str
+    ) -> None:
+        """A shipped default roster must normalize to the backend sentinel for
+        every CLI backend that selects its model via config (no ``--model``
+        flag), not only the original Codex/Copilot/Hermes trio.
+
+        Without this, the roster leaks unrunnable shipped ids for backends
+        added after that trio, so consensus records/executes what look like
+        three distinct external-model votes while every call actually uses the
+        backend's single configured model.
+        """
+        config = OuroborosConfig()  # default = current shipped roster
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_consensus_models(backend=backend) == (
+                "default",
+                "default",
+                "default",
+            )
+
+    def test_consensus_roster_preserved_for_claude_backend(self) -> None:
+        """Claude can run shipped OpenRouter ids, so the roster must NOT be
+        sentinel-normalized. Guards against over-broadening the CLI-backend
+        normalization set."""
+        config = OuroborosConfig()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_consensus_models(backend="claude") == (
+                "openrouter/openai/gpt-4o",
+                "openrouter/anthropic/claude-opus-4.8",
+                "openrouter/google/gemini-2.5-pro",
+            )
+
     def test_nonshipped_claude_id_is_preserved_not_normalized(self) -> None:
         """Guard against over-broadening: a Claude id that was NEVER a shipped
         default must still be preserved as an explicit user override, not
