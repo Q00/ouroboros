@@ -522,16 +522,14 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         soft_tool_enforcement=True,
     ),
     BackendCapability(
-        # Zcode (Z.ai GLM-5.x desktop agent) — the ``zcode.cjs`` script run as
-        # ``node zcode.cjs --prompt --json`` drives the agentic orchestrator
-        # runtime with a single JSON summary. Runtime-only: it does not back
-        # structured LLM completions or auto-interview answering (no LLM
-        # adapter factory), matching the antigravity/grok runtime-only contract.
+        # Zcode (Z.ai GLM-5.x desktop agent) — supports both agentic runtime
+        # (via ``node zcode.cjs --prompt --json``) and structured LLM completions
+        # (zcode-cli adapter), matching the codex contract.
         name="zcode",
         aliases=("zcode_cli",),
         supports_runtime=True,
-        supports_llm=False,
-        supports_interview_driver=False,
+        supports_llm=True,
+        supports_interview_driver=True,
         switchable_runtime=True,
         cli_name="zcode",
         cli_config_key="zcode_cli_path",
