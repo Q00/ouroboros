@@ -36,6 +36,7 @@ tui = ["textual==8.2.7", "textual-serve==1.1.3"]
 all = ["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]
 
 [project.scripts]
+ooo = "ouroboros.cli.main:app"
 ouroboros = "ouroboros.cli.main:app"
 
 [build-system]

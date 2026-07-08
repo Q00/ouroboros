@@ -4999,7 +4999,10 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     if "ambiguity_score" in lowered:
         repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
-        repairs.append("Preserve ledger non-goals and runtime context in executable Seed surfaces.")
+        repairs.append(
+            "Preserve ledger non-goals and runtime context in executable Seed surfaces; "
+            "use constraints prefixed with `Non-goal:` and explicit runtime constraints or ontology fields."
+        )
     if "polluted" in lowered or "diagnostic" in lowered or "lateral repair" in lowered:
         repairs.append(
             "Constraints must contain only actionable product/runtime constraints; omit QA or lateral diagnostic prose."

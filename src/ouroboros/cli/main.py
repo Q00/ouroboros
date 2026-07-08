@@ -38,6 +38,7 @@ from ouroboros.cli.commands import (
     qa,
     resume,
     run,
+    seed,
     setup,
     status,
     tui,
@@ -95,6 +96,10 @@ app.command(
     ),
 )(auto.auto_command)
 app.add_typer(init.app, name="init")
+app.add_typer(init.app, name="interview")
+app.command(name="seed", help="Generate a Seed YAML specification from an interview.")(
+    seed.seed_command
+)
 app.add_typer(run.app, name="run")
 app.add_typer(job.app, name="job")
 app.add_typer(harness.app, name="harness")

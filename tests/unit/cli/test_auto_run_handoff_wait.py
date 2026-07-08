@@ -27,7 +27,8 @@ from ouroboros.auto.state import (
 from ouroboros.cli.commands import auto as auto_command
 from ouroboros.cli.commands.auto import _await_run_handoff_terminal
 from ouroboros.cli.main import app
-from ouroboros.mcp.job_manager import JobManager, JobStatus
+from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.persistence.event_store import EventStore
 
@@ -558,6 +559,79 @@ async def test_wait_completed_job_without_success_meta_is_not_complete(tmp_path)
         assert "without confirming terminal run success" in reconciled.blocker
         # Upgraded from the NONE input — allowlist-blocked runs are resumable.
         assert reconciled.resume_capability is AutoResumeCapability.RESUME
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_prefers_linked_execution_terminal_over_live_wedged_job(
+    tmp_path,
+) -> None:
+    """Durable execution success must win over a live job task stuck open.
+
+    Live ``ooo auto`` can observe all ACs completed and an ``execution.terminal``
+    success while the underlying runtime subprocess still keeps the job task
+    open. The wait path must not cancel that product at the deadline.
+    """
+    import time as time_module
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+        started_running = asyncio.Event()
+
+        async def _wedged_runner() -> MCPToolResult:
+            started_running.set()
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+        started = await manager.start_job(
+            job_type="execute",
+            initial_message="queued",
+            runner=_wedged_runner(),
+            links=JobLinks(session_id="orch_wait", execution_id="exec_wait"),
+        )
+        await asyncio.wait_for(started_running.wait(), timeout=5)
+
+        await store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_wait",
+                data={"completed_count": 3, "total_count": 3},
+            )
+        )
+        await store.append(
+            BaseEvent(
+                type="execution.terminal",
+                aggregate_type="execution",
+                aggregate_id="exec_wait",
+                data={"status": "completed", "session_id": "orch_wait"},
+            )
+        )
+
+        reconciled = await asyncio.wait_for(
+            _await_run_handoff_terminal(
+                _handoff_only_result(started.job_id),
+                job_manager=manager,
+                event_store=store,
+                quiet=True,
+                deadline_at=time_module.monotonic() + 0.1,
+            ),
+            timeout=5,
+        )
+
+        assert reconciled.status == "complete"
+        assert reconciled.execution_job_status == JobStatus.COMPLETED.value
+        assert reconciled.execution_job_message == "Execution complete: 3/3 ACs completed"
+        assert reconciled.run_handoff_status == "completed"
+        assert reconciled.resume_capability is AutoResumeCapability.NONE
+
+        snapshot = await manager.get_snapshot(started.job_id)
+        assert snapshot.status is JobStatus.RUNNING
+        events, _cursor = await store.get_events_after("job", started.job_id, 0)
+        assert not any(event.type == "mcp.job.cancelled" for event in events)
     finally:
         await _cancel_manager_tasks(manager)
         await store.close()

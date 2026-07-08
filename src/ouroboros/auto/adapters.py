@@ -815,8 +815,11 @@ class HandlerSeedQAEvaluator:
         quality_bar = (
             "The Seed must be ready for autonomous execution before run starts. "
             "It must preserve the interview/ledger intent, have ambiguity_score <= 0.20, "
-            "contain concrete acceptance criteria, include constraints/non-goals/runtime "
-            "context, and avoid unsupported assumptions or missing requirements."
+            "contain concrete acceptance criteria, and preserve constraints, non-goals, "
+            "and runtime context in executable Seed surfaces. The Seed schema has no "
+            "top-level non_goals/runtime_context fields; constraints, ontology fields, "
+            "brownfield_context, or acceptance criteria are valid preservation surfaces. "
+            "Avoid unsupported assumptions or missing requirements."
         )
         result = await self.qa_handler.handle(
             {

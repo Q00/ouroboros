@@ -919,6 +919,62 @@ async def _cancel_run_handoff_job(job_manager: JobManager, job_id: str) -> None:
 _FAILED_RUN_META_STATUSES = frozenset({"failed", "cancelled", "interrupted"})
 
 
+async def _linked_execution_completed_result(
+    result: AutoPipelineResult,
+    event_store: EventStore,
+) -> AutoPipelineResult | None:
+    """Return a successful run verdict from durable linked execution evidence.
+
+    Direct CLI ``ooo auto`` waits on the in-process execute job so the process
+    does not exit before the run finishes. In practice a runtime subprocess can
+    outlive the already-emitted source-of-truth ``execution.terminal`` event
+    (for example a Codex child that keeps the job task open after all ACs
+    completed). When the execution terminal says completed, prefer that durable
+    fact over cancelling the live job at the wait deadline.
+    """
+    execution_id = result.execution_id
+    if not execution_id:
+        return None
+
+    terminal_events = await event_store.query_events(
+        aggregate_id=execution_id,
+        event_type="execution.terminal",
+        limit=1,
+    )
+    if not terminal_events or terminal_events[0].data.get("status") != "completed":
+        return None
+
+    message = "Execution complete"
+    workflow_events = await event_store.query_events(
+        aggregate_id=execution_id,
+        event_type="workflow.progress.updated",
+        limit=1,
+    )
+    if workflow_events:
+        data = workflow_events[0].data
+        completed = data.get("completed_count")
+        total = data.get("total_count")
+        if (
+            isinstance(completed, int)
+            and isinstance(total, int)
+            and total > 0
+            and completed >= total
+        ):
+            message = f"Execution complete: {completed}/{total} ACs completed"
+
+    return replace(
+        result,
+        status="complete",
+        phase="complete",
+        blocker=None,
+        resume_capability=AutoResumeCapability.NONE,
+        execution_job_status=JobStatus.COMPLETED.value,
+        execution_job_error=None,
+        execution_job_message=message,
+        run_handoff_status="completed",
+    )
+
+
 def _run_meta_verdict(snapshot: JobSnapshot) -> tuple[str, bool | None]:
     """Extract the execution-level (status, success) verdict from a job snapshot.
 
@@ -1202,8 +1258,14 @@ async def _await_run_handoff_terminal(
     last_line = ""
     try:
         while not snapshot.is_terminal:
+            linked_completed = await _linked_execution_completed_result(result, event_store)
+            if linked_completed is not None:
+                return _persist_resumable_run_verdict(linked_completed, state, store)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                linked_completed = await _linked_execution_completed_result(result, event_store)
+                if linked_completed is not None:
+                    return _persist_resumable_run_verdict(linked_completed, state, store)
                 deadline_result = await _cancel_run_and_build_deadline_result(
                     result, job_manager, job_id, snapshot
                 )
@@ -1263,6 +1325,10 @@ async def _await_run_handoff_terminal(
             f"Resume with: ouroboros auto --resume {result.auto_session_id}"
         )
         raise
+
+    linked_completed = await _linked_execution_completed_result(result, event_store)
+    if linked_completed is not None:
+        return _persist_resumable_run_verdict(linked_completed, state, store)
 
     snapshot = await job_manager.get_snapshot(job_id)
     if not quiet:
