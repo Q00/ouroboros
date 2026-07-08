@@ -65,6 +65,11 @@ exclude = [
     "/.venv",
     "/coverage.xml",
     "/.coverage",
+    # Keep docs (esp. the 7.5MB docs/images/ouroboros.png) out of the sdist —
+    # they are never imported and the wheel already excludes them via
+    # packages=["src/ouroboros"]. Shipping them re-bloated every dev build and
+    # pushed the PyPI project past its 10GB storage cap.
+    "/docs",
 ]
 
 [tool.hatch.build.targets.wheel]
