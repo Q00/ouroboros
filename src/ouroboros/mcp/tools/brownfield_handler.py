@@ -4,8 +4,8 @@ Provides an ``ouroboros_brownfield`` MCP tool for managing brownfield
 repository registrations in the SQLite database. Supports four actions:
 
 - **scan** — Walk a caller-supplied root (or the home directory by
-  default) for seed repos/worktrees, include Git-reported linked worktrees
-  from normal repo roots, and register discovered local repositories in the DB.
+  default) up to a shallow depth for seed repos/worktrees, and register
+  discovered local repositories in the DB.
 - **register** — Manually register a single repository by path.
 - **query** — List all registered repos or get the current default.
 - **set_default** — Set a registered repo as the default brownfield context.
@@ -326,7 +326,7 @@ class BrownfieldHandler:
         """Scan an existing root directory for repos/worktrees and register them.
 
         Delegates to ``bigbang.brownfield.scan_and_register`` which handles
-        directory walking, linked worktree expansion, and DB upsert.
+        depth-bounded directory walking and DB upsert.
         """
         scan_root_str = arguments.get("scan_root")
         scan_root = Path(scan_root_str).expanduser() if scan_root_str else None
@@ -341,7 +341,7 @@ class BrownfieldHandler:
         store = await self._get_store()
 
         # scan_and_register handles the full workflow:
-        # walk dirs → expand linked worktrees → upsert
+        # walk dirs (depth-bounded) → validate candidates → upsert
         repos = await scan_and_register(
             store=store,
             llm_adapter=None,  # No LLM in MCP context for now

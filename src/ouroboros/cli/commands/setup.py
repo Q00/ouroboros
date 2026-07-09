@@ -2913,10 +2913,9 @@ async def _scan_and_register_repos(scan_root: Path | None = None) -> list[dict]:
     """Scan a root directory and register repos/worktrees in DB.
 
     Uses upsert semantics so that manually-registered repos outside the
-    scan root are preserved across re-scans. Git-reported linked worktrees for
-    discovered normal repo roots may be registered even when they live outside
-    the scan root. A linked worktree inside the scan root is registered itself
-    but does not pull its main/sibling worktrees outside the scan root.
+    scan root are preserved across re-scans. The walk is depth-bounded and
+    registers each repo/worktree it reaches directly; Git worktree families
+    are not expanded.
 
     Returns:
         List of repo dicts with path, name, desc, is_default.
@@ -3289,12 +3288,11 @@ def scan(
 ) -> None:
     """Re-scan a root directory and register new repos.
 
-    Scans the requested root for valid seed git repos/worktrees and updates the
-    brownfield registry. Linked worktrees reported by normal repo roots may be
-    registered even when they live outside the scan root. A linked worktree
-    found inside the scan root is registered itself but does not pull its
-    main/sibling worktrees outside the scan root. Local repos and repos with any
-    remote name are eligible. Existing repos are preserved (upsert).
+    Scans the requested root (up to a shallow depth) for valid seed git
+    repos/worktrees and updates the brownfield registry. Each repo/worktree
+    the walk reaches directly is registered self-only; Git worktree families
+    are not expanded. Local repos and repos with any remote name are eligible.
+    Existing repos are preserved (upsert).
     """
     effective_scan_root = scan_root or Path.home()
     console.print("\n[bold cyan]Brownfield Scan[/]\n")
@@ -3315,7 +3313,7 @@ def scan(
 
 async def _run_scan_only(scan_root: Path) -> list[dict]:
     """Scan and register, returning repo list."""
-    with console.status("[cyan]Scanning scan root and linked worktrees...[/]", spinner="dots"):
+    with console.status("[cyan]Scanning scan root for repos...[/]", spinner="dots"):
         return await _scan_and_register_repos(scan_root)
 
 

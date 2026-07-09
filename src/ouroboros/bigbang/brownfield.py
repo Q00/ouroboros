@@ -4,8 +4,7 @@ Manages the global brownfield registry in ``~/.ouroboros/ouroboros.db``
 via :class:`~ouroboros.persistence.brownfield.BrownfieldStore`.
 
 Business-level operations:
-- Scan-root discovery for valid seed git repos/worktrees
-- Linked worktree discovery from normal repo roots via Git metadata
+- Scan-root discovery for valid seed git repos/worktrees (depth-bounded walk)
 - README/CLAUDE.md parsing for one-line description generation (Frugal model)
 - Async CRUD delegated to BrownfieldStore
 
