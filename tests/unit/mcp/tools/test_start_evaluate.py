@@ -113,6 +113,10 @@ class TestBackgroundJobPath:
         assert result.value.meta["job_id"] == "job_abc123"
         assert result.value.meta["session_id"] == "orch_xyz"
         assert result.value.meta["status"] == "queued"
+        observer = result.value.meta["job_observer"]
+        assert observer["job_id"] == "job_abc123"
+        assert observer["session_id"] == "orch_xyz"
+        assert observer["recommended_host_action"] == "spawn_observer_session"
         # Inner evaluate must NOT have been called synchronously — fire-and-forget.
         fake_inner_handler.handle.assert_not_called()
         job_manager.start_job.assert_awaited_once()

@@ -113,6 +113,8 @@ async def test_ralph_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(mo
     ]
     assert calls[0]["cancel_key"] != "ralph:lin_same"
     assert calls[0]["process_id"] != calls[1]["process_id"]
+    assert first.value.meta["job_observer"]["job_id"] == "job_000000000001"
+    assert second.value.meta["job_observer"]["job_id"] == "job_000000000002"
 
 
 async def test_evolve_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(monkeypatch) -> None:
@@ -134,6 +136,8 @@ async def test_evolve_jobs_on_same_lineage_use_distinct_job_scoped_cancel_keys(m
     ]
     assert calls[0]["cancel_key"] != "evolve_step:lin_same"
     assert calls[0]["process_id"] != calls[1]["process_id"]
+    assert first.value.meta["job_observer"]["job_id"] == "job_000000000001"
+    assert second.value.meta["job_observer"]["job_id"] == "job_000000000002"
 
 
 async def test_execute_seed_uses_job_scoped_cancel_key(monkeypatch, tmp_path) -> None:
@@ -183,3 +187,4 @@ async def test_start_evaluate_now_passes_durable_job_scoped_cancel_key(monkeypat
     assert calls[0]["cancel_key"] == "mcp_job:job_000000000001"
     assert calls[0]["process_id"] == "evaluate:orch_eval:job_000000000001"
     assert calls[0]["cancel_key"] != calls[0]["process_id"]
+    assert result.value.meta["job_observer"]["session_id"] == "orch_eval"

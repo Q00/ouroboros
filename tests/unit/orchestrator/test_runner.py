@@ -2535,6 +2535,8 @@ class TestOrchestratorRunner:
         assert "files_touched" in system_prompt
         assert "commands_run" in system_prompt
         assert "tests_passed" in system_prompt
+        assert "evidence record as a receipt" in system_prompt
+        assert "exact successful test command" in system_prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_single_ac_uses_ac_executor_path(

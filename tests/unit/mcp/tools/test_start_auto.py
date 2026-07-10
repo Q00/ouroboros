@@ -334,6 +334,17 @@ class TestBackgroundJobPath:
         assert result.value.meta["status_tool"] == "ouroboros_job_status"
         assert result.value.meta["wait_tool"] == "ouroboros_job_wait"
         assert result.value.meta["result_tool"] == "ouroboros_job_result"
+        observer = result.value.meta["job_observer"]
+        assert observer["recommended_host_action"] == "spawn_observer_session"
+        assert observer["ownership"] == "exclusive"
+        assert observer["job_id"] == "job_auto_001"
+        assert observer["session_id"] == auto_session_id
+        assert observer["main_session_policy"] == "start_and_on_demand_only"
+        assert observer["follow_result_job_keys"] == [
+            "job_id",
+            "ralph_job_id",
+            "chained_evaluate_job_id",
+        ]
         assert captured["links"].session_id == auto_session_id
         assert store.path_for(auto_session_id).exists()
         # The inner AutoHandler must NOT have run synchronously — the runner is
@@ -492,7 +503,9 @@ class TestBackgroundJobPath:
             assert re.fullmatch(r"job_[0-9a-f]{12}", job_id)
             assert isinstance(auto_session_id, str)
             assert auto_session_id.startswith("auto_")
-            assert started.value.meta == {
+            meta = dict(started.value.meta)
+            observer = meta.pop("job_observer")
+            assert meta == {
                 "job_id": job_id,
                 "auto_session_id": auto_session_id,
                 "session_id": auto_session_id,
@@ -502,6 +515,10 @@ class TestBackgroundJobPath:
                 "wait_tool": "ouroboros_job_wait",
                 "result_tool": "ouroboros_job_result",
             }
+            assert observer["job_id"] == job_id
+            assert observer["session_id"] == auto_session_id
+            assert observer["recommended_host_action"] == "spawn_observer_session"
+            assert observer["ownership"] == "exclusive"
 
             await asyncio.wait_for(inner_started.wait(), timeout=1.0)
 

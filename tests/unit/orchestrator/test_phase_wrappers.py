@@ -123,6 +123,15 @@ class TestPostBlock:
         assert "Do not include exploratory discovery commands" in block
         assert "rg, grep, sed, cat, ls, find, or pwd" in block
 
+    def test_requires_transcript_exact_test_evidence(self, code_profile: ExecutionProfile) -> None:
+        block = build_post_block(code_profile)
+        assert "evidence record as a receipt" in block
+        assert "exact command string from a successful Bash tool call" in block
+        assert "tests_passed" in block
+        assert "never use a test ID" in block
+        assert "manual verification" in block
+        assert "command you intended but did not run" in block
+
     def test_forbids_self_declared_done(self, code_profile: ExecutionProfile) -> None:
         block = build_post_block(code_profile)
         assert "Do not declare" in block

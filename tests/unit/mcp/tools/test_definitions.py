@@ -1975,6 +1975,16 @@ class TestAsyncJobHandlers:
         assert result.value.meta["verification_status"] == "executed_unverified"
         assert result.value.meta["formal_evaluation_required"] is True
         assert result.value.meta["next_step"].startswith("ooo evaluate orch_")
+        observer = result.value.meta["job_observer"]
+        assert observer["recommended_host_action"] == "spawn_observer_session"
+        assert observer["ownership"] == "exclusive"
+        assert observer["job_id"] == "job_test"
+        assert observer["session_id"] == result.value.meta["session_id"]
+        assert observer["execution_id"] == result.value.meta["execution_id"]
+        assert observer["wait"]["arguments"]["wait_for"] == "ac_change"
+        assert observer["relay"]["mode"] == "event_driven"
+        assert observer["parent_session"]["availability"] == "available_after_handoff"
+        assert observer["follow_result_job_keys"] == ["chained_evaluate_job_id"]
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_" in result.value.text_content

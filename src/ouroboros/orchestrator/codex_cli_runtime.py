@@ -1348,6 +1348,8 @@ class CodexCliRuntime:
         """Merge known command-result fields from one Codex event object."""
         text_key_map = {
             "output": "output",
+            "aggregated_output": "output",
+            "aggregatedOutput": "output",
             "stdout": "stdout",
             "stderr": "stderr",
             "result_preview": "result_preview",

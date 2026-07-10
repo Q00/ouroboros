@@ -280,6 +280,23 @@ ouroboros_job_wait(job_id="JOB_ID")
 ouroboros_job_result(job_id="JOB_ID")
 ```
 
+Pollable background start responses also include
+`meta.job_observer.protocol="ouroboros.job_observer.v1"`. Hosts with independent
+child sessions should delegate that object to exactly one read-only observer.
+The observer exclusively owns the wait cursor and terminal result retrieval;
+the main conversation remains available for user interaction and explicit
+on-demand status checks. Hosts without child sessions use the contract's
+`fallback` fields and keep the bounded polling loop in the main session.
+OpenCode plugin delegation returns `job_id=None` and does not emit a local job
+observer because the plugin child already owns the execution lifecycle.
+
+The contract's `relay` section turns job changes into bounded parent-session
+events (`phase_changed`, `progress_advanced`, `attention_required`, `terminal`)
+and suppresses unchanged heartbeats and raw tool output. Its `parent_session`
+section tells the host to show `dashboard_url` or `ouroboros tui open`, keep the
+conversation available for safe concurrent work, and conflict-check writes to
+the active workspace.
+
 Treat `running` or other non-terminal status output as progress only. A
 `running` lifecycle status is non-terminal tracked background work, not a final
 `auto` result. Wait with `ouroboros_job_wait`, then fetch the completed result

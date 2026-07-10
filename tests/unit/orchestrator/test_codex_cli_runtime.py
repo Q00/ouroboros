@@ -797,6 +797,30 @@ class TestCodexCliRuntime:
         assert message.data["output"] == "1 passed in 0.01s"
         assert message.data["exit_code"] == 0
 
+    def test_convert_command_execution_preserves_aggregated_output_metadata(self) -> None:
+        """Current Codex JSONL aggregated output remains available to the verifier."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": ("/bin/zsh -lc 'python3 -m pytest --doctest-modules -q hello.py'"),
+                    "aggregated_output": ". [100%]\n1 passed in 0.01s\n",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.data["output"] == ". [100%]\n1 passed in 0.01s"
+        assert message.data["exit_code"] == 0
+        assert message.data["status"] == "completed"
+
     def test_convert_command_execution_preserves_nested_output_metadata(self) -> None:
         """Codex command result fields may arrive under nested output/result objects."""
         runtime = CodexCliRuntime(cli_path="codex")

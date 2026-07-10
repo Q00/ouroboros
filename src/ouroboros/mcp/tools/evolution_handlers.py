@@ -34,6 +34,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
@@ -1028,6 +1029,10 @@ class StartEvolveStepHandler:
                     "lineage_id": lineage_id,
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
+                    "job_observer": build_job_observer_contract(
+                        job_id=snapshot.job_id,
+                        cursor=snapshot.cursor,
+                    ),
                 },
             )
         )

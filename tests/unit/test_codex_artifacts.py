@@ -65,12 +65,18 @@ class TestInstallCodexRules:
         assert secondary_target_path.read_text(encoding="utf-8") == "# status rules\n"
         assert not rules_dir.joinpath("team.md").exists()
 
-    def test_packaged_rules_make_auto_monitoring_agent_owned(self) -> None:
-        """Codex rules should keep background auto polling in the agent UX."""
+    def test_packaged_rules_delegate_auto_monitoring_out_of_main_session(self) -> None:
+        """Codex rules should assign one child observer exclusive polling ownership."""
         rules = load_packaged_codex_rules()
         compact = " ".join(rules.split())
 
-        assert "keep monitoring the job yourself" in compact
+        assert "explicitly delegate that object to exactly one native Codex subagent" in compact
+        assert "read-only and exclusively owns" in compact
+        assert "do not poll the same job from both sessions" in compact
+        assert "the main conversation remains available" in compact
+        assert "ouroboros tui open" in compact
+        assert "attention_required" in compact
+        assert "use an isolated worktree" in compact
         assert "Do not hand the user polling instructions as the final UX" in compact
         assert "ouroboros_job_result(job_id)" in compact
 

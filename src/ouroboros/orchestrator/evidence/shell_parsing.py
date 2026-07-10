@@ -174,6 +174,12 @@ def _is_safe_test_command_preamble(segment: str) -> bool:
     return all(_is_env_assignment(part) for part in parts)
 
 
+def _is_python_executable(value: str) -> bool:
+    """Return True for standard versioned Python interpreter names."""
+    executable = Path(value).name.lower()
+    return bool(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable))
+
+
 def _is_env_assignment(value: str) -> bool:
     """Return True for a simple shell environment assignment token."""
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", value))
@@ -266,12 +272,9 @@ def _test_invocation_from_prefix(command: str) -> str | None:
         return _normalized_evidence_text(" ".join(parts))
     if (
         len(parts) >= 3
-        and parts[:2] == ["python", "-m"]
-        and parts[2]
-        in {
-            "pytest",
-            "unittest",
-        }
+        and _is_python_executable(parts[0])
+        and parts[1] == "-m"
+        and parts[2] in {"pytest", "unittest"}
     ):
         return _normalized_evidence_text(" ".join(parts))
     executable = Path(parts[0]).name
@@ -290,7 +293,7 @@ def _unittest_command_invocation(command: str) -> str | None:
     if invocation is None:
         return None
     parts = invocation.split()
-    if len(parts) >= 3 and parts[:3] == ["python", "-m", "unittest"]:
+    if len(parts) >= 3 and _is_python_executable(parts[0]) and parts[1:3] == ["-m", "unittest"]:
         return invocation
     return None
 

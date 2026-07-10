@@ -324,6 +324,21 @@ class TestWorktreeHardening:
             with pytest.raises(WorktreeError, match="Invalid durable task identifier"):
                 prepare_task_workspace(repo_root, "bad id")
 
+    def test_prepare_task_workspace_explains_empty_repository_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        repo_root.mkdir()
+        self._git(repo_root, "init", "-b", "main")
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            with pytest.raises(WorktreeError, match="Create an initial commit first") as exc_info:
+                prepare_task_workspace(repo_root, "orch_test_empty")
+
+        assert "git commit --allow-empty" in exc_info.value.message
+
     def test_maybe_prepare_creates_worktree_from_dirty_source_when_allowed(
         self, tmp_path: Path
     ) -> None:

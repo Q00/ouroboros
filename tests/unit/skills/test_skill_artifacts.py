@@ -116,3 +116,20 @@ def test_packaged_skills_gate_fallback_on_callability_not_empty_discovery() -> N
                 assert "not already callable" in text, (
                     f"{skill_path}: `no matching tool` fallback not gated on callability"
                 )
+
+
+def test_background_skills_delegate_one_exclusive_job_observer() -> None:
+    """Run/auto should free the main session when native child sessions exist."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for skill in ("run", "auto", "ralph"):
+        text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+        normalized = text.lower()
+        assert "response.meta.job_observer" in normalized
+        assert "exactly one" in normalized
+        assert "read-only" in normalized
+        assert "main session must not poll the same job" in normalized
+        assert "attention_required" in normalized
+        assert "isolated worktree" in normalized
+        assert "tui open" in normalized
+        assert "conversation" in normalized and "available" in normalized

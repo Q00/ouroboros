@@ -103,7 +103,21 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      ```
      [Ralph] Started background loop: <job_id>
      Lineage: <lineage_id>
+     Live view: <dashboard_url, or `ouroboros tui open`>
+
+     A read-only observer will post meaningful progress, attention, and terminal
+     events here. This conversation remains available for other safe work.
      ```
+
+   - If `response.meta.job_observer` is present and the host supports an
+     independent child session, spawn exactly one read-only observer and pass
+     that contract unchanged. The observer exclusively owns job wait/result
+     calls and the cursor. The main session retains only user conversation,
+     explicit on-demand status, and cancellation when the user requests it. The
+     main session must not poll the same job while the observer is active. It may
+     refine requirements, perform read-only review, or work in an unrelated
+     isolated worktree; check active-worker conflicts before writing to Ralph's
+     workspace.
 
    - If `response.meta.status == "delegated_to_plugin"` and
      `response.meta.job_id is None`, report that OpenCode plugin mode delegated
@@ -111,14 +125,23 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      `ouroboros_job_result`, or `ouroboros_cancel_job` without a job id; follow
      the host Task widget/session lifecycle instead.
 
-4. **Monitor non-plugin job progress** with job tooling when a `job_id` exists:
+4. **Monitor non-plugin job progress in the polling owner** when a `job_id` exists.
+
+   The delegated observer is the default owner. Use the main-session loop below
+   only when no independent child session exists; never run both loops:
+
    - `ouroboros_job_wait(job_id, cursor, timeout_seconds=120)` for long polling;
      after every wait/status response, update `cursor = response.meta.cursor`
    - `ouroboros_job_status(job_id)` for a quick status check
    - `ouroboros_job_result(job_id)` when the job is terminal
    - `ouroboros_cancel_job(job_id)` if the user says stop/cancel
 
-5. **On non-plugin job termination**, fetch `ouroboros_job_result(job_id)` and
+   Observer events are concise: relay phase/progress changes in 1-2 lines,
+   surface `attention_required` immediately, present `terminal` as the final
+   result, and suppress unchanged heartbeats or raw tool output.
+
+5. **On non-plugin job termination**, the polling owner fetches
+   `ouroboros_job_result(job_id)` and
    summarize the final job result and next step:
    - Success / convergence: summarize the final generation output, QA verdict,
      and any `worktree_path` / `worktree_branch` returned in job metadata. Do not

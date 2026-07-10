@@ -977,6 +977,32 @@ def test_message_contains_test_success_handles_zero_failure_summaries(
     assert _message_contains_test_success(message) is expected
 
 
+@pytest.mark.parametrize("python_executable", ("python3", "python3.12", "/usr/bin/python3"))
+def test_tests_passed_accepts_versioned_python_codex_command(
+    python_executable: str,
+) -> None:
+    """Sol's shell-wrapped versioned Python pytest run is formal test evidence."""
+    claim = f"{python_executable} -m pytest --doctest-modules -q hello.py"
+    message = AgentMessage(
+        type="assistant",
+        content=f"Calling tool: Bash: /bin/zsh -lc '{claim}'",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": f"/bin/zsh -lc '{claim}'"},
+            "output": ". [100%]\n1 passed in 0.01s",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value=claim,
+        backed_commands=(claim,),
+        messages=(message,),
+        task_cwd=None,
+    )
+
+
 @pytest.mark.parametrize(
     "ac_content",
     (

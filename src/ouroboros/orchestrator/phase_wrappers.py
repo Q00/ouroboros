@@ -126,6 +126,13 @@ def build_post_block(profile: ExecutionProfile) -> str:
         "or docs verification commands. Do not include exploratory discovery "
         "commands such as rg, grep, sed, cat, ls, find, or pwd unless that "
         "command is itself the validation required by the current AC.\n\n"
+        "Treat the evidence record as a receipt for tool calls completed in "
+        "this attempt, never as a plan or summary. For commands_run, copy the "
+        "exact command string from a successful Bash tool call. For "
+        "tests_passed, copy the exact successful test command from commands_run; "
+        "never use a test ID, a prose label such as 'manual verification', or a "
+        "command you intended but did not run. If the required command has not "
+        "run successfully, run it before emitting the evidence record.\n\n"
         "If a required precondition is unavailable, emit this typed "
         "terminal blocker shape instead of prose or partial evidence: "
         '{"status":"blocked","blocker":{"code":"<one of: '

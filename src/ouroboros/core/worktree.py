@@ -307,7 +307,22 @@ def _ensure_worktree(
         _run_git(["worktree", "add", str(worktree_path), branch], repo_root)
         return
 
-    base = base_ref or _run_git(["rev-parse", "HEAD"], repo_root)
+    if base_ref is not None:
+        base = base_ref
+    else:
+        head = _run_git_process(["rev-parse", "--verify", "HEAD"], repo_root)
+        if head.returncode != 0:
+            raise WorktreeError(
+                "Cannot create a task worktree from an empty Git repository. "
+                "Create an initial commit first (for example: "
+                'git commit --allow-empty -m "chore: initialize repository") and retry.',
+                details={
+                    "repo_root": str(repo_root),
+                    "stdout": head.stdout.strip(),
+                    "stderr": head.stderr.strip(),
+                },
+            )
+        base = head.stdout.strip()
     _run_git(["worktree", "add", "-b", branch, str(worktree_path), base], repo_root)
 
 

@@ -92,25 +92,27 @@ fallback instead of retrying the failing call.
      session_id: <existing session ID>
    ```
 
-5. **Recommended monitoring stance: relay compact progress in the main session.**
+5. **Recommended monitoring stance: delegate observation to one child session.**
 
    **TUI surfacing at job start (RFC #1392):**
 
-   After `job_id`, `session_id`, and `execution_id` are returned, surface the
-   live dashboard once for this run before entering the relay loop:
+   After `job_id`, `session_id`, and `execution_id` are returned, surface a live
+   view once without delaying execution or observer delegation:
+
+   - If `response.meta.dashboard_url` exists, show it as the primary live view.
 
    - If `execution.tui_autolaunch: true` (or legacy top-level
      `tui_autolaunch: true`) is present in the loaded Ouroboros config, run
      `ouroboros tui open` unconditionally and mention the dashboard in one
      short line.
-   - Otherwise offer once: "Want a live dashboard? I can open the TUI in a new
-     terminal window with `ouroboros tui open`." Remember the answer for this
-     session and do not repeat the offer during the same run.
+   - Otherwise mention once that the TUI can be opened in a new terminal with
+     `ouroboros tui open`. Offer to open it, but do not block the run waiting for
+     an answer. Remember the answer for this session and do not repeat the offer.
    - If the user accepts, run `ouroboros tui open`.
    - If `ouroboros tui open` reports a manual command because the environment
      is headless, SSH, or unsupported, relay that command once and continue.
-   - Always keep the in-session compact progress relay below as the baseline;
-     the dashboard is additive, not a replacement for relay updates.
+   - The dashboard is an external observer. It does not change which chat
+     session owns MCP polling.
 
    After IDs are returned, print only this short handoff:
 
@@ -119,17 +121,57 @@ fallback instead of retrying the failing call.
    Job ID: <job_id>
    Session ID: <session_id>
    Execution ID: <execution_id>
+   Live view: <dashboard_url, or `ouroboros tui open`>
 
-   I will wait in low-token relay mode and report only meaningful state changes.
+   A read-only observer will post meaningful progress, attention, and completion
+   events here. This conversation stays available while the run continues.
+   We can refine requirements, inspect or review code, or work on an unrelated
+   task in an isolated worktree. I will check for active-worker conflicts before
+   editing this run's workspace.
    For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
-   Rationale: the main chat session must wait for MCP calls. Frequent full-tree
-   polling burns context without improving execution. The user usually wants
-   "what is it doing now?" rather than the whole tree, so use compact job
-   read-model snapshots and narrate them like a brief live relay.
+   When `response.meta.job_observer` is present and the host has an independent
+   child/subagent session primitive, spawn exactly one observer session and pass
+   that object unchanged. Codex requires explicit native subagent delegation;
+   Claude Code uses one Task/Agent child. The observer must:
 
-6. **Low-token relay loop with `ouroboros_job_wait` (recommended default).**
+   - remain read-only: no repository edits, execution control, or worker fan-out;
+   - own the job cursor exclusively and reload deferred MCP schemas immediately
+     before each observer tool call;
+   - call the declared `wait.tool` with the declared arguments, update its local
+     cursor from response meta, and repeat until terminal;
+   - call the declared `result.tool` after terminal status;
+   - follow any job IDs named by `follow_result_job_keys`, including chained
+     formal evaluation, before returning one compact final summary;
+   - send sparse progress notices only when the host supports child-to-parent
+     messages and the state meaningfully changes.
+
+   The main session must not poll the same job while the observer owns it. It may
+   continue the user conversation, refine requirements, perform read-only
+   inspection/review, handle explicit status/control requests, or work on an
+   unrelated task in an isolated worktree. Before writing to the active run's
+   workspace, check for overlap with worker files or isolate the work. If
+   `job_id` is absent because plugin mode already delegated the whole execution,
+   follow that plugin child lifecycle instead.
+
+   Handle observer messages as events, not as a transcript:
+
+   - `phase_changed` / `progress_advanced`: relay at most 1-2 concise lines.
+   - `attention_required`: surface the blocker or pending decision immediately
+     and ask the user only when human judgment is required.
+   - `terminal`: fetch/present the final result and any chained evaluation.
+   - Suppress unchanged heartbeats and raw tool output.
+
+   This ownership split is the default for SOL-class models: the main model
+   performs one start handoff, while a small isolated context owns the repetitive
+   wait/result state machine.
+
+6. **Fallback: low-token relay loop in the main session.**
+
+   Use this only when `response.meta.job_observer` is absent or the host has no
+   independent child session primitive. Do not run it in parallel with a
+   delegated observer.
 
    Use `ouroboros_job_wait`, not repeated `ouroboros_ac_tree_hud`, for routine
    monitoring. Keep the latest cursor and previous progress counters from the
@@ -258,7 +300,10 @@ fallback instead of retrying the failing call.
    no-op. Do not explain it to the user unless they explicitly asked for
    heartbeat messages.
 
-8. **Fetch final result** with `ouroboros_job_result`:
+8. **Fetch final result in the polling owner** with `ouroboros_job_result`.
+
+   The delegated observer performs this call on the default path. The main
+   session performs it only on the fallback path from step 6.
    ```
    Tool: ouroboros_job_result
    Arguments:
@@ -279,8 +324,8 @@ fallback instead of retrying the failing call.
    To skip: pass `skip_qa: true` to the tool.
 
    If the final run result meta contains `chained_evaluate_job_id`:
-   - Poll that job with `ouroboros_job_wait` / `ouroboros_job_status`
-   - Fetch its verdict with `ouroboros_job_result`
+   - The current polling owner continues with that job ID
+   - Fetch its verdict with `ouroboros_job_result` after terminal status
    - Render **APPROVED** when `final_approved: true`; otherwise render not approved and list failed ACs or the failure reason from the evaluation result
    - If the evaluate job failed or timed out, keep the run success intact and show `Next: ooo evaluate <session_id>` as the manual retry
 

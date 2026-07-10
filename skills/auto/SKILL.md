@@ -24,8 +24,9 @@ manually inspect repositories, run shell commands, query GitHub, edit files, or
 otherwise emulate the auto pipeline as a substitute. Full auto runs routinely
 exceed interactive MCP tool-call timeouts, so the background starter is the
 supported default: it returns `job_id` and `auto_session_id` quickly. Retain
-both, poll progress with `ouroboros_job_wait` / `ouroboros_job_status`, and read
-terminal results with `ouroboros_job_result`.
+both. When `response.meta.job_observer` is present, delegate its read-only
+wait/result contract to exactly one independent child session. The main session
+keeps only start and explicit on-demand status responsibility.
 
 If `ouroboros_start_auto` is unavailable, or if any required job polling/result
 MCP tool is unavailable, stop and report that the required MCP tool is
@@ -34,15 +35,16 @@ unavailable. A manual fallback is not an `ooo auto` run.
 If a started auto job later returns `detached`, `blocked`, `failed`, or another
 auto-session status, report that auto-session status and the tool's blocker.
 `detached` is non-terminal tracked background work; surface the job/Ralph
-handles and keep polling. Do not label a `blocked` or `failed` outcome as MCP
-dispatch failure; dispatch failure means the MCP tool could not be invoked.
+handles and keep observing them through the same owner. Do not label a
+`blocked` or `failed` outcome as MCP dispatch failure; dispatch failure means
+the MCP tool could not be invoked.
 
 If the active runtime routes `ooo auto` through a background starter such as
 `ouroboros_start_auto`, do not stop after returning the `job_id`. Keep ownership
 of the conversational UX: retain the returned `job_id`, `auto_session_id`, and
-cursor, then monitor the job with `ouroboros_job_wait` / `ouroboros_job_status`
-until a terminal job status is reached or the user explicitly asks you to stop.
-The user should not have to poll the job manually.
+cursor, then delegate monitoring when the host supports child sessions. Only
+the fallback path monitors with `ouroboros_job_wait` / `ouroboros_job_status`
+in the main session. The user should not have to poll the job manually.
 
 ## Usage
 
@@ -86,17 +88,38 @@ When an auto start response includes `response.meta.job_id`:
 
 1. Briefly acknowledge that auto started and keep the handles in local state:
    `job_id`, `auto_session_id` / `session_id`, and `cursor` from `response.meta`
-   if present.
-2. Immediately enter a low-noise monitor loop with:
+   if present. Show `response.meta.dashboard_url` when available; otherwise
+   mention `ouroboros tui open` once as the live view. Tell the user that an
+   observer will post meaningful progress/attention/completion events here and
+   that this conversation remains available for requirement refinement,
+   read-only inspection/review, explicit control, or unrelated isolated work.
+2. If `response.meta.job_observer` is present and the host supports independent
+   child sessions, spawn exactly one read-only observer and pass the contract
+   unchanged. Codex uses explicit native subagent delegation; Claude Code uses
+   one Task/Agent child. The observer owns the cursor, waits until terminal,
+   fetches the result, and follows downstream IDs named by
+   `follow_result_job_keys`. It must not edit files, control execution, or spawn
+   implementation workers. The main session must not poll the same job.
+3. If child-to-parent progress messages are supported, the observer relays only
+   meaningful `phase_changed`, `progress_advanced`, `attention_required`, and
+   `terminal` events in at most 1-2 lines. During interview, it may use
+   `ouroboros_session_status(session_id=<auto_session_id>)` to surface a new
+   pending question or newly answered rounds. Otherwise, keep the main session
+   available and use on-demand status only when the user asks. Surface
+   `attention_required` immediately when a blocker needs human judgment.
+   Suppress unchanged heartbeats and raw tool output.
+   Before the main session writes to the active auto workspace, check for overlap
+   with worker files or move the unrelated work to an isolated worktree.
+4. When no independent child session exists, enter the fallback low-noise loop:
    - `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=120, view="summary")`
    - update `cursor = response.meta.cursor` after every wait/status response
    - treat `response.meta` as the source of truth; use response text only as a
      human-readable hint
-3. Relay only meaningful changes: status changes, phase changes, new
+5. Relay only meaningful changes: status changes, phase changes, new
    execution/session/lineage handles, progress counters, blocker/error text, or
    a terminal state. If `response.meta.changed is false`, continue silently
    unless the user asked for heartbeat updates.
-4. **During the interview phase, surface the live Q&A — not just the round
+6. **During the interview phase, surface the live Q&A — not just the round
    counter.** Whenever the relayed phase is `interview` (e.g. progress reads
    `interview round N/50`), call
    `ouroboros_session_status(session_id=<auto_session_id>)` and relay to the
@@ -111,13 +134,14 @@ When an auto start response includes `response.meta.job_id`:
    nothing for the auto session, and it shows only the last 3 answers (each
    truncated). Keep it low-noise: relay the pending question and any newly
    answered rounds, not the same 3 entries every poll.
-5. If the job status is non-terminal (`queued`, `running`, or another active
+7. If the job status is non-terminal (`queued`, `running`, or another active
    status), keep waiting. Do not tell the user to call job tools themselves.
-6. When the job reaches a terminal status, call `ouroboros_job_result(job_id)`
+8. When the job reaches a terminal status, the polling owner calls
+   `ouroboros_job_result(job_id)`
    and summarize the final auto-session outcome. If the final auto result is
    `detached`, keep tracking the surfaced downstream job/Ralph handles when
    available instead of presenting `detached` as completion.
-7. If `response.meta.status == "delegated_to_plugin"` and
+9. If `response.meta.status == "delegated_to_plugin"` and
    `response.meta.job_id is None`, report that OpenCode plugin mode delegated
    the work to the child Task/session. Do not call job wait/result without a
    real job id; follow the host Task widget/session lifecycle.

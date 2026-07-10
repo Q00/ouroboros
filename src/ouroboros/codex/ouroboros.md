@@ -41,24 +41,44 @@ If a user input starts with `ooo auto`, call `ouroboros_start_auto`. Full auto
 runs routinely exceed interactive MCP tool-call timeouts, so the background
 starter is the supported default. It returns `job_id` and `auto_session_id`
 quickly; report both briefly, retain the `job_id` plus latest cursor, and keep
-monitoring the job yourself with `ouroboros_job_wait` / `ouroboros_job_status`.
-Do not hand the user polling instructions as the final UX. For normal
-conversational tracking, call `ouroboros_job_wait` with a positive
-`timeout_seconds` value (for example 120) and `view="summary"`, update the cursor
-from `response.meta.cursor`, relay only meaningful changes, and continue until a
-terminal job status is reached or the user explicitly asks you to stop. If that
-MCP tool is unavailable, or if any required job polling/result MCP tool is
-unavailable, stop and report that the MCP dispatch surface is incomplete instead
-of continuing as a normal Codex task.
+monitoring ownership inside the agent UX. When the response includes
+`meta.job_observer`, explicitly delegate that object to exactly one native Codex
+subagent session. That observer is read-only and exclusively owns
+`ouroboros_job_wait`, its cursor, `ouroboros_job_result`, and any downstream job
+IDs named by `follow_result_job_keys`. Keep the main session available for the
+user; do not poll the same job from both sessions. The main session may perform
+an on-demand status check only when the user asks. If native subagents are not
+available, use the contract's main-session fallback and relay only meaningful
+changes. Do not hand the user polling instructions as the final UX. If that MCP
+tool is unavailable, or any required job polling/result MCP tool is unavailable,
+stop and report that the MCP dispatch surface is incomplete instead of
+continuing as a normal Codex task. Do not emulate the workflow with ordinary
+shell or coding work.
+
+Immediately after observer delegation, give one compact handoff to the user:
+- show `meta.dashboard_url` when present; otherwise mention that
+  `ouroboros tui open` opens the live view;
+- state that progress, attention-required, and terminal events will be posted
+  back into this conversation;
+- state that the main conversation remains available for requirement refinement,
+  read-only inspection/review, explicit status or control requests, and unrelated
+  work in an isolated worktree.
+
+Treat observer messages as events. Relay `phase_changed` and
+`progress_advanced` in at most two concise lines. Surface `attention_required`
+immediately when a blocker or pending decision needs the user. Present
+`terminal` as the final result. Suppress unchanged heartbeats and raw tool
+output. Before editing the active run's workspace from the main session, check
+for overlap with worker files or use an isolated worktree.
 
 If `ouroboros_start_auto` is invoked and returns an auto-session outcome such as
 `blocked`, `failed`, or `complete`, report that outcome as the auto session
 result. `detached` is non-terminal tracked background work; surface the job or
-Ralph handles and keep polling without blocking the foreground tool call. After
-the auto job reaches a terminal job status, call `ouroboros_job_result(job_id)`
-and summarize the final auto result. Do not call a `blocked` or `failed`
-auto-session result a dispatch failure; dispatch failure is reserved for cases
-where the MCP tool could not be invoked.
+Ralph handles and keep the same observer ownership without blocking the main
+session. After the auto job reaches a terminal job status, the observer calls
+`ouroboros_job_result(job_id)` and returns a compact final result. Do not call a
+`blocked` or `failed` auto-session result a dispatch failure; dispatch failure
+is reserved for cases where the MCP tool could not be invoked.
 
 ## Setup & Update
 

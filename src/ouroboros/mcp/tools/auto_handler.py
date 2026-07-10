@@ -80,6 +80,7 @@ from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, Intervie
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import (
@@ -910,6 +911,16 @@ class StartAutoHandler:
                     "status_tool": "ouroboros_job_status",
                     "wait_tool": "ouroboros_job_wait",
                     "result_tool": "ouroboros_job_result",
+                    "job_observer": build_job_observer_contract(
+                        job_id=snapshot.job_id,
+                        cursor=getattr(snapshot, "cursor", 0),
+                        session_id=auto_session_id,
+                        follow_result_job_keys=(
+                            "job_id",
+                            "ralph_job_id",
+                            "chained_evaluate_job_id",
+                        ),
+                    ),
                 },
             )
         )

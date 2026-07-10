@@ -14,6 +14,7 @@ from ouroboros.orchestrator.evidence.claims import (
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
+    _is_python_executable,
     _looks_like_test_command,
     _looks_like_unittest_command,
     _normalized_command_claim_aliases,
@@ -248,11 +249,11 @@ def _test_command_targets_claim(
     # Existence alone is deliberately insufficient: otherwise a transcript with
     # unrelated ``pytest`` output could prove any stale test file in the tree.
     command_parts = (_test_command_invocation(command) or normalized_command).split()
-    broad_pytest = command_parts in (["pytest"], ["py.test"]) or command_parts[-3:] == [
-        "python",
-        "-m",
-        "pytest",
-    ]
+    broad_pytest = command_parts in (["pytest"], ["py.test"]) or (
+        len(command_parts) >= 3
+        and _is_python_executable(command_parts[-3])
+        and command_parts[-2:] == ["-m", "pytest"]
+    )
     if not broad_pytest or task_cwd is None:
         return False
     return _runtime_messages_support_file_claim(file_part, messages, task_cwd=task_cwd)
