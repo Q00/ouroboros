@@ -284,6 +284,14 @@ class MockClaudeAgentAdapter:
     def permission_mode(self) -> str | None:
         return "default"
 
+    @property
+    def self_governs_rate_limit(self) -> bool:
+        # The real Claude adapter self-governs its RPM/TPM bucket, so the executor
+        # must not add a dispatch-level rate gate (mirrors adapter.py's
+        # self_governs_rate_limit = True). Without it, failure-path retries wait
+        # out 30s rate-limit backoffs.
+        return True
+
     def add_execution_sequence(self, messages: list[AgentMessage]) -> MockClaudeAgentAdapter:
         """Add a sequence of messages for a single execution."""
         self.message_sequences.append(messages)

@@ -2,7 +2,9 @@
 
 import inspect
 import os
+import sys
 
+import pytest
 import pytest_asyncio
 
 # In CI, GITHUB_ACTIONS env var causes Typer to set force_terminal=True on
@@ -18,6 +20,39 @@ os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 # effects, non-deterministic URL in responses). Force it OFF by default; tests that
 # exercise the wiring opt back in explicitly via monkeypatch + a mocked resolver.
 os.environ["OUROBOROS_DASHBOARD"] = "0"
+
+
+@pytest.fixture(autouse=True)
+def block_runner_real_llm_adapter(monkeypatch):
+    """Block execute_seed's dependency analysis from spawning real agent CLIs.
+
+    ``OrchestratorRunner._build_dependency_analyzer`` resolves an LLM adapter
+    from the adapter's ``llm_backend`` / the developer's real ~/.ouroboros
+    config, and if a matching CLI binary exists on the machine (claude,
+    opencode, ...) it spawns it for a REAL completion — with no timeout on
+    some backends. In tests this meant real API calls locally and a ~60s
+    hang per failure-path e2e test on CI.
+
+    Raising here routes the builder through its existing RuntimeError
+    fallback (structured-only ``DependencyAnalyzer()``), which is also the
+    effective CI behavior. Tests that exercise the builder itself patch
+    ``ouroboros.orchestrator.runner.create_llm_adapter`` inside the test
+    body; that patch is applied after this one and wins.
+
+    Gated on sys.modules so tests that never import the orchestrator don't
+    pay the import cost.
+    """
+    runner_mod = sys.modules.get("ouroboros.orchestrator.runner")
+    if runner_mod is not None:
+
+        def _blocked_create_llm_adapter(*_args, **_kwargs):
+            raise RuntimeError(
+                "create_llm_adapter blocked in tests: dependency analysis must not "
+                "spawn real agent CLIs (patch ouroboros.orchestrator.runner."
+                "create_llm_adapter to test the LLM path)"
+            )
+
+        monkeypatch.setattr(runner_mod, "create_llm_adapter", _blocked_create_llm_adapter)
 
 
 @pytest_asyncio.fixture(autouse=True)

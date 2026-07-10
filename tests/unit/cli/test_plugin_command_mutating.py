@@ -345,11 +345,21 @@ def test_add_duplicate_manifest_names_in_catalog_refused(runner: CliRunner, tmp_
         ],
     )
     assert result.exit_code == 1, result.output
-    # Stable phrase the operator can grep for.
-    assert "duplicate `name`" in result.output
+    # The error is rendered through a force_terminal Rich Panel (80 cols),
+    # which emits ANSI codes and hard-wraps long lines. When tmp_path grows
+    # longer (e.g. the ``popen-gwN/`` segment under pytest-xdist workers) the
+    # wrap point shifts and splits a token across panel lines, so raw
+    # substring checks on ``result.output`` are brittle. Strip ANSI, then
+    # squash box borders and all whitespace/newlines so wrapped tokens rejoin.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    squashed = re.sub(r"[│╭╮╰╯─\s]+", "", plain)
+    # Stable phrase the operator can grep for (space vanishes when squashed).
+    assert "duplicate`name`" in squashed
     # Both colliding paths surfaced for remediation.
-    assert "github-pr-ops-a" in result.output
-    assert "github-pr-ops-b" in result.output
+    assert "github-pr-ops-a" in squashed
+    assert "github-pr-ops-b" in squashed
     # Crucially: nothing was installed.
     assert not paths["lockfile"].exists() or Lockfile(paths["lockfile"]).read() == {}
 

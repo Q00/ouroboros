@@ -40,7 +40,7 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
-          uv run pytest tests/ --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
+          uv run pytest tests/ -n 4 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
