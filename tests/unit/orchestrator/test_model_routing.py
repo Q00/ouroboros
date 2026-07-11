@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.config._model_defaults import DEFAULT_HAIKU_MODEL, DEFAULT_SONNET_MODEL
+from ouroboros.config._model_defaults import (
+    DEFAULT_HAIKU_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.config.models import (
     EconomicsConfig,
     ModelConfig,
@@ -233,6 +237,100 @@ class TestBuildModelRouter:
         assert router.base_tier == "standard"
         assert router.tier_models["frugal"] == DEFAULT_HAIKU_MODEL
         assert router.tier_models["standard"] == DEFAULT_SONNET_MODEL
+
+
+def _legacy_persisted_economics() -> EconomicsConfig:
+    """Economics as an OLD release would have persisted it to ~/.ouroboros/config.yaml.
+
+    Carries the FULL old shipped tier defaults verbatim across all three providers,
+    exactly as they appear in the git history of ``ouroboros.config.models``.
+    """
+    return EconomicsConfig(
+        default_tier="frugal",
+        escalation_threshold=2,
+        tiers={
+            "frugal": TierConfig(
+                cost_factor=1,
+                models=[
+                    ModelConfig(provider="openai", model="gpt-4o-mini"),
+                    ModelConfig(provider="google", model="gemini-2.0-flash"),
+                    ModelConfig(provider="anthropic", model="claude-3-5-haiku"),
+                ],
+            ),
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[
+                    ModelConfig(provider="openai", model="gpt-4o"),
+                    ModelConfig(provider="anthropic", model="claude-sonnet-4-20250514"),
+                    ModelConfig(provider="google", model="gemini-2.5-pro"),
+                ],
+            ),
+            "frontier": TierConfig(
+                cost_factor=30,
+                models=[
+                    ModelConfig(provider="openai", model="o3"),
+                    ModelConfig(provider="anthropic", model="claude-opus-4-5-20251101"),
+                ],
+            ),
+        },
+    )
+
+
+class TestLegacyTierModelNormalization:
+    """A config persisted by an older release carries retired shipped tier ids.
+
+    Model-tier routing must normalize those to the CURRENT shipped ids (the
+    persisted-config trap that made every AC fail with "unknown provider for model
+    gpt-4o"), while preserving a genuinely explicit user id verbatim — the same
+    precedent role models use in LEGACY_DEFAULT_MODELS (Q00/ouroboros#1324).
+    """
+
+    def test_claude_backend_resolves_current_ids(self) -> None:
+        router = build_model_router(_legacy_persisted_economics(), runtime_backend="claude")
+        assert router is not None
+        assert router.tier_models == {
+            "frugal": DEFAULT_HAIKU_MODEL,
+            "standard": DEFAULT_SONNET_MODEL,
+            "frontier": DEFAULT_OPUS_MODEL,
+        }
+
+    def test_codex_cli_backend_resolves_current_ids(self) -> None:
+        router = build_model_router(_legacy_persisted_economics(), runtime_backend="codex_cli")
+        assert router is not None
+        assert router.tier_models == {
+            "frugal": "gpt-5.1-codex-mini",
+            "standard": "gpt-5-codex",
+            "frontier": "gpt-5.2",
+        }
+
+    def test_legacy_opus_4_6_normalizes_to_current(self) -> None:
+        # The later frontier default claude-opus-4-6 is also a legacy shipped id.
+        economics = _economics(
+            tiers={
+                "frontier": TierConfig(
+                    cost_factor=30,
+                    models=[ModelConfig(provider="anthropic", model="claude-opus-4-6")],
+                ),
+            }
+        )
+        router = build_model_router(economics, runtime_backend="claude")
+        assert router is not None
+        assert router.tier_models == {"frontier": DEFAULT_OPUS_MODEL}
+
+    def test_explicit_user_id_preserved_verbatim(self) -> None:
+        # A never-shipped, proxy-specific id is a deliberate user choice — routing
+        # must not rewrite it to any shipped default.
+        economics = _economics(
+            tiers={
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[ModelConfig(provider="openai", model="gpt-5.6-sol")],
+                ),
+            }
+        )
+        router = build_model_router(economics, runtime_backend="codex_cli")
+        assert router is not None
+        assert router.tier_models == {"standard": "gpt-5.6-sol"}
 
 
 class TestDecideModel:

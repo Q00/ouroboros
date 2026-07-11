@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ouroboros.config._model_defaults import normalize_tier_model
 from ouroboros.orchestrator.adapter import ParamSupport
 
 if TYPE_CHECKING:
@@ -215,6 +216,17 @@ def build_model_router(
         A :class:`ModelRouter`, or ``None`` when routing must stay dormant: an
         explicit pin is set, the backend has no verified tier ladder, or no tier
         resolved to a runnable model.
+
+    The persisted-config trap: ``economics.tiers`` is read from the user's
+    ``~/.ouroboros/config.yaml``, which a prior release wrote with the OLD shipped
+    tier defaults verbatim (the defaults ship as concrete ids, not a ``"default"``
+    sentinel). After a pin bump, an untouched shipped default in that persisted
+    config is indistinguishable from a deliberate override, so routing would
+    enforce a retired id (e.g. ``--model gpt-4o``) the current provider map cannot
+    run — failing every AC. Each tier model is therefore normalized through
+    :func:`~ouroboros.config._model_defaults.normalize_tier_model`, the same
+    precedent role models use (Q00/ouroboros#1324): a legacy shipped id resolves
+    to its current replacement, while a genuinely explicit id is preserved.
     """
     # An explicit user pin always wins — routing must not override it.
     if pinned_model:
@@ -235,9 +247,11 @@ def build_model_router(
         if tier_config is None:
             continue
         # First model whose provider matches this backend wins for the tier.
+        # Normalize a legacy shipped id (from an older persisted config) to its
+        # current replacement; an explicit user id passes through untouched.
         for model_config in tier_config.models:
             if model_config.provider == provider:
-                tier_models[tier] = model_config.model
+                tier_models[tier] = normalize_tier_model(model_config.model)
                 break
     if not tier_models:
         return None

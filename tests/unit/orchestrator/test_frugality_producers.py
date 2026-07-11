@@ -16,11 +16,20 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+from ouroboros.core.seed import (
+    EvaluationPrinciple,
+    ExitCondition,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
+from ouroboros.core.types import Result
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.orchestrator import parallel_executor as pe_module
 from ouroboros.orchestrator.adapter import (
@@ -29,6 +38,7 @@ from ouroboros.orchestrator.adapter import (
     ParamSupport,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.frugality_proof import (
@@ -41,8 +51,13 @@ from ouroboros.orchestrator.frugality_proof import (
     evaluate_proof,
 )
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
-from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionResult,
+    ParallelACExecutor,
+    ParallelExecutionResult,
+)
 from ouroboros.orchestrator.runner import OrchestratorRunner
+from ouroboros.orchestrator.session import SessionTracker
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -708,3 +723,102 @@ class TestProducedEventsMatchProofContract:
         assert row.counts_in_proof is False
         # And the whole-run verdict is INSUFFICIENT_DATA, as intended pre-baseline.
         assert evaluate_proof(rows).status is ProofStatus.INSUFFICIENT_DATA
+
+
+# -- Regression: the LIVE run paths must trigger the run-end proof ------------
+def _mini_seed() -> Seed:
+    return Seed(
+        goal="Build a task management CLI",
+        constraints=("Python 3.12+",),
+        acceptance_criteria=("Tasks can be created",),
+        ontology_schema=OntologySchema(
+            name="TaskManager",
+            description="Task management ontology",
+            fields=(OntologyField(name="tasks", field_type="array", description="tasks"),),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="completeness", description="All requirements are met"),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="all_criteria_met",
+                description="All acceptance criteria satisfied",
+                evaluation_criteria="100% criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=0.15),
+    )
+
+
+def _runner_adapter() -> MagicMock:
+    adapter = MagicMock()
+    adapter.runtime_backend = "claude"
+    adapter.working_directory = "/tmp/project"
+    adapter.permission_mode = "acceptEdits"
+    return adapter
+
+
+class TestLiveRunPathsTriggerProof:
+    @pytest.mark.asyncio
+    async def test_parallel_completion_evaluates_proof(self) -> None:
+        # The bug this pins: ``ooo run`` takes the PARALLEL path, whose terminal
+        # event must be followed by a proof evaluation. Without the wiring a real
+        # run produced token/effort events but never a frugality_proof.evaluated.
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = _mini_seed()
+        runner = OrchestratorRunner(_runner_adapter(), AsyncMock(), MagicMock())
+        tracker = SessionTracker.create("exec_parallel", seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=True,
+                    final_message="done",
+                ),
+            ),
+            success_count=1,
+            failure_count=0,
+            total_messages=1,
+        )
+
+        class _FakeParallelExecutor:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            async def execute_parallel(self, **kwargs: object) -> ParallelExecutionResult:
+                return parallel_result
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                _FakeParallelExecutor,
+            ),
+            patch.object(runner, "_evaluate_frugality_proof", AsyncMock()) as proof,
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok
+        # The proof was evaluated for THIS execution after the terminal event.
+        proof.assert_awaited_once_with("exec_parallel")

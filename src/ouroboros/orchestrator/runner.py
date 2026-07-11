@@ -3354,6 +3354,10 @@ class OrchestratorRunner:
             )
         )
 
+        # Deterministic frugality proof over this execution's per-AC triads.
+        # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
+        await self._evaluate_frugality_proof(exec_id)
+
         log.info(
             "orchestrator.runner.parallel_completed",
             execution_id=exec_id,
@@ -3753,6 +3757,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                     ),
                 )
             )
+
+            # Deterministic frugality proof over this execution's per-AC triads.
+            # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
+            await self._evaluate_frugality_proof(tracker.execution_id)
 
             log.info(
                 "orchestrator.runner.resume_completed",
