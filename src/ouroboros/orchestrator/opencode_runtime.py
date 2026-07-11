@@ -208,9 +208,9 @@ class OpenCodeRuntime:
                 :func:`~ouroboros.config.get_opencode_cli_path`,
                 then ``PATH`` if not supplied.
             permission_mode: OpenCode permission mode string.
-                Stored for forward compatibility and surfaced in
-                :attr:`RuntimeHandle.approval_mode`, but currently a
-                **no-op**: ``opencode run`` has no permission flag.
+                ``bypassPermissions`` maps to OpenCode's native
+                ``--dangerously-skip-permissions`` flag and is surfaced in
+                :attr:`RuntimeHandle.approval_mode`.
             model: Optional model override passed to the CLI via
                 ``--model``.
             cwd: Working directory for the subprocess.  Defaults to
@@ -268,7 +268,7 @@ class OpenCodeRuntime:
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
-            permission_mode_support=ParamSupport.IGNORED,
+            permission_mode_support=ParamSupport.TRANSLATED,
             # OpenCode's host bridge spawns a native sub-agent out-of-band via the
             # ``_subagent`` envelope (ouroboros does NOT drive the child directly) —
             # the HOST_BRIDGE mode, eligible for plugin dispatch when the bridge is
@@ -492,6 +492,13 @@ class OpenCodeRuntime:
         # _subagent envelope that leaked into MCP output. --pure makes the
         # runtime's isolation explicit regardless of plugin-install state.
         command = [self._cli_path, "run", "--pure", "--format", "json"]
+
+        if self._permission_mode.strip().lower() in {
+            "bypasspermissions",
+            "bypass_permissions",
+            "bypass",
+        }:
+            command.append("--dangerously-skip-permissions")
 
         normalized_model = self._normalize_model(self._model)
         if normalized_model:

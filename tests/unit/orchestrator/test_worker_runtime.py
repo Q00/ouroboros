@@ -42,6 +42,7 @@ class _FakeTransport:
         *,
         session_id: str,
         prompt: str,
+        permission_mode: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> WorkerTurn:
@@ -49,6 +50,7 @@ class _FakeTransport:
             {
                 "session_id": session_id,
                 "prompt": prompt,
+                "permission_mode": permission_mode,
                 "model": model,
                 "reasoning_effort": reasoning_effort,
             }
@@ -181,6 +183,7 @@ class TestResume:
             {
                 "session_id": "s1",
                 "prompt": "again",
+                "permission_mode": None,
                 "model": None,
                 "reasoning_effort": None,
             }
@@ -210,10 +213,34 @@ class TestResume:
             {
                 "session_id": "s1",
                 "prompt": "again",
+                "permission_mode": None,
                 "model": "claude-haiku-4-5",
                 "reasoning_effort": "high",
             }
         ]
+
+    @pytest.mark.asyncio
+    async def test_resume_forwards_runtime_permission_mode(self) -> None:
+        t = _FakeTransport(
+            spawn_turn=WorkerTurn(text="first", session_id="s1"),
+            resume_turn=WorkerTurn(text="second", session_id="s1"),
+        )
+        rt = LeaderDrivenWorkerRuntime(
+            transport=t,
+            runtime_backend="claude_mcp",
+            llm_backend="claude",
+            permission_mode="bypassPermissions",
+        )
+
+        _ = [
+            message
+            async for message in rt.execute_task(
+                prompt="again",
+                resume_handle=RuntimeHandle(backend="claude_mcp", native_session_id="s1"),
+            )
+        ]
+
+        assert t.resume_calls[0]["permission_mode"] == "bypassPermissions"
 
     @pytest.mark.asyncio
     async def test_resume_does_not_re_emit_init(self) -> None:
@@ -268,6 +295,7 @@ class TestForkFromHostSession:
             {
                 "session_id": "s1",
                 "prompt": "again",
+                "permission_mode": None,
                 "model": None,
                 "reasoning_effort": None,
             }
@@ -307,6 +335,7 @@ class TestErrors:
                 *,
                 session_id: str,
                 prompt: str,
+                permission_mode: str | None = None,
                 model: str | None = None,
                 reasoning_effort: str | None = None,
             ) -> WorkerTurn:  # pragma: no cover

@@ -385,6 +385,19 @@ class TestKiroCodeAdapterComplete:
 
         assert "--trust-all-tools" in cmd
 
+    def test_bypass_permission_takes_precedence_over_allowed_tools(self) -> None:
+        from ouroboros.providers.base import CompletionConfig
+
+        adapter = KiroCodeAdapter(
+            cli_path="kiro-cli",
+            allowed_tools=["Read"],
+            permission_mode="bypassPermissions",
+        )
+        cmd = adapter._build_cmd("Question", CompletionConfig(model="default"))
+
+        assert "--trust-all-tools" in cmd
+        assert not any(arg.startswith("--trust-tools=") for arg in cmd)
+
     def test_build_child_env_strips_ouroboros_vars(self) -> None:
         adapter = KiroCodeAdapter(cli_path="kiro-cli")
         with patch.dict(
@@ -478,6 +491,21 @@ class TestKiroCodeAdapterComplete:
 
         assert "kiro_adapter.native_tool_enforcement" in info_events
         assert "kiro_adapter.soft_tool_enforcement" not in warning_events
+
+    def test_init_reports_soft_tool_enforcement_under_bypass(self) -> None:
+        warning_events: list[str] = []
+
+        with patch(
+            "ouroboros.providers.kiro_adapter.log.warning",
+            side_effect=lambda event, **_kwargs: warning_events.append(event),
+        ):
+            KiroCodeAdapter(
+                cli_path="kiro-cli",
+                allowed_tools=[],
+                permission_mode="bypassPermissions",
+            )
+
+        assert "kiro_adapter.soft_tool_enforcement" in warning_events
 
     @pytest.mark.asyncio
     async def test_on_message_receives_assistant_response(self) -> None:
@@ -590,8 +618,9 @@ class TestKiroAgentAdapterParamSupport:
         # onto coarse --trust-* flags — both lossy adaptations.
         assert caps.system_prompt_support is ParamSupport.TRANSLATED
         assert caps.permission_mode_support is ParamSupport.TRANSLATED
-        # tools restriction is enforced via native trust flags → stays NATIVE.
-        assert caps.tool_restriction_support is ParamSupport.NATIVE
+        # Full bypass must win over native trust lists, so simultaneous tool
+        # restrictions are retained as translated prompt guidance.
+        assert caps.tool_restriction_support is ParamSupport.TRANSLATED
 
     def test_tracks_caller_requested_permission_mode(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
@@ -828,7 +857,7 @@ class TestKiroPermissionModeContract:
     def test_per_call_tools_map_to_kiro_trust_categories(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
-        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="acceptEdits")
         cmd = adapter._build_cmd("hello", tools=["Read", "Grep", "Bash"])
         assert "--trust-tools=read,grep,shell" in cmd
         assert "--trust-all-tools" not in cmd
@@ -836,7 +865,7 @@ class TestKiroPermissionModeContract:
     def test_per_call_tools_filter_mcp_names_from_kiro_trust_categories(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
-        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="acceptEdits")
         cmd = adapter._build_cmd(
             "hello",
             tools=["Read", "mcp__ouroboros__interview", "Bash"],
@@ -849,10 +878,19 @@ class TestKiroPermissionModeContract:
     def test_per_call_tools_only_mcp_names_set_empty_kiro_trust_categories(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
 
-        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="acceptEdits")
         cmd = adapter._build_cmd("hello", tools=["mcp__ouroboros__interview"])
         assert "--trust-tools=" in cmd
         assert "--trust-all-tools" not in cmd
+
+    def test_bypass_takes_precedence_over_per_call_tools(self) -> None:
+        from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+        adapter = KiroAgentAdapter(cli_path="kiro-cli", permission_mode="bypassPermissions")
+        cmd = adapter._build_cmd("hello", tools=["Read", "Grep", "Bash"])
+
+        assert "--trust-all-tools" in cmd
+        assert not any(arg.startswith("--trust-tools=") for arg in cmd)
 
     def test_runtime_child_env_strips_ouroboros_runtime_vars(self) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter

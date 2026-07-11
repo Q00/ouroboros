@@ -682,8 +682,11 @@ class OrchestratorRunner:
         self._execution_contract: dict[str, Any] | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
-        # Default OFF: replaying every decomposed child at the parent tier doubles
-        # token cost, so it is an experiment lever, never a production default.
+        # Default OFF. Enabling the flag only arms the experiment's eligibility
+        # checks. Current live decompositions have no deterministic MECE trust
+        # attestation, and bundled runtimes have no complete replay-isolation
+        # attestation, so production leaves are quarantined before baseline model
+        # dispatch. A future fully-attested experiment may incur the extra cost.
         from ouroboros.orchestrator.shadow_replay import shadow_replay_enabled_from_env
 
         self._shadow_replay_enabled = shadow_replay_enabled_from_env()
@@ -691,15 +694,18 @@ class OrchestratorRunner:
             log.warning(
                 "orchestrator.runner.shadow_replay_enabled",
                 note=(
-                    "OUROBOROS_SHADOW_REPLAY is ON — every decomposed child is "
-                    "RE-EXECUTED at the parent tier to measure a baseline. This "
-                    "DOUBLES token cost and is an experiment harness only."
+                    "OUROBOROS_SHADOW_REPLAY is ON — the experiment harness is "
+                    "ARMED. Current live decompositions have no deterministic MECE "
+                    "attestation, and bundled runtimes have no complete replay-"
+                    "isolation attestation, so baseline dispatch is quarantined and "
+                    "no shadow baseline is emitted until both contracts are met."
                 ),
             )
             self._console.print(
-                "[bold yellow]⚠ Shadow-replay baseline harness ENABLED "
-                "(OUROBOROS_SHADOW_REPLAY): decomposed children are re-executed at "
-                "the parent tier — this DOUBLES token cost. Experiment only.[/bold yellow]"
+                "[bold yellow]⚠ Shadow-replay experiment ARMED "
+                "(OUROBOROS_SHADOW_REPLAY). Live decompositions and bundled runtimes "
+                "currently lack the required MECE/isolation attestations, so baseline "
+                "model dispatch is skipped and no shadow baseline is emitted.[/bold yellow]"
             )
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id

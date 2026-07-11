@@ -211,7 +211,14 @@ class LevelCoordinator:
                         delegated child executions.
         """
         self._adapter = adapter
-        self._inherited_runtime_handle = inherited_runtime_handle
+        approval_mode = getattr(adapter, "permission_mode", None)
+        self._inherited_runtime_handle = (
+            replace(inherited_runtime_handle, approval_mode=approval_mode.strip())
+            if inherited_runtime_handle is not None
+            and isinstance(approval_mode, str)
+            and approval_mode.strip()
+            else inherited_runtime_handle
+        )
         self._task_cwd = task_cwd
         self._level_runtime_handles: dict[tuple[str, int], RuntimeHandle] = {}
         self._announced_param_degradations: set[tuple[str, str]] = set()
@@ -240,7 +247,7 @@ class LevelCoordinator:
             return self._inherited_runtime_handle
 
         cwd = self._task_cwd or self._adapter.working_directory
-        approval_mode = self._adapter.permission_mode
+        approval_mode = getattr(self._adapter, "permission_mode", None)
         native_session_id = seeded_handle.native_session_id if seeded_handle is not None else None
         if native_session_id is None and previous_review is not None:
             if previous_review.level_number == level_number:
@@ -272,13 +279,9 @@ class LevelCoordinator:
                     if isinstance(cwd, str) and cwd
                     else None
                 ),
-                approval_mode=(
-                    seeded_handle.approval_mode
-                    if seeded_handle.approval_mode
-                    else approval_mode
-                    if isinstance(approval_mode, str) and approval_mode
-                    else None
-                ),
+                approval_mode=approval_mode
+                if isinstance(approval_mode, str) and approval_mode
+                else seeded_handle.approval_mode,
                 updated_at=datetime.now(UTC).isoformat(),
                 metadata=metadata,
             )

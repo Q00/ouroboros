@@ -829,7 +829,14 @@ class ParallelACExecutor:
         self._console = console or Console()
         self._enable_decomposition = enable_decomposition
         self._max_decomposition_depth = max(0, max_decomposition_depth)
-        self._inherited_runtime_handle = inherited_runtime_handle
+        approval_mode = getattr(adapter, "permission_mode", None)
+        self._inherited_runtime_handle = (
+            replace(inherited_runtime_handle, approval_mode=approval_mode.strip())
+            if inherited_runtime_handle is not None
+            and isinstance(approval_mode, str)
+            and approval_mode.strip()
+            else inherited_runtime_handle
+        )
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
@@ -856,7 +863,7 @@ class ParallelACExecutor:
         self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
-            inherited_runtime_handle=inherited_runtime_handle,
+            inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=task_cwd,
         )
         self._semaphore = anyio.Semaphore(max_concurrent)
@@ -2704,7 +2711,11 @@ class ParallelACExecutor:
         from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
         cwd = self._task_cwd or self._adapter.working_directory
-        alt_adapter = create_agent_runtime(backend=backend, cwd=cwd)
+        alt_adapter = create_agent_runtime(
+            backend=backend,
+            cwd=cwd,
+            permission_mode="bypassPermissions",
+        )
 
         event = create_alt_harness_redispatch_event(
             session_id=rerun_kwargs["session_id"],

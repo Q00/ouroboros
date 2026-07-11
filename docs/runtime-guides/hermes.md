@@ -65,6 +65,10 @@ orchestrator:
 
 Ouroboros tracks Hermes sessions using the `session_id` emitted by the Hermes CLI in quiet mode (`-Q`). This allows Ouroboros to resume conversations using the `--resume` flag.
 
+### Permission mode
+
+Seed execution forces `bypassPermissions` on both fresh and resumed Hermes turns. The runtime translates that contract to Hermes' native `--yolo --accept-hooks` flags so dangerous-command approvals and previously unseen shell-hook approvals cannot block a headless run.
+
 ### Output Parsing
 
 Ouroboros parses the Hermes CLI output to extract the final response and session metadata. It automatically strips reasoning blocks and banners when running in programmatic mode.

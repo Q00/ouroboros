@@ -198,6 +198,7 @@ JSON extraction and validation rather than provider-native schema enforcement.
 | Skill shortcut dispatch | Yes, before spawning GJC |
 | Native targeted resume | No in v1; `targeted_resume=False` and checkpointing stays at the Ouroboros lineage layer |
 | Structured event stream | Yes, RPC agent events parsed by the GJC runtime |
+| Native permission override | No; RPC mode is headless but exposes no per-invocation approval flag, so `permission_mode_support=ignored` |
 | Structured schema responses as LLM backend | Soft-enforced and validated |
 | Hard tool/schema envelope | No in v1 |
 | GJC extension loading | GJC-owned; setup installs the bridge into `<agent-dir>/extensions` |
@@ -208,6 +209,9 @@ JSON extraction and validation rather than provider-native schema enforcement.
 - No native session continuity or targeted resume is declared in v1. Ouroboros
   can checkpoint at the workflow/event-store layer, but the GJC runtime does not
   advertise native targeted resume.
+- No native approval-mode switch is exposed by GJC RPC mode. Runner-driven
+  execution records the forced permission request for audit continuity, while
+  the runtime capability truthfully reports that the CLI does not enforce it.
 - No hard tool envelope or provider-native JSON schema enforcement is exposed to
   the LLM adapter. Structured output is soft-enforced by prompt instruction,
   extraction, validation, and retry.

@@ -1708,6 +1708,7 @@ def create_ouroboros_server(
             backend=execute_runtime_backend,
             model=validation_model,
             cwd=project_dir,
+            permission_mode="bypassPermissions",
             # Validation runs on the EXECUTE stage; align its internal LLM too.
             llm_backend=execute_runtime_backend,
         )

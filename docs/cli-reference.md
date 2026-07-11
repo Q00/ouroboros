@@ -1139,7 +1139,9 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
-| `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored mode for Claude Code / Codex; seed execution forces the native `bypassPermissions` equivalent (no-op for OpenCode) |
+| `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored runtime preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches wherever the backend exposes an approval surface. OpenCode maps it to `--dangerously-skip-permissions`; Pi and GJC have no separate approval flag and already run headlessly without an approval dialogue |
+| `OUROBOROS_MODEL_TIER_ROUTING` | — | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable it completely |
+| `OUROBOROS_SHADOW_REPLAY` | — | Arms the opt-in shadow-baseline experiment only for `1`, `true`, or `on`. Current live decompositions are quarantined before baseline model dispatch because they lack deterministic MECE attestation; bundled runtimes also lack the required isolation attestation |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Maximum concurrent Acceptance Criteria workers for parallel execution |
 | `OUROBOROS_LLM_BACKEND` | `llm.backend` | Override the LLM-only flow backend |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary |

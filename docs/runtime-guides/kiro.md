@@ -104,6 +104,14 @@ matched **before** the Kiro subprocess spawns. Skill dispatch therefore
 runs identically across Kiro / Codex / Claude. See
 [Shared `ooo` Skill Dispatch Router](../guides/ooo-skill-dispatch-router.md).
 
+### Permission mode
+
+Runner-driven seed execution forces `bypassPermissions` for both fresh and
+resumed Kiro dispatches. Kiro translates that contract to
+`--trust-all-tools`. If the same call carries a tool envelope, the envelope is
+still included as prompt guidance, but it cannot downgrade the native approval
+boundary to `--trust-tools`.
+
 ### Targeted resume (caller-supplied session id)
 
 When a caller passes a known session id, the adapter forwards it to Kiro's native `--resume-id` flag (invalid or shell-unsafe ids are rejected at argv-build time):

@@ -154,7 +154,7 @@ class TestOpenCodeRuntimeProperties:
 
         assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
-        assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
+        assert runtime.capabilities.permission_mode_support is ParamSupport.TRANSLATED
 
 
 class TestOpenCodeRuntimeBuildCommand:
@@ -163,8 +163,24 @@ class TestOpenCodeRuntimeBuildCommand:
     def test_basic_command(self) -> None:
         runtime = OpenCodeRuntime(cli_path="/usr/bin/opencode", cwd="/tmp")
         cmd = runtime._build_command(prompt="Hello world")
-        assert cmd == ["/usr/bin/opencode", "run", "--pure", "--format", "json"]
+        assert cmd == [
+            "/usr/bin/opencode",
+            "run",
+            "--pure",
+            "--format",
+            "json",
+            "--dangerously-skip-permissions",
+        ]
         assert "Hello world" not in cmd  # prompt piped via stdin, not argv
+
+    def test_accept_edits_does_not_enable_full_permission_bypass(self) -> None:
+        runtime = OpenCodeRuntime(
+            cli_path="opencode",
+            cwd="/tmp",
+            permission_mode="acceptEdits",
+        )
+
+        assert "--dangerously-skip-permissions" not in runtime._build_command(prompt="safe")
 
     def test_command_always_includes_pure(self) -> None:
         """`--pure` is mandatory: disables opencode plugins inside the

@@ -71,6 +71,56 @@ def _succeeded() -> ACExecutionResult:
 
 
 @pytest.mark.asyncio
+async def test_alternate_runtime_is_created_with_forced_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(enabled=True)
+    created_kwargs: dict[str, object] = {}
+
+    def _fake_create_agent_runtime(**kwargs: object) -> MagicMock:
+        created_kwargs.update(kwargs)
+        runtime = MagicMock()
+        runtime.runtime_backend = "codex_cli"
+        runtime.working_directory = "/tmp/work"
+        runtime.permission_mode = "bypassPermissions"
+        runtime.self_governs_rate_limit = True
+        return runtime
+
+    async def _fake_execute_single_ac(
+        _self: ParallelACExecutor,
+        **_kwargs: Any,
+    ) -> ACExecutionResult:
+        return _succeeded()
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_factory.create_agent_runtime",
+        _fake_create_agent_runtime,
+    )
+    monkeypatch.setattr(ParallelACExecutor, "_execute_single_ac", _fake_execute_single_ac)
+
+    result = await executor._run_single_ac_on_backend(
+        "codex",
+        rerun_kwargs=_rerun_kwargs(),
+        retry_attempt=1,
+        decision=chr.AltHarnessDecision(
+            should_redispatch=True,
+            from_backend="claude",
+            to_backend="codex",
+            policy=None,
+            reason="test",
+        ),
+        runtime_identity=executor._resolve_ac_runtime_identity(
+            0,
+            execution_context_id="exec-1",
+        ),
+        failure_class="fabrication_suspected",
+    )
+
+    assert result is not None and result.success is True
+    assert created_kwargs["permission_mode"] == "bypassPermissions"
+
+
+@pytest.mark.asyncio
 async def test_disabled_returns_none() -> None:
     executor = _make_executor(enabled=False)
     result = await executor._maybe_redispatch_alt_harness(

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.gjc_runtime import GjcRuntime
 
 
@@ -609,6 +610,7 @@ def test_capabilities_are_non_resumable_structured_skill_dispatch() -> None:
     assert caps.skill_dispatch is True
     assert caps.targeted_resume is False
     assert caps.structured_output is True
+    assert caps.permission_mode_support is ParamSupport.IGNORED
 
 
 def _envelope(event: dict[str, object], *, seq: int = 1) -> str:

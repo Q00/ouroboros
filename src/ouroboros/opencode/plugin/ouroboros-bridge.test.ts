@@ -898,8 +898,12 @@ describe("_patch — PATCH with retry", () => {
 describe("_dispatch — child session lifecycle", () => {
   test("success: creates child, patches running, fires prompt", async () => {
     const patchCalls: string[] = []
+    const createCalls: unknown[] = []
     const cli = mockCli({
-      create: async () => ({ data: { id: "child_123" } }),
+      create: async (args: unknown) => {
+        createCalls.push(args)
+        return { data: { id: "child_123" } }
+      },
       prompt: async () => ({ data: { parts: [{ type: "text", text: "result" }] } }),
     })
     const b = mockBase(async (_a: unknown) => {
@@ -909,6 +913,15 @@ describe("_dispatch — child session lifecycle", () => {
     const sub = { tool: "ouroboros_qa", title: "QA", prompt: "check it", agent: "general" }
     const result = await _dispatch(cli as never, b as never, "pid", "mid", sub as never)
     expect(result.childID).toBe("child_123")
+    expect(createCalls).toEqual([
+      {
+        body: {
+          parentID: "pid",
+          title: "QA",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        },
+      },
+    ])
     // At least the PATCH-running call should have fired (awaited phase)
     expect(patchCalls.length).toBeGreaterThanOrEqual(1)
   })

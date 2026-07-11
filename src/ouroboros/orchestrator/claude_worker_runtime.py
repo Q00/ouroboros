@@ -288,6 +288,7 @@ class ClaudeWorkerTransport:
         *,
         session_id: str,
         prompt: str,
+        permission_mode: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> WorkerTurn:
@@ -308,6 +309,7 @@ class ClaudeWorkerTransport:
         # Claude sessions are disk-persisted → cross-process resume works, but
         # only from the SAME cwd the session was created in (cwd-scoped store).
         command = [*self._base_command(cwd=self._cwd), "--resume", session_id]
+        command.extend(self._permission_args(permission_mode))
         if model and model != "default":
             command.extend(["--model", model])
         if reasoning_effort and reasoning_effort in CLAUDE_REASONING_EFFORT_LEVELS:

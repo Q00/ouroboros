@@ -235,9 +235,9 @@ class HermesCliRuntime(AgentRuntime):
     @property
     def capabilities(self) -> RuntimeCapabilities:
         # Hermes composes the system prompt and tool guidance into the user
-        # message rather than passing native runtime parameters, and hermes chat
-        # has no permission-mode flag. Surface both truthfully for degradation
-        # notices.
+        # message rather than passing native runtime parameters. Permission mode
+        # is translated onto Hermes' native ``--yolo`` switch when Ouroboros
+        # requests bypassPermissions.
         # Reasoning effort is advised, not enforced: `hermes chat` exposes only
         # -q/--image/-m/-t — no per-invocation effort flag and no `-c` config
         # override (its config.yaml reasoning_effort is global, not per-call), so
@@ -247,7 +247,7 @@ class HermesCliRuntime(AgentRuntime):
             FULL_CAPABILITIES,
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
-            permission_mode_support=ParamSupport.IGNORED,
+            permission_mode_support=ParamSupport.TRANSLATED,
             reasoning_effort_support=ParamSupport.IGNORED,
         )
 
@@ -440,6 +440,14 @@ class HermesCliRuntime(AgentRuntime):
         args = [self._cli_path, "chat"]
         if handle and handle.native_session_id:
             args.extend(["--resume", handle.native_session_id])
+
+        if self._permission_mode.strip().lower() in {
+            "bypasspermissions",
+            "bypass_permissions",
+            "bypass",
+            "yolo",
+        }:
+            args.extend(["--yolo", "--accept-hooks"])
 
         # Use quiet mode for programmatic output
         args.extend(["-Q", "--source", "tool"])

@@ -126,6 +126,15 @@ class TestOpenCodeLLMAdapter:
         assert "--model" in cmd
         assert "anthropic/claude-sonnet-4-20250514" in cmd
 
+    def test_build_command_maps_bypass_permissions_to_native_flag(self) -> None:
+        adapter = OpenCodeLLMAdapter(
+            cli_path="opencode",
+            cwd="/tmp",
+            permission_mode="bypassPermissions",
+        )
+
+        assert "--dangerously-skip-permissions" in adapter._build_command("Hello")
+
     def test_normalize_model_default(self) -> None:
         """Default model returns None."""
         adapter = OpenCodeLLMAdapter(cli_path="opencode", cwd="/tmp")
@@ -519,7 +528,7 @@ class TestOpenCodeLLMAdapter:
 class TestOpenCodeToolEnvelopeSoftEnforcement:
     """OpenCode enforces ``allowed_tools`` softly (prompt + post-hoc audit).
 
-    The ``opencode run`` CLI has no ``--allowed-tools`` or
+    The ``opencode run`` CLI has no ``--allowed-tools`` or multi-value
     ``--permission-mode`` flag, so the adapter must (a) make the
     envelope visible to the model via a prompt directive and (b)
     surface ``tool_use`` events outside the envelope as structured

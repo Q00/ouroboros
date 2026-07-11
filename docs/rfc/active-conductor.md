@@ -18,12 +18,15 @@ an AC fails after retry exhaustion, a TraceGuard deliver verdict rejects the sam
 lineage repeatedly, or the frugality proof returns a FAIL status, nothing with
 semantic judgment reacts. The engine's deterministic recovery is the ceiling:
 reasoning-effort raise at `EFFORT_RAISE_RETRY_THRESHOLD = 2`
-(`orchestrator/effort_routing.py:38`), and one-notch model-tier escalation up to
-the `frontier` ceiling (`orchestrator/model_routing.py`, `raise_one_notch`,
-`MODEL_TIER_LADDER = (frugal, standard, frontier)`). Once those are exhausted the
-run simply reports failure. The proven pattern for lifting that ceiling is a
-conductor main loop: woken by events, it re-verifies claims against ground truth
-and issues corrective, context-rich directives to workers.
+(`orchestrator/effort_routing.py:38`), and one model-tier raise applied once at or
+after the configured escalation retry threshold (`orchestrator/model_routing.py`,
+`raise_one_notch`). Later retries recompute from the same starting tier rather than
+climbing repeatedly: a normal decomposed child moves `frugal -> standard`, while a
+normal top-level AC moves `standard -> frontier`. Once the configured retry budget,
+including that stronger-model attempt where available, is exhausted, the run simply
+reports failure. The proven pattern for lifting that ceiling is a conductor main
+loop: woken by events, it re-verifies claims against ground truth and issues
+corrective, context-rich directives to workers.
 
 ## Decision
 
@@ -48,10 +51,10 @@ Attention triggers (all sensed from events already emitted on this branch):
 
 | Trigger | Source event | Sensed field |
 |---|---|---|
-| AC terminal failure after retry exhaustion | `execution.ac.model_routed` at `model_tier=frontier`, then AC terminal-fail | `model_tier`, `retry_attempt` (`execution_event_emitter.py:363`) |
-| Model-tier escalation exhausted, frontier still failing | `execution.ac.model_routed` | `model_tier=frontier` + subsequent failure |
+| AC terminal failure after retry exhaustion | latest failed `execution.ac.outcome_finalized` plus terminal execution state | `success=false`, `retry_attempt`, and no further engine-owned retry/redispatch |
+| One-notch model escalation attempted and still failing | `execution.ac.model_routed` + matching `execution.ac.outcome_finalized` | `retry_attempt` at/above the resolved escalation threshold, raised `model_tier`, `success=false` |
 | deliver_verdict rejected streak (≥2 for one AC lineage) | `execution.ac.deliver_verdict` | `rejected_reasons`, `traceguard_verdict` (`execution_event_emitter.py:434-467`) |
-| Frugality proof FAIL | `execution.frugality_proof.evaluated` | `status` ∈ `fail_grounding_regression`, `fail_no_frugality` (`runner.py:786`, `frugality_proof.py:80-81`) |
+| Frugality proof FAIL | `execution.frugality_proof.evaluated` | `status` ∈ `fail_grounding_regression`, `fail_no_frugality` (`runner.py:871`, `frugality_proof.py:80-81`) |
 | Seed-QA blocked | seed-QA gate block event | gate status |
 | Stagnation | progress-stall signal | unchanged progress across bounded window |
 
@@ -105,8 +108,11 @@ reasoning-effort raise (`effort_routing.py`), model-tier escalation
 
 The conductor never re-drives an AC the engine is still retrying. Double-driving
 burns tokens and races the engine's own escalation ladder. The conductor engages
-only *after* the engine's deterministic ladder is exhausted, which is exactly
-what the L1 triggers detect (frontier tier reached, retry threshold passed).
+only *after* the configured retry budget is closed and no engine-owned
+same-runtime or alternate-harness redispatch remains. Reaching `frontier` is
+neither required nor sufficient: a decomposed child normally exhausts its single
+raise at `standard`, while a top-level AC may reach `frontier` before its retry
+budget is closed.
 
 ## Frugality coupling
 
@@ -156,8 +162,8 @@ Each slice ships independently.
    rationale}` templates using real `ouroboros_*` tool names — no prose.
 3. The playbook VERIFYs via a read-only host subagent before any ACT, and never
    acts on a worker claim alone.
-4. The conductor never redispatches an AC while the engine's deterministic
-   ladder (effort raise, tier escalation) has rungs left.
+4. The conductor never redispatches an AC while the engine still owns a configured
+   retry, the one-notch effort/model raise, or an alternate-harness redispatch.
 5. In `auto`/`ralph` a repeated `deliver_verdict` rejection produces a corrective
    injection composed from `rejected_reasons`; in `ooo run` a spec-changing
    intervention stops at user escalation.

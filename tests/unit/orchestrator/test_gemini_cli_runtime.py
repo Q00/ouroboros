@@ -124,6 +124,7 @@ def test_build_command_maps_bypass_permissions_to_yolo() -> None:
     )
     cmd = runtime._build_command("/tmp/unused", prompt="x")
     assert _approval_flag(cmd) == "yolo"
+    assert "--skip-trust" in cmd
 
 
 def test_build_command_maps_accept_edits_to_auto_edit() -> None:
@@ -133,6 +134,7 @@ def test_build_command_maps_accept_edits_to_auto_edit() -> None:
     )
     cmd = runtime._build_command("/tmp/unused", prompt="x")
     assert _approval_flag(cmd) == "auto_edit"
+    assert "--skip-trust" not in cmd
 
 
 def test_default_permission_mode_normalized_to_accept_edits() -> None:

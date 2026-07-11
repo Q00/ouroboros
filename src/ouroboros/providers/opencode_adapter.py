@@ -130,11 +130,10 @@ class OpenCodeLLMAdapter:
                 ``PATH`` if not supplied.
             cwd: Working directory for the subprocess.  Defaults to
                 the current process working directory.
-            permission_mode: OpenCode permission mode string.  Stored
-                for forward compatibility but currently a **no-op**:
-                the ``opencode run`` CLI has no ``--permission-mode``
-                flag — it runs non-interactively by default.  Same
-                limitation applies to the Gemini CLI adapter.
+            permission_mode: OpenCode permission mode string.
+                ``bypassPermissions`` maps to the native
+                ``--dangerously-skip-permissions`` flag. OpenCode has no
+                multi-value ``--permission-mode`` flag.
             allowed_tools: Optional tool allow-list injected into the
                 composed prompt.
             max_turns: Maximum conversation turns per CLI invocation.
@@ -308,6 +307,13 @@ class OpenCodeLLMAdapter:
             "--format",
             "json",
         ]
+
+        if self._permission_mode.strip().lower() in {
+            "bypasspermissions",
+            "bypass_permissions",
+            "bypass",
+        }:
+            command.append("--dangerously-skip-permissions")
 
         if model:
             command.extend(["--model", model])

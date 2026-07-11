@@ -147,7 +147,7 @@ class TestHermesCliRuntime:
             async for _ in runtime._iter_stream_lines(newline_free):
                 pass
 
-    def test_tracks_requested_permission_mode_and_declares_ignored_support(self) -> None:
+    def test_tracks_requested_permission_mode_and_declares_translated_support(self) -> None:
         runtime = HermesCliRuntime(
             cli_path="hermes",
             cwd="/tmp/project",
@@ -158,7 +158,7 @@ class TestHermesCliRuntime:
         assert runtime.permission_mode_requested is True
         assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
-        assert runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
+        assert runtime.capabilities.permission_mode_support is ParamSupport.TRANSLATED
 
     def test_constructor_accepts_llm_backend(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
@@ -1155,7 +1155,11 @@ class TestHermesCliRuntime:
         swallowed the protocol's ``resume_handle``, so multi-turn
         orchestrator flows always started a fresh session.
         """
-        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            cwd="/tmp/project",
+            permission_mode="bypassPermissions",
+        )
         process = _FakeProcess("Continued work\nsession_id: 20260413_120000_deadbeef\n")
         handle = RuntimeHandle(backend="hermes_cli", native_session_id="20260412_090000_cafebabe")
 
@@ -1172,6 +1176,8 @@ class TestHermesCliRuntime:
         call_args = mock_exec.call_args.args
         assert "--resume" in call_args
         assert "20260412_090000_cafebabe" in call_args
+        assert "--yolo" in call_args
+        assert "--accept-hooks" in call_args
 
     @pytest.mark.asyncio
     async def test_execute_task_resumes_from_legacy_resume_session_id(self) -> None:

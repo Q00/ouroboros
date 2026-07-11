@@ -88,18 +88,32 @@ class KiroCodeAdapter:
         self._max_retries = max_retries
         log.info("kiro_adapter.init", cli_path=self._cli_path, cwd=self._cwd)
         if self._allowed_tools is not None:
-            log.info(
-                "kiro_adapter.native_tool_enforcement",
-                allowed_tools=list(self._allowed_tools),
-                reason=(
-                    "Kiro CLI trust categories are constrained with --trust-tools; "
-                    "the prompt directive and marker audit provide additional "
-                    "observability."
-                ),
-            )
+            if self._bypass_permissions_requested():
+                log.warning(
+                    "kiro_adapter.soft_tool_enforcement",
+                    allowed_tools=list(self._allowed_tools),
+                    reason=(
+                        "bypassPermissions requires --trust-all-tools; the tool envelope "
+                        "is retained as prompt guidance with post-hoc auditing."
+                    ),
+                )
+            else:
+                log.info(
+                    "kiro_adapter.native_tool_enforcement",
+                    allowed_tools=list(self._allowed_tools),
+                    reason=(
+                        "Kiro CLI trust categories are constrained with --trust-tools; "
+                        "the prompt directive and marker audit provide additional "
+                        "observability."
+                    ),
+                )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         return resolve_kiro_cli_path(cli_path)
+
+    def _bypass_permissions_requested(self) -> bool:
+        permission_mode = (self._permission_mode or "").strip().lower()
+        return permission_mode in {"bypasspermissions", "bypass_permissions", "bypass"}
 
     async def complete(
         self,
@@ -224,15 +238,20 @@ class KiroCodeAdapter:
 
     def _build_cmd(self, prompt: str, config: CompletionConfig) -> list[str]:
         cmd = [self._cli_path, "chat", "--no-interactive"]
-        if self._allowed_tools is not None:
+        permission_mode = (self._permission_mode or "").strip().lower()
+        if self._bypass_permissions_requested():
+            # The runner's mandatory bypass contract wins at the native
+            # approval boundary. allowed_tools remains in the composed prompt.
+            cmd.append("--trust-all-tools")
+        elif self._allowed_tools is not None:
             # Kiro's headless mode exposes native trust flags.  Passing the
             # flag even for an empty list makes the caller's explicit
             # no-tools envelope visible at the CLI boundary instead of relying
             # only on prompt wording.
             cmd.append(f"--trust-tools={self._kiro_trust_tools_arg()}")
-        elif self._permission_mode == "default":
+        elif permission_mode == "default":
             cmd.append("--trust-tools=")
-        elif self._permission_mode in {"acceptEdits", "bypassPermissions"}:
+        elif permission_mode == "acceptedits":
             cmd.append("--trust-all-tools")
         if config.model and config.model != "default":
             cmd.extend(["--model", map_kiro_model_name(config.model)])

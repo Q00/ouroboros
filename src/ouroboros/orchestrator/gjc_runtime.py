@@ -20,6 +20,7 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    ParamSupport,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
@@ -136,7 +137,13 @@ class GjcRuntime:
     @property
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(
-            skill_dispatch=True, targeted_resume=False, structured_output=True
+            skill_dispatch=True,
+            targeted_resume=False,
+            structured_output=True,
+            # GJC RPC mode is already headless, but exposes no per-invocation
+            # approval/permission flag. Keep the requested mode in runtime
+            # metadata without claiming that the subprocess enforces it.
+            permission_mode_support=ParamSupport.IGNORED,
         )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:

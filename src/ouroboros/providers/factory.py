@@ -55,8 +55,10 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # ``tool_use`` stream event.  Hard enforcement would need a Gemini CLI
 # flag that does not exist.
 #
-# Kiro is not listed: ``KiroCodeAdapter`` maps the envelope to Kiro's
-# native ``--trust-tools`` categories before adding prompt guidance.
+# Kiro is not listed globally because its behavior is conditional. Narrower
+# permission modes map the envelope to native ``--trust-tools`` categories;
+# ``bypassPermissions`` must instead use ``--trust-all-tools``, and the adapter
+# emits its own soft-enforcement warning for that path.
 #
 # OpenCode: ``OpenCodeLLMAdapter`` injects a ``## Tool Constraints``
 # section into the composed prompt and emits

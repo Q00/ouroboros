@@ -191,6 +191,7 @@ async def _capture_resume(transport: ClaudeWorkerTransport, **kwargs) -> list[st
     await transport.resume(
         session_id=kwargs.get("session_id", "s1"),
         prompt=kwargs.get("prompt", "again"),
+        permission_mode=kwargs.get("permission_mode"),
         model=kwargs.get("model"),
         reasoning_effort=kwargs.get("reasoning_effort"),
     )
@@ -277,6 +278,16 @@ class TestPerCallModelArg:
 
 
 class TestPersistedResumeControls:
+    @pytest.mark.asyncio
+    async def test_resume_enforces_bypass_permission_flag(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", persist_sessions=True)
+        command = await _capture_resume(
+            transport,
+            permission_mode="bypassPermissions",
+        )
+
+        assert "--dangerously-skip-permissions" in command
+
     @pytest.mark.asyncio
     async def test_resume_enforces_model_and_effort_flags(self) -> None:
         transport = ClaudeWorkerTransport(cli_path="claude", persist_sessions=True)

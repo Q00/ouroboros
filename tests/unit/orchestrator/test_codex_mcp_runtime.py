@@ -26,7 +26,7 @@ class TestPermissionMapping:
         [
             (None, "workspace-write", "never"),
             ("acceptEdits", "workspace-write", "never"),
-            ("bypassPermissions", "workspace-write", "never"),
+            ("bypassPermissions", "danger-full-access", "never"),
             ("read-only", "read-only", "on-request"),
             ("plan", "read-only", "on-request"),
         ],
@@ -34,10 +34,10 @@ class TestPermissionMapping:
     def test_maps_to_codex_sandbox_approval(self, mode, sandbox, approval) -> None:
         assert _map_permission_mode(mode) == (sandbox, approval)
 
-    def test_never_danger_full_access(self) -> None:
-        # No ouroboros permission mode should ever request danger-full-access.
-        for mode in (None, "acceptEdits", "bypassPermissions", "read-only", "plan", "weird"):
+    def test_only_explicit_bypass_requests_danger_full_access(self) -> None:
+        for mode in (None, "acceptEdits", "read-only", "plan", "weird"):
             assert _map_permission_mode(mode)[0] != "danger-full-access"
+        assert _map_permission_mode("bypassPermissions") == ("danger-full-access", "never")
 
 
 class TestParseTurn:

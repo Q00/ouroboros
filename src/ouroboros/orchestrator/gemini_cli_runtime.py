@@ -250,6 +250,11 @@ class GeminiCLIRuntime(CodexCliRuntime):
             "--approval-mode",
             approval_flag,
         ]
+        if approval_flag == "yolo":
+            # Gemini downgrades yolo in untrusted directories unless trust
+            # checks are explicitly skipped. Ouroboros task worktrees are often
+            # freshly created and therefore absent from Gemini's trust registry.
+            command.append("--skip-trust")
         normalized_model = self._normalize_model(self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])

@@ -20,6 +20,9 @@ export const DEDUPE_MS = 5_000
 export const MAX_FANOUT = 10
 export const MAX_SEEN = 256
 export const ID_LEN = 26
+export const BYPASS_PERMISSION_RULESET = [
+  { permission: "*", pattern: "*", action: "allow" },
+] as const
 export function num(v: string | undefined, d: number): number {
   const n = !v ? d : Number(v)
   return Number.isFinite(n) && n >= 0 ? n : d
@@ -400,7 +403,17 @@ export function base(client: unknown): Base | null {
 
 type Cli = {
   session: {
-    create: (a: { body: { parentID?: string; title?: string } }) => Promise<{ data?: { id: string } }>
+    create: (a: {
+      body: {
+        parentID?: string
+        title?: string
+        permission?: ReadonlyArray<{
+          permission: string
+          pattern: string
+          action: "allow" | "deny" | "ask"
+        }>
+      }
+    }) => Promise<{ data?: { id: string } }>
     prompt: (a: { path: { id: string }; body: { agent?: string; parts: Array<{ type: string; text: string }> }; signal?: AbortSignal }) => Promise<{ data?: { info?: unknown; parts?: Array<{ type: string; text?: string }> } }>
     abort: (a: { path: { id: string } }) => Promise<{ data?: unknown }>
     messages: (a: { path: { id: string } }) => Promise<{ data?: Array<{ info: { id: string; role: string }; parts: Array<{ type: string; callID?: string }> }> }>
@@ -483,7 +496,13 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
   const timeout = childTimeout(s)
 
   // --- Awaited phase (fast) ---
-  const created = await cli.session.create({ body: { parentID: pid, title: s.title } })
+  const created = await cli.session.create({
+    body: {
+      parentID: pid,
+      title: s.title,
+      permission: BYPASS_PERMISSION_RULESET,
+    },
+  })
   const childID = created?.data?.id
   if (!childID) throw new Error("child session create returned no id")
   if (isRalphTool(s) || isRalphOwnedSession(pid)) markRalphChild(childID)

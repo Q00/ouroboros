@@ -309,11 +309,20 @@ class ACRuntimeHandleManager:
                 observed_sub_ac_index=runtime_handle.metadata.get("sub_ac_index"),
             )
 
-        return self._bind_runtime_handle_to_ac_scope(
+        normalized_handle = self._bind_runtime_handle_to_ac_scope(
             runtime_handle,
             expected_metadata=expected_metadata,
             scrub_resume_state=scrub_resume_state,
         )
+        approval_mode = getattr(self._adapter, "permission_mode", None)
+        if normalized_handle is not None and isinstance(approval_mode, str):
+            normalized_approval_mode = approval_mode.strip()
+            if normalized_approval_mode:
+                normalized_handle = replace(
+                    normalized_handle,
+                    approval_mode=normalized_approval_mode,
+                )
+        return normalized_handle
 
     def _build_ac_runtime_handle(
         self,
@@ -357,7 +366,7 @@ class ACRuntimeHandleManager:
             return None
 
         cwd = self._task_cwd or self._adapter.working_directory
-        approval_mode = self._adapter.permission_mode
+        approval_mode = getattr(self._adapter, "permission_mode", None)
         metadata: dict[str, Any] = dict(seeded_handle.metadata) if seeded_handle is not None else {}
         metadata.update(runtime_identity.to_metadata())
         metadata.setdefault("turn_number", 1)
@@ -391,13 +400,9 @@ class ACRuntimeHandleManager:
                 else cwd
                 if isinstance(cwd, str) and cwd
                 else None,
-                approval_mode=(
-                    seeded_handle.approval_mode
-                    if seeded_handle.approval_mode
-                    else approval_mode
-                    if isinstance(approval_mode, str) and approval_mode
-                    else None
-                ),
+                approval_mode=approval_mode
+                if isinstance(approval_mode, str) and approval_mode
+                else seeded_handle.approval_mode,
                 updated_at=datetime.now(UTC).isoformat(),
                 metadata=metadata,
             )

@@ -59,6 +59,9 @@ _KIRO_CAPABILITIES = RuntimeCapabilities(
     # adaptations rather than native handling.
     system_prompt_support=ParamSupport.TRANSLATED,
     permission_mode_support=ParamSupport.TRANSLATED,
+    # A full bypass must use --trust-all-tools, so any simultaneous tool
+    # envelope is retained as prompt guidance instead of a native trust list.
+    tool_restriction_support=ParamSupport.TRANSLATED,
 )
 
 log = get_logger(__name__)
@@ -181,14 +184,17 @@ class KiroAgentAdapter:
     def _build_permission_args(self, tools: list[str] | None = None) -> list[str]:
         """Map per-call tools and permission_mode onto kiro-cli trust flags.
 
-        A non-``None`` ``tools`` list is the policy layer's executable tool
-        allow-list and must take precedence over coarse permission modes.
-        Only when no per-call allow-list is supplied do ``acceptEdits`` and
-        ``bypassPermissions`` expand to full trust.
+        ``bypassPermissions`` is the approval-boundary contract and therefore
+        takes precedence over a per-call tool envelope. The envelope is still
+        rendered into the prompt, but it must not silently downgrade full
+        bypass to ``--trust-tools`` before the subprocess starts.
         """
+        permission_mode = self._permission_mode.strip().lower()
+        if permission_mode in {"bypasspermissions", "bypass_permissions", "bypass"}:
+            return ["--trust-all-tools"]
         if tools is not None:
             return [f"--trust-tools={self._kiro_trust_tools_arg(tools)}"]
-        if self._permission_mode == "default":
+        if permission_mode == "default":
             return ["--trust-tools="]
         return ["--trust-all-tools"]
 

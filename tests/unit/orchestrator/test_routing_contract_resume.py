@@ -481,8 +481,11 @@ def test_non_codex_subclass_does_not_inherit_codex_profile_as_model_identity(
 
 def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model="default",

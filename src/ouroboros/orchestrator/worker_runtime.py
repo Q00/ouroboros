@@ -104,6 +104,7 @@ class LeaderDrivenWorkerTransport(Protocol):
         *,
         session_id: str,
         prompt: str,
+        permission_mode: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> WorkerTurn:
@@ -238,6 +239,7 @@ class LeaderDrivenWorkerRuntime:
                 turn = await self._transport.resume(
                     session_id=prior_session_id,
                     prompt=prompt,
+                    permission_mode=self._permission_mode,
                     model=model or self._model,
                     reasoning_effort=reasoning_effort,
                 )

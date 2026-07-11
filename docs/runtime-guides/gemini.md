@@ -77,7 +77,8 @@ Each task spawns:
 gemini --prompt <PROMPT> \
        --non-interactive \
        --output-format stream-json \
-       --approval-mode auto_edit \
+       --approval-mode yolo \
+       --skip-trust \
        [--model gemini-2.5-pro]
 ```
 
@@ -87,6 +88,7 @@ gemini --prompt <PROMPT> \
 | `--non-interactive` | Disables TTY prompts so the subprocess never blocks     |
 | `--output-format`   | NDJSON event stream parsed by `GeminiEventNormalizer`   |
 | `--approval-mode`   | `auto_edit` by default (`acceptEdits`); `yolo` only when `bypassPermissions` is explicitly configured |
+| `--skip-trust`      | Preserves `yolo` in fresh task worktrees that are not yet in Gemini's workspace trust registry |
 | `--model`           | Optional model override (`gemini-2.5-pro`, `flash`)     |
 
 Ouroboros maps its permission modes onto Gemini's non-blocking headless
@@ -96,6 +98,8 @@ approval modes:
 |---------------------------|-------------------|------------------------------------------------|
 | `acceptEdits`             | `auto_edit`       | Default; applies edits without TTY prompts     |
 | `bypassPermissions`       | `yolo`            | Explicit full bypass requested by the operator |
+
+Runner-driven seed execution forces `bypassPermissions`, so its fresh and logical-resume invocations use `--approval-mode yolo --skip-trust`. Direct lower-level callers that explicitly select `acceptEdits` continue to use `auto_edit` without `--skip-trust`.
 
 The interactive Ouroboros `default` permission mode is normalized to
 `acceptEdits` for Gemini because `--non-interactive` cannot service TTY

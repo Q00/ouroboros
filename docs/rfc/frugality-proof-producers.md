@@ -129,13 +129,15 @@ runs remain `INSUFFICIENT_SAMPLE`.
 
 ## Producer #3 — Shadow-replay paired baseline (AC5)
 
-In an **experiment-harness path only** (never production steady-state), re-execute
-each enforced decomposed-child AC once at its **parent** model tier/effort and emit
-`execution.ac.shadow_replay` with `baseline_token_spend`, `baseline_mode:
-"shadow_replay"`, `baseline_tier`, `baseline_model`, and
-`decomposition_trustworthy` (false for forced-atomic /
-MECE-repair-failed units, which are quarantined out of the proof). This is the
-paired baseline the frugality bar measures reduction against.
+In an **experiment-harness path only** (never production steady-state), a child
+with deterministic decomposition-trust attestation and an isolation-attested
+replay runtime is eligible for one re-execution at its **parent** model tier/effort.
+That run emits `execution.ac.shadow_replay` with `baseline_token_spend`,
+`baseline_mode: "shadow_replay"`, `baseline_tier`, `baseline_model`, and
+`decomposition_trustworthy`. The field is currently false for every live
+decomposition; only an explicitly attested test or future experiment producer may
+set it true. Untrusted units are quarantined out of the proof. This is the paired
+baseline the frugality bar measures reduction against.
 
 The child and baseline must also resolve to different concrete model IDs. A sparse
 tier configuration may label a child `frugal` while falling upward to the same
@@ -175,9 +177,10 @@ hint and retry index used by the live child. Otherwise a profile-pinned frugal
 parent could be replayed at the router's standard default, inventing a lowering
 that the live route never made.
 
-Acceptance: cost bounded to the experiment set (~2× on those rows only); forced-atomic
-units are recorded but excluded; the triad pairs each child's lower-tier run with
-its parent-tier baseline.
+Acceptance: no baseline model call occurs without both trust and isolation
+attestations. Once an eligible experiment runtime exists, cost is bounded to the
+experiment set (~2× on those rows only); untrusted units remain excluded, and the
+triad pairs each child's lower-tier run with its parent-tier baseline.
 
 ## Out of scope
 

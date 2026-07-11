@@ -80,8 +80,8 @@ allow-list, and `permission_mode`. Each is one of:
 | Parameter       | Claude Code | Codex | Gemini | Goose | Copilot | OpenCode | Hermes | Pi | Kiro |
 | --------------- | :---------: | :---: | :-----: | :---: | :-----: | :------: | :----: | :-: | :--: |
 | `system_prompt` | native | translated | translated | translated | translated | translated | translated | translated | translated |
-| `permission_mode` | native | native | native | native | native | ignored | ignored | ignored | translated |
-| `tools` (allow-list) | native | translated | translated | translated | translated | translated | translated | translated | native |
+| `permission_mode` | native | native | native | native | native | translated | translated | ignored | translated |
+| `tools` (allow-list) | native | translated | translated | translated | translated | translated | translated | translated | translated |
 
 > Most CLI runtimes compose the system prompt **into the user message** (e.g.
 > `## System Instructions\n...`) rather than passing a native system directive. Codex,
@@ -90,10 +90,12 @@ allow-list, and `permission_mode`. Each is one of:
 > native runtime allow-list when the list is non-empty. An explicit empty
 > allow-list (`tools=[]`) cannot be translated by those prompt-only composers
 > because no tool names are rendered; the orchestrator reports that no-tools
-> restriction as `ignored` for observability. Kiro
-> additionally maps `permission_mode` onto coarse `--trust-*` flags, which is honored work but
-> not in the form supplied. OpenCode, Hermes, and Pi keep the requested mode in runtime metadata
-> but do not pass it to their CLI commands.
+> restriction as `ignored` for observability. Kiro maps `permission_mode` onto
+> coarse `--trust-*` flags. When full bypass is requested, `--trust-all-tools`
+> takes precedence and any simultaneous tool envelope remains prompt guidance.
+> OpenCode and Hermes translate full bypass onto
+> `--dangerously-skip-permissions` and `--yolo --accept-hooks`, respectively. Pi keeps the
+> requested mode in runtime metadata because its CLI does not expose an approval switch.
 
 **Observability:** when a workflow supplies a parameter the active runtime does not honor
 natively, the orchestrator surfaces a one-time notice (console + a structured

@@ -155,7 +155,7 @@ Or per-invocation:
 uv run ouroboros run workflow --runtime opencode ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 ```
 
-The `OpenCodeRuntime` adapter launches `opencode run --format json` as a subprocess, pipes the prompt via stdin, and parses the structured JSON event stream from stdout. `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since `opencode run` is non-interactive.
+The `OpenCodeRuntime` adapter launches `opencode run --format json --dangerously-skip-permissions` as a subprocess, pipes the prompt via stdin, and parses the structured JSON event stream from stdout. `orchestrator.opencode_permission_mode` defaults to `bypassPermissions`; seed execution forces that mode for fresh and resumed dispatches.
 
 ### When to use subprocess over plugin
 
@@ -321,9 +321,11 @@ The bridge manages its own lifecycle: child creation, progress rendering (Task p
 
 The adapter uses `opencode run --format json` (non-interactive). Features that require interactive OpenCode sessions (e.g., manual approval prompts) are not available during Ouroboros execution.
 
-### Permission mode not wired to CLI
+### Permission mode
 
-OpenCode's `opencode run` command does not expose a `--permission-mode` flag. The `opencode_permission_mode` config value is stored for forward compatibility but is not currently passed to the subprocess. OpenCode runs non-interactively by default, so there is no approval dialogue to bypass.
+OpenCode has no multi-value `--permission-mode` option, but current releases expose `--dangerously-skip-permissions`. Ouroboros translates `bypassPermissions` to that native flag on both fresh and `--session` resume commands. Narrower stored modes do not add the full-bypass flag.
+
+In plugin mode, the bridge creates every delegated child session with an explicit OpenCode permission ruleset of `permission="*", pattern="*", action="allow"`. This is the session-API equivalent of the subprocess bypass flag; plugin resume remains unsupported because the host bridge cannot durably reattach an already-dispatched child.
 
 ## Troubleshooting
 

@@ -9231,7 +9231,7 @@ class TestParallelACExecutor:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
-                self._permission_mode = "acceptEdits"
+                self._permission_mode = "bypassPermissions"
 
             @property
             def runtime_backend(self) -> str:
@@ -9329,6 +9329,7 @@ class TestParallelACExecutor:
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.native_session_id == "opencode-session-9"
+        assert resume_handle.approval_mode == "bypassPermissions"
         assert resume_handle.metadata["server_session_id"] == "server-99"
         event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
