@@ -987,7 +987,14 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
 
     elif event_type == "execution.ac.token_attribution.reported":
         token_spend = data.get("token_spend")
+        # Mirror the board reducer's finite-number guard (dashboard.board._coerce_spend):
+        # reject bool, non-numeric, NaN, ±Inf and negative spend at parse time so a
+        # malformed payload never produces a message (it can no longer poison the run
+        # total downstream, where negatives were previously dropped after the fact).
         if not isinstance(token_spend, (int, float)) or isinstance(token_spend, bool):
+            return None
+        spend = float(token_spend)
+        if spend != spend or spend in (float("inf"), float("-inf")) or spend < 0:
             return None
         node_id = data.get("node_id") if isinstance(data.get("node_id"), str) else None
         ac_index = data.get("ac_index")
@@ -995,7 +1002,7 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
         return ACTokenAttribution(
             node_id=node_id,
             ac_index=ac_index,
-            token_spend=float(token_spend),
+            token_spend=spend,
             model_tier=data.get("model_tier") if isinstance(data.get("model_tier"), str) else None,
         )
 

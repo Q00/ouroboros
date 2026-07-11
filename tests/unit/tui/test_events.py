@@ -770,6 +770,33 @@ class TestFrugalityTelemetryEvents:
 
         assert create_message_from_event(event) is None
 
+    @pytest.mark.parametrize(
+        "token_spend",
+        [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -1,
+            -0.5,
+        ],
+    )
+    def test_token_attribution_rejects_non_finite_or_negative_spend(
+        self, token_spend: float
+    ) -> None:
+        """Non-finite (NaN/±Inf) or negative spend is malformed and dropped at parse.
+
+        Mirrors the board reducer's finite-number guard so a poisoned payload never
+        reaches the run total (negatives were previously dropped only downstream).
+        """
+        event = BaseEvent(
+            type="execution.ac.token_attribution.reported",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={"node_id": "node_7", "ac_index": 2, "token_spend": token_spend},
+        )
+
+        assert create_message_from_event(event) is None
+
     def test_frugality_proof_event(self) -> None:
         """frugality_proof events convert to FrugalityProofEvaluated."""
         event = BaseEvent(

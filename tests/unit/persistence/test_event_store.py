@@ -1171,6 +1171,109 @@ class TestSessionRelatedEvents:
         ]
         assert next_cursor > cursor
 
+    async def test_blank_scope_returns_no_events_not_whole_store(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """A blank session with no execution must fail closed, not scan the store.
+
+        With an empty ``session_id`` and no ``execution_id`` there is no scope
+        predicate, and ``or_()`` over zero clauses emits a WHERE-less query — this
+        pins that the query returns nothing rather than the entire event store.
+        """
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-unrelated",
+                data={"execution_id": "exec-unrelated", "seed_id": "seed-unrelated"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="exec-unrelated",
+                data={"session_id": "sess-unrelated", "message_count": 1},
+            )
+        )
+
+        result = await event_store.query_session_related_events(
+            "",
+            execution_id=None,
+            limit=None,
+        )
+
+        assert result == []
+
+    async def test_blank_scope_after_returns_no_events_and_unchanged_cursor(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """The incremental variant must also fail closed and leave the cursor put."""
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-unrelated",
+                data={"execution_id": "exec-unrelated", "seed_id": "seed-unrelated"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="exec-unrelated",
+                data={"session_id": "sess-unrelated", "message_count": 1},
+            )
+        )
+
+        events, cursor = await event_store.query_session_related_events_after(
+            "",
+            execution_id=None,
+            last_row_id=0,
+        )
+
+        assert events == []
+        assert cursor == 0
+
+    async def test_blank_session_with_execution_still_returns_execution_rows(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """The TUI case that motivated the empty-session change must keep working.
+
+        A blank session paired with a real ``execution_id`` still carries an
+        execution scope, so the query returns that execution's related rows.
+        """
+        execution_id = "exec-tui-scope"
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={"execution_id": execution_id, "message_count": 1},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="exec-other-scope",
+                data={"execution_id": "exec-other", "message_count": 1},
+            )
+        )
+
+        result = await event_store.query_session_related_events(
+            "",
+            execution_id=execution_id,
+            limit=None,
+        )
+        aggregate_ids = {event.aggregate_id for event in result}
+
+        assert execution_id in aggregate_ids
+        assert "exec-other-scope" not in aggregate_ids
+
 
 class TestGetAllSessions:
     """Test get_all_sessions returns all session lifecycle events."""

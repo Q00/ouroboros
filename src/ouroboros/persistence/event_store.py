@@ -1004,6 +1004,11 @@ class EventStore:
         session_started_at = await self._resolve_session_started_at(session_id)
 
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
+        if not conditions:
+            # Fail closed: a blank session with no resolvable execution produces zero
+            # scope predicates, and ``or_()`` over an empty list emits NO WHERE clause
+            # — SQLAlchemy would then return the ENTIRE store. Select nothing instead.
+            return []
 
         try:
             async with self._engine.begin() as conn:
@@ -1134,6 +1139,11 @@ class EventStore:
         )
         session_started_at = await self._resolve_session_started_at(session_id)
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
+        if not conditions:
+            # Fail closed (see query_session_related_events): ``or_()`` over an empty
+            # list emits NO WHERE clause and would scan the whole store. A blank scope
+            # must yield no rows and leave the cursor unchanged so the poll is idempotent.
+            return [], last_row_id
 
         try:
             async with self._engine.begin() as conn:
