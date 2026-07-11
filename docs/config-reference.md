@@ -318,7 +318,7 @@ economics:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
-| `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier — a persistently failing unit walks the whole ladder rather than stalling one tier up. |
+| `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier — a persistently failing unit walks the whole ladder rather than stalling one tier up. The *effective* runtime contract (routing policy plus the retry loop's early-stop) is pinned by `test_retry_top_level_walks_whole_ladder_to_frontier` in `tests/unit/orchestrator/test_parallel_executor_verify_by_default.py`, which asserts a top-level unit is re-dispatched through the frontier ceiling and then early-stop resumes; the sibling `test_retry_decomposed_child_reaches_retry3_frontier` documents (currently `xfail`) that a decomposed child, which starts one tier lower, is early-stopped one rung short of frontier. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
 | `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. |
 

@@ -241,6 +241,7 @@ from ouroboros.orchestrator.level_context import (
     serialize_level_contexts,
 )
 from ouroboros.orchestrator.model_routing import (
+    decide_model,
     resolve_execute_model,
     tier_from_profile_hint,
 )
@@ -4385,25 +4386,54 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         "model_override_support",
                         ParamSupport.IGNORED,
                     )
-                    escalation_attempt = (
-                        self._model_router.escalation_retry_threshold
-                        if self._model_router is not None
-                        else None
-                    )
-                    pending_enforced_escalation = (
+                    # Ladder-truth escalation probe. The arithmetic proxy
+                    # ``ac_retry_attempts[ac_idx] < escalation_threshold`` only
+                    # defeats early-stop for the SINGLE threshold crossing, which is
+                    # correct for a top-level unit (base tier tops out at the
+                    # frontier ceiling exactly at that crossing) but wrong for a
+                    # decomposed child: it starts one tier cheaper, so its ladder
+                    # tops out one retry PAST the threshold. Instead, ask the router
+                    # directly whether the NEXT scheduled retry resolves to a
+                    # DIFFERENT enforced model than the one just dispatched. This is
+                    # agnostic to the unit's start tier and ladder shape: escalation
+                    # stays pending until the resolved model stops climbing (the
+                    # frontier ceiling), then early-stop resumes. Whether the unit
+                    # routes as a child is read from the dispatched result — a
+                    # decomposed parent re-runs its children (routed one tier
+                    # cheaper, sharing this retry counter) on the next retry, so the
+                    # child ladder, not the parent's, governs the escalation ahead.
+                    pending_enforced_escalation = False
+                    if (
                         self._model_router is not None
                         and self._model_router.runtime_backend
                         == getattr(self._adapter, "runtime_backend", None)
                         and model_support is ParamSupport.NATIVE
-                        and escalation_attempt is not None
-                        and ac_retry_attempts[ac_idx]
-                        < escalation_attempt
-                        <= self._ac_retry_attempts
-                    )
+                        and ac_retry_attempts[ac_idx] < self._ac_retry_attempts
+                    ):
+                        routes_as_child = (
+                            isinstance(gated, ACExecutionResult) and gated.is_decomposed
+                        )
+                        just_dispatched = decide_model(
+                            model_support,
+                            router=self._model_router,
+                            is_decomposed_child=routes_as_child,
+                            retry_attempt=ac_retry_attempts[ac_idx],
+                        )
+                        next_scheduled = decide_model(
+                            model_support,
+                            router=self._model_router,
+                            is_decomposed_child=routes_as_child,
+                            retry_attempt=ac_retry_attempts[ac_idx] + 1,
+                        )
+                        pending_enforced_escalation = (
+                            just_dispatched.is_enforced
+                            and next_scheduled.model is not None
+                            and next_scheduled.model != just_dispatched.model
+                        )
                     if pending_enforced_escalation:
-                        # The next scheduled retry is the first one that can use
-                        # a stronger model. Identical weak-model failures are not
-                        # evidence that the escalation itself is futile.
+                        # The next scheduled retry escalates to a stronger model.
+                        # Identical weak-model failures are not evidence that the
+                        # escalation itself is futile.
                         last_failure_class[ac_idx] = new_class
                         continue
                     # Identical failure class on every attempt: stop early
