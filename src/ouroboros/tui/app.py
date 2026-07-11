@@ -344,15 +344,6 @@ class OuroborosTUI(App[None]):
             return False
         return not (context.session_id and self._state.session_id != context.session_id)
 
-    def _iter_subscription_sources(
-        self, context: _EventSubscriptionContext
-    ) -> tuple[tuple[str, str], ...]:
-        """Return the active aggregates that should feed the HUD."""
-        sources: list[tuple[str, str]] = [("execution", context.execution_id)]
-        if context.session_id:
-            sources.insert(0, ("session", context.session_id))
-        return tuple(sources)
-
     def _process_subscription_event(self, event: BaseEvent) -> None:
         """Forward a subscribed event into TUI state and installed screens."""
         self._state.add_log(
@@ -424,26 +415,33 @@ class OuroborosTUI(App[None]):
     async def _subscribe_to_events(self, context: _EventSubscriptionContext) -> None:
         """Subscribe to EventStore for live updates.
 
-        Uses incremental fetching via get_events_after() to avoid replaying
-        the full event history on every poll cycle. This keeps each poll at
-        O(new_events) instead of O(total_events).
+        Uses incremental fetching via query_session_related_events_after() to
+        avoid replaying the full event history on every poll cycle, keeping each
+        poll at O(new_events) instead of O(total_events).
+
+        The related-events query matches the session/execution aggregates AND any
+        worker-scoped aggregate whose payload references this run's session_id /
+        execution_id (the exact predicates the web Kanban reader applies). This is
+        what lets per-AC telemetry — model_routed / token_attribution and per-worker
+        provider identity, all persisted under ``exec_<id>_node_<NODEID>`` scopes
+        with the run id only in the payload — reach the HUD. A single rowid cursor
+        advances across all matched scopes, so each event is delivered exactly once.
         """
         if self._event_store is None or not context.execution_id:
             return
 
-        last_row_ids = dict.fromkeys(self._iter_subscription_sources(context), 0)
+        last_row_id = 0
 
         while self._is_subscription_active(context):
             try:
-                new_events: list[BaseEvent] = []
-                for source in self._iter_subscription_sources(context):
-                    aggregate_type, aggregate_id = source
-                    events, last_row_ids[source] = await self._event_store.get_events_after(
-                        aggregate_type,
-                        aggregate_id,
-                        last_row_ids[source],
-                    )
-                    new_events.extend(events)
+                (
+                    new_events,
+                    last_row_id,
+                ) = await self._event_store.query_session_related_events_after(
+                    session_id=context.session_id,
+                    execution_id=context.execution_id,
+                    last_row_id=last_row_id,
+                )
 
                 if new_events:
                     for event in sorted(new_events, key=lambda item: (item.timestamp, item.id)):

@@ -785,20 +785,73 @@ class TestOuroborosTUIEventSubscription:
             await app._subscription_task
 
     @pytest.mark.asyncio
+    async def test_subscription_delivers_worker_scoped_telemetry(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Per-AC telemetry persisted under a WORKER-scoped aggregate id must reach
+        the HUD. On a real decomposed run ``execution.ac.model_routed`` lands on
+        ``exec_<id>_node_<NODEID>`` with the run id only in the payload, so the
+        prior exact aggregate-id poll never saw it (PR #1602 regression)."""
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_active",
+                data={"execution_id": "exec_active"},
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.model_routed",
+                aggregate_type="execution",
+                aggregate_id="exec_active_node_6RU7IB5VIJMCE",
+                data={
+                    "execution_id": "exec_active",
+                    "session_id": "sess_active",
+                    "node_id": "6RU7IB5VIJMCE",
+                    "ac_index": 1,
+                    "model_tier": "frugal",
+                    "model": "haiku",
+                },
+            )
+        )
+
+        app = OuroborosTUI(event_store=memory_event_store)
+        app._poll_interval_seconds = 0.01
+        app.post_message = MagicMock()  # type: ignore[method-assign]
+        app.set_execution("exec_active", "sess_active")
+        await asyncio.sleep(0.05)
+
+        if app._subscription_task is not None:
+            app._subscription_task.cancel()
+            await app._subscription_task
+
+        routed = [
+            call.args[0]
+            for call in app.post_message.call_args_list
+            if call.args and isinstance(call.args[0], ACModelRouted)
+        ]
+        assert routed, "worker-scoped model_routed event never reached the TUI"
+        assert routed[0].model_tier == "frugal"
+        assert routed[0].model == "haiku"
+        assert routed[0].node_id == "6RU7IB5VIJMCE"
+
+    @pytest.mark.asyncio
     async def test_subscription_task_drops_stale_context_parameters(self) -> None:
         """A running poller must not start listening to a new context implicitly."""
 
         class RecordingEventStore:
             def __init__(self) -> None:
-                self.calls: list[tuple[str, str, int]] = []
+                self.calls: list[tuple[str, str | None, int]] = []
 
-            async def get_events_after(
+            async def query_session_related_events_after(
                 self,
-                aggregate_type: str,
-                aggregate_id: str,
+                session_id: str,
+                execution_id: str | None = None,
                 last_row_id: int = 0,
             ) -> tuple[list[BaseEvent], int]:
-                self.calls.append((aggregate_type, aggregate_id, last_row_id))
+                self.calls.append((session_id, execution_id, last_row_id))
                 return [], last_row_id
 
         event_store = RecordingEventStore()
@@ -820,10 +873,8 @@ class TestOuroborosTUIEventSubscription:
         await asyncio.wait_for(task, timeout=0.1)
 
         assert task.done()
-        assert ("session", "sess_new", 0) not in event_store.calls
-        assert ("execution", "exec_new", 0) not in event_store.calls
-        assert any(call[:2] == ("session", "sess_old") for call in event_store.calls)
-        assert any(call[:2] == ("execution", "exec_old") for call in event_store.calls)
+        assert ("sess_new", "exec_new", 0) not in event_store.calls
+        assert any(call[:2] == ("sess_old", "exec_old") for call in event_store.calls)
 
     @pytest.mark.asyncio
     async def test_update_state_from_event_session_started(self) -> None:
