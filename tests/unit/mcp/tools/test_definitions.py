@@ -612,6 +612,44 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "without a persisted fat_harness_mode contract" in str(result.error)
 
+    async def test_handle_plugin_rejects_resume_without_execution_contract_restore(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A delegated child must not replace Seed/backend/workspace/model identity."""
+        tracker = SessionTracker.create("exec_resume", "seed-original").with_progress(
+            {"fat_harness_mode": False, "execution_contract": {"version": 1}}
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "sess_resume"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        handler = ExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML.replace("Test Goal", "Completely Changed Goal"),
+                "session_id": "sess_resume",
+            }
+        )
+
+        assert result.is_err
+        assert "cannot safely resume an existing execute_seed session" in str(result.error)
+
     async def test_handle_rejects_unknown_execution_mode(self) -> None:
         """MCP execute_seed keeps execution_mode non-configurable like the CLI."""
         handler = ExecuteSeedHandler()
@@ -2151,6 +2189,41 @@ class TestAsyncJobHandlers:
 
         assert result.is_err
         assert "without a persisted fat_harness_mode contract" in str(result.error)
+
+    async def test_start_execute_seed_plugin_rejects_resume_without_contract_restore(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """start_execute_seed must apply the same fail-closed plugin resume policy."""
+        tracker = SessionTracker.create("exec_resume", "seed-original").with_progress(
+            {"fat_harness_mode": False}
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                assert session_id == "sess_resume"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        handler = StartExecuteSeedHandler(
+            event_store=memory_event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "session_id": "sess_resume"}
+        )
+
+        assert result.is_err
+        assert "cannot safely resume an existing execute_seed session" in str(result.error)
 
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()

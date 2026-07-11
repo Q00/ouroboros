@@ -7,8 +7,9 @@ import re
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
-    _runtime_message_search_text,
+    _runtime_message_has_success_evidence,
     _runtime_message_supports_command_claim,
+    _runtime_message_tool_call_id,
     _runtime_messages_support_file_claim,
 )
 from ouroboros.orchestrator.evidence.common import _normalized_evidence_text
@@ -55,15 +56,23 @@ def _runtime_messages_have_masked_test_command_for_test_claim(
             if following.tool_name and not _is_tool_result_message(following):
                 break
             chunk.append(following)
+        if _test_chunk_has_structured_failure(chunk):
+            continue
+        if _runtime_message_tool_call_id(message) is not None and not (
+            _runtime_message_has_success_evidence(
+                message,
+                messages=messages,
+                index=index,
+            )
+        ):
+            continue
         if not any(_message_contains_test_success(item) for item in chunk):
             continue
-        chunk_text = "\n".join(_runtime_message_search_text(item) for item in chunk)
         chunk_test_proof_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
         if any(
             _test_command_targets_claim(
                 command=command,
                 claim=value,
-                chunk_text=chunk_text,
                 chunk_test_proof_text=chunk_test_proof_text,
                 messages=messages,
                 task_cwd=task_cwd,
@@ -126,6 +135,54 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
     if type(exit_code) is int:
         parts.append(f"exit code {exit_code}")
     return _text_contains_test_success("\n".join(parts))
+
+
+def _test_chunk_has_structured_failure(chunk: list[AgentMessage]) -> bool:
+    """Return whether a Bash/result chunk carries failure or malformed status.
+
+    Runtime-produced success text is useful evidence, but it can coexist with an
+    authoritative non-zero exit or tool-result error bit (for example a suite
+    that passed one test before the command failed). Any explicit failure, or a
+    present-but-malformed status field, vetoes the textual success signal.
+    """
+    for message in chunk:
+        if message.is_error:
+            return True
+        data = message.data
+        if "is_error" in data:
+            is_error = data["is_error"]
+            if not isinstance(is_error, bool) or is_error:
+                return True
+        if "exit_code" in data:
+            exit_code = data["exit_code"]
+            if isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code != 0:
+                return True
+        tool_result = data.get("tool_result")
+        if tool_result is not None:
+            if not isinstance(tool_result, dict):
+                return True
+            if "is_error" in tool_result:
+                result_is_error = tool_result["is_error"]
+                if not isinstance(result_is_error, bool) or result_is_error:
+                    return True
+            meta = tool_result.get("meta")
+            if isinstance(meta, dict) and "exit_status" in meta:
+                exit_status = meta["exit_status"]
+                if (
+                    isinstance(exit_status, bool)
+                    or not isinstance(exit_status, int)
+                    or exit_status != 0
+                ):
+                    return True
+        status = data.get("status")
+        if isinstance(status, str) and status.strip().lower() in {"failed", "error"}:
+            return True
+        runtime_event_type = data.get("runtime_event_type")
+        if isinstance(runtime_event_type, str) and runtime_event_type.strip().lower().endswith(
+            (".failed", ".error")
+        ):
+            return True
+    return False
 
 
 def _runtime_message_test_proof_text(message: AgentMessage) -> str:
@@ -214,7 +271,6 @@ def _test_command_targets_claim(
     *,
     command: str,
     claim: str,
-    chunk_text: str,
     chunk_test_proof_text: str,
     messages: tuple[AgentMessage, ...],
     task_cwd: str | None,
@@ -227,7 +283,8 @@ def _test_command_targets_claim(
             claim=claim,
             chunk_text=chunk_test_proof_text,
         )
-    if needle and needle in chunk_text:
+    normalized_proof_text = chunk_test_proof_text.lower()
+    if needle and needle in normalized_proof_text:
         return True
 
     file_part = _test_claim_file_part(claim)
@@ -235,7 +292,7 @@ def _test_command_targets_claim(
         return False
     normalized_file = file_part.lower()
     normalized_command = command.lower()
-    if normalized_file in chunk_text or normalized_file in normalized_command:
+    if normalized_file in normalized_proof_text or normalized_file in normalized_command:
         return True
     if _claim_summary_matches_runtime_chunk(
         command=command,
@@ -304,15 +361,23 @@ def _runtime_messages_support_test_claim(
             if following.tool_name and not _is_tool_result_message(following):
                 break
             chunk.append(following)
+        if _test_chunk_has_structured_failure(chunk):
+            continue
+        if _runtime_message_tool_call_id(message) is not None and not (
+            _runtime_message_has_success_evidence(
+                message,
+                messages=messages,
+                index=index,
+            )
+        ):
+            continue
         if not any(_message_contains_test_success(item) for item in chunk):
             continue
-        chunk_text = "\n".join(_runtime_message_search_text(item) for item in chunk)
         chunk_test_proof_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
         if any(
             _test_command_targets_claim(
                 command=command,
                 claim=value,
-                chunk_text=chunk_text,
                 chunk_test_proof_text=chunk_test_proof_text,
                 messages=messages,
                 task_cwd=task_cwd,
@@ -342,6 +407,16 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
             if following.tool_name and not _is_tool_result_message(following):
                 break
             chunk.append(following)
+        if _test_chunk_has_structured_failure(chunk):
+            continue
+        if _runtime_message_tool_call_id(message) is not None and not (
+            _runtime_message_has_success_evidence(
+                message,
+                messages=messages,
+                index=index,
+            )
+        ):
+            continue
         if any(
             not item.is_final
             and _text_contains_test_success(_runtime_message_test_proof_text(item))

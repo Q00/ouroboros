@@ -10,6 +10,7 @@ from ouroboros.harness.claim_term_guard import (
     ClaimTermGuardFact,
     ClaimTermGuardVerdict,
     deterministic_claim_term_guard,
+    strict_deterministic_claim_term_guard,
 )
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
@@ -80,6 +81,7 @@ __all__ = [
     "VerdictRecord",
     "build_run_snapshot",
     "deterministic_claim_term_guard",
+    "strict_deterministic_claim_term_guard",
     "evaluate_deliver_claim",
     "filter_events_for_ac",
     "load_ac_evidence_manifest",

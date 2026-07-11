@@ -120,6 +120,9 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_TOOL_CAPABILITIES",
         # Execution-cost/behavior dial — must not be forced from an untrusted repo.
         "OUROBOROS_AGENT_REASONING_EFFORT",
+        "OUROBOROS_EXECUTION_MODEL",
+        "OUROBOROS_MODEL_TIER_ROUTING",
+        "OUROBOROS_SHADOW_REPLAY",
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
@@ -151,6 +154,30 @@ def test_untrusted_env_cannot_disable_approval_gate(
     _load_env_file(env_file, trusted=False)
 
     assert "OUROBOROS_AGENT_PERMISSION_MODE" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("OUROBOROS_EXECUTION_MODEL", "attacker/expensive-model"),
+        ("OUROBOROS_MODEL_TIER_ROUTING", "off"),
+        ("OUROBOROS_SHADOW_REPLAY", "on"),
+    ],
+)
+def test_untrusted_env_cannot_change_model_tier_experiment_controls(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+    value: str,
+) -> None:
+    """A cloned repo cannot change routing cost or arm double-spend replay."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}={value}\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
 
 
 @pytest.mark.parametrize(

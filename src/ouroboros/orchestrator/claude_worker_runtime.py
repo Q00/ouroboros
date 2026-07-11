@@ -237,12 +237,15 @@ class ClaudeWorkerTransport:
 
         session_id = payload.get("session_id")
         result_text = payload.get("result")
+        raw_usage = payload.get("usage")
+        usage = dict(raw_usage) if isinstance(raw_usage, dict) else None
         is_error = bool(payload.get("is_error")) or returncode not in (0, None)
         return WorkerTurn(
             text=str(result_text) if result_text is not None else "",
             session_id=session_id if isinstance(session_id, str) and session_id else None,
             is_error=is_error,
             error=(stderr or None) if is_error else None,
+            usage=usage,
         )
 
     async def spawn(
@@ -280,7 +283,14 @@ class ClaudeWorkerTransport:
             command.extend(["--effort", reasoning_effort])
         return await self._run(command, prompt, cwd)
 
-    async def resume(self, *, session_id: str, prompt: str) -> WorkerTurn:
+    async def resume(
+        self,
+        *,
+        session_id: str,
+        prompt: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> WorkerTurn:
         if not self._persist_sessions:
             # Non-persisted (dashboard-centric) workers wrote no session file, so
             # there is nothing to ``--resume``. Fail clearly rather than silently
@@ -298,6 +308,10 @@ class ClaudeWorkerTransport:
         # Claude sessions are disk-persisted → cross-process resume works, but
         # only from the SAME cwd the session was created in (cwd-scoped store).
         command = [*self._base_command(cwd=self._cwd), "--resume", session_id]
+        if model and model != "default":
+            command.extend(["--model", model])
+        if reasoning_effort and reasoning_effort in CLAUDE_REASONING_EFFORT_LEVELS:
+            command.extend(["--effort", reasoning_effort])
         return await self._run(command, prompt, self._cwd)
 
 

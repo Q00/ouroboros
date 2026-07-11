@@ -75,8 +75,11 @@ LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
 # indistinguishable from a deliberate user override — so per-call model-tier
 # routing would enforce a retired id (e.g. ``--model gpt-4o``) that the current
 # provider map cannot execute, failing every AC. Normalizing a legacy shipped id
-# to its current replacement keeps the shipped defaults live across a bump while
-# leaving a genuinely explicit, never-shipped id (a proxy-specific model) alone.
+# to its current replacement keeps the shipped defaults live across a bump. This
+# necessarily means a deliberate override that is byte-for-byte equal to an old
+# shipped default is normalized too: the persisted schema carries no provenance
+# bit that could distinguish those cases. Explicit ids that were never shipped
+# (for example a proxy-specific model) remain untouched.
 #
 # Verified against git history of ``ouroboros.config.models`` (the tier defaults
 # have only ever held these ids): openai frugal ``gpt-4o-mini`` -> standard
@@ -98,15 +101,37 @@ LEGACY_TIER_MODELS: dict[str, str] = {
     "claude-opus-4-6": DEFAULT_OPUS_MODEL,
 }
 
+# Provider each historical tier default shipped under. The same model-looking
+# string under a DIFFERENT provider cannot be an untouched shipped default; it is
+# necessarily an explicit/custom routing choice (often a proxy alias) and must be
+# preserved verbatim.
+LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
+    "gpt-4o-mini": "openai",
+    "gpt-4o": "openai",
+    "o3": "openai",
+    "claude-3-5-haiku": "anthropic",
+    "claude-sonnet-4-20250514": "anthropic",
+    "claude-opus-4-5-20251101": "anthropic",
+    "claude-opus-4-6": "anthropic",
+}
 
-def normalize_tier_model(model: str) -> str:
+
+def normalize_tier_model(model: str, *, provider: str | None = None) -> str:
     """Return the current shipped id for ``model`` if it is a legacy shipped default.
 
     A tier model matching a historically shipped default (see
-    :data:`LEGACY_TIER_MODELS`) resolves to its current replacement; any other id
-    — including the current shipped defaults and genuinely explicit user choices —
-    is returned verbatim.
+    :data:`LEGACY_TIER_MODELS`) resolves to its current replacement, even if the
+    user deliberately typed that same historical id under the same provider:
+    persisted config has no provenance with which to tell that override from an
+    untouched old default. When ``provider`` is supplied, normalization is limited
+    to the provider the historical value actually shipped under; a cross-provider
+    occurrence is necessarily explicit and is preserved. Any id outside the
+    historical set — including current shipped defaults and explicit never-shipped
+    choices — is returned verbatim.
     """
+    shipped_provider = LEGACY_TIER_MODEL_PROVIDERS.get(model)
+    if provider is not None and model in LEGACY_TIER_MODELS and provider != shipped_provider:
+        return model
     return LEGACY_TIER_MODELS.get(model, model)
 
 

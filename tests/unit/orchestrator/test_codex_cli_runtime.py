@@ -290,7 +290,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_uses_profile_for_runtime_session_role(self) -> None:
         """Agent runtime sessions should resolve Codex profiles from session_role."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -306,6 +305,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -317,7 +317,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_matches_codex_0134_unified_profile_v2_contract(self) -> None:
         """Codex 0.134 uses --profile to load ~/.codex/<name>.config.toml files."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -333,6 +332,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -343,14 +343,7 @@ class TestCodexCliRuntime:
         assert command[command.index("--profile") + 1] == "ouroboros-frontier"
 
     def test_build_command_uses_default_runtime_profile_for_resumed_roleless_handle(self) -> None:
-        """Resumed role-less agent_runtime handles keep using the documented fallback role."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
-        runtime_handle = RuntimeHandle(
-            backend="codex_cli",
-            kind="agent_runtime",
-            native_session_id="thread-123",
-            metadata={},
-        )
+        """Role-less resumes keep the fallback profile frozen at runtime construction."""
         config = OuroborosConfig(
             llm_profiles={
                 "standard": {
@@ -359,8 +352,28 @@ class TestCodexCliRuntime:
             },
             llm_role_profiles={"agent_runtime": "standard"},
         )
+        drifted_config = OuroborosConfig(
+            llm_profiles={
+                "frontier": {
+                    "providers": {"codex": {"profile": "drifted-frontier"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime": "frontier"},
+        )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="agent_runtime",
+            native_session_id="thread-123",
+            metadata={},
+        )
+
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=drifted_config,
+        ):
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -371,9 +384,49 @@ class TestCodexCliRuntime:
         assert command[command.index("--profile") + 1] == "ouroboros-standard"
         assert "--model" not in command
 
+    def test_build_command_rejects_mid_run_role_profile_drift(self) -> None:
+        """Explicit-role commands cannot re-read a changed profile mapping mid-run."""
+        original_config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+        drifted_config = OuroborosConfig(
+            llm_profiles={
+                "frontier": {
+                    "providers": {"codex": {"profile": "drifted-frontier"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "frontier"},
+        )
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=original_config,
+        ):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+
+        with (
+            patch(
+                "ouroboros.providers.profiles.load_config",
+                return_value=drifted_config,
+            ),
+            pytest.raises(RuntimeError, match="profile routing changed"),
+        ):
+            runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
     def test_build_command_does_not_double_prefix_prefixed_runtime_handle_kind(self) -> None:
         """Already-prefixed runtime handle kinds are treated as logical role keys."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="agent_runtime_evaluation",
@@ -389,6 +442,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -400,7 +454,6 @@ class TestCodexCliRuntime:
 
     def test_runtime_profile_prevents_duplicate_role_profile_flags(self) -> None:
         """Worker isolation owns Codex's singular --profile flag when both resolve."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project", runtime_profile="worker")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -416,6 +469,11 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(
+                cli_path="codex",
+                cwd="/tmp/project",
+                runtime_profile="worker",
+            )
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -427,7 +485,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_uses_runtime_profile_provider_model_fallback(self) -> None:
         """Codex runtime profiles without Codex-native profile anchors should use models."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -443,6 +500,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -454,7 +512,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_uses_runtime_profile_top_level_model_fallback(self) -> None:
         """Agent runtime should honor provider-neutral profile model fallback."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -466,6 +523,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -504,7 +562,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_uses_explicit_runtime_profile_metadata(self) -> None:
         """Runtime metadata can directly select an Ouroboros profile."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="evaluation_session",
@@ -519,6 +576,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -529,7 +587,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_uses_explicit_runtime_profile_model_fallback(self) -> None:
         """Explicit Ouroboros profile metadata should still fall back to model."""
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="evaluation_session",
@@ -538,6 +595,7 @@ class TestCodexCliRuntime:
         config = OuroborosConfig(llm_profiles={"deep": {"model": "gpt-5.5"}})
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -875,6 +933,8 @@ class TestCodexCliRuntime:
             "/tmp/project/hello.py",
             "/tmp/project/test_hello.py",
         ]
+        assert all(message.data["subtype"] == "success" for message in messages)
+        assert all(message.data["runtime_event_type"] == "tool.completed" for message in messages)
 
     def test_convert_turn_completed_with_usage_emits_system_usage_message(self) -> None:
         """turn.completed with token usage surfaces a non-final system message."""
@@ -904,8 +964,8 @@ class TestCodexCliRuntime:
             "output_tokens": 64,
         }
 
-    def test_convert_turn_completed_filters_malformed_usage(self) -> None:
-        """Non-numeric usage fields are dropped; only valid counts survive."""
+    def test_convert_turn_completed_rejects_partially_malformed_usage(self) -> None:
+        """One malformed known counter is preserved as an attempt-level veto."""
         runtime = CodexCliRuntime(cli_path="codex")
 
         messages = runtime._convert_event(
@@ -920,16 +980,53 @@ class TestCodexCliRuntime:
         )
 
         assert len(messages) == 1
-        assert messages[0].data["usage"] == {"output_tokens": 64}
+        assert messages[0].data == {
+            "subtype": "turn.completed",
+            "usage_invalid": True,
+        }
+
+    @pytest.mark.parametrize("invalid_total", ["576", -1, float("nan"), True])
+    def test_convert_turn_completed_does_not_fallback_from_invalid_total(
+        self,
+        invalid_total: object,
+    ) -> None:
+        """A present invalid total cannot fall back to a smaller component sum."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "total_tokens": invalid_total,
+                    "input_tokens": 512,
+                    "output_tokens": 64,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        assert messages[0].data["usage_invalid"] is True
 
     def test_convert_turn_completed_without_usage_is_dropped(self) -> None:
         """turn.completed without a usable usage object stays a dropped event."""
         runtime = CodexCliRuntime(cli_path="codex")
 
         assert runtime._convert_event({"type": "turn.completed"}, current_handle=None) == []
+        malformed = runtime._convert_event(
+            {"type": "turn.completed", "usage": {"input_tokens": "x"}},
+            current_handle=None,
+        )
+        assert len(malformed) == 1
+        assert malformed[0].data["usage_invalid"] is True
+
+    def test_convert_turn_completed_ignores_unknown_only_usage_shape(self) -> None:
+        """Provider diagnostics with no recognized token counter are not corruption."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
         assert (
             runtime._convert_event(
-                {"type": "turn.completed", "usage": {"input_tokens": "x"}},
+                {"type": "turn.completed", "usage": {"request_id": "req-1"}},
                 current_handle=None,
             )
             == []

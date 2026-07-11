@@ -903,6 +903,18 @@ class TestBuildExecuteSubagent:
         assert p.context["max_iterations"] == 5
         assert p.context["skip_qa"] is True
         assert p.context["auto_evaluate"] is False
+        assert p.context["model_tier"] is None
+
+    def test_model_tier_distinguishes_omitted_from_explicit_medium(self) -> None:
+        omitted = build_execute_subagent(seed_content="goal: test", session_id="sess-123")
+        explicit = build_execute_subagent(
+            seed_content="goal: test",
+            session_id="sess-123",
+            model_tier="medium",
+        )
+
+        assert omitted.context["model_tier"] is None
+        assert explicit.context["model_tier"] == "medium"
 
     def test_max_parallel_workers_propagates_to_context_and_prompt(self) -> None:
         """Worker cap must reach the child runtime via both prompt and context."""

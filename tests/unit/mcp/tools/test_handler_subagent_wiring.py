@@ -351,6 +351,17 @@ class TestExecuteSeedHandlerSubagentDispatch:
         assert ctx["max_iterations"] == 5
         assert ctx["skip_qa"] is True
         assert ctx["auto_evaluate"] is False
+        assert ctx["model_tier"] == "medium"
+
+    async def test_context_preserves_explicit_model_tier(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "seed_content": "goal: test",
+                "model_tier": "medium",
+            }
+        )
+
+        assert result.value.meta["_subagent"]["context"]["model_tier"] == "medium"
 
     async def test_plugin_payload_includes_resolved_worker_cap(self, handler) -> None:
         """Plugin dispatch must propagate the configured worker cap (#489)."""
@@ -437,6 +448,15 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         assert result.is_ok
         assert result.value.meta["job_id"] is None
         assert result.value.meta["status"] == "delegated_to_plugin"
+
+    async def test_plugin_context_applies_fresh_default_and_preserves_explicit_tier(
+        self, handler
+    ) -> None:
+        omitted = await handler.handle({"seed_content": "goal: test"})
+        explicit = await handler.handle({"seed_content": "goal: test", "model_tier": "medium"})
+
+        assert omitted.value.meta["_subagent"]["context"]["model_tier"] == "medium"
+        assert explicit.value.meta["_subagent"]["context"]["model_tier"] == "medium"
 
     async def test_plugin_mode_delegates_formal_evaluation_to_child(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test"})

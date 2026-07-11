@@ -571,6 +571,7 @@ class TestOrchestratorRunner:
         assert result.value.session_id == tracker.session_id
         assert result.value.progress["fat_harness_mode"] is False
         assert result.value.messages_processed == 0
+        assert runner._execution_contract is not None
         create_session.assert_awaited_once_with(
             execution_id="exec_prepared",
             seed_id=sample_seed.metadata.seed_id,
@@ -579,6 +580,7 @@ class TestOrchestratorRunner:
             # Backend is forwarded so the live dashboard can provider-tag the run.
             runtime_backend=runner._adapter.runtime_backend,
             llm_backend=runner._adapter.llm_backend,
+            execution_contract=runner._execution_contract,
         )
 
     @pytest.mark.asyncio
@@ -610,9 +612,14 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         assert "initial session contract" in result.error.message
+        assert runner._execution_contract is not None
         track_progress.assert_awaited_once_with(
             "orch_prepared",
-            {"fat_harness_mode": False, "messages_processed": 0},
+            {
+                "fat_harness_mode": False,
+                "messages_processed": 0,
+                "execution_contract": runner._execution_contract,
+            },
         )
         mark_failed.assert_awaited_once_with(
             "orch_prepared",
@@ -2035,7 +2042,7 @@ class TestOrchestratorRunner:
         from ouroboros.core.types import Result
 
         runtime_handle = RuntimeHandle(
-            backend="claude",
+            backend=mock_adapter.runtime_backend,
             native_session_id="sess_runtime",
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
@@ -2109,7 +2116,7 @@ class TestOrchestratorRunner:
 
         runtime = OpenCodeRuntime(  # type: ignore[name-defined]  # noqa: F821
             cli_path="/tmp/opencode",
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             cwd=tmp_path,
         )
         runner = OrchestratorRunner(runtime, mock_event_store, mock_console)
@@ -2789,7 +2796,7 @@ class TestOrchestratorRunner:
         assert result.is_ok
         mock_create_llm_adapter.assert_called_once_with(
             backend="opencode",
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
@@ -2827,7 +2834,7 @@ class TestOrchestratorRunner:
         assert analyzer is dependency_analyzer_cls.return_value
         mock_create_llm_adapter.assert_called_once_with(
             backend="codex",
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             cli_path="/tmp/real-codex",
             cwd="/tmp/project",
             max_turns=1,
@@ -2864,7 +2871,7 @@ class TestOrchestratorRunner:
         # llm_backend="codex" takes precedence over runtime_backend="opencode"
         mock_create_llm_adapter.assert_called_once_with(
             backend="codex",
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
@@ -2900,7 +2907,7 @@ class TestOrchestratorRunner:
         assert analyzer is dependency_analyzer_cls.return_value
         mock_create_llm_adapter.assert_called_once_with(
             backend="opencode",
-            permission_mode="acceptEdits",
+            permission_mode="bypassPermissions",
             cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
@@ -3205,7 +3212,10 @@ class TestOrchestratorRunner:
             )
 
         assert result.is_ok
-        assert captured_init["inherited_runtime_handle"] == inherited_handle
+        inherited_runtime_handle = captured_init["inherited_runtime_handle"]
+        assert inherited_runtime_handle.native_session_id == inherited_handle.native_session_id
+        assert inherited_runtime_handle.metadata == inherited_handle.metadata
+        assert inherited_runtime_handle.approval_mode == "bypassPermissions"
         assert captured_execute["tools"] == ["Read", "mcp__chrome-devtools__click"]
 
     @pytest.mark.asyncio

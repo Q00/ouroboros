@@ -25,16 +25,19 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import os
 from pathlib import Path
+import subprocess
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
-from ouroboros.orchestrator import shadow_replay as sr_module
+from ouroboros.core.seed import AcceptanceCriterionSpec
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.frugality_proof import (
+    EVENT_AC_OUTCOME_FINALIZED,
     EVENT_SHADOW_REPLAY,
     ProofStatus,
     assemble_triads,
@@ -42,7 +45,10 @@ from ouroboros.orchestrator.frugality_proof import (
 )
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.orchestrator.shadow_replay import (
+    STRICT_EXTERNAL_EFFECT_ISOLATION,
+    STRICT_FILESYSTEM_ISOLATION,
     isolated_workspace,
     run_shadow_replay,
     shadow_replay_enabled_from_env,
@@ -95,6 +101,60 @@ def _usage_result(usage: dict | None) -> AgentMessage:
     return AgentMessage(type="result", content="[TASK_COMPLETE]", data=data)
 
 
+def _verified_usage_messages(usage: dict | None) -> list[AgentMessage]:
+    """A profile-valid mutation + test transcript ending in measured evidence."""
+    return [
+        AgentMessage(
+            type="tool",
+            content="edit state.txt",
+            tool_name="Edit",
+            data={
+                "tool_call_id": "edit_state",
+                "tool_input": {"file_path": "state.txt"},
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="updated state.txt",
+            data={
+                "subtype": "tool_result",
+                "tool_call_id": "edit_state",
+                "is_error": False,
+            },
+        ),
+        AgentMessage(
+            type="tool",
+            content="run pytest",
+            tool_name="Bash",
+            data={
+                "tool_call_id": "test_state",
+                "tool_input": {"command": "pytest"},
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="1 passed in 0.01s",
+            data={
+                "subtype": "tool_result",
+                "tool_call_id": "test_state",
+                "exit_code": 0,
+                "output": "1 passed in 0.01s",
+            },
+        ),
+        AgentMessage(
+            type="result",
+            content=(
+                '```json\n{"files_touched":["state.txt"],'
+                '"commands_run":["pytest"],"tests_passed":["pytest"]}\n```'
+            ),
+            data={
+                "subtype": "success",
+                **({"usage": usage} if usage is not None else {}),
+            },
+        ),
+    ]
+
+
 class _FakeBaselineRuntime:
     """A throwaway baseline runtime the mocked factory returns.
 
@@ -102,12 +162,41 @@ class _FakeBaselineRuntime:
     at the parent tier + isolated cwd, and yields a scripted usage stream.
     """
 
-    def __init__(self, *, backend, model, cwd, messages: list[AgentMessage]) -> None:
+    def __init__(
+        self,
+        *,
+        backend,
+        model,
+        cwd,
+        messages: list[AgentMessage],
+        permission_mode=None,
+        llm_backend=None,
+        execute_error: Exception | None = None,
+        close_error: Exception | None = None,
+        strict_isolation: bool = True,
+        external_effect_isolation: bool = True,
+    ) -> None:
         self.backend = backend
         self.model = model
         self.cwd = cwd
+        self.permission_mode = permission_mode
+        self.llm_backend = llm_backend
         self.cwd_existed_at_build = bool(cwd) and os.path.isdir(cwd)
         self._messages = messages
+        self._execute_error = execute_error
+        self._close_error = close_error
+        self.closed = False
+        self.execute_calls = 0
+        self.shadow_replay_filesystem_isolation = (
+            STRICT_FILESYSTEM_ISOLATION if strict_isolation else None
+        )
+        self.shadow_replay_external_effect_isolation = (
+            STRICT_EXTERNAL_EFFECT_ISOLATION if external_effect_isolation else None
+        )
+
+    @property
+    def working_directory(self) -> str | None:
+        return self.cwd
 
     async def execute_task(
         self,
@@ -118,15 +207,26 @@ class _FakeBaselineRuntime:
         resume_session_id: str | None = None,
         **kwargs,
     ):
+        self.execute_calls += 1
+        self.received_prompt = prompt
         self.received_resume_handle = resume_handle
+        if self._execute_error is not None:
+            raise self._execute_error
         for message in self._messages:
             yield message
+
+    async def aclose(self) -> None:
+        self.closed = True
+        if self._close_error is not None:
+            raise self._close_error
 
 
 def _executor_with_router(*, task_cwd: str, store: AsyncMock) -> ParallelACExecutor:
     adapter = MagicMock()
     adapter.runtime_backend = "claude"
     adapter.working_directory = task_cwd
+    adapter.permission_mode = "bypassPermissions"
+    adapter.llm_backend = "claude_code"
     return ParallelACExecutor(
         adapter=adapter,
         event_store=store,
@@ -134,6 +234,8 @@ def _executor_with_router(*, task_cwd: str, store: AsyncMock) -> ParallelACExecu
         enable_decomposition=False,
         model_router=_claude_router(),
         task_cwd=task_cwd,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
     )
 
 
@@ -157,6 +259,7 @@ class _EmitterHarness:
 
     def __init__(self) -> None:
         self.events: list = []
+        self._finalized_roots: set[tuple[str, int]] = set()
 
         async def _safe_emit(event) -> bool:
             self.events.append(event)
@@ -192,6 +295,18 @@ class _EmitterHarness:
             effort_level="high",
             effort_mode=effort_mode,
             base_reasoning_effort="high",
+            runtime_backend="claude",
+        )
+        await self.emitter.emit_model_routed(
+            runtime_identity=identity,
+            execution_id=run_id,
+            session_id=session_id,
+            ac_index=1,
+            is_sub_ac=True,
+            model_tier="frugal",
+            model="haiku-x",
+            model_mode="enforced",
+            retry_attempt=0,
             runtime_backend="claude",
         )
         await self.emitter.emit_token_attribution(
@@ -232,6 +347,23 @@ class _EmitterHarness:
             baseline_tier="standard",
             decomposition_trustworthy=trustworthy,
         )
+        root_key = (run_id, 0)
+        if root_key not in self._finalized_roots:
+            self._finalized_roots.add(root_key)
+            self.events.append(
+                BaseEvent(
+                    type=EVENT_AC_OUTCOME_FINALIZED,
+                    aggregate_type="execution",
+                    aggregate_id=run_id,
+                    data={
+                        "execution_id": run_id,
+                        "root_ac_index": 0,
+                        "retry_attempt": 0,
+                        "success": True,
+                        "is_decomposed": True,
+                    },
+                )
+            )
 
 
 class TestProofContractClosesWithBaseline:
@@ -297,7 +429,7 @@ class TestProofContractClosesWithBaseline:
 
     @pytest.mark.asyncio
     async def test_deliver_verdict_without_regression_omits_key(self) -> None:
-        # The live path leaves grounding_regression None → the key is ABSENT, so
+        # A caller with no deterministic regression policy leaves it unset →
         # the proof honestly excludes the row (has_all_axes needs the flag set).
         harness = _EmitterHarness()
         await harness.emitter.emit_deliver_verdict(
@@ -319,20 +451,21 @@ class TestShadowReplayHarness:
     async def test_baseline_runs_at_parent_tier_in_isolated_cwd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A real task cwd with content; force the copytree isolation branch.
+        # A real task cwd with content; snapshot it before invoking the replay.
         (tmp_path / "src.py").write_text("print('hi')\n")
         (tmp_path / "node_modules").mkdir()
         (tmp_path / "node_modules" / "junk.js").write_text("x")
-        monkeypatch.setattr(sr_module, "is_git_repo", lambda _cwd: False)
 
         built: list[_FakeBaselineRuntime] = []
 
-        def _fake_factory(*, backend, model, cwd):
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
             runtime = _FakeBaselineRuntime(
                 backend=backend,
                 model=model,
                 cwd=cwd,
-                messages=[_usage_result({"input_tokens": 80, "output_tokens": 20})],
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 80, "output_tokens": 20}),
             )
             # Capture whether the isolated copy actually exists (and excludes junk)
             # at the moment the baseline runtime is constructed.
@@ -348,30 +481,37 @@ class TestShadowReplayHarness:
         store, events = _capturing_event_store()
         executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
 
-        await run_shadow_replay(
-            executor,
-            runtime_identity=_identity(),
-            execution_id="exec_frugal",
-            session_id="sess",
-            ac_index=1,
-            is_sub_ac=True,
-            prompt="do the thing",
-            system_prompt="system",
-            tools=["Read"],
-            decomposition_trustworthy=True,
-        )
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="do the thing",
+                system_prompt="system",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
 
         assert len(built) == 1
         baseline = built[0]
         # Built at the PARENT tier (standard → sonnet-x), same backend.
         assert baseline.model == "sonnet-x"
         assert baseline.backend == "claude"
+        assert baseline.permission_mode == "bypassPermissions"
+        assert baseline.llm_backend == "claude_code"
         # Ran against the ISOLATED copy (not the live cwd), which held the source
         # but excluded node_modules, and was a fresh session.
         assert baseline.cwd != str(tmp_path)
         assert baseline.isolated_has_src is True
         assert baseline.isolated_has_node_modules is False
         assert baseline.received_resume_handle is None
+        assert baseline.closed is True
         # The isolated copy is cleaned up after the replay.
         assert not os.path.exists(baseline.cwd)
 
@@ -387,16 +527,214 @@ class TestShadowReplayHarness:
         assert data["is_decomposed_child"] is True
 
     @pytest.mark.asyncio
+    async def test_runtime_without_strict_isolation_contract_is_never_executed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 90, "output_tokens": 10}),
+                strict_isolation=False,
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt=f"Edit {tmp_path / 'live.txt'}",
+                system_prompt="system",
+                tools=["Edit", "Bash"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert built[0].execute_calls == 0
+        assert built[0].closed is True
+        assert _shadow_events(events) == []
+
+    @pytest.mark.asyncio
+    async def test_runtime_without_external_effect_isolation_is_never_executed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 90, "output_tokens": 10}),
+                external_effect_isolation=False,
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="Post a deployment notification",
+                system_prompt="system",
+                tools=["mcp__slack__send_message"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert built[0].execute_calls == 0
+        assert built[0].closed is True
+        assert _shadow_events(events) == []
+
+    @pytest.mark.asyncio
+    async def test_semantic_failure_with_success_subtype_and_usage_emits_no_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=[
+                    AgentMessage(
+                        type="result",
+                        content="I could not complete the task; dependencies are missing",
+                        data={
+                            "subtype": "success",
+                            "usage": {"input_tokens": 100_000},
+                        },
+                    )
+                ],
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="implement",
+                system_prompt="system",
+                tools=["Edit", "Bash"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert built[0].execute_calls == 1
+        assert _shadow_events(events) == []
+
+    @pytest.mark.asyncio
+    async def test_verify_command_is_never_run_outside_runtime_sandbox(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outside_marker = tmp_path / "host-command-ran.txt"
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            return _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 90, "output_tokens": 10}),
+            )
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="implement",
+                system_prompt="system",
+                tools=["Edit", "Bash"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                ac_spec=AcceptanceCriterionSpec(
+                    description="Implement a thing",
+                    verify_command=f"touch {outside_marker}",
+                ),
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert not outside_marker.exists()
+        assert _shadow_events(events) == []
+
+    @pytest.mark.asyncio
     async def test_usage_less_baseline_emits_no_event(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(sr_module, "is_git_repo", lambda _cwd: False)
+        built: list[_FakeBaselineRuntime] = []
 
-        def _fake_factory(*, backend, model, cwd):
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
             # Baseline that reports NO usage telemetry.
-            return _FakeBaselineRuntime(
-                backend=backend, model=model, cwd=cwd, messages=[_usage_result(None)]
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages(None),
             )
+            built.append(runtime)
+            return runtime
 
         monkeypatch.setattr(
             "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
@@ -405,33 +743,310 @@ class TestShadowReplayHarness:
         store, events = _capturing_event_store()
         executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
 
-        await run_shadow_replay(
-            executor,
-            runtime_identity=_identity(),
-            execution_id="exec_frugal",
-            session_id="sess",
-            ac_index=1,
-            is_sub_ac=True,
-            prompt="p",
-            system_prompt="s",
-            tools=["Read"],
-            decomposition_trustworthy=True,
-        )
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="p",
+                system_prompt="s",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
 
         # Missing is missing: no baseline spend measured → no event fabricated.
+        assert _shadow_events(events) == []
+
+    @pytest.mark.asyncio
+    async def test_baseline_respects_live_profile_starting_tier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A profile-pinned frugal parent cannot be replayed as standard."""
+        (tmp_path / "src.py").write_text("print('hi')\n")
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 8, "output_tokens": 2}),
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="do the thing",
+                system_prompt="system",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+                suggested_tier="frugal",
+            )
+
+        assert built[0].model == "haiku-x"
+        shadow = _shadow_events(events)
+        assert len(shadow) == 1
+        assert shadow[0].data["baseline_tier"] == "frugal"
+        assert built[0].closed is True
+
+    @pytest.mark.asyncio
+    async def test_terminal_error_with_usage_emits_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            # A failed baseline can still consume substantial tokens while trying
+            # to recover from missing snapshot dependencies/metadata. That spend
+            # must never inflate the comparison denominator.
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=[
+                    AgentMessage(
+                        type="result",
+                        content="dependency unavailable",
+                        data={
+                            "subtype": "error",
+                            "usage": {"input_tokens": 900, "output_tokens": 100},
+                        },
+                    )
+                ],
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="p",
+                system_prompt="s",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert _shadow_events(events) == []
+        assert built[0].closed is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "messages",
+        [
+            [
+                AgentMessage(
+                    type="assistant",
+                    content="stream ended early",
+                    data={"usage": {"input_tokens": 90, "output_tokens": 10}},
+                )
+            ],
+            [
+                AgentMessage(
+                    type="result",
+                    content="unknown outcome",
+                    data={"usage": {"input_tokens": 90, "output_tokens": 10}},
+                )
+            ],
+            [
+                _usage_result({"input_tokens": 40, "output_tokens": 10}),
+                _usage_result({"input_tokens": 40, "output_tokens": 10}),
+            ],
+            [
+                AgentMessage(
+                    type="result",
+                    content="contradictory outcome",
+                    data={
+                        "subtype": "success",
+                        "is_error": True,
+                        "usage": {"input_tokens": 90, "output_tokens": 10},
+                    },
+                )
+            ],
+        ],
+        ids=["missing-terminal", "missing-status", "multiple-terminals", "contradictory-status"],
+    )
+    async def test_missing_or_ambiguous_terminal_with_usage_emits_no_event(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        messages: list[AgentMessage],
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=messages,
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="p",
+                system_prompt="s",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert _shadow_events(events) == []
+        assert built[0].closed is True
+
+    @pytest.mark.asyncio
+    async def test_runtime_close_failure_does_not_discard_measured_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 7, "output_tokens": 3}),
+                close_error=RuntimeError("close boom"),
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="p",
+                system_prompt="s",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert built[0].closed is True
+        shadow = _shadow_events(events)
+        assert len(shadow) == 1
+        assert shadow[0].data["baseline_token_spend"] == pytest.approx(10)
+
+    @pytest.mark.asyncio
+    async def test_runtime_is_closed_when_baseline_execution_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        built: list[_FakeBaselineRuntime] = []
+
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
+            runtime = _FakeBaselineRuntime(
+                backend=backend,
+                model=model,
+                cwd=cwd,
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=[],
+                execute_error=RuntimeError("baseline boom"),
+            )
+            built.append(runtime)
+            return runtime
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.runtime_factory.create_agent_runtime", _fake_factory
+        )
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="p",
+                system_prompt="s",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        assert built[0].closed is True
         assert _shadow_events(events) == []
 
     @pytest.mark.asyncio
     async def test_isolation_failure_skips_replay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import contextlib
-
-        @contextlib.contextmanager
-        def _failed_isolation(_cwd):
-            yield None
-
-        monkeypatch.setattr(sr_module, "isolated_workspace", _failed_isolation)
         factory = MagicMock()
         monkeypatch.setattr("ouroboros.orchestrator.runtime_factory.create_agent_runtime", factory)
 
@@ -449,6 +1064,8 @@ class TestShadowReplayHarness:
             system_prompt="s",
             tools=["Read"],
             decomposition_trustworthy=True,
+            ac_content="Implement a thing",
+            isolated_cwd=None,
         )
 
         # Never build a runtime, never emit — and above all never run against the
@@ -486,6 +1103,8 @@ class TestShadowReplayHarness:
             system_prompt="s",
             tools=["Read"],
             decomposition_trustworthy=True,
+            ac_content="Implement a thing",
+            isolated_cwd=None,
         )
 
         factory.assert_not_called()
@@ -494,13 +1113,10 @@ class TestShadowReplayHarness:
 
 # -- isolated_workspace primitive --------------------------------------------
 class TestIsolatedWorkspace:
-    def test_copytree_branch_copies_and_cleans(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_copytree_copies_and_cleans(self, tmp_path: Path) -> None:
         (tmp_path / "keep.txt").write_text("data")
         (tmp_path / ".venv").mkdir()
         (tmp_path / ".venv" / "big").write_text("x")
-        monkeypatch.setattr(sr_module, "is_git_repo", lambda _cwd: False)
 
         captured: str | None = None
         with isolated_workspace(str(tmp_path)) as isolated:
@@ -513,43 +1129,80 @@ class TestIsolatedWorkspace:
         assert captured is not None
         assert not os.path.exists(captured)
 
-    def test_git_branch_uses_worktree_add_and_remove(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_git_workspace_preserves_dirty_and_untracked_files_without_git_metadata(
+        self, tmp_path: Path
     ) -> None:
-        monkeypatch.setattr(sr_module, "is_git_repo", lambda _cwd: True)
-        calls: list[list[str]] = []
-
-        def _fake_run(args, **kwargs):
-            calls.append(args)
-            if args[:3] == ["git", "worktree", "add"]:
-                # Simulate a successful worktree checkout by creating the target.
-                Path(args[-1]).mkdir(parents=True, exist_ok=True)
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(sr_module.subprocess, "run", _fake_run)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        tracked = tmp_path / "tracked.txt"
+        tracked.write_text("committed\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Shadow Replay Test",
+                "-c",
+                "user.email=shadow@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+        tracked.write_text("dirty working tree\n")
+        (tmp_path / "untracked.txt").write_text("untracked input\n")
 
         with isolated_workspace(str(tmp_path)) as isolated:
             assert isolated is not None
+            snapshot = Path(isolated)
+            assert (snapshot / "tracked.txt").read_text() == "dirty working tree\n"
+            assert (snapshot / "untracked.txt").read_text() == "untracked input\n"
+            # Safety boundary: no shared/copied repository metadata. Git-dependent
+            # prompts are an explicit limitation of this experiment harness.
+            assert not (snapshot / ".git").exists()
+            probe = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=snapshot,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert probe.returncode != 0
 
-        add_calls = [c for c in calls if c[:3] == ["git", "worktree", "add"]]
-        remove_calls = [c for c in calls if c[:3] == ["git", "worktree", "remove"]]
-        assert len(add_calls) == 1
-        assert "--detach" in add_calls[0]
-        assert len(remove_calls) == 1
-        assert "--force" in remove_calls[0]
-
-    def test_git_add_failure_yields_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(sr_module, "is_git_repo", lambda _cwd: True)
-
-        def _fake_run(args, **kwargs):
-            return MagicMock(returncode=1, stdout="", stderr="fatal: boom")
-
-        monkeypatch.setattr(sr_module.subprocess, "run", _fake_run)
+    def test_snapshot_is_frozen_at_context_entry(self, tmp_path: Path) -> None:
+        state = tmp_path / "state.txt"
+        state.write_text("before\n")
 
         with isolated_workspace(str(tmp_path)) as isolated:
-            # Isolation could not be established → caller must skip.
+            assert isolated is not None
+            state.write_text("after\n")
+            (tmp_path / "created-after-snapshot.txt").write_text("late\n")
+            snapshot = Path(isolated)
+            assert (snapshot / "state.txt").read_text() == "before\n"
+            assert not (snapshot / "created-after-snapshot.txt").exists()
+
+    def test_body_exception_propagates_and_snapshot_is_cleaned(self, tmp_path: Path) -> None:
+        captured: str | None = None
+
+        with pytest.raises(RuntimeError, match="body boom"):
+            with isolated_workspace(str(tmp_path)) as isolated:
+                assert isolated is not None
+                captured = isolated
+                raise RuntimeError("body boom")
+
+        assert captured is not None
+        assert not Path(captured).exists()
+
+    def test_escaping_symlink_rejects_snapshot(self, tmp_path: Path) -> None:
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+        outside.write_text("live data\n")
+        try:
+            (tmp_path / "escape").symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+
+        with isolated_workspace(str(tmp_path)) as isolated:
             assert isolated is None
 
 
@@ -571,8 +1224,16 @@ class TestEnvFlag:
 class _ScriptedRuntime:
     """Advised runtime yielding a scripted success stream (the live child)."""
 
-    def __init__(self, messages: list[AgentMessage]) -> None:
+    def __init__(
+        self,
+        messages: list[AgentMessage],
+        *,
+        working_directory: str = "/tmp/project",
+        on_execute=None,
+    ) -> None:
         self._messages = messages
+        self._working_directory = working_directory
+        self._on_execute = on_execute
 
     @property
     def runtime_backend(self) -> str:
@@ -580,11 +1241,15 @@ class _ScriptedRuntime:
 
     @property
     def working_directory(self) -> str | None:
-        return "/tmp/project"
+        return self._working_directory
 
     @property
     def permission_mode(self) -> str | None:
         return "acceptEdits"
+
+    @property
+    def llm_backend(self) -> str | None:
+        return "claude_code"
 
     async def execute_task(
         self,
@@ -594,6 +1259,8 @@ class _ScriptedRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ):
+        if self._on_execute is not None:
+            self._on_execute()
         for message in self._messages:
             yield replace(message, resume_handle=resume_handle)
 
@@ -640,19 +1307,23 @@ class TestExecutorWiring:
         assert _shadow_events(events) == []
 
     @pytest.mark.asyncio
-    async def test_flag_on_replays_successful_child(
+    async def test_flag_on_skips_child_without_decomposition_attestation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(sr_module, "is_git_repo", lambda _cwd: False)
+        state = tmp_path / "state.txt"
+        state.write_text("before live child\n")
         built: list[_FakeBaselineRuntime] = []
 
-        def _fake_factory(*, backend, model, cwd):
+        def _fake_factory(*, backend, permission_mode, model, cwd, llm_backend):
             runtime = _FakeBaselineRuntime(
                 backend=backend,
                 model=model,
                 cwd=cwd,
-                messages=[_usage_result({"input_tokens": 90, "output_tokens": 10})],
+                permission_mode=permission_mode,
+                llm_backend=llm_backend,
+                messages=_verified_usage_messages({"input_tokens": 90, "output_tokens": 10}),
             )
+            runtime.snapshot_state = (Path(cwd) / "state.txt").read_text()
             built.append(runtime)
             return runtime
 
@@ -661,7 +1332,11 @@ class TestExecutorWiring:
         )
 
         store, events = _capturing_event_store()
-        runtime = _ScriptedRuntime([_usage_result({"input_tokens": 10, "output_tokens": 2})])
+        runtime = _ScriptedRuntime(
+            _verified_usage_messages({"input_tokens": 10, "output_tokens": 2}),
+            working_directory=str(tmp_path),
+            on_execute=lambda: state.write_text("after live child\n"),
+        )
         executor = ParallelACExecutor(
             adapter=runtime,
             event_store=store,
@@ -670,15 +1345,15 @@ class TestExecutorWiring:
             model_router=_claude_router(),
             task_cwd=str(tmp_path),
             shadow_replay_enabled=True,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
         )
 
         result = await _run_child_leaf(executor)
 
         assert result.success is True
-        # Flag on → the successful decomposed child is replayed once at the parent
-        # tier, emitting a baseline event.
-        assert len(built) == 1
-        assert built[0].model == "sonnet-x"
-        shadow = _shadow_events(events)
-        assert len(shadow) == 1
-        assert shadow[0].data["baseline_token_spend"] == pytest.approx(100)
+        # The live decomposer has no deterministic MECE attestation yet, so
+        # opt-in shadow mode skips before spending any baseline tokens.
+        assert built == []
+        assert state.read_text() == "after live child\n"
+        assert _shadow_events(events) == []

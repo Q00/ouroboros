@@ -13,6 +13,8 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.model_routing import ModelRouter
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -145,6 +147,55 @@ async def test_apply_verify_gate_flips_success_to_failed(tmp_path: Any) -> None:
     assert "Verify gate failed" in (gated.error or "")
     assert gated.atomic_verifier_verdict is not None
     assert gated.atomic_verifier_verdict.failure_class == "EVIDENCE_MISSING"
+
+
+@pytest.mark.asyncio
+async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: Any) -> None:
+    """Provisional leaf proof events cannot outlive a seed-level rejection."""
+    executor = _make_executor(working_directory=str(tmp_path), ac_retry_attempts=0)
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 1"))
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                retry_attempt=0,
+                is_decomposed=True,
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    results = await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].success is False
+    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
+    markers = [event for event in emitted if event.type == "execution.ac.outcome_finalized"]
+    assert len(markers) == 1
+    assert markers[0].data == {
+        "execution_id": "e",
+        "session_id": "s",
+        "root_ac_index": 0,
+        "ac_index": 0,
+        "retry_attempt": 0,
+        "success": False,
+        "outcome": "failed",
+        "is_decomposed": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -369,6 +420,61 @@ async def test_retry_early_stop_on_identical_failure_class(tmp_path: Any) -> Non
     # early rather than burning the last attempt (2 dispatches, not 3).
     assert calls == [[0], [0]]
     assert ac_retry_attempts[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_reaches_pending_native_model_escalation(tmp_path: Any) -> None:
+    adapter = _StubAdapter(str(tmp_path))
+    adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        model_override_support=ParamSupport.NATIVE,
+    )
+    executor = ParallelACExecutor(
+        adapter=adapter,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=False,
+        ac_retry_attempts=2,
+        model_router=ModelRouter(
+            tier_models={
+                "frugal": "haiku-x",
+                "standard": "sonnet-x",
+                "frontier": "opus-x",
+            },
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=2,
+        ),
+    )
+    seed = _seed_with_specs("ac")
+    ac_retry_attempts = {0: 0}
+    calls: list[list[int]] = []
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        calls.append(list(kwargs["batch_indices"]))
+        return [_fail(0, "EVIDENCE_MISSING")]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts=ac_retry_attempts,
+        execution_counters=None,
+    )
+
+    assert calls == [[0], [0], [0]]
+    assert ac_retry_attempts[0] == 2
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -48,6 +48,8 @@ class WorkerTurn:
         error: Human-readable error message when ``is_error``.
         tool_events: Optional ordered (tool_name, detail) pairs observed during
             the turn, surfaced as ``assistant`` messages for TUI/telemetry.
+        usage: Optional provider-reported token counters for attribution. Values
+            remain raw here and are validated by the proof producer before use.
     """
 
     text: str
@@ -55,6 +57,7 @@ class WorkerTurn:
     is_error: bool = False
     error: str | None = None
     tool_events: tuple[tuple[str, str], ...] = ()
+    usage: dict[str, Any] | None = None
 
 
 class LeaderDrivenWorkerTransport(Protocol):
@@ -96,8 +99,15 @@ class LeaderDrivenWorkerTransport(Protocol):
         """
         ...
 
-    async def resume(self, *, session_id: str, prompt: str) -> WorkerTurn:
-        """Continue an EXISTING worker session identified by ``session_id``."""
+    async def resume(
+        self,
+        *,
+        session_id: str,
+        prompt: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> WorkerTurn:
+        """Continue an existing worker, applying supported per-turn controls."""
         ...
 
 
@@ -202,11 +212,11 @@ class LeaderDrivenWorkerRuntime:
         enforced — native passthrough lets the worker use whatever its provider
         natively exposes.
 
-        ``model`` is a per-call model-tier override; when set it WINS over the
-        constructor pin (``self._model``) for a fresh spawn, when ``None`` (the
-        default) the constructor model is used, so existing callers are unchanged.
-        It only reaches a NEW session — a resumed worker keeps the model its
-        session was created with (there is no per-turn re-target on resume).
+        ``model`` is a per-call model-tier override; when set it wins over the
+        constructor pin (``self._model``), while ``None`` falls back to that pin.
+        The effective model and ``reasoning_effort`` are forwarded on both spawn
+        and resume. Each transport applies only controls it can enforce and must
+        advertise that truth through its runtime capabilities.
         """
         # A handle carrying ``fork_session`` is the HOST session delegated by the
         # parent (its native_session_id is the human's LIVE conversation). It is a
@@ -225,7 +235,12 @@ class LeaderDrivenWorkerRuntime:
 
         try:
             if prior_session_id:
-                turn = await self._transport.resume(session_id=prior_session_id, prompt=prompt)
+                turn = await self._transport.resume(
+                    session_id=prior_session_id,
+                    prompt=prompt,
+                    model=model or self._model,
+                    reasoning_effort=reasoning_effort,
+                )
             else:
                 turn = await self._transport.spawn(
                     prompt=prompt,
@@ -277,6 +292,7 @@ class LeaderDrivenWorkerRuntime:
                 "subtype": "error" if turn.is_error else "success",
                 "session_id": turn.session_id,
                 **({"error": turn.error} if turn.error else {}),
+                **({"usage": turn.usage} if turn.usage is not None else {}),
             },
             resume_handle=handle,
         )

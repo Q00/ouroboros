@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -37,6 +38,69 @@ if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore, SessionActivitySnapshot
 
 log = get_logger(__name__)
+
+
+# Reconstruction-only metadata copied from the authoritative session start
+# event.  It intentionally lives in ``SessionTracker.progress`` rather than a
+# new persisted progress row: resume validation needs the original seed/runtime
+# identity even for legacy sessions, while later progress events must never be
+# able to overwrite that identity.
+SESSION_START_IDENTITY_PROGRESS_KEY = "_session_start_identity"
+SESSION_RUNTIME_IDENTITY_PROGRESS_KEY = "_session_runtime_identity"
+
+_STABLE_RUNTIME_RESUME_BACKENDS: dict[str, str] = {
+    "codex": "codex_cli",
+    "codex_cli": "codex_cli",
+    "goose": "goose",
+    "pi": "pi",
+    "hermes": "hermes_cli",
+    "hermes_cli": "hermes_cli",
+    "opencode": "opencode",
+}
+
+
+def runtime_resume_identity_from_payload(value: object) -> dict[str, str] | None:
+    """Extract a stable resume id for runtimes without intentional ID rebinding.
+
+    Claude can intentionally fork to a new child session during recovery, so a
+    generic forever-first-id rule would reject legitimate lineage transitions.
+    Codex, Goose, Pi, Hermes, and direct OpenCode sessions have no such transition:
+    once their stable id is observed, a different id in progress is corruption
+    and must fail closed.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    backend = value.get("backend")
+    normalized_backend = (
+        _STABLE_RUNTIME_RESUME_BACKENDS.get(backend.strip().lower())
+        if isinstance(backend, str)
+        else None
+    )
+    if normalized_backend is None:
+        return None
+    metadata = value.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    candidates = (
+        ("native_session_id", value.get("native_session_id")),
+        ("conversation_id", value.get("conversation_id")),
+        ("server_session_id", metadata.get("server_session_id")),
+    )
+    selected_kind: str | None = None
+    selected_id: str | None = None
+    for kind, candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            selected_kind = kind
+            selected_id = candidate.strip()
+            break
+    if selected_kind is None or selected_id is None:
+        return None
+    return {
+        "status": "bound",
+        "backend": normalized_backend,
+        "id_kind": selected_kind,
+        "id": selected_id,
+    }
+
 
 _PARALLEL_ACTIVITY_EVENT_TYPES = frozenset(
     {
@@ -578,6 +642,7 @@ class SessionRepository:
         seed_goal: str | None = None,
         runtime_backend: str | None = None,
         llm_backend: str | None = None,
+        execution_contract: Mapping[str, Any] | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -590,6 +655,9 @@ class SessionRepository:
                 so observers (the live dashboard) can tag the run's provider even for
                 simple, non-decomposed runs that emit no per-worker session events.
             llm_backend: Resolved LLM backend, persisted alongside for the same reason.
+            execution_contract: Resolved immutable run inputs needed for safe
+                resume and proof-cohort attribution. The same payload is also
+                written to the initial progress checkpoint by the runner.
 
         Returns:
             Result containing new SessionTracker.
@@ -607,6 +675,10 @@ class SessionRepository:
             event_data["runtime_backend"] = runtime_backend
         if llm_backend:
             event_data["llm_backend"] = llm_backend
+        if execution_contract is not None:
+            event_data["execution_contract"] = sanitize_event_data_for_persistence(
+                dict(execution_contract)
+            )
 
         event = BaseEvent(
             type="orchestrator.session.started",
@@ -954,8 +1026,53 @@ class SessionRepository:
 
             # Replay subsequent events
             messages_processed = 0
-            last_progress: dict[str, Any] = {}
+            start_identity = {
+                key: sanitize_event_data_for_persistence(start_event.data[key])
+                for key in (
+                    "execution_id",
+                    "seed_id",
+                    "seed_goal",
+                    "runtime_backend",
+                    "llm_backend",
+                )
+                if key in start_event.data
+            }
+            last_progress: dict[str, Any] = {
+                SESSION_START_IDENTITY_PROGRESS_KEY: start_identity,
+            }
+            if "execution_contract" in start_event.data:
+                start_execution_contract = start_event.data.get("execution_contract")
+                # The start event is the durable fallback for the immutable run
+                # contract. A later progress event normally repeats it and may
+                # overwrite this copy, but losing that progress row must never make
+                # a new-format session look legacy and silently recompute routing.
+                # Preserve malformed-present values too: the runner distinguishes
+                # a missing legacy key from a corrupt current-format contract and
+                # must fail closed on the latter.
+                last_progress["execution_contract"] = (
+                    dict(start_execution_contract)
+                    if isinstance(start_execution_contract, Mapping)
+                    else start_execution_contract
+                )
+            runtime_identity: dict[str, Any] | None = None
             explicit_terminal_status: SessionStatus | None = None
+
+            def observe_runtime_identity(progress_payload: Mapping[str, Any]) -> None:
+                nonlocal runtime_identity
+                observed = runtime_resume_identity_from_payload(progress_payload.get("runtime"))
+                if observed is None:
+                    return
+                if runtime_identity is None:
+                    runtime_identity = dict(observed)
+                    return
+                if runtime_identity.get("status") == "conflict":
+                    return
+                if runtime_identity != observed:
+                    runtime_identity = {
+                        "status": "conflict",
+                        "first": dict(runtime_identity),
+                        "later": dict(observed),
+                    }
 
             for event in all_events:
                 if event.type == "orchestrator.progress.updated":
@@ -963,6 +1080,7 @@ class SessionRepository:
                     if not isinstance(progress_update, dict):
                         continue
                     progress_update = self._normalize_progress_payload(progress_update)
+                    observe_runtime_identity(progress_update)
                     last_progress = self._merge_progress_payloads(last_progress, progress_update)
                     persisted_messages = progress_update.get("messages_processed")
                     if isinstance(persisted_messages, int):
@@ -974,6 +1092,7 @@ class SessionRepository:
                         self._workflow_progress_from_event(event.data),
                     )
                     if workflow_progress:
+                        observe_runtime_identity(workflow_progress)
                         last_progress = self._merge_progress_payloads(
                             last_progress,
                             workflow_progress,
@@ -1010,6 +1129,16 @@ class SessionRepository:
                         "orchestrator.session.paused",
                     }:
                         explicit_terminal_status = status_update
+
+            # This snapshot is derived from the authoritative start event, not
+            # from mutable progress. Re-assert it after replay so even a corrupt
+            # or colliding progress key cannot rewrite the identity used by
+            # legacy contract migration.
+            last_progress[SESSION_START_IDENTITY_PROGRESS_KEY] = start_identity
+            if runtime_identity is None:
+                last_progress.pop(SESSION_RUNTIME_IDENTITY_PROGRESS_KEY, None)
+            else:
+                last_progress[SESSION_RUNTIME_IDENTITY_PROGRESS_KEY] = runtime_identity
 
             # Sanitize stale runtime metadata when an explicit lifecycle event
             # provides the authoritative session state. Progress events captured

@@ -24,7 +24,9 @@ from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+import hashlib
 import inspect
+import json
 import math
 import os
 from pathlib import Path
@@ -53,6 +55,7 @@ from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
     AgentMessage,
     AgentRuntime,
+    ParamSupport,
     RuntimeHandle,
 )
 from ouroboros.orchestrator.backend_limits import (
@@ -110,7 +113,14 @@ from ouroboros.orchestrator.runtime_message_projection import (
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+from ouroboros.orchestrator.session import (
+    SESSION_RUNTIME_IDENTITY_PROGRESS_KEY,
+    SESSION_START_IDENTITY_PROGRESS_KEY,
+    SessionRepository,
+    SessionStatus,
+    SessionTracker,
+    runtime_resume_identity_from_payload,
+)
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
@@ -457,6 +467,17 @@ SESSION_PROGRESS_PERSIST_INTERVAL = 10
 # Cancellation check interval (every N messages)
 CANCELLATION_CHECK_INTERVAL = 5
 
+# Frugality proof is a multi-run experiment, but its run-end consumer must not
+# scan or mix the whole event database. Session-start events provide the stable
+# seed_id -> execution_id ownership map; inspect a bounded recent window and at
+# most this many same-seed executions.
+FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
+FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
+EXECUTION_CONTRACT_VERSION = 1
+FRUGALITY_PROOF_PROTOCOL_VERSION = 1
+EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
+FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
+
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _DURATION_PATTERN = re.compile(
     r"\b(?P<value>\d+(?:\.\d+)?)\s*"
@@ -574,6 +595,7 @@ class OrchestratorRunner:
                 nothing so routing derives its own base tier.
         """
         self._adapter = adapter
+        self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
         self._event_store = event_store
         self._checkpoint_store = checkpoint_store
         self._console = console or Console()
@@ -582,7 +604,9 @@ class OrchestratorRunner:
         self._mcp_tool_prefix = mcp_tool_prefix
         self._debug = debug
         self._enable_decomposition = enable_decomposition
-        self._inherited_runtime_handle = inherited_runtime_handle
+        self._inherited_runtime_handle = self._force_runtime_handle_permission(
+            inherited_runtime_handle
+        )
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
         self._task_cwd = task_cwd
         self._task_workspace = task_workspace
@@ -600,38 +624,62 @@ class OrchestratorRunner:
         # Global escape hatch: routing is on by default, so honor an explicit kill
         # switch (a custom-proxy codex user may need to disable it entirely).
         self._model_router: ModelRouter | None = None
-        _model_routing_disabled = os.environ.get(
-            "OUROBOROS_MODEL_TIER_ROUTING", ""
-        ).strip().lower() in {"0", "off", "false"}
+        _model_routing_env = os.environ.get("OUROBOROS_MODEL_TIER_ROUTING")
+        _model_routing_disabled = (_model_routing_env or "").strip().lower() in {
+            "0",
+            "off",
+            "false",
+        }
         # An explicit user model pin disables routing (routing must never override
         # it). The DEFAULT sonnet pin that execution_handlers/run.py pass to
         # create_agent_runtime is a SHIPPED default, not a user pin — only the env
         # var counts here.
-        _model_pin = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-        _model_pin = _model_pin.strip() or None if _model_pin else None
-        # Verify-by-default execution knobs (PR-V). Read once from config with a
-        # safe fallback so direct/test construction never fails on config IO.
+        _model_pin_env = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+        _model_pin = _model_pin_env.strip() or None if _model_pin_env else None
+        # Resume normally restores the run's persisted resolved router. These are
+        # the existing user-facing controls that explicitly request a different
+        # contract for this invocation, so only they may replace it.
+        self._model_routing_override_explicit = bool(
+            base_model_tier is not None
+            or _model_pin is not None
+            or (_model_routing_env is not None and _model_routing_env.strip())
+        )
+        # Verify-by-default execution knobs (PR-V). Start from the shipped config
+        # so direct/test construction in a fresh HOME still gets the real defaults
+        # (including the model-tier ladder), then replace it with the user's config
+        # when one exists. A missing/malformed config must not silently disable
+        # routing by leaving ``self._model_router`` at None.
+        from ouroboros.config import get_default_config, load_config
+
+        _shipped_config = get_default_config()
+        _config = _shipped_config
         try:
-            from ouroboros.config import load_config
-
             _config = load_config()
-            _execution_config = _config.execution
-            self._run_verify_commands = _execution_config.run_verify_commands
-            self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
-            self._ac_retry_attempts = _execution_config.ac_retry_attempts
-            if not _model_routing_disabled:
-                from ouroboros.orchestrator.model_routing import build_model_router
-
-                self._model_router = build_model_router(
-                    _config.economics,
-                    runtime_backend=getattr(adapter, "runtime_backend", None),
-                    pinned_model=_model_pin,
-                    base_tier_override=base_model_tier,
-                )
         except Exception:  # pragma: no cover - defensive config fallback
-            self._run_verify_commands = True
-            self._verify_command_timeout_seconds = 600
-            self._ac_retry_attempts = 2
+            pass
+        # A valid partial/older config is materialized as ``tiers={}`` by the
+        # Pydantic default. Treat only that empty mapping as "not configured" so
+        # routing keeps the shipped ladder; any non-empty user ladder remains the
+        # exact source of truth (including intentionally sparse/custom tiers).
+        _economics_config = _config.economics
+        if not _economics_config.tiers:
+            _economics_config = _economics_config.model_copy(
+                update={"tiers": _shipped_config.economics.tiers}
+            )
+        _execution_config = _config.execution
+        self._run_verify_commands = _execution_config.run_verify_commands
+        self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
+        self._ac_retry_attempts = _execution_config.ac_retry_attempts
+        if not _model_routing_disabled:
+            from ouroboros.orchestrator.model_routing import build_model_router
+
+            self._model_router = build_model_router(
+                _economics_config,
+                runtime_backend=getattr(adapter, "runtime_backend", None),
+                pinned_model=_model_pin,
+                base_tier_override=base_model_tier,
+            )
+        self._execution_contract: dict[str, Any] | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
         # Default OFF: replaying every decomposed child at the parent tier doubles
@@ -781,26 +829,35 @@ class OrchestratorRunner:
         return kwargs
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
-        """Run the deterministic frugality proof over this execution's events.
+        """Run the deterministic frugality proof over a bounded same-seed cohort.
 
-        Best-effort, run-end telemetry: it queries the execution's per-AC events,
-        assembles frugality triads, and emits an
+        Best-effort, run-end telemetry: session-start events identify the current
+        execution's ``seed_id`` and the most recent executions of that same seed.
+        It queries only that bounded cohort, assembles frugality triads, and emits an
         ``execution.frugality_proof.evaluated`` event plus one console line with the
-        verdict. The token, effort and (opt-in) shadow-replay baseline axes are
-        now produced, but the grounding axis's ``grounding_regression`` flag is
-        not — the shadow-replay harness cannot compute a baseline deliver verdict
-        offline (see ``shadow_replay`` module docstring), so a counted row is still
-        unreachable and this honestly reports INSUFFICIENT_DATA in production. Any
-        failure degrades to a warning; the proof never fails the run.
+        verdict. This is what makes ``min_runs >= 3`` reachable without mixing a
+        different seed/project's evidence into the proof. When the session-start
+        ownership event is unavailable it safely falls back to the current execution
+        only, which remains insufficient until enough attributable runs exist.
+
+        Grounding uses the live producer's explicit fail-closed policy (accepted
+        child -> no regression; rejected child -> conservative regression), while
+        the shadow replay supplies only the paired token baseline. Any failure
+        degrades to a warning; the proof never fails the run.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.frugality_proof import assemble_triads, evaluate_proof
 
         try:
-            events = await self._event_store.query_execution_related_events(
-                execution_id,
-                limit=None,
-            )
+            seed_id, cohort_execution_ids = await self._frugality_proof_cohort(execution_id)
+            events = []
+            for cohort_execution_id in cohort_execution_ids:
+                events.extend(
+                    await self._event_store.query_execution_related_events(
+                        cohort_execution_id,
+                        limit=None,
+                    )
+                )
             rows = assemble_triads(events)
             verdict = evaluate_proof(rows)
             await self._event_store.append(
@@ -810,6 +867,8 @@ class OrchestratorRunner:
                     aggregate_id=execution_id,
                     data={
                         "execution_id": execution_id,
+                        "seed_id": seed_id,
+                        "cohort_execution_ids": list(cohort_execution_ids),
                         "status": verdict.status.value,
                         "counted_rows": verdict.counted_rows,
                         "runs": verdict.runs,
@@ -827,6 +886,72 @@ class OrchestratorRunner:
                 execution_id=execution_id,
                 error=str(exc),
             )
+
+    async def _frugality_proof_cohort(
+        self,
+        execution_id: str,
+    ) -> tuple[str | None, tuple[str, ...]]:
+        """Return recent executions with the exact same proof protocol identity.
+
+        ``orchestrator.session.started`` is the authoritative ownership record for
+        ``seed_id``, canonical project/workspace, protocol version, and resolved
+        routing fingerprint. EventStore returns newest first, so selected prior
+        runs are the most recent comparable experiment runs. Any missing legacy
+        metadata falls back to current-only rather than mixing a global DB cohort.
+        """
+        query_events = getattr(self._event_store, "query_events", None)
+        if not callable(query_events):
+            return None, (execution_id,)
+
+        session_starts = await query_events(
+            event_type="orchestrator.session.started",
+            limit=FRUGALITY_PROOF_SESSION_LOOKBACK,
+        )
+        if not isinstance(session_starts, (list, tuple)):
+            return None, (execution_id,)
+        current_identity: tuple[str, str, str, int, str, str] | None = None
+        for event in session_starts:
+            data = getattr(event, "data", None)
+            if not isinstance(data, Mapping) or data.get("execution_id") != execution_id:
+                continue
+            current_identity = self._proof_cohort_identity(data)
+            break
+        if current_identity is None:
+            return None, (execution_id,)
+
+        current_seed_id = current_identity[0]
+        # An explicit resume override can intentionally replace the persisted
+        # start contract. That execution now contains mixed regimes, so it must
+        # never borrow prior runs for a proof verdict.
+        if self._execution_contract is not None:
+            active_identity = self._proof_cohort_identity(
+                {
+                    "seed_id": current_seed_id,
+                    EXECUTION_CONTRACT_PROGRESS_KEY: self._execution_contract,
+                }
+            )
+            if active_identity != current_identity:
+                return current_seed_id, (execution_id,)
+
+        cohort: list[str] = [execution_id]
+        seen = {execution_id}
+        for event in session_starts:
+            data = getattr(event, "data", None)
+            if not isinstance(data, Mapping):
+                continue
+            if self._proof_cohort_identity(data) != current_identity:
+                continue
+            candidate = data.get("execution_id")
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            normalized = candidate.strip()
+            if normalized in seen:
+                continue
+            cohort.append(normalized)
+            seen.add(normalized)
+            if len(cohort) >= FRUGALITY_PROOF_MAX_COHORT_RUNS:
+                break
+        return current_seed_id, tuple(cohort)
 
     def _plan_parallel_workers(self) -> int:
         """Return the effective fan-out worker count for the connected backend.
@@ -1036,7 +1161,7 @@ class OrchestratorRunner:
             )
 
         cwd = self._effective_cwd(runtime_handle)
-        approval_mode = self._adapter.permission_mode
+        approval_mode = self._forced_permission_mode
 
         if runtime_handle is not None:
             return replace(
@@ -1050,13 +1175,7 @@ class OrchestratorRunner:
                     if isinstance(cwd, str) and cwd
                     else None
                 ),
-                approval_mode=(
-                    runtime_handle.approval_mode
-                    if runtime_handle.approval_mode
-                    else approval_mode
-                    if isinstance(approval_mode, str) and approval_mode
-                    else None
-                ),
+                approval_mode=approval_mode,
                 updated_at=datetime.now(UTC).isoformat(),
                 metadata=metadata,
             )
@@ -1093,6 +1212,922 @@ class OrchestratorRunner:
         cwd = self._adapter.working_directory
         return cwd if isinstance(cwd, str) and cwd else None
 
+    @staticmethod
+    def _canonical_path(value: str) -> str:
+        """Return a symlink-resolved absolute path without requiring existence."""
+        return str(Path(value).expanduser().resolve(strict=False))
+
+    @classmethod
+    def _task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
+        """Return the stable source identity encoded by a managed workspace."""
+        project_root = cls._canonical_path(workspace.repo_root)
+        original_cwd = cls._canonical_path(workspace.original_cwd)
+        try:
+            relative_workspace = Path(original_cwd).relative_to(project_root)
+            workspace_path = relative_workspace.as_posix() or "."
+        except ValueError:
+            # Corrupted/legacy workspace metadata must not collapse onto a
+            # broad identity. Keep the canonical absolute source cwd instead.
+            workspace_path = original_cwd
+        return {
+            "project_root": project_root,
+            "workspace_path": workspace_path,
+        }
+
+    def _proof_workspace_identity(self) -> dict[str, str] | None:
+        """Return the stable project + source-workspace identity for this run.
+
+        Managed task worktrees have a different checkout path for every session,
+        so cohort identity is anchored to their persisted source repository and
+        source-relative cwd. Non-worktree callers use their canonical effective
+        cwd as a conservative project/workspace identity; this may split cohorts
+        launched from different subdirectories, but can never mix projects.
+        """
+        if self._task_workspace is not None:
+            return self._task_workspace_identity(self._task_workspace)
+
+        effective_cwd = self._effective_cwd()
+        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
+            return None
+        canonical_cwd = self._canonical_path(effective_cwd)
+        return {
+            "project_root": canonical_cwd,
+            "workspace_path": ".",
+        }
+
+    @classmethod
+    def _task_resume_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
+        """Return the exact managed checkout identity required for safe resume."""
+        return {
+            "mode": "task_workspace",
+            "durable_id": workspace.durable_id,
+            "repo_root": cls._canonical_path(workspace.repo_root),
+            "worktree_path": cls._canonical_path(workspace.worktree_path),
+            "effective_cwd": cls._canonical_path(workspace.effective_cwd),
+            "branch": workspace.branch,
+        }
+
+    def _resume_workspace_identity(self) -> dict[str, str] | None:
+        """Return session-specific checkout identity, unlike stable proof cohorting."""
+        if self._task_workspace is not None:
+            return self._task_resume_workspace_identity(self._task_workspace)
+        effective_cwd = self._effective_cwd()
+        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
+            return None
+        return {
+            "mode": "direct",
+            "effective_cwd": self._canonical_path(effective_cwd),
+        }
+
+    @staticmethod
+    def _routing_fingerprint(routing_contract: Mapping[str, Any]) -> str:
+        """Hash a resolved routing contract into a stable cohort key."""
+        encoded = json.dumps(
+            dict(routing_contract),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _seed_semantics_fingerprint(seed: Seed) -> str:
+        """Hash executable Seed semantics while excluding volatile identity fields."""
+        payload = seed.to_dict()
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            for key in ("seed_id", "created_at", "interview_id", "parent_seed_id"):
+                metadata.pop(key, None)
+            payload["metadata"] = metadata
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _constructor_model_contract(self) -> dict[str, Any]:
+        """Return the runtime's normalized constructor-model pin contract.
+
+        Every bundled runtime stores its constructor ``model`` argument in
+        ``_model``. Read it statically so permissive mocks/custom ``__getattr__``
+        implementations cannot fabricate a value, then apply the runtime's own
+        statically declared ``_normalize_model`` hook when one exists. CLI
+        runtimes use sentinels such as ``default`` or ``current`` to mean "no
+        model pin"; persisting those raw strings as concrete pins would let an
+        unpinned, routing-disabled resume bypass the effective-model guard.
+        ``observed=False`` remains a truthful compatibility state for third-party
+        runtimes that expose no constructor model at all; current-format resume
+        then fails closed because the effective pin cannot be verified.
+        """
+        try:
+            raw_model = inspect.getattr_static(self._adapter, "_model")
+        except AttributeError:
+            return {"observed": False}
+        if raw_model is None:
+            return {"observed": True, "model": None}
+        if not isinstance(raw_model, str):
+            return {"observed": False}
+
+        normalized_model: object = raw_model.strip() or None
+        normalizer_descriptor = inspect.getattr_static(
+            type(self._adapter),
+            "_normalize_model",
+            None,
+        )
+        if normalizer_descriptor is not None:
+            try:
+                normalizer = object.__getattribute__(self._adapter, "_normalize_model")
+                normalized_model = normalizer(raw_model)
+            except Exception:
+                return {"observed": False}
+        if normalized_model is None:
+            return {"observed": True, "model": None}
+        if not isinstance(normalized_model, str) or not normalized_model.strip():
+            return {"observed": False}
+        return {"observed": True, "model": normalized_model.strip()}
+
+    @staticmethod
+    def _valid_constructor_model_contract(value: object) -> bool:
+        """Return whether a persisted constructor-model contract is canonical."""
+        if not isinstance(value, Mapping):
+            return False
+        observed = value.get("observed")
+        if observed is not True:
+            return False
+        model = value.get("model")
+        return set(value) == {"observed", "model"} and (
+            model is None or isinstance(model, str) and bool(model.strip())
+        )
+
+    def _runtime_execution_identity_contract(self) -> dict[str, Any]:
+        """Return backend-specific resolved execution inputs, when observable.
+
+        The generic constructor-model pin is sufficient for runtimes whose
+        model is fully selected by ``_model``. Some runtimes have an additional
+        resolved execution profile, though: Codex can choose a provider/model
+        through ``runtime_profile`` / ``--profile`` while ``_model`` remains
+        ``None``. Bundled runtimes may expose ``execution_identity_contract`` to
+        persist those command-relevant inputs without teaching the runner every
+        backend's private configuration model.
+        """
+
+        provider_descriptor = inspect.getattr_static(
+            type(self._adapter),
+            "execution_identity_contract",
+            None,
+        )
+        if provider_descriptor is None:
+            return {"version": 1, "observed": False}
+
+        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
+        identity = provider()
+        if not isinstance(identity, Mapping):
+            raise OrchestratorError(
+                message="Runtime returned an invalid execution identity contract",
+                details={"adapter_type": type(self._adapter).__name__},
+            )
+        try:
+            encoded = json.dumps(
+                dict(identity),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            normalized_identity = json.loads(encoded)
+        except (TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Runtime returned an invalid execution identity contract",
+                details={
+                    "adapter_type": type(self._adapter).__name__,
+                    "cause": str(exc),
+                },
+            ) from exc
+        if not isinstance(normalized_identity, dict):
+            raise OrchestratorError(
+                message="Runtime returned an invalid execution identity contract",
+                details={"adapter_type": type(self._adapter).__name__},
+            )
+        return {
+            "version": 1,
+            "observed": True,
+            "identity": normalized_identity,
+        }
+
+    @staticmethod
+    def _valid_runtime_execution_identity_contract(value: object) -> bool:
+        """Return whether a persisted backend execution identity is canonical."""
+        if not isinstance(value, Mapping):
+            return False
+        version = value.get("version")
+        observed = value.get("observed")
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != 1
+            or not isinstance(observed, bool)
+        ):
+            return False
+        if not observed:
+            return set(value) == {"version", "observed"}
+        identity = value.get("identity")
+        if (
+            set(value) != {"version", "observed", "identity"}
+            or not isinstance(identity, Mapping)
+            or not identity
+        ):
+            return False
+        try:
+            json.dumps(
+                dict(identity),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _runtime_execution_proves_effective_model(value: object) -> bool:
+        """Return whether a backend identity observed a concrete model/profile."""
+        if not OrchestratorRunner._valid_runtime_execution_identity_contract(value):
+            return False
+        if not isinstance(value, Mapping) or value.get("observed") is not True:
+            return False
+        identity = value.get("identity")
+        return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
+
+    def _validate_resume_handle_execution_identity(
+        self,
+        runtime_handle: RuntimeHandle | None,
+    ) -> None:
+        """Reject persisted handle selectors that were not part of the start contract."""
+        raw_contract = self._execution_contract
+        if not isinstance(raw_contract, Mapping):
+            raise OrchestratorError(
+                message="Cannot resume without a restored execution contract",
+                details={"invalid": "execution_contract"},
+            )
+        raw_routing = raw_contract.get("model_routing")
+        raw_runtime_execution = (
+            raw_routing.get("runtime_execution") if isinstance(raw_routing, Mapping) else None
+        )
+        raw_identity = (
+            raw_runtime_execution.get("identity")
+            if isinstance(raw_runtime_execution, Mapping)
+            and raw_runtime_execution.get("observed") is True
+            else None
+        )
+        if not isinstance(raw_identity, Mapping):
+            return
+        persisted_selector = raw_identity.get("resume_handle_selector")
+        if persisted_selector is None:
+            # Only runtimes that explicitly persist a root-handle selector
+            # contract participate in this check. Codex does; CLI subclasses
+            # that merely inherit its process machinery do not.
+            return
+
+        provider_descriptor = inspect.getattr_static(
+            type(self._adapter),
+            "resume_handle_execution_identity_contract",
+            None,
+        )
+        if provider_descriptor is None:
+            raise OrchestratorError(
+                message="Cannot validate the persisted runtime resume selector",
+                details={"runtime_backend": self._runtime_backend_contract()},
+            )
+
+        provider = object.__getattribute__(
+            self._adapter,
+            "resume_handle_execution_identity_contract",
+        )
+        try:
+            current_selector = provider(runtime_handle)
+        except Exception as exc:
+            raise OrchestratorError(
+                message="Cannot resume with invalid runtime selector metadata",
+                details={"cause": str(exc)},
+            ) from exc
+        if persisted_selector != current_selector:
+            raise OrchestratorError(
+                message="Cannot resume with a different runtime handle selector",
+                details={
+                    "persisted_selector": persisted_selector,
+                    "current_selector": current_selector,
+                    "hint": "Restore the original runtime handle metadata or start a new session.",
+                },
+            )
+
+    @staticmethod
+    def _validate_bound_runtime_resume_identity(
+        progress: Mapping[str, Any],
+        runtime_handle: RuntimeHandle | None,
+    ) -> None:
+        """Bind resume to the first stable backend session id in event history."""
+        persisted_identity = progress.get(SESSION_RUNTIME_IDENTITY_PROGRESS_KEY)
+        if persisted_identity is None:
+            return
+        if (
+            not isinstance(persisted_identity, Mapping)
+            or persisted_identity.get("status") != "bound"
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with conflicting runtime session identity",
+                details={"persisted_runtime_identity": persisted_identity},
+            )
+        current_identity = runtime_resume_identity_from_payload(
+            runtime_handle.to_persisted_dict() if runtime_handle is not None else None
+        )
+        if current_identity != dict(persisted_identity):
+            raise OrchestratorError(
+                message="Cannot resume a different backend session",
+                details={
+                    "persisted_runtime_identity": dict(persisted_identity),
+                    "current_runtime_identity": current_identity,
+                    "hint": "Restore the original runtime session id or start a new session.",
+                },
+            )
+
+    def _validate_runtime_handle_backend(
+        self,
+        runtime_handle: RuntimeHandle | None,
+    ) -> None:
+        """Require every persisted handle to belong to the contracted runtime."""
+        if runtime_handle is None:
+            return
+        expected_backend = self._runtime_backend_contract()
+        if runtime_handle.backend != expected_backend:
+            raise OrchestratorError(
+                message="Cannot resume with a runtime handle from a different backend",
+                details={
+                    "persisted_handle_backend": runtime_handle.backend,
+                    "execution_runtime_backend": expected_backend,
+                    "hint": "Restore the original runtime handle or start a new session.",
+                },
+            )
+
+    @staticmethod
+    def _force_adapter_permission_mode(adapter: AgentRuntime) -> str:
+        """Force the runtime's native equivalent of bypassPermissions."""
+        normalized = FORCED_EXECUTION_PERMISSION_MODE
+        resolver_descriptor = inspect.getattr_static(
+            type(adapter),
+            "_resolve_permission_mode",
+            None,
+        )
+        if resolver_descriptor is not None:
+            resolver = object.__getattribute__(adapter, "_resolve_permission_mode")
+            resolved = resolver(FORCED_EXECUTION_PERMISSION_MODE)
+            if not isinstance(resolved, str) or not resolved.strip():
+                raise ValueError("Runtime returned an invalid bypass permission mode")
+            normalized = resolved.strip()
+        try:
+            object.__setattr__(adapter, "_permission_mode", normalized)
+        except Exception as exc:
+            raise ValueError("Runtime permission mode cannot be forced to bypass") from exc
+        return normalized
+
+    def _force_runtime_handle_permission(
+        self,
+        runtime_handle: RuntimeHandle | None,
+    ) -> RuntimeHandle | None:
+        """Overwrite persisted approval state with the mandatory bypass mode."""
+        if runtime_handle is None:
+            return None
+        return replace(runtime_handle, approval_mode=self._forced_permission_mode)
+
+    def _runtime_backend_contract(self) -> str | None:
+        """Return the concrete runtime backend that owns this resumable run."""
+        runtime_backend = getattr(self._adapter, "runtime_backend", None)
+        if not isinstance(runtime_backend, str) or not runtime_backend.strip():
+            return None
+        return runtime_backend.strip()
+
+    def _llm_backend_contract(self) -> str | None:
+        """Return the LLM backend used by analysis and runtime-adjacent calls."""
+        llm_backend = getattr(self._adapter, "llm_backend", None)
+        if not isinstance(llm_backend, str) or not llm_backend.strip():
+            return None
+        return llm_backend.strip()
+
+    def _permission_mode_contract(self) -> dict[str, Any]:
+        """Return the normalized runtime authority level used for this run."""
+        permission_mode = self._forced_permission_mode
+        if not isinstance(permission_mode, str) or not permission_mode.strip():
+            return {"observed": False}
+        return {"observed": True, "mode": permission_mode.strip()}
+
+    @staticmethod
+    def _valid_permission_mode_contract(value: object) -> bool:
+        if not isinstance(value, Mapping) or value.get("observed") is not True:
+            return False
+        mode = value.get("mode")
+        return set(value) == {"observed", "mode"} and isinstance(mode, str) and bool(mode.strip())
+
+    def _build_execution_contract(
+        self,
+        *,
+        seed: Seed | None = None,
+        seed_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the durable resolved inputs shared by resume and proof cohorting."""
+        from ouroboros.orchestrator.model_routing import serialize_model_router
+
+        routing_contract = serialize_model_router(self._model_router)
+        routing_contract["constructor_model"] = self._constructor_model_contract()
+        routing_contract["runtime_execution"] = self._runtime_execution_identity_contract()
+        routing_contract["runtime_backend"] = self._runtime_backend_contract()
+        routing_contract["llm_backend"] = self._llm_backend_contract()
+        routing_contract["permission_mode"] = self._permission_mode_contract()
+        proof_contract: dict[str, Any] = {
+            "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
+            "routing_fingerprint": self._routing_fingerprint(routing_contract),
+        }
+        workspace_identity = self._proof_workspace_identity()
+        if workspace_identity is not None:
+            proof_contract.update(workspace_identity)
+        resolved_seed_fingerprint = seed_fingerprint
+        if resolved_seed_fingerprint is None and seed is not None:
+            resolved_seed_fingerprint = self._seed_semantics_fingerprint(seed)
+        if resolved_seed_fingerprint is not None:
+            proof_contract["seed_fingerprint"] = resolved_seed_fingerprint
+        return {
+            "version": EXECUTION_CONTRACT_VERSION,
+            "model_routing": routing_contract,
+            "frugality_proof": proof_contract,
+            "resume": {
+                "workspace": self._resume_workspace_identity(),
+            },
+        }
+
+    def _validate_legacy_resume_identity(
+        self,
+        progress: Mapping[str, Any],
+        *,
+        seed: Seed | None,
+    ) -> None:
+        """Validate every recoverable identity field before legacy migration.
+
+        Legacy sessions predate the versioned execution contract, but their
+        authoritative start event already records the seed id/goal and runtime
+        backend. ``SessionRepository`` exposes that snapshot under
+        :data:`SESSION_START_IDENTITY_PROGRESS_KEY`; accepting a mismatched
+        current invocation would permanently bless the wrong seed/backend when
+        the migration checkpoint is written.
+        """
+
+        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
+        if raw_start_identity is not None and not isinstance(raw_start_identity, Mapping):
+            raise OrchestratorError(
+                message="Cannot migrate a legacy session with invalid start identity",
+                details={"invalid": SESSION_START_IDENTITY_PROGRESS_KEY},
+            )
+        start_identity = raw_start_identity if isinstance(raw_start_identity, Mapping) else {}
+
+        if "seed_id" in start_identity:
+            persisted_seed_id = start_identity.get("seed_id")
+            current_seed_id = seed.metadata.seed_id if seed is not None else None
+            if (
+                not isinstance(persisted_seed_id, str)
+                or not persisted_seed_id.strip()
+                or current_seed_id != persisted_seed_id
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume a legacy session with a different Seed identity",
+                    details={
+                        "persisted_seed_id": persisted_seed_id,
+                        "current_seed_id": current_seed_id,
+                        "hint": "Resume with the original Seed, or start a new session.",
+                    },
+                )
+
+        if "seed_goal" in start_identity:
+            persisted_seed_goal = start_identity.get("seed_goal")
+            current_seed_goal = seed.goal if seed is not None else None
+            if (
+                not isinstance(persisted_seed_goal, str)
+                or not persisted_seed_goal.strip()
+                or current_seed_goal != persisted_seed_goal
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume a legacy session with a modified Seed goal",
+                    details={
+                        "persisted_seed_goal": persisted_seed_goal,
+                        "current_seed_goal": current_seed_goal,
+                        "hint": "Resume with the original Seed, or start a new session.",
+                    },
+                )
+
+        persisted_runtime_backend: object | None = None
+        if "runtime_backend" in start_identity:
+            persisted_runtime_backend = start_identity.get("runtime_backend")
+        elif "runtime_backend" in progress:
+            # Older start events may lack the backend while runtime progress
+            # still carries the backend that owns the resumable handle.
+            persisted_runtime_backend = progress.get("runtime_backend")
+        if persisted_runtime_backend is not None:
+            current_runtime_backend = self._runtime_backend_contract()
+            if (
+                not isinstance(persisted_runtime_backend, str)
+                or not persisted_runtime_backend.strip()
+                or current_runtime_backend != persisted_runtime_backend
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume a legacy session with a different runtime backend",
+                    details={
+                        "persisted_runtime_backend": persisted_runtime_backend,
+                        "current_runtime_backend": current_runtime_backend,
+                        "hint": "Resume with the original runtime, or start a new session.",
+                    },
+                )
+
+        if "llm_backend" in start_identity:
+            persisted_llm_backend = start_identity.get("llm_backend")
+            current_llm_backend = getattr(self._adapter, "llm_backend", None)
+            if (
+                not isinstance(persisted_llm_backend, str)
+                or not persisted_llm_backend.strip()
+                or current_llm_backend != persisted_llm_backend
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume a legacy session with a different LLM backend",
+                    details={
+                        "persisted_llm_backend": persisted_llm_backend,
+                        "current_llm_backend": current_llm_backend,
+                        "hint": "Resume with the original backend, or start a new session.",
+                    },
+                )
+
+        if "workspace" in progress:
+            persisted_task_workspace = TaskWorkspace.from_progress_dict(progress.get("workspace"))
+            if persisted_task_workspace is None:
+                raise OrchestratorError(
+                    message="Cannot migrate a legacy session with invalid workspace identity",
+                    details={"invalid": "workspace"},
+                )
+            persisted_workspace = self._task_resume_workspace_identity(persisted_task_workspace)
+            active_workspace = self._resume_workspace_identity()
+            if active_workspace != persisted_workspace:
+                raise OrchestratorError(
+                    message="Cannot resume a legacy session from a different project workspace",
+                    details={
+                        "persisted_workspace": persisted_workspace,
+                        "current_workspace": active_workspace,
+                        "hint": "Resume from the original project/workspace.",
+                    },
+                )
+        else:
+            runtime_progress = progress.get("runtime")
+            if isinstance(runtime_progress, Mapping) and "cwd" in runtime_progress:
+                persisted_cwd = runtime_progress.get("cwd")
+                if persisted_cwd is not None:
+                    current_cwd = self._effective_cwd()
+                    if (
+                        not isinstance(persisted_cwd, str)
+                        or not persisted_cwd.strip()
+                        or not isinstance(current_cwd, str)
+                        or self._canonical_path(current_cwd) != self._canonical_path(persisted_cwd)
+                    ):
+                        raise OrchestratorError(
+                            message=(
+                                "Cannot resume a legacy session from a different project workspace"
+                            ),
+                            details={
+                                "persisted_workspace": persisted_cwd,
+                                "current_workspace": current_cwd,
+                                "hint": "Resume from the original project/workspace.",
+                            },
+                        )
+
+    def _restore_execution_contract(
+        self,
+        progress: Mapping[str, Any],
+        *,
+        seed: Seed | None = None,
+    ) -> bool:
+        """Restore the persisted router unless this invocation explicitly overrides it.
+
+        Returns whether a replacement contract (an explicit override or one-time
+        legacy migration) should be checkpointed for subsequent resumes. A present
+        malformed contract blocks resume; it is never reinterpreted as a legacy
+        session or allowed to change models silently.
+        """
+        if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
+            self._validate_legacy_resume_identity(progress, seed=seed)
+            self._execution_contract = self._build_execution_contract(seed=seed)
+            # One unavoidable recomputation migrates a legacy session. Persist the
+            # resolved contract now so every later resume restores this exact policy
+            # instead of drifting again with each environment/config change.
+            return True
+        raw_contract = progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+
+        raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
+        if (
+            not isinstance(raw_contract, Mapping)
+            or isinstance(raw_version, bool)
+            or not isinstance(raw_version, int)
+            or raw_version != EXECUTION_CONTRACT_VERSION
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"contract_version": raw_version},
+            )
+
+        raw_proof = raw_contract.get("frugality_proof")
+        raw_routing = raw_contract.get("model_routing")
+        raw_resume = raw_contract.get("resume")
+        if (
+            not isinstance(raw_proof, Mapping)
+            or not isinstance(raw_routing, Mapping)
+            or not isinstance(raw_resume, Mapping)
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"missing": "frugality_proof, model_routing, or resume"},
+            )
+
+        protocol_version = raw_proof.get("protocol_version")
+        persisted_project_root = raw_proof.get("project_root")
+        persisted_workspace_path = raw_proof.get("workspace_path")
+        persisted_routing_fingerprint = raw_proof.get("routing_fingerprint")
+        persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
+        persisted_constructor_model = raw_routing.get("constructor_model")
+        persisted_runtime_execution = raw_routing.get("runtime_execution")
+        persisted_runtime_backend = raw_routing.get("runtime_backend")
+        persisted_llm_backend = raw_routing.get("llm_backend")
+        persisted_permission_mode = raw_routing.get("permission_mode")
+        persisted_resume_workspace = raw_resume.get("workspace")
+        valid_seed_fingerprint = (
+            isinstance(persisted_seed_fingerprint, str)
+            and len(persisted_seed_fingerprint) == 64
+            and all(char in "0123456789abcdef" for char in persisted_seed_fingerprint)
+        )
+        if (
+            isinstance(protocol_version, bool)
+            or not isinstance(protocol_version, int)
+            or protocol_version != FRUGALITY_PROOF_PROTOCOL_VERSION
+            or not isinstance(persisted_project_root, str)
+            or not persisted_project_root.strip()
+            or not isinstance(persisted_workspace_path, str)
+            or not persisted_workspace_path.strip()
+            or not isinstance(persisted_routing_fingerprint, str)
+            or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
+            or (seed is not None and not valid_seed_fingerprint)
+            or not self._valid_constructor_model_contract(persisted_constructor_model)
+            or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
+            or not isinstance(persisted_runtime_backend, str)
+            or not persisted_runtime_backend.strip()
+            or not isinstance(persisted_llm_backend, str)
+            or not persisted_llm_backend.strip()
+            or not self._valid_permission_mode_contract(persisted_permission_mode)
+            or not isinstance(persisted_resume_workspace, Mapping)
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "proof identity"},
+            )
+
+        current_seed_fingerprint = (
+            self._seed_semantics_fingerprint(seed) if seed is not None else None
+        )
+        active_workspace = self._proof_workspace_identity()
+        persisted_workspace = {
+            "project_root": persisted_project_root,
+            "workspace_path": persisted_workspace_path,
+        }
+        if active_workspace != persisted_workspace:
+            raise OrchestratorError(
+                message="Cannot resume from a different project workspace",
+                details={
+                    "persisted_workspace": persisted_workspace,
+                    "current_workspace": active_workspace,
+                    "hint": "Resume from the original project/workspace.",
+                },
+            )
+        active_resume_workspace = self._resume_workspace_identity()
+        if active_resume_workspace != dict(persisted_resume_workspace):
+            raise OrchestratorError(
+                message="Cannot resume from a different execution workspace",
+                details={
+                    "persisted_workspace": dict(persisted_resume_workspace),
+                    "current_workspace": active_resume_workspace,
+                    "hint": "Resume from the exact original worktree and branch.",
+                },
+            )
+        current_runtime_backend = self._runtime_backend_contract()
+        if current_runtime_backend != persisted_runtime_backend:
+            raise OrchestratorError(
+                message="Cannot resume with a different runtime backend",
+                details={
+                    "persisted_runtime_backend": persisted_runtime_backend,
+                    "current_runtime_backend": current_runtime_backend,
+                    "hint": "Resume with the original runtime, or start a new session.",
+                },
+            )
+        current_llm_backend = self._llm_backend_contract()
+        if current_llm_backend != persisted_llm_backend:
+            raise OrchestratorError(
+                message="Cannot resume with a different LLM backend",
+                details={
+                    "persisted_llm_backend": persisted_llm_backend,
+                    "current_llm_backend": current_llm_backend,
+                    "hint": "Restore the original LLM backend or start a new session.",
+                },
+            )
+        current_permission_mode = self._permission_mode_contract()
+        if current_permission_mode != persisted_permission_mode:
+            raise OrchestratorError(
+                message="Cannot resume with a different permission mode",
+                details={
+                    "persisted_permission_mode": dict(persisted_permission_mode),
+                    "current_permission_mode": current_permission_mode,
+                    "hint": "Restore the original permission mode or start a new session.",
+                },
+            )
+        if (
+            valid_seed_fingerprint
+            and current_seed_fingerprint is not None
+            and persisted_seed_fingerprint != current_seed_fingerprint
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with a modified Seed",
+                details={
+                    "persisted_seed_fingerprint": persisted_seed_fingerprint,
+                    "current_seed_fingerprint": current_seed_fingerprint,
+                    "hint": "Start a new session for changed goals, constraints, or ACs.",
+                },
+            )
+        current_constructor_model = self._constructor_model_contract()
+        if persisted_constructor_model != current_constructor_model:
+            raise OrchestratorError(
+                message="Cannot resume with a different constructor model",
+                details={
+                    "persisted_constructor_model": dict(persisted_constructor_model),
+                    "current_constructor_model": current_constructor_model,
+                    "hint": (
+                        "Resume with the original runtime model, or start a new session "
+                        "for an intentional model change."
+                    ),
+                },
+            )
+        current_runtime_execution = self._runtime_execution_identity_contract()
+        if persisted_runtime_execution != current_runtime_execution:
+            raise OrchestratorError(
+                message="Cannot resume with a different runtime execution profile",
+                details={
+                    "persisted_runtime_execution": dict(persisted_runtime_execution),
+                    "current_runtime_execution": current_runtime_execution,
+                    "hint": (
+                        "Restore the original runtime/model profile, or start a new "
+                        "session for an intentional execution-profile change."
+                    ),
+                },
+            )
+
+        from ouroboros.orchestrator.model_routing import deserialize_model_router
+
+        recognized, restored_router = deserialize_model_router(raw_routing)
+        if not recognized:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "model_routing"},
+            )
+
+        if (
+            restored_router is not None
+            and persisted_runtime_backend != restored_router.runtime_backend
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an inconsistent runtime backend contract",
+                details={
+                    "persisted_runtime_backend": restored_router.runtime_backend,
+                    "execution_runtime_backend": persisted_runtime_backend,
+                },
+            )
+        constructor_model_value = persisted_constructor_model.get("model")
+        effective_model_observed = self._runtime_execution_proves_effective_model(
+            persisted_runtime_execution
+        )
+        model_override_support = getattr(
+            getattr(self._adapter, "capabilities", None),
+            "model_override_support",
+            ParamSupport.IGNORED,
+        )
+        if (
+            constructor_model_value is None
+            and not effective_model_observed
+            and not (restored_router is not None and model_override_support is ParamSupport.NATIVE)
+        ):
+            raise OrchestratorError(
+                message="Cannot resume because the effective runtime model is unverifiable",
+                details={
+                    "runtime_backend": persisted_runtime_backend,
+                    "constructor_model": None,
+                    "effective_model_observed": False,
+                    "model_routing_enforced": (
+                        restored_router is not None
+                        and model_override_support is ParamSupport.NATIVE
+                    ),
+                    "hint": ("Pin the original runtime model/profile, or start a new session."),
+                },
+            )
+        if self._model_routing_override_explicit:
+            self._execution_contract = self._build_execution_contract(
+                seed=seed,
+                seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
+            )
+            return self._execution_contract != raw_contract
+
+        self._model_router = restored_router
+        # Preserve the exact persisted proof identity alongside the restored
+        # router. Recomputing it from a resumed throwaway worktree would make the
+        # same execution appear to be a different experiment.
+        self._execution_contract = dict(raw_contract)
+        return False
+
+    @staticmethod
+    def _proof_cohort_identity(
+        event_data: Mapping[str, Any],
+    ) -> tuple[str, str, str, int, str, str] | None:
+        """Extract the exact fail-closed identity tuple from a session start."""
+        raw_seed_id = event_data.get("seed_id")
+        raw_contract = event_data.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_seed_id, str) or not raw_seed_id.strip():
+            return None
+        if not isinstance(raw_contract, Mapping):
+            return None
+        raw_version = raw_contract.get("version")
+        if (
+            isinstance(raw_version, bool)
+            or not isinstance(raw_version, int)
+            or raw_version != EXECUTION_CONTRACT_VERSION
+        ):
+            return None
+        proof_contract = raw_contract.get("frugality_proof")
+        if not isinstance(proof_contract, Mapping):
+            return None
+        routing_contract = raw_contract.get("model_routing")
+        if not isinstance(routing_contract, Mapping):
+            return None
+        runtime_backend = routing_contract.get("runtime_backend")
+        llm_backend = routing_contract.get("llm_backend")
+        permission_mode = routing_contract.get("permission_mode")
+        constructor_model = routing_contract.get("constructor_model")
+        runtime_execution = routing_contract.get("runtime_execution")
+        if (
+            not isinstance(runtime_backend, str)
+            or not runtime_backend.strip()
+            or not isinstance(llm_backend, str)
+            or not llm_backend.strip()
+            or not OrchestratorRunner._valid_permission_mode_contract(permission_mode)
+            or not OrchestratorRunner._valid_constructor_model_contract(constructor_model)
+            or not OrchestratorRunner._valid_runtime_execution_identity_contract(runtime_execution)
+        ):
+            return None
+        protocol_version = proof_contract.get("protocol_version")
+        project_root = proof_contract.get("project_root")
+        workspace_path = proof_contract.get("workspace_path")
+        routing_fingerprint = proof_contract.get("routing_fingerprint")
+        seed_fingerprint = proof_contract.get("seed_fingerprint")
+        if (
+            isinstance(protocol_version, bool)
+            or not isinstance(protocol_version, int)
+            or protocol_version < 1
+        ):
+            return None
+        if not isinstance(project_root, str) or not project_root.strip():
+            return None
+        if not isinstance(workspace_path, str) or not workspace_path.strip():
+            return None
+        if (
+            not isinstance(routing_fingerprint, str)
+            or len(routing_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in routing_fingerprint)
+        ):
+            return None
+        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(routing_contract):
+            return None
+        if (
+            not isinstance(seed_fingerprint, str)
+            or len(seed_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in seed_fingerprint)
+        ):
+            return None
+        return (
+            raw_seed_id.strip(),
+            project_root.strip(),
+            workspace_path.strip(),
+            protocol_version,
+            routing_fingerprint,
+            seed_fingerprint,
+        )
+
     def _build_dependency_analyzer(self) -> DependencyAnalyzer:
         """Create a dependency analyzer wired to the active LLM backend when available.
 
@@ -1127,7 +2162,7 @@ class OrchestratorRunner:
             # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
             llm_adapter = create_llm_adapter(
                 backend=backend,
-                permission_mode=self._adapter.permission_mode,
+                permission_mode=self._forced_permission_mode,
                 cli_path=resolved_cli_path,
                 cwd=self._effective_cwd(),
                 max_turns=1,
@@ -2383,6 +3418,8 @@ class OrchestratorRunner:
         immediately and then start the actual runtime work asynchronously.
         """
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
+        execution_contract = self._build_execution_contract(seed=seed)
+        self._execution_contract = execution_contract
         session_result = await self._session_repo.create_session(
             execution_id=exec_id,
             seed_id=seed.metadata.seed_id,
@@ -2390,6 +3427,7 @@ class OrchestratorRunner:
             seed_goal=seed.goal,
             runtime_backend=getattr(self._adapter, "runtime_backend", None),
             llm_backend=getattr(self._adapter, "llm_backend", None),
+            execution_contract=execution_contract,
         )
 
         if session_result.is_err:
@@ -2406,6 +3444,7 @@ class OrchestratorRunner:
         initial_progress: dict[str, Any] = {
             "fat_harness_mode": self._fat_harness_mode,
             "messages_processed": 0,
+            EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
         }
         if self._task_workspace is not None:
             initial_progress["workspace"] = self._task_workspace.to_progress_dict()
@@ -3469,12 +4508,43 @@ class OrchestratorRunner:
                 )
             )
 
+        try:
+            execution_contract_changed = self._restore_execution_contract(
+                tracker.progress,
+                seed=seed,
+            )
+        except OrchestratorError as exc:
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+            )
+            return Result.err(exc)
         session_registered = False
 
         try:
             # Register session for cancellation tracking
             self._register_session(tracker.execution_id, session_id)
             session_registered = True
+
+            if execution_contract_changed and self._execution_contract is not None:
+                contract_progress = {
+                    EXECUTION_CONTRACT_PROGRESS_KEY: self._execution_contract,
+                    "messages_processed": tracker.messages_processed,
+                }
+                persisted_contract = await self._session_repo.track_progress(
+                    session_id,
+                    contract_progress,
+                )
+                if persisted_contract.is_err:
+                    raise OrchestratorError(
+                        message="Failed to persist explicit resume routing override",
+                        details={
+                            "session_id": session_id,
+                            "cause": str(persisted_contract.error),
+                        },
+                    )
+                tracker = tracker.with_progress(contract_progress)
 
             self._console.print(
                 f"[cyan]Resuming session {session_id}[/cyan]\n"
@@ -3491,6 +4561,10 @@ Note: This is a resumed session. Please continue from where execution was interr
 """
             # Get runtime resume state if stored
             runtime_handle = self._deserialize_runtime_handle(tracker.progress)
+            runtime_handle = self._force_runtime_handle_permission(runtime_handle)
+            self._validate_runtime_handle_backend(runtime_handle)
+            self._validate_bound_runtime_resume_identity(tracker.progress, runtime_handle)
+            self._validate_resume_handle_execution_identity(runtime_handle)
             if self._task_workspace is not None and "workspace" not in tracker.progress:
                 await self._persist_session_progress(
                     session_id,

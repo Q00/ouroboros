@@ -16,11 +16,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+from ouroboros.config.models import (
+    EconomicsConfig,
+    ModelConfig,
+    OuroborosConfig,
+    TierConfig,
+    get_default_config,
+)
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -366,6 +373,80 @@ class TestRunnerRouterConstruction:
         runner = self._runner(self._adapter("claude"))
         assert runner._model_router is not None
         assert runner._model_router.runtime_backend == "claude"
+
+    def test_missing_user_config_uses_shipped_routing_and_verify_defaults(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A fresh HOME must not make routing accidentally dormant."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+
+        runner = self._runner(self._adapter("claude"))
+
+        assert runner._model_router is not None
+        assert runner._model_router.runtime_backend == "claude"
+        assert runner._model_router.child_tier == "frugal"
+        assert runner._model_router.base_tier == "standard"
+        assert runner._run_verify_commands is True
+        assert runner._verify_command_timeout_seconds == 600
+        assert runner._ac_retry_attempts == 2
+
+    def test_existing_config_with_empty_tiers_uses_shipped_ladder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill only empty tiers; preserve every explicit non-tier economics knob."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        loaded_economics = EconomicsConfig(
+            default_tier="frontier",
+            escalation_threshold=7,
+            downgrade_success_streak=11,
+        )
+        monkeypatch.setattr(
+            "ouroboros.config.load_config",
+            lambda: OuroborosConfig(economics=loaded_economics),
+        )
+        captured: dict[str, EconomicsConfig] = {}
+
+        def _capture_economics(economics: EconomicsConfig, **_kwargs) -> None:
+            captured["economics"] = economics
+            return None
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.model_routing.build_model_router",
+            _capture_economics,
+        )
+
+        self._runner(self._adapter("claude"))
+
+        economics = captured["economics"]
+        assert economics.tiers == get_default_config().economics.tiers
+        assert economics.default_tier == "frontier"
+        assert economics.escalation_threshold == 7
+        assert economics.downgrade_success_streak == 11
+
+    def test_non_empty_custom_tiers_are_preserved_exactly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Any non-empty user ladder remains authoritative, even when custom."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.setattr(
+            "ouroboros.config.load_config",
+            lambda: OuroborosConfig(economics=_economics()),
+        )
+
+        runner = self._runner(self._adapter("claude"))
+
+        assert runner._model_router is not None
+        assert dict(runner._model_router.tier_models) == {
+            "frugal": "haiku-x",
+            "standard": "sonnet-x",
+            "frontier": "opus-x",
+        }
 
     def test_unmapped_backend_stays_dormant(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)

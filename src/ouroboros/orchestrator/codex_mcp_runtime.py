@@ -34,7 +34,6 @@ from ouroboros.codex.cli_policy import build_codex_child_env, resolve_codex_cli_
 from ouroboros.config import get_codex_cli_path
 from ouroboros.mcp.types import MCPServerConfig, TransportType
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.codex_mcp_session_pool import (
     DEFAULT_SESSION_IDLE_TIMEOUT,
     MCPSessionActor,
@@ -229,7 +228,17 @@ class CodexMcpWorkerTransport:
             await actor.aclose()
         return turn
 
-    async def resume(self, *, session_id: str, prompt: str) -> WorkerTurn:
+    async def resume(
+        self,
+        *,
+        session_id: str,
+        prompt: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> WorkerTurn:
+        # ``codex-reply`` accepts neither control. Keep the provider-neutral
+        # transport contract without smuggling unsupported arguments into MCP.
+        del model, reasoning_effort
         actor = self._pool.get(session_id)
         if actor is None or not actor.is_alive:
             # The warm session was reaped (idle TTL / closed) — process-bound
@@ -285,8 +294,11 @@ def build_codex_mcp_worker_runtime(
         cwd=cwd,
         permission_mode=permission_mode,
         model=model,
-        reasoning_effort_support=ParamSupport.NATIVE,
-        enforceable_reasoning_efforts=_CODEX_REASONING_EFFORT_LEVELS,
+        # A fresh ``codex`` call accepts model_reasoning_effort, but the warm
+        # ``codex-reply`` resume leg cannot retarget it. The capability describes
+        # the whole per-call runtime contract, so claiming NATIVE would make
+        # resumed rows falsely appear enforced; retain the truthful IGNORED
+        # default, matching model_override_support below.
         # model_override_support is intentionally left at its IGNORED default: a
         # per-call model can be pinned only at thread creation (the ``codex`` call),
         # but ``codex-reply`` (this runtime's resume path) has no model argument, so

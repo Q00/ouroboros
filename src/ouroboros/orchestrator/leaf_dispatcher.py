@@ -25,6 +25,10 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.evidence.claims import (
+    _runtime_message_is_tool_completion,
+    _runtime_message_tool_call_id,
+)
 from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
@@ -56,6 +60,29 @@ class LeafDispatchState:
     final_message: str = ""
     success: bool = False
     stalled: bool = False
+
+
+def _correlated_tool_result_name(
+    messages: list[AgentMessage],
+    result_message: AgentMessage,
+) -> str | None:
+    """Resolve a result's tool name from one exact prior call-id match.
+
+    Claude ToolResultBlock carries ``tool_use_id`` but no tool name. Missing ids,
+    duplicate ids with different names, and otherwise ambiguous histories fail
+    closed so a completion event can never be attached to the wrong mutation.
+    """
+    result_call_id = _runtime_message_tool_call_id(result_message)
+    if result_call_id is None:
+        return None
+    names = {
+        message.tool_name
+        for message in messages[:-1]
+        if message.tool_name is not None
+        and not _runtime_message_is_tool_completion(message)
+        and _runtime_message_tool_call_id(message) == result_call_id
+    }
+    return next(iter(names)) if len(names) == 1 else None
 
 
 class LeafDispatcher:
@@ -245,10 +272,17 @@ class LeafDispatcher:
                         runtime_metadata=executor._runtime_event_metadata(message),
                     )
 
-                if projected.is_tool_result and projected.tool_name is not None:
+                if projected.message_type == "tool_result":
+                    completed_tool_name = projected.tool_name or _correlated_tool_result_name(
+                        state.messages,
+                        message,
+                    )
+                else:
+                    completed_tool_name = None
+                if completed_tool_name is not None:
                     await executor._event_emitter.emit_atomic_tool_completed(
                         runtime_identity=runtime_identity,
-                        tool_name=projected.tool_name,
+                        tool_name=completed_tool_name,
                         tool_result_text=projected.content,
                         runtime_metadata=executor._runtime_event_metadata(message),
                     )

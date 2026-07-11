@@ -12,13 +12,20 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.claim_term_guard import ClaimTermGuard, ClaimTermGuardFact
-from ouroboros.harness.journal import EvidenceManifest, normalize_events
+from ouroboros.harness.journal import (
+    EvidenceEntry,
+    EvidenceKind,
+    EvidenceManifest,
+    normalize_events,
+)
 
 
 class EventStoreEvidenceReader(Protocol):
@@ -170,6 +177,9 @@ async def load_ac_evidence_manifest(
     session_id: str | None = None,
     scope_id: str | None = None,
     limit: int | None = None,
+    admit_accepted_tool_starts: bool = False,
+    accepted_retry_attempt: int | None = None,
+    accepted_session_attempt_id: str | None = None,
 ) -> EvidenceManifest:
     """Load and normalize EventStore evidence for one AC deliver-gate check.
 
@@ -192,6 +202,15 @@ async def load_ac_evidence_manifest(
         limit: Optional EventStore query cap. The default ``None`` reads the
             full related event set so the manifest is not silently truncated
             before TraceGuard sees it.
+        admit_accepted_tool_starts: Add AC-scoped ``execution.tool.started``
+            events as journal entries after the caller has established accepted
+            leaf + exact typed-evidence match + verifier PASS. Mutation tools are
+            admitted only when the start itself records explicit completion or a
+            correlated ``execution.tool.completed`` event proves success.
+        accepted_retry_attempt: Optional accepted leaf retry attempt. When set,
+            tool starts from failed/older attempts are excluded.
+        accepted_session_attempt_id: Optional exact implementation-attempt id,
+            providing the strongest filter when runtime metadata carries it.
 
     Raises:
         ValueError: If ``ac_id`` is blank, if ``execution_id`` is missing
@@ -229,7 +248,29 @@ async def load_ac_evidence_manifest(
         execution_id=normalized_execution_id,
         session_id=normalized_session_id,
     )
-    manifest = normalize_events(_chronological_events(filtered_events), ac_id=normalized_scope_id)
+    chronological = _chronological_events(filtered_events)
+    manifest = normalize_events(chronological, ac_id=normalized_scope_id)
+    if admit_accepted_tool_starts:
+        admitted_entries = _accepted_tool_start_entries(
+            chronological,
+            scope_id=normalized_scope_id,
+            retry_attempt=accepted_retry_attempt,
+            session_attempt_id=accepted_session_attempt_id,
+        )
+        if admitted_entries:
+            manifest = EvidenceManifest(
+                ac_id=normalized_scope_id,
+                entries=tuple(
+                    sorted(
+                        (*manifest.entries, *admitted_entries),
+                        key=lambda entry: (entry.started_at, entry.source_event_ids),
+                    )
+                ),
+                metadata={
+                    **dict(manifest.metadata),
+                    "accepted_tool_starts_admitted": True,
+                },
+            )
     if normalized_scope_id == normalized_ac_id:
         return manifest
     return EvidenceManifest(
@@ -240,12 +281,334 @@ async def load_ac_evidence_manifest(
     )
 
 
+def _accepted_tool_start_entries(
+    events: Iterable[BaseEvent],
+    *,
+    scope_id: str,
+    retry_attempt: int | None,
+    session_attempt_id: str | None,
+) -> tuple[EvidenceEntry, ...]:
+    """Project accepted-leaf tool dispatches into claim-independent entries.
+
+    The accepted-leaf + exact-match + verifier-PASS preconditions are necessary
+    but not sufficient for file mutation: a failed Edit/Write can still be
+    followed by an overall successful assistant result. Mutation starts therefore
+    require their own explicit success signal or one exact successful completion.
+    Missing, failed, or ambiguous correlation is omitted fail-closed.
+    """
+    chronological = tuple(events)
+    entries: list[EvidenceEntry] = []
+    for index, event in enumerate(chronological):
+        if event.type != "execution.tool.started" or not _event_matches_scope(event, scope_id):
+            continue
+        data = event.data
+        if retry_attempt is not None and data.get("retry_attempt") != retry_attempt:
+            continue
+        if session_attempt_id is not None and data.get("session_attempt_id") != session_attempt_id:
+            continue
+        tool_name = data.get("tool_name") if isinstance(data, Mapping) else None
+        tool_input = data.get("tool_input") if isinstance(data, Mapping) else None
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            continue
+        normalized_tool_name = tool_name.strip()
+        completion: BaseEvent | None = None
+        if normalized_tool_name in {"Edit", "Write", "NotebookEdit"}:
+            call_id = _event_tool_call_id(event)
+            if call_id is not None:
+                matching_starts = tuple(
+                    candidate
+                    for candidate in chronological
+                    if candidate.type == "execution.tool.started"
+                    and _event_matches_accepted_attempt(
+                        candidate,
+                        scope_id=scope_id,
+                        retry_attempt=retry_attempt,
+                        session_attempt_id=session_attempt_id,
+                    )
+                    and _event_tool_call_id(candidate) == call_id
+                )
+                if len(matching_starts) != 1:
+                    continue
+            if not _event_has_explicit_tool_success(event):
+                completion = _correlated_successful_tool_completion(
+                    chronological,
+                    start_index=index,
+                    scope_id=scope_id,
+                    retry_attempt=retry_attempt,
+                    session_attempt_id=session_attempt_id,
+                )
+                if completion is None:
+                    continue
+        normalized_input = dict(tool_input) if isinstance(tool_input, Mapping) else {}
+        payload: dict[str, Any] = {
+            "tool_name": normalized_tool_name,
+            "accepted_leaf_dispatch": True,
+        }
+        if normalized_input:
+            payload["args_preview"] = json.dumps(
+                normalized_input,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        command = normalized_input.get("command")
+        if isinstance(command, str) and command.strip():
+            payload["command"] = command.strip()
+        raw_path = next(
+            (
+                normalized_input[key]
+                for key in ("file_path", "path", "notebook_path")
+                if isinstance(normalized_input.get(key), str) and str(normalized_input[key]).strip()
+            ),
+            None,
+        )
+        if isinstance(raw_path, str):
+            payload["file_path"] = raw_path.strip()
+            relative_path = _event_workspace_relative_path(raw_path, data)
+            if relative_path is not None:
+                payload["workspace_relative_path"] = relative_path
+        entries.append(
+            EvidenceEntry(
+                kind=EvidenceKind.TOOL_INVOCATION,
+                ok=True,
+                started_at=event.timestamp,
+                ended_at=completion.timestamp if completion is not None else event.timestamp,
+                payload=payload,
+                source_event_ids=(
+                    (event.id, completion.id) if completion is not None else (event.id,)
+                ),
+            )
+        )
+    return tuple(entries)
+
+
+def _event_tool_call_id(event: BaseEvent) -> str | None:
+    """Return a normalized tool-call correlation id from one execution event."""
+    data = event.data
+    if not isinstance(data, Mapping):
+        return None
+    for key in ("tool_call_id", "tool_use_id", "call_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    tool_result = data.get("tool_result")
+    if isinstance(tool_result, Mapping):
+        for key in ("tool_call_id", "tool_use_id", "call_id"):
+            value = tool_result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        meta = tool_result.get("meta")
+        if isinstance(meta, Mapping):
+            for key in ("tool_call_id", "tool_use_id", "call_id"):
+                value = meta.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
+    """Return True only for machine-readable non-error completion evidence."""
+    data = event.data
+    if not isinstance(data, Mapping):
+        return False
+    if data.get("is_error_invalid") is True:
+        return False
+    if "is_error" in data and not isinstance(data["is_error"], bool):
+        return False
+    if data.get("is_error") is True:
+        return False
+    tool_result = data.get("tool_result")
+    if tool_result is not None and not isinstance(tool_result, Mapping):
+        return False
+    if isinstance(tool_result, Mapping):
+        if tool_result.get("is_error_invalid") is True:
+            return False
+        if "is_error" in tool_result and not isinstance(tool_result["is_error"], bool):
+            return False
+        if tool_result.get("is_error") is True:
+            return False
+    is_completion_event = event.type == "execution.tool.completed"
+    success_signal = is_completion_event and (
+        data.get("is_error") is False
+        or (isinstance(tool_result, Mapping) and tool_result.get("is_error") is False)
+    )
+    if "exit_code" in data:
+        exit_code = data["exit_code"]
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            return False
+        if exit_code != 0:
+            return False
+        success_signal = True
+    if isinstance(tool_result, Mapping):
+        meta = tool_result.get("meta")
+        if isinstance(meta, Mapping):
+            if "exit_status" in meta:
+                exit_status = meta["exit_status"]
+                if isinstance(exit_status, bool) or not isinstance(exit_status, int):
+                    return False
+                if exit_status != 0:
+                    return False
+                success_signal = True
+    subtype = data.get("subtype")
+    if isinstance(subtype, str) and subtype.strip().lower() == "success":
+        success_signal = True
+    status = data.get("status")
+    if isinstance(status, str):
+        normalized_status = status.strip().lower()
+        if normalized_status in {"failed", "error"}:
+            return False
+        if normalized_status in {"completed", "success", "succeeded"}:
+            success_signal = True
+    runtime_event_type = data.get("runtime_event_type")
+    if isinstance(runtime_event_type, str):
+        normalized = runtime_event_type.strip().lower()
+        if normalized.endswith((".failed", ".error")):
+            return False
+        if normalized.endswith((".completed", ".succeeded")):
+            success_signal = True
+    return success_signal
+
+
+def _event_matches_accepted_attempt(
+    event: BaseEvent,
+    *,
+    scope_id: str,
+    retry_attempt: int | None,
+    session_attempt_id: str | None,
+) -> bool:
+    if not _event_matches_scope(event, scope_id):
+        return False
+    data = event.data
+    if not isinstance(data, Mapping):
+        return False
+    if retry_attempt is not None and data.get("retry_attempt") != retry_attempt:
+        return False
+    return not (
+        session_attempt_id is not None and data.get("session_attempt_id") != session_attempt_id
+    )
+
+
+def _correlated_successful_tool_completion(
+    events: tuple[BaseEvent, ...],
+    *,
+    start_index: int,
+    scope_id: str,
+    retry_attempt: int | None,
+    session_attempt_id: str | None,
+) -> BaseEvent | None:
+    """Return one exact successful completion for a mutation start, else None."""
+    start = events[start_index]
+    start_data = start.data
+    if not isinstance(start_data, Mapping):
+        return None
+    start_tool = start_data.get("tool_name")
+    if not isinstance(start_tool, str):
+        return None
+    start_call_id = _event_tool_call_id(start)
+
+    if start_call_id is not None:
+        matching_starts = tuple(
+            candidate
+            for candidate in events
+            if candidate.type == "execution.tool.started"
+            and _event_matches_accepted_attempt(
+                candidate,
+                scope_id=scope_id,
+                retry_attempt=retry_attempt,
+                session_attempt_id=session_attempt_id,
+            )
+            and _event_tool_call_id(candidate) == start_call_id
+        )
+        if len(matching_starts) != 1:
+            return None
+        matches = tuple(
+            candidate
+            for candidate in events[start_index + 1 :]
+            if candidate.type == "execution.tool.completed"
+            and _event_matches_accepted_attempt(
+                candidate,
+                scope_id=scope_id,
+                retry_attempt=retry_attempt,
+                session_attempt_id=session_attempt_id,
+            )
+            and _event_tool_call_id(candidate) == start_call_id
+            and isinstance(candidate.data, Mapping)
+            and candidate.data.get("tool_name") == start_tool
+        )
+        if len(matches) != 1 or not _event_has_explicit_tool_success(matches[0]):
+            return None
+        return matches[0]
+
+    # Legacy id-less streams: only the next same-attempt tool event may close
+    # the start. Any intervening start or id-bearing completion is ambiguous.
+    for candidate in events[start_index + 1 :]:
+        if candidate.type not in {"execution.tool.started", "execution.tool.completed"}:
+            continue
+        if not _event_matches_accepted_attempt(
+            candidate,
+            scope_id=scope_id,
+            retry_attempt=retry_attempt,
+            session_attempt_id=session_attempt_id,
+        ):
+            continue
+        if candidate.type == "execution.tool.started":
+            return None
+        if _event_tool_call_id(candidate) is not None:
+            return None
+        candidate_tool = (
+            candidate.data.get("tool_name") if isinstance(candidate.data, Mapping) else None
+        )
+        if candidate_tool != start_tool:
+            return None
+        return candidate if _event_has_explicit_tool_success(candidate) else None
+    return None
+
+
+def _event_matches_scope(event: BaseEvent, scope_id: str) -> bool:
+    if event.aggregate_id == scope_id:
+        return True
+    if not isinstance(event.data, Mapping):
+        return False
+    return any(
+        isinstance(event.data.get(key), str) and event.data[key].strip() == scope_id
+        for key in ("ac_id", "session_scope_id")
+    )
+
+
+def _event_workspace_relative_path(raw_path: str, data: Mapping[str, Any]) -> str | None:
+    """Return a contained POSIX path relative to the runtime cwd, else ``None``."""
+    runtime = data.get("runtime")
+    runtime_cwd = runtime.get("cwd") if isinstance(runtime, Mapping) else None
+    if not isinstance(runtime_cwd, str) or not runtime_cwd.strip():
+        return _safe_relative_path(raw_path)
+    try:
+        root = Path(runtime_cwd).expanduser().resolve(strict=False)
+        candidate_path = Path(raw_path).expanduser()
+        candidate = (
+            candidate_path.resolve(strict=False)
+            if candidate_path.is_absolute()
+            else (root / candidate_path).resolve(strict=False)
+        )
+        return candidate.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _safe_relative_path(raw_path: str) -> str | None:
+    path = Path(raw_path.strip())
+    if not raw_path.strip() or path.is_absolute() or ".." in path.parts:
+        return None
+    normalized = path.as_posix()
+    return normalized if normalized not in {"", "."} else None
+
+
 def evaluate_deliver_claim(
     manifest: EvidenceManifest,
     claim: DeliverEvidenceClaim,
     *,
     traceguard_validator: TraceGuardValidator,
     claim_term_guard: ClaimTermGuard | None = None,
+    journal_bound: bool = False,
 ) -> DeliverGateVerdict:
     """Evaluate a typed AC deliver claim with a TraceGuard-compatible validator.
 
@@ -255,6 +618,16 @@ def evaluate_deliver_claim(
     claim into TraceGuard's ``parent_synthesis`` claim surface. The deterministic
     validator is injected so this PR does not add a hard runtime dependency or
     alter live AC success semantics.
+
+    ``journal_bound=True`` is the fail-closed live mode.  The canonical
+    TraceGuard manifest is then built entirely from successful journal entries:
+    each entry's journal-generated handle is both its fact and chunk identity.
+    The leaf's arbitrary ``fact_id`` is never copied into the manifest; it is
+    retained only for the returned diagnostics.  The parent synthesis cites the
+    journal handle and accepted handles are mapped back to *all* original facts
+    that cited them.  This avoids the circular legacy shape where a claim could
+    mint a fact id and the adapter would insert that same id into the evidence
+    manifest before validating it.
     """
     if manifest.ac_id != claim.ac_id:
         msg = (
@@ -262,8 +635,15 @@ def evaluate_deliver_claim(
             f"({claim.ac_id!r} != {manifest.ac_id!r})"
         )
         raise ValueError(msg)
+    if journal_bound and claim_term_guard is None:
+        msg = "journal_bound deliver validation requires a claim_term_guard"
+        raise ValueError(msg)
 
-    traceguard_manifest, source_events_by_handle = _traceguard_manifest(manifest, claim)
+    traceguard_manifest, source_events_by_handle = _traceguard_manifest(
+        manifest,
+        claim,
+        journal_bound=journal_bound,
+    )
     evidence_text_by_handle = {
         entry.chunk_id: entry.text for entry in traceguard_manifest if entry.chunk_id
     }
@@ -271,19 +651,41 @@ def evaluate_deliver_claim(
         claim,
         available_handles=frozenset(source_events_by_handle),
     )
-    parent_synthesis = _parent_synthesis_from_claim(claim)
+    parent_synthesis = _parent_synthesis_from_claim(claim, journal_bound=journal_bound)
     raw_result = traceguard_validator(
         evidence_manifest=traceguard_manifest,
         parent_synthesis=parent_synthesis,
     )
-    rejected = missing_evidence + _rejected_claim_summaries(raw_result)
+    raw_rejected = _rejected_claim_summaries(raw_result)
+    rejected = missing_evidence + (
+        _remap_journal_rejections(raw_rejected, claim) if journal_bound else raw_rejected
+    )
     accepted_claims = getattr(raw_result, "accepted_claims", ())
-    accepted_fact_ids = _claim_fact_ids(accepted_claims)
-    if not accepted_fact_ids:
-        accepted_fact_ids = _string_tuple(getattr(raw_result, "allowed_fact_ids", ()))
-    accepted_handles = _claim_chunk_ids(accepted_claims)
-    if not accepted_handles:
-        accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
+    raw_accepted_fact_ids = _claim_fact_ids(accepted_claims)
+    if not raw_accepted_fact_ids:
+        raw_accepted_fact_ids = _string_tuple(getattr(raw_result, "allowed_fact_ids", ()))
+    raw_accepted_handles = _claim_chunk_ids(accepted_claims)
+    if not raw_accepted_handles:
+        raw_accepted_handles = _string_tuple(getattr(raw_result, "allowed_chunk_ids", ()))
+    if journal_bound:
+        accepted_handles = _journal_accepted_handles(
+            raw_fact_ids=raw_accepted_fact_ids,
+            raw_handles=raw_accepted_handles,
+            available_handles=frozenset(source_events_by_handle),
+        )
+        accepted_fact_ids = _claim_fact_ids_for_handles(claim, accepted_handles)
+    else:
+        accepted_fact_ids = raw_accepted_fact_ids
+        accepted_handles = raw_accepted_handles
+    journal_mapping_missing = journal_bound and bool(raw_result.accepted) and not accepted_handles
+    if journal_mapping_missing:
+        rejected += (
+            (
+                None,
+                None,
+                "traceguard_mapping_missing: accepted result named no journal evidence handle",
+            ),
+        )
     claim_term_guard_verdict = None
     # In mixed rejected TraceGuard results, chunk-only fallbacks are provenance,
     # not per-fact acceptance. Semantic checks must not fan out to every claim
@@ -337,6 +739,7 @@ def evaluate_deliver_claim(
         accepted=(
             bool(raw_result.accepted)
             and not missing_evidence
+            and not journal_mapping_missing
             and (claim_term_guard_verdict is None or claim_term_guard_verdict.accepted)
         ),
         unsupported_claim_rate=unsupported_claim_rate,
@@ -454,10 +857,30 @@ def _normalize_optional_anchor(name: str, value: str | None) -> str | None:
 def _traceguard_manifest(
     manifest: EvidenceManifest,
     claim: DeliverEvidenceClaim,
+    *,
+    journal_bound: bool,
 ) -> tuple[tuple[TraceGuardEvidenceInput, ...], dict[str, tuple[str, ...]]]:
     entries_by_handle = {entry.handle: entry for entry in manifest.entries if entry.ok is True}
     entries: list[TraceGuardEvidenceInput] = []
     source_events_by_handle: dict[str, tuple[str, ...]] = {}
+    if journal_bound:
+        # The evidence side must be independent of the claim.  Journal handles
+        # are stable identities derived by ``journal.EvidenceEntry`` from the
+        # recorded source events; using them on both TraceGuard axes gives the
+        # validator a genuine manifest membership check without inventing a fact
+        # id from the text being judged.
+        for entry in entries_by_handle.values():
+            entries.append(
+                TraceGuardEvidenceInput(
+                    fact_id=entry.handle,
+                    chunk_id=entry.handle,
+                    text=_evidence_text(entry.payload),
+                    child_call_id=",".join(entry.source_event_ids),
+                )
+            )
+            source_events_by_handle[entry.handle] = entry.source_event_ids
+        return tuple(entries), source_events_by_handle
+
     for fact in claim.facts:
         entry = entries_by_handle.get(fact.evidence_handle)
         if entry is None:
@@ -508,6 +931,12 @@ def _evidence_text(payload: object) -> str:
     if not isinstance(payload, Mapping):
         return str(payload)
     context_parts: list[str] = []
+    workspace_relative_path = payload.get("workspace_relative_path")
+    if isinstance(workspace_relative_path, str) and workspace_relative_path.strip():
+        context_parts.append(f"path={workspace_relative_path.strip()}")
+    command = payload.get("command")
+    if isinstance(command, str) and command.strip():
+        context_parts.append(f"command={command.strip()}")
     child_ac_id = payload.get("child_ac_id")
     if isinstance(child_ac_id, str) and child_ac_id.strip():
         context_parts.append(f"child_ac_id={child_ac_id.strip()}")
@@ -537,12 +966,19 @@ def _evidence_text(payload: object) -> str:
     return str(dict(payload))
 
 
-def _parent_synthesis_from_claim(claim: DeliverEvidenceClaim) -> dict[str, Any]:
+def _parent_synthesis_from_claim(
+    claim: DeliverEvidenceClaim,
+    *,
+    journal_bound: bool,
+) -> dict[str, Any]:
     return {
         "result": {
             "observed_facts": [
                 {
-                    "fact_id": fact.fact_id,
+                    # In live journal-bound mode the leaf may label its claim for
+                    # diagnostics, but only the independently generated journal
+                    # handle participates in TraceGuard membership.
+                    "fact_id": fact.evidence_handle if journal_bound else fact.fact_id,
                     "chunk_id": fact.evidence_handle,
                     "statement": fact.statement,
                 }
@@ -550,6 +986,53 @@ def _parent_synthesis_from_claim(claim: DeliverEvidenceClaim) -> dict[str, Any]:
             ]
         }
     }
+
+
+def _journal_accepted_handles(
+    *,
+    raw_fact_ids: tuple[str, ...],
+    raw_handles: tuple[str, ...],
+    available_handles: frozenset[str],
+) -> tuple[str, ...]:
+    """Return accepted journal handles from a journal-bound TraceGuard result."""
+    return _dedupe_strings(
+        value for value in (*raw_handles, *raw_fact_ids) if value in available_handles
+    )
+
+
+def _claim_fact_ids_for_handles(
+    claim: DeliverEvidenceClaim,
+    handles: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Map every accepted handle back to every original claim fact safely.
+
+    Multiple facts may cite one journal entry.  We deliberately retain all of
+    them (in claim order) so the strict term guard checks every statement; a
+    single semantic miss rejects the final verdict instead of silently choosing
+    one ambiguous 1:1 mapping.
+    """
+    accepted = frozenset(handles)
+    return tuple(fact.fact_id for fact in claim.facts if fact.evidence_handle in accepted)
+
+
+def _remap_journal_rejections(
+    rejected: tuple[tuple[str | None, str | None, str], ...],
+    claim: DeliverEvidenceClaim,
+) -> tuple[tuple[str | None, str | None, str], ...]:
+    """Map canonical handle rejections back to all citing claim facts."""
+    remapped: list[tuple[str | None, str | None, str]] = []
+    for fact_id, chunk_id, reason in rejected:
+        handle = chunk_id or fact_id
+        matched = (
+            tuple(fact for fact in claim.facts if fact.evidence_handle == handle)
+            if handle is not None
+            else ()
+        )
+        if not matched:
+            remapped.append((fact_id, chunk_id, reason))
+            continue
+        remapped.extend((fact.fact_id, fact.evidence_handle, reason) for fact in matched)
+    return tuple(remapped)
 
 
 def _claim_fact_ids(claims: object) -> tuple[str, ...]:

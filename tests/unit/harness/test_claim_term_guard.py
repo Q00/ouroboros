@@ -8,6 +8,7 @@ from ouroboros.harness.claim_term_guard import (
     ClaimTermGuardFact,
     ClaimTermGuardVerdict,
     deterministic_claim_term_guard,
+    strict_deterministic_claim_term_guard,
 )
 
 
@@ -116,6 +117,32 @@ def test_prose_only_claims_are_left_to_later_semantic_evaluators() -> None:
     )
 
     assert verdict.accepted is True
+
+
+def test_strict_guard_rejects_prose_only_claims() -> None:
+    verdict = strict_deterministic_claim_term_guard(
+        ac_id="AC-1",
+        facts=(
+            ClaimTermGuardFact(
+                fact_id="fact_1",
+                evidence_handle="ev_1",
+                statement="The AC passed because the command succeeded.",
+                evidence_text="result for ev_1",
+            ),
+        ),
+    )
+
+    assert verdict.accepted is False
+    assert verdict.rejected_fact_ids == ("fact_1",)
+    assert "contains no structured key=value term" in verdict.rejected_reasons[0]
+
+
+def test_strict_guard_rejects_empty_journal_binding() -> None:
+    verdict = strict_deterministic_claim_term_guard(ac_id="AC-1", facts=())
+
+    assert verdict.accepted is False
+    assert verdict.rejected_fact_ids == ()
+    assert "no journal-backed facts" in verdict.rejected_reasons[0]
 
 
 def test_rejects_partial_numeric_token_match() -> None:

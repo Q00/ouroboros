@@ -444,6 +444,7 @@ class ExecutionEventEmitter:
         rejected_reasons: list[str],
         accepted_fact_count: int,
         grounding_regression: bool | None = None,
+        grounding_regression_mode: str | None = None,
     ) -> None:
         """Persist a per-AC TraceGuard deliver verdict (frugality-proof grounding axis).
 
@@ -451,14 +452,14 @@ class ExecutionEventEmitter:
         grounded in cited evidence, never changing AC success/failure. Routed
         through ``_safe_emit_event``.
 
-        ``grounding_regression`` is only included in the payload when a caller
-        explicitly measured it against a baseline (a child at the cheap tier
-        newly rejecting a claim the baseline accepted). The live deliver-verdict
-        path leaves it ``None`` so the key is ABSENT — the honest default, since
-        the shadow-replay harness cannot compute a baseline verdict offline (see
-        :mod:`ouroboros.orchestrator.shadow_replay`). The parameter exists so the
-        deterministic proof machine can be closed once a baseline-verdict source
-        exists, without changing this event contract.
+        ``grounding_regression`` is included only when the caller has an explicit
+        deterministic policy for it.  The live path uses the documented
+        ``fail_closed_live_traceguard`` policy: accepted means ``False`` (the
+        lower-tier child is not rejected), while any rejection becomes ``True``
+        because the isolated replay cannot prove that the parent-tier baseline
+        would also reject it.  This is conservative rather than fabricated and
+        lets the proof reach PASS only on journal-grounded accepted children.
+        ``grounding_regression_mode`` records that provenance for audit consumers.
         """
         data: dict[str, Any] = {
             **runtime_identity.to_metadata(),
@@ -475,6 +476,8 @@ class ExecutionEventEmitter:
         # ``_strict_bool`` guard anyway, so never smuggle a truthy string here.
         if isinstance(grounding_regression, bool):
             data["grounding_regression"] = grounding_regression
+            if isinstance(grounding_regression_mode, str) and grounding_regression_mode.strip():
+                data["grounding_regression_mode"] = grounding_regression_mode.strip()
         await self._safe_emit_event(
             BaseEvent(
                 type=EVENT_DELIVER_VERDICT,

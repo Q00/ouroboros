@@ -1649,7 +1649,7 @@ def build_execute_subagent(
     max_iterations: int = 10,
     skip_qa: bool = False,
     auto_evaluate: bool = True,
-    model_tier: str | None = "medium",
+    model_tier: str | None = None,
     max_parallel_workers: int | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for seed execution.

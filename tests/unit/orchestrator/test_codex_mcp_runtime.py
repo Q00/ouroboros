@@ -7,7 +7,11 @@ import pytest
 from ouroboros.core.types import Result
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator import codex_mcp_runtime as codex_mod
-from ouroboros.orchestrator.adapter import SubagentOrchestration, is_leader_driven_worker
+from ouroboros.orchestrator.adapter import (
+    ParamSupport,
+    SubagentOrchestration,
+    is_leader_driven_worker,
+)
 from ouroboros.orchestrator.codex_mcp_runtime import (
     CodexMcpWorkerTransport,
     _map_permission_mode,
@@ -79,6 +83,12 @@ class TestRuntimeWiring:
         rt = build_codex_mcp_worker_runtime(cwd="/tmp")
         assert rt.capabilities.targeted_resume is False
 
+    def test_resume_controls_are_declared_ignored(self) -> None:
+        """codex-reply cannot retarget either model or reasoning effort."""
+        rt = build_codex_mcp_worker_runtime(cwd="/tmp")
+        assert rt.capabilities.model_override_support is ParamSupport.IGNORED
+        assert rt.capabilities.reasoning_effort_support is ParamSupport.IGNORED
+
     @pytest.mark.asyncio
     async def test_does_not_emit_resumable_handle(self) -> None:
         # Even when a turn surfaces a live threadId, no RuntimeHandle is emitted:
@@ -101,14 +111,45 @@ class _RecordingActor:
     last_args: dict = {}
 
     def __init__(self, server_config, *, idle_timeout) -> None:  # noqa: ARG002
-        pass
+        self.is_alive = True
 
     async def call(self, tool: str, arguments: dict):
         _RecordingActor.last_args = {"tool": tool, **arguments}
         return Result.ok(MCPToolResult(structured_content={"threadId": "t1", "content": "ok"}))
 
     async def aclose(self) -> None:
-        pass
+        self.is_alive = False
+
+
+class TestResumeContract:
+    @pytest.mark.asyncio
+    async def test_resume_does_not_send_unsupported_model_or_effort(self, monkeypatch) -> None:
+        monkeypatch.setattr(codex_mod, "MCPSessionActor", _RecordingActor)
+        transport = CodexMcpWorkerTransport(cli_path="codex")
+        turn = await transport.spawn(
+            prompt="first",
+            system_prompt=None,
+            cwd="/tmp",
+            permission_mode=None,
+            model="gpt-5.5",
+            reasoning_effort="high",
+        )
+
+        assert turn.session_id == "t1"
+        _RecordingActor.last_args = {}
+        await transport.resume(
+            session_id="t1",
+            prompt="again",
+            model="gpt-5.6-sol",
+            reasoning_effort="xhigh",
+        )
+
+        assert _RecordingActor.last_args == {
+            "tool": "codex-reply",
+            "threadId": "t1",
+            "prompt": "again",
+        }
+        await transport.aclose()
 
 
 class TestRecursionHardening:

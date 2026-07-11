@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ouroboros.config._model_defaults import normalize_tier_model
 from ouroboros.orchestrator.adapter import ParamSupport
@@ -50,6 +50,11 @@ MODEL_MODE_ENFORCED = "enforced"
 MODEL_MODE_ADVISED = "advised"
 MODEL_MODE_NONE = "none"
 
+# Persisted resolved-router schema. A run stores the concrete backend model map,
+# not just the source config knobs, so a later resume cannot silently pick up a
+# changed config/default ladder mid-session.
+MODEL_ROUTING_CONTRACT_VERSION = 1
+
 # Maps a runtime's ``runtime_backend`` property value to the config provider whose
 # tier models it can execute. Keyed on the EXACT strings each runtime returns from
 # ``runtime.runtime_backend`` (verified against the runtime classes:
@@ -65,6 +70,7 @@ MODEL_MODE_NONE = "none"
 _BACKEND_PROVIDER: Mapping[str, str] = {
     "claude": "anthropic",
     "claude_code": "anthropic",
+    "claude_mcp": "anthropic",
     "codex_cli": "openai",
     "codex_mcp": "openai",
     "gemini_cli": "google",
@@ -191,6 +197,103 @@ class ModelDecision:
         return self.mode == MODEL_MODE_ENFORCED and self.model is not None
 
 
+def serialize_model_router(router: ModelRouter | None) -> dict[str, Any]:
+    """Serialize the resolved per-run routing contract for durable resume.
+
+    ``enabled=False`` is a real contract, distinct from a legacy checkpoint that
+    has no contract at all. Persisting that distinction keeps a kill-switched run
+    dormant when it is resumed in an environment where routing defaults to on.
+    """
+    payload: dict[str, Any] = {
+        "version": MODEL_ROUTING_CONTRACT_VERSION,
+        "enabled": router is not None,
+    }
+    if router is None:
+        return payload
+    payload["router"] = {
+        "tier_models": dict(sorted(router.tier_models.items())),
+        "runtime_backend": router.runtime_backend,
+        "child_tier": router.child_tier,
+        "base_tier": router.base_tier,
+        "escalation_retry_threshold": router.escalation_retry_threshold,
+    }
+    return payload
+
+
+def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
+    """Deserialize a persisted routing contract.
+
+    Returns ``(recognized, router)`` so callers can distinguish a valid dormant
+    contract (``True, None``) from a missing/malformed legacy payload
+    (``False, None``). The latter lets resume apply an explicit fail-closed policy
+    without confusing it with the intentional kill switch.
+    """
+    if not isinstance(value, Mapping):
+        return False, None
+    version = value.get("version")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != MODEL_ROUTING_CONTRACT_VERSION
+    ):
+        return False, None
+    enabled = value.get("enabled")
+    if not isinstance(enabled, bool):
+        return False, None
+    if not enabled:
+        return True, None
+
+    raw_router = value.get("router")
+    if not isinstance(raw_router, Mapping):
+        return False, None
+    raw_tier_models = raw_router.get("tier_models")
+    if not isinstance(raw_tier_models, Mapping) or not raw_tier_models:
+        return False, None
+    tier_models: dict[str, str] = {}
+    for raw_tier, raw_model in raw_tier_models.items():
+        if not isinstance(raw_tier, str) or not raw_tier.strip():
+            return False, None
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            return False, None
+        normalized_tier = raw_tier.strip()
+        if normalized_tier not in MODEL_TIER_LADDER:
+            return False, None
+        if normalized_tier in tier_models:
+            # Whitespace-normalized aliases such as ``"frugal"`` and
+            # ``" frugal "`` make the persisted policy order-dependent. A
+            # versioned execution contract must have one unambiguous model per
+            # tier, so fail closed instead of accepting last-write-wins.
+            return False, None
+        tier_models[normalized_tier] = raw_model.strip()
+
+    runtime_backend = raw_router.get("runtime_backend")
+    child_tier = raw_router.get("child_tier")
+    base_tier = raw_router.get("base_tier")
+    threshold = raw_router.get("escalation_retry_threshold")
+    if (
+        not isinstance(runtime_backend, str)
+        or not runtime_backend.strip()
+        or runtime_backend.strip() not in _BACKEND_PROVIDER
+    ):
+        return False, None
+    if not isinstance(child_tier, str) or child_tier.strip() not in MODEL_TIER_LADDER:
+        return False, None
+    if not isinstance(base_tier, str) or base_tier.strip() not in MODEL_TIER_LADDER:
+        return False, None
+    # bool is an int subclass; accepting it here would make a corrupted payload
+    # silently change retry escalation semantics.
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+        return False, None
+
+    return True, ModelRouter(
+        tier_models=tier_models,
+        runtime_backend=runtime_backend.strip(),
+        child_tier=child_tier.strip(),
+        base_tier=base_tier.strip(),
+        escalation_retry_threshold=threshold,
+    )
+
+
 def build_model_router(
     economics: EconomicsConfig,
     *,
@@ -226,7 +329,9 @@ def build_model_router(
     run — failing every AC. Each tier model is therefore normalized through
     :func:`~ouroboros.config._model_defaults.normalize_tier_model`, the same
     precedent role models use (Q00/ouroboros#1324): a legacy shipped id resolves
-    to its current replacement, while a genuinely explicit id is preserved.
+    to its current replacement. Because the persisted schema has no provenance,
+    an explicit same-provider override equal to that legacy id is normalized as
+    well; cross-provider aliases and explicit never-shipped ids are preserved.
     """
     # An explicit user pin always wins — routing must not override it.
     if pinned_model:
@@ -248,10 +353,14 @@ def build_model_router(
             continue
         # First model whose provider matches this backend wins for the tier.
         # Normalize a legacy shipped id (from an older persisted config) to its
-        # current replacement; an explicit user id passes through untouched.
+        # current replacement; cross-provider aliases and never-shipped explicit
+        # ids pass through untouched (same-provider historical ids are ambiguous).
         for model_config in tier_config.models:
             if model_config.provider == provider:
-                tier_models[tier] = normalize_tier_model(model_config.model)
+                tier_models[tier] = normalize_tier_model(
+                    model_config.model,
+                    provider=model_config.provider,
+                )
                 break
     if not tier_models:
         return None
@@ -272,18 +381,25 @@ def build_model_router(
     )
 
 
-def _resolve_model_for_tier(tier: str, tier_models: Mapping[str, str]) -> str | None:
-    """Find the model for ``tier``, preferring a stronger fallback over a cheaper one.
+def _resolve_model_for_tier(
+    tier: str,
+    tier_models: Mapping[str, str],
+) -> tuple[str, str] | None:
+    """Find the resolved ``(tier, model)`` for a requested tier.
 
     A decided tier may have no model in this backend's map (a sparse config, or a
     child dropped to a tier the backend does not populate). We first walk UP the
     ladder to the nearest defined tier — never silently substituting a model
     *cheaper* than decided — and only as a last resort walk DOWN. Returns ``None``
     when the map is empty or the tier is off the ladder with no exact entry.
+
+    Returning the fallback tier together with its model is correctness-critical:
+    telemetry and the frugality proof must describe the tier that actually ran,
+    not the unavailable tier the policy originally requested.
     """
     exact = tier_models.get(tier)
     if exact is not None:
-        return exact
+        return tier, exact
     if tier not in MODEL_TIER_LADDER:
         return None
     current_index = MODEL_TIER_LADDER.index(tier)
@@ -291,12 +407,12 @@ def _resolve_model_for_tier(tier: str, tier_models: Mapping[str, str]) -> str | 
     for candidate in MODEL_TIER_LADDER[current_index + 1 :]:
         model = tier_models.get(candidate)
         if model is not None:
-            return model
+            return candidate, model
     # ...then DOWN as a last resort (nothing stronger exists).
     for candidate in reversed(MODEL_TIER_LADDER[:current_index]):
         model = tier_models.get(candidate)
         if model is not None:
-            return model
+            return candidate, model
     return None
 
 
@@ -316,11 +432,13 @@ def decide_model(
             ``runtime.capabilities.model_override_support``.
         router: The per-run policy from :func:`build_model_router`, or ``None`` to
             leave model routing dormant.
-        is_decomposed_child: Whether this unit is a verified-MECE child. Unlike
+        is_decomposed_child: Whether this unit is a runtime-decomposed child. Unlike
             effort routing V5 (which does NOT lower a child's reasoning depth),
             this drops the child ONE tier cheaper — the RLM frugality move: a child
-            keeps its reasoning depth but runs on a cheaper model because
-            decomposition made it affordable.
+            keeps its reasoning depth but runs on a cheaper model because the
+            outer success/verifier gate still owns final acceptance. This flag is
+            not itself a MECE attestation; proof admission separately requires a
+            deterministic decomposition-trust signal.
         retry_attempt: Same-runtime retry index for this unit (0 on the initial
             dispatch). At ``router.escalation_retry_threshold`` onward the tier is
             raised one notch, applied AFTER the child drop so a failing child's
@@ -345,14 +463,15 @@ def decide_model(
         # Applied after the child drop so escalation beats the drop.
         tier = raise_one_notch(tier)
 
-    model = _resolve_model_for_tier(tier, router.tier_models)
-    if model is None:
+    resolved = _resolve_model_for_tier(tier, router.tier_models)
+    if resolved is None:
         return ModelDecision(tier=tier, model=None, mode=MODEL_MODE_NONE)
+    resolved_tier, model = resolved
 
     mode = (
         MODEL_MODE_ENFORCED if model_override_support is ParamSupport.NATIVE else MODEL_MODE_ADVISED
     )
-    return ModelDecision(tier=tier, model=model, mode=mode)
+    return ModelDecision(tier=resolved_tier, model=model, mode=mode)
 
 
 def resolve_execute_model(

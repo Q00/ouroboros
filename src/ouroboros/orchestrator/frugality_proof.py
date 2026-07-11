@@ -1,7 +1,7 @@
 """Deterministic frugality-proof machine (the seed's FrugalityProofTriad gate).
 
 The hypothesis the seed exists to prove: *if work is decomposed well, each child
-runs at a lower reasoning-effort and stays token-frugal WITHOUT losing grounding.*
+runs on a lower model tier and stays token-frugal WITHOUT losing grounding.*
 This module is the deterministic, LLM-free judge of that hypothesis. It reads the
 event stream a run produces, assembles one :class:`FrugalityTriadRow` per AC, and
 computes a PASS/FAIL verdict — no model is asked anything, so the proof cannot be
@@ -9,21 +9,28 @@ reward-hacked.
 
 A triad row joins three measured axes by ``ac_id``:
 
-* **effort** — ``execution.ac.effort_routed`` (effort_level + effort_mode). Emitted
-  today by the effort contract.
-* **token** — ``execution.ac.token_attribution.reported`` (token_spend). Production
-  side not wired yet (seed AC2).
+* **routing** — ``execution.ac.model_routed`` (model_tier + model_mode). The child
+  tier must be natively enforced and strictly lower than the shadow baseline tier.
+  ``execution.ac.effort_routed`` remains auxiliary audit metadata.
+* **token** — ``execution.ac.token_attribution.reported`` (token_spend), harvested
+  from runtime usage telemetry (seed AC2).
 * **grounding** — ``execution.ac.deliver_verdict`` (traceguard_verdict +
-  unsupported_claim_rate). Production side not wired yet (seed AC4).
+  unsupported_claim_rate + fail-closed grounding_regression), validated against
+  accepted-leaf journal evidence (seed AC4).
 * **baseline** — ``execution.ac.shadow_replay`` (baseline_token_spend at parent
-  effort). Production side not wired yet (seed AC5).
+  model tier), emitted only by the opt-in isolated replay experiment (seed AC5).
+* **acceptance** — ``execution.ac.outcome_finalized``. Proof rows remain provisional
+  until the seed-level verify/retry layer authoritatively accepts their root AC.
 
-A row only ``counts_in_proof`` when effort was ENFORCED, the unit is a decomposed
-child (the hypothesis is about children, not top-level ACs), the decomposition was
-trustworthy, and all axes are present. The gate therefore returns
-``INSUFFICIENT_DATA`` honestly until the token / grounding / baseline producers are
-wired — and the *same* gate yields PASS/FAIL once they are. The contract (event
-types + fields) is fixed here so the producers have a precise target.
+A row only ``counts_in_proof`` when the lower model tier was ENFORCED, every retry
+attempt has a paired token/deliver/shadow measurement, the root AC was finally
+accepted, the unit is a decomposed child (the hypothesis is about children, not
+top-level ACs), the decomposition was trustworthy, and all axes are present. The
+gate therefore returns
+``INSUFFICIENT_DATA`` honestly when a run lacks a measured axis (for example the
+opt-in replay is off or a claim cannot be bound unambiguously to journal evidence).
+Across a bounded same-seed cohort with every axis measured, the same gate yields a
+real PASS/FAIL. The contract (event types + fields) remains deterministic.
 """
 
 from __future__ import annotations
@@ -44,7 +51,10 @@ def _finite_number(value: object) -> float | None:
     """
     if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    f = float(value)
+    try:
+        f = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
     return f if math.isfinite(f) else None
 
 
@@ -63,11 +73,20 @@ def _strict_bool(value: object) -> bool | None:
 
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
+EVENT_MODEL_ROUTED = "execution.ac.model_routed"
 EVENT_TOKEN_ATTRIBUTION = "execution.ac.token_attribution.reported"
 EVENT_DELIVER_VERDICT = "execution.ac.deliver_verdict"
 EVENT_SHADOW_REPLAY = "execution.ac.shadow_replay"
+EVENT_AC_OUTCOME_FINALIZED = "execution.ac.outcome_finalized"
 
 EFFORT_MODE_ENFORCED = "enforced"
+MODEL_MODE_ENFORCED = "enforced"
+BASELINE_MODE_SHADOW_REPLAY = "shadow_replay"
+MODEL_TIER_ORDER: Mapping[str, int] = {
+    "frugal": 0,
+    "standard": 1,
+    "frontier": 2,
+}
 
 # -- Default gate thresholds (the seed's acceptance criteria) -----------------
 DEFAULT_MIN_TRIADS = 20
@@ -85,16 +104,24 @@ class ProofStatus(StrEnum):
 
 @dataclass(frozen=True)
 class FrugalityTriadRow:
-    """One AC's measured triad (token x effort x grounding) + its baseline."""
+    """One AC's measured triad (token x model routing x grounding) + baseline."""
 
     ac_id: str
     seed_run_id: str | None = None
+    root_ac_index: int | None = None
     is_decomposed_child: bool = False
     decomposition_trustworthy: bool = True
     # effort axis
     effort_level: str | None = None
     effort_mode: str | None = None
     parent_effort: str | None = None
+    # model-routing axis
+    model_tier: str | None = None
+    model: str | None = None
+    model_mode: str | None = None
+    baseline_tier: str | None = None
+    baseline_model: str | None = None
+    model_lowering_enforced: bool = False
     # token axis
     token_spend: float | None = None
     baseline_token_spend: float | None = None
@@ -103,9 +130,18 @@ class FrugalityTriadRow:
     traceguard_verdict: str | None = None
     unsupported_claim_rate: float | None = None
     grounding_regression: bool | None = None
+    # authoritative admission / retry pairing
+    authoritatively_accepted: bool = False
+    attempts_paired: bool = False
 
     @property
     def is_enforced(self) -> bool:
+        """Whether the frugality actuator was natively enforced and lowered."""
+        return self.model_lowering_enforced
+
+    @property
+    def is_effort_enforced(self) -> bool:
+        """Auxiliary effort-contract metadata; not proof admission."""
         return self.effort_mode == EFFORT_MODE_ENFORCED and self.effort_level is not None
 
     @property
@@ -129,6 +165,12 @@ class FrugalityTriadRow:
         baseline = _finite_number(self.baseline_token_spend)
         claim_rate = _finite_number(self.unsupported_claim_rate)
         verdict = self.traceguard_verdict
+        normalized_verdict = verdict.strip().casefold() if isinstance(verdict, str) else ""
+        grounding_consistent = (
+            normalized_verdict == "accepted"
+            and claim_rate == 0.0
+            and self.grounding_regression is False
+        ) or (normalized_verdict != "accepted" and self.grounding_regression is True)
         return (
             token is not None
             and token >= 0
@@ -139,24 +181,28 @@ class FrugalityTriadRow:
             and claim_rate is not None
             and 0.0 <= claim_rate <= 1.0
             and self.grounding_regression is not None
+            and grounding_consistent
+            and self.baseline_mode == BASELINE_MODE_SHADOW_REPLAY
+            and self.attempts_paired
         )
 
     @property
     def counts_in_proof(self) -> bool:
-        """Only enforced + decomposed-child + trustworthy + fully-measured rows count.
+        """Only accepted, lowered-model, trustworthy, fully-measured rows count.
 
         The hypothesis is specifically about *decomposed children* running at a
-        lower effort than their parent (see module docstring), so a top-level AC
+        lower model tier than their parent (see module docstring), so a top-level AC
         (``is_decomposed_child=False``) is excluded even when fully measured —
         otherwise a sample of ordinary top-level executions could PASS the gate and
         "prove" a frugality claim the run never tested. A top-level unit also has no
-        parent effort to lower from and no shadow-replay baseline that means
-        anything. Advised effort, untrustworthy (forced-atomic) decomposition, or a
-        missing axis likewise exclude the row — the exact honesty the deterministic
-        proof needs.
+        parent tier to lower from and no shadow-replay baseline that means anything.
+        Advised/equal-tier routing, an outer-gate rejection, untrustworthy
+        (forced-atomic) decomposition, an unpaired retry, or a missing axis likewise
+        exclude the row — the exact honesty the deterministic proof needs.
         """
         return (
             self.is_enforced
+            and self.authoritatively_accepted
             and self.is_decomposed_child
             and self.decomposition_trustworthy
             and self.has_all_axes
@@ -200,9 +246,9 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     ``ac_id`` cannot be correlated and is skipped.
 
     Skipping the ``ac_id``-less event is **by design, not a gap**: the proof is a
-    per-decomposed-AC measurement, and the whole-seed direct-runner effort event
-    (``OrchestratorRunner._route_call_effort``) is emitted without a per-AC id
-    because a non-decomposed single-call run has no child to lower effort on and no
+    per-decomposed-AC measurement, and the whole-seed direct-runner routing events
+    are emitted without a per-AC id because a non-decomposed single-call run has no
+    child tier to lower and no
     shadow-replay baseline — there is nothing for the frugality triad to prove. Such
     runs are intentionally out of the proof's scope rather than counted as
     missing-axis rows; only the parallel executor's per-AC events (which carry
@@ -217,80 +263,343 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     single implicit run — the original single-run behavior, preserved.
     """
     acc: dict[tuple[str | None, str], dict] = {}
+    finalized: dict[
+        tuple[str | None, int],
+        dict[int, list[tuple[bool | None, bool | None]]],
+    ] = {}
+    finalized_invalid: set[tuple[str | None, int]] = set()
+
+    def run_anchor(data: Mapping) -> str | None:
+        run = data.get("seed_run_id") or data.get("execution_id")
+        return str(run) if run is not None else None
+
+    def retry_attempt(data: Mapping) -> int | None:
+        # Retry identity is part of the proof schema, not an optional legacy
+        # convenience. Defaulting a missing field to attempt zero lets malformed
+        # events pair with a real final marker and manufacture a complete row.
+        if "retry_attempt" not in data:
+            return None
+        value = data.get("retry_attempt")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    def root_ac_index(data: Mapping) -> int | None:
+        for key in ("root_ac_index", "parent_ac_index", "ac_index"):
+            value = data.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return None
+
+    def merge_root(row: dict, data: Mapping) -> None:
+        observed = root_ac_index(data)
+        if observed is None:
+            return
+        current = row.get("root_ac_index")
+        if current is None:
+            row["root_ac_index"] = observed
+        elif current != observed:
+            row["root_index_invalid"] = True
+
+    def merge_decomposed(row: dict, data: Mapping) -> None:
+        observed = _strict_bool(data.get("is_decomposed_child"))
+        if observed is None:
+            row["decomposition_flag_invalid"] = True
+            return
+        current = row.get("is_decomposed_child")
+        if current is None:
+            row["is_decomposed_child"] = observed
+        elif current != observed:
+            row["decomposition_flag_invalid"] = True
 
     def slot(data: Mapping) -> dict | None:
         ac_id = data.get("ac_id")
         if not ac_id:
             return None
-        run = data.get("seed_run_id") or data.get("execution_id")
-        run_key = str(run) if run is not None else None
+        run_key = run_anchor(data)
         return acc.setdefault((run_key, str(ac_id)), {"ac_id": str(ac_id), "seed_run_id": run_key})
 
     for event in events:
         etype = _event_type(event)
         data = _event_data(event)
-        if etype == EVENT_EFFORT_ROUTED:
+        if etype == EVENT_AC_OUTCOME_FINALIZED:
+            run_key = run_anchor(data)
+            root_index = root_ac_index(data)
+            attempt = retry_attempt(data)
+            success = _strict_bool(data.get("success"))
+            is_decomposed = _strict_bool(data.get("is_decomposed"))
+            if root_index is None:
+                continue
+            if attempt is None:
+                # A malformed marker for a known root must poison admission for
+                # that root. Ignoring it would let the assembler fall back to an
+                # older successful marker and potentially PASS after the producer
+                # emitted a newer-but-corrupt authoritative outcome.
+                finalized_invalid.add((run_key, root_index))
+                continue
+            # Preserve malformed booleans as ``None`` instead of dropping the
+            # marker. If this is the latest root attempt, admission must fail closed
+            # rather than falling back to an older successful marker.
+            finalized.setdefault((run_key, root_index), {}).setdefault(attempt, []).append(
+                (success, is_decomposed)
+            )
+        elif etype == EVENT_EFFORT_ROUTED:
             row = slot(data)
             if row is None:
                 continue
-            row["effort_level"] = data.get("effort_level")
-            row["effort_mode"] = data.get("effort_mode")
-            # Strict boolean: a malformed/missing value fails safe to False, which
-            # excludes the row (counts_in_proof requires a decomposed child) rather
-            # than admitting a top-level row whose flag was a truthy string.
-            row["is_decomposed_child"] = _strict_bool(data.get("is_decomposed_child")) or False
+            merge_root(row, data)
+            merge_decomposed(row, data)
+            row.setdefault("effort_levels", set()).add(data.get("effort_level"))
+            row.setdefault("effort_modes", set()).add(data.get("effort_mode"))
             if data.get("parent_effort") is not None:
-                row["parent_effort"] = data.get("parent_effort")
-            # seed_run_id is established as part of the row key (see ``slot``), so it
-            # is not re-read here.
+                row.setdefault("parent_efforts", set()).add(data.get("parent_effort"))
+        elif etype == EVENT_MODEL_ROUTED:
+            row = slot(data)
+            if row is None:
+                continue
+            merge_root(row, data)
+            merge_decomposed(row, data)
+            attempt = retry_attempt(data)
+            if attempt is None:
+                row["model_invalid"] = True
+                continue
+            model_tier = data.get("model_tier")
+            model = data.get("model")
+            model_mode = data.get("model_mode")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (model_tier, model, model_mode)
+            ):
+                row["model_invalid"] = True
+                continue
+            value = (model_tier.strip(), model.strip(), model_mode.strip())
+            models = row.setdefault("models_by_attempt", {})
+            if attempt in models:
+                # One routing decision is authoritative per leaf attempt. Even an
+                # identical duplicate can be an at-least-once persistence replay;
+                # accepting it would make other single-axis duplicates exploitable.
+                row["model_invalid"] = True
+            else:
+                models[attempt] = value
         elif etype == EVENT_TOKEN_ATTRIBUTION:
             row = slot(data)
             if row is None:
                 continue
-            row["token_spend"] = data.get("token_spend")
+            merge_root(row, data)
+            attempt = retry_attempt(data)
+            # One logical AC may emit one attribution event per retry/resume
+            # attempt. Spend is cumulative across those attempts, and EventStore
+            # query order is newest-first, so replacement would both undercount
+            # rework and make the result order-dependent. Sum every valid
+            # measurement instead. If any measurement is malformed, poison the
+            # axis for this row: silently dropping a bad retry could understate
+            # spend and create a false frugality PASS.
+            token_spend = _finite_number(data.get("token_spend"))
+            if attempt is None or token_spend is None or token_spend < 0:
+                row["token_spend_invalid"] = True
+            else:
+                tokens = row.setdefault("tokens_by_attempt", {})
+                # Runtime-message usage is already aggregated by the producer into
+                # one attribution event. A second event for the same attempt is not
+                # another usage fragment; it is ambiguous duplicate telemetry.
+                if attempt in tokens:
+                    row["token_spend_invalid"] = True
+                else:
+                    tokens[attempt] = token_spend
         elif etype == EVENT_DELIVER_VERDICT:
             row = slot(data)
             if row is None:
                 continue
-            row["traceguard_verdict"] = data.get("traceguard_verdict")
-            row["unsupported_claim_rate"] = data.get("unsupported_claim_rate")
-            # Strict boolean: a malformed grounding flag stays None (unset) so
-            # has_all_axes excludes the row, rather than a truthy string defaulting
-            # the veto to a value the producer did not actually measure.
+            merge_root(row, data)
+            attempt = retry_attempt(data)
+            verdict = data.get("traceguard_verdict")
+            claim_rate = _finite_number(data.get("unsupported_claim_rate"))
             grounding = _strict_bool(data.get("grounding_regression"))
-            if grounding is not None:
-                row["grounding_regression"] = grounding
+            if (
+                attempt is None
+                or not isinstance(verdict, str)
+                or not verdict.strip()
+                or claim_rate is None
+                or not 0.0 <= claim_rate <= 1.0
+                or grounding is None
+            ):
+                row["deliver_invalid"] = True
+                continue
+            deliveries = row.setdefault("deliveries_by_attempt", {})
+            normalized_verdict = verdict.strip()
+            if normalized_verdict.casefold() == "accepted" and (
+                claim_rate != 0.0 or grounding is not False
+            ):
+                # An accepted TraceGuard verdict means every claim was supported.
+                # A non-zero unsupported rate or regression flag contradicts that
+                # verdict, so the payload is malformed rather than ground truth.
+                row["deliver_invalid"] = True
+                continue
+            if attempt in deliveries:
+                row["deliver_invalid"] = True
+            else:
+                deliveries[attempt] = (normalized_verdict, claim_rate, grounding)
         elif etype == EVENT_SHADOW_REPLAY:
             row = slot(data)
             if row is None:
                 continue
-            row["baseline_token_spend"] = data.get("baseline_token_spend")
-            row["baseline_mode"] = data.get("baseline_mode")
-            # Strict boolean: a present-but-malformed trustworthiness flag fails safe
-            # to False (excludes the row) instead of a truthy string admitting an
-            # untrustworthy decomposition into the proof.
-            if data.get("decomposition_trustworthy") is not None:
-                trustworthy = _strict_bool(data.get("decomposition_trustworthy"))
-                row["decomposition_trustworthy"] = trustworthy if trustworthy is not None else False
+            merge_root(row, data)
+            attempt = retry_attempt(data)
+            baseline = _finite_number(data.get("baseline_token_spend"))
+            baseline_mode = data.get("baseline_mode")
+            baseline_tier = data.get("baseline_tier")
+            baseline_model = data.get("baseline_model")
+            trustworthy = _strict_bool(data.get("decomposition_trustworthy"))
+            if (
+                attempt is None
+                or baseline is None
+                or baseline <= 0
+                or baseline_mode != BASELINE_MODE_SHADOW_REPLAY
+                or not isinstance(baseline_tier, str)
+                or not baseline_tier.strip()
+                or not isinstance(baseline_model, str)
+                or not baseline_model.strip()
+                or trustworthy is None
+            ):
+                row["baseline_invalid"] = True
+                continue
+            baselines = row.setdefault("baselines_by_attempt", {})
+            normalized_tier = baseline_tier.strip()
+            normalized_model = baseline_model.strip()
+            if attempt not in baselines:
+                baselines[attempt] = (
+                    baseline,
+                    normalized_tier,
+                    normalized_model,
+                    trustworthy,
+                )
+            else:
+                # A replay is run once per live attempt. Summing a duplicate only
+                # on the denominator can turn an ordinary row into a false PASS.
+                row["baseline_invalid"] = True
 
-    return [
-        FrugalityTriadRow(
-            ac_id=v["ac_id"],
-            seed_run_id=v.get("seed_run_id"),
-            is_decomposed_child=v.get("is_decomposed_child", False),
-            decomposition_trustworthy=v.get("decomposition_trustworthy", True),
-            effort_level=v.get("effort_level"),
-            effort_mode=v.get("effort_mode"),
-            parent_effort=v.get("parent_effort"),
-            token_spend=v.get("token_spend"),
-            baseline_token_spend=v.get("baseline_token_spend"),
-            baseline_mode=v.get("baseline_mode"),
-            traceguard_verdict=v.get("traceguard_verdict"),
-            unsupported_claim_rate=v.get("unsupported_claim_rate"),
-            grounding_regression=v.get("grounding_regression"),
+    rows: list[FrugalityTriadRow] = []
+    for v in acc.values():
+        models = v.get("models_by_attempt", {})
+        tokens = v.get("tokens_by_attempt", {})
+        deliveries = v.get("deliveries_by_attempt", {})
+        baselines = v.get("baselines_by_attempt", {})
+        attempt_sets = (set(models), set(tokens), set(deliveries), set(baselines))
+        attempts_paired = bool(attempt_sets[0]) and all(
+            attempt_set == attempt_sets[0] for attempt_set in attempt_sets[1:]
         )
-        for v in acc.values()
-    ]
+        attempts_paired = attempts_paired and not any(
+            v.get(flag, False)
+            for flag in (
+                "model_invalid",
+                "token_spend_invalid",
+                "deliver_invalid",
+                "baseline_invalid",
+                "root_index_invalid",
+                "decomposition_flag_invalid",
+            )
+        )
+
+        model_tiers = {value[0] for value in models.values()}
+        model_names = {value[1] for value in models.values()}
+        model_modes = {value[2] for value in models.values()}
+        baseline_tiers = {value[1] for value in baselines.values()}
+        baseline_models = {value[2] for value in baselines.values()}
+        model_lowering_enforced = attempts_paired and all(
+            model_mode == MODEL_MODE_ENFORCED
+            and child_tier in MODEL_TIER_ORDER
+            and baseline_tier in MODEL_TIER_ORDER
+            and MODEL_TIER_ORDER[child_tier] < MODEL_TIER_ORDER[baseline_tier]
+            and child_model != baseline_model
+            for attempt, (child_tier, child_model, model_mode) in models.items()
+            for _baseline_spend, baseline_tier, baseline_model, _trustworthy in (
+                baselines[attempt],
+            )
+        )
+
+        root_index = v.get("root_ac_index")
+        final_markers = (
+            finalized.get((v.get("seed_run_id"), root_index), {})
+            if isinstance(root_index, int)
+            else {}
+        )
+        authoritatively_accepted = False
+        if final_markers:
+            final_attempt = max(final_markers)
+            final_records = final_markers[final_attempt]
+            # The outer marker is authoritative only when there is exactly one
+            # unambiguous result for its latest attempt, that result is a successful
+            # decomposition, and this child actually participated in that final
+            # attempt. This prevents failed/stale child rows from hitchhiking on a
+            # later atomic root success.
+            authoritatively_accepted = (
+                (v.get("seed_run_id"), root_index) not in finalized_invalid
+                and len(final_records) == 1
+                and final_records[0] == (True, True)
+                and final_attempt in attempt_sets[0]
+            )
+
+        delivery_values = list(deliveries.values())
+        grounding_regression = (
+            any(value[2] or value[0].casefold() != "accepted" for value in delivery_values)
+            if delivery_values and not v.get("deliver_invalid", False)
+            else None
+        )
+        traceguard_verdict = None
+        unsupported_claim_rate = None
+        if delivery_values and grounding_regression is not None:
+            traceguard_verdict = "rejected" if grounding_regression else "accepted"
+            unsupported_claim_rate = max(value[1] for value in delivery_values)
+
+        effort_levels = v.get("effort_levels", set())
+        effort_modes = v.get("effort_modes", set())
+        parent_efforts = v.get("parent_efforts", set())
+        rows.append(
+            FrugalityTriadRow(
+                ac_id=v["ac_id"],
+                seed_run_id=v.get("seed_run_id"),
+                root_ac_index=root_index if isinstance(root_index, int) else None,
+                is_decomposed_child=(
+                    bool(v.get("is_decomposed_child"))
+                    and not v.get("decomposition_flag_invalid", False)
+                ),
+                decomposition_trustworthy=(
+                    bool(baselines)
+                    and all(value[3] for value in baselines.values())
+                    and not v.get("baseline_invalid", False)
+                ),
+                effort_level=next(iter(effort_levels)) if len(effort_levels) == 1 else None,
+                effort_mode=next(iter(effort_modes)) if len(effort_modes) == 1 else None,
+                parent_effort=next(iter(parent_efforts)) if len(parent_efforts) == 1 else None,
+                model_tier=next(iter(model_tiers)) if len(model_tiers) == 1 else None,
+                model=next(iter(model_names)) if len(model_names) == 1 else None,
+                model_mode=next(iter(model_modes)) if len(model_modes) == 1 else None,
+                baseline_tier=(next(iter(baseline_tiers)) if len(baseline_tiers) == 1 else None),
+                baseline_model=(next(iter(baseline_models)) if len(baseline_models) == 1 else None),
+                model_lowering_enforced=model_lowering_enforced,
+                token_spend=(
+                    sum(tokens.values())
+                    if tokens and not v.get("token_spend_invalid", False)
+                    else None
+                ),
+                baseline_token_spend=(
+                    sum(value[0] for value in baselines.values())
+                    if baselines and not v.get("baseline_invalid", False)
+                    else None
+                ),
+                baseline_mode=(
+                    BASELINE_MODE_SHADOW_REPLAY
+                    if baselines and not v.get("baseline_invalid", False)
+                    else None
+                ),
+                traceguard_verdict=traceguard_verdict,
+                unsupported_claim_rate=unsupported_claim_rate,
+                grounding_regression=grounding_regression,
+                authoritatively_accepted=authoritatively_accepted,
+                attempts_paired=attempts_paired,
+            )
+        )
+    return rows
 
 
 def evaluate_proof(
@@ -304,17 +613,16 @@ def evaluate_proof(
 
     Order of checks (the seed's exit conditions):
 
-    1. **Grounding is a per-AC veto** — any counted row whose lower-effort run
+    1. **Grounding is a per-AC veto** — any counted row whose lower-tier run
        produced a newly-rejected claim (``grounding_regression``) fails the proof
-       outright; lowering effort must never reduce grounding.
+       outright; lowering model tier must never reduce grounding.
     2. **Sample sufficiency** — at least ``min_triads`` counted rows across at least
        ``min_runs`` runs, else the result is anecdotal.
     3. **Frugality** — aggregate token reduction vs the shadow-replay baseline must
        beat ``min_reduction_pct``.
 
-    Returns ``INSUFFICIENT_DATA`` when no row carries all axes (the token / grounding
-    / baseline producers are not wired yet) — honest about an unproven hypothesis
-    rather than asserting one.
+    Returns ``INSUFFICIENT_DATA`` when no row carries all measured axes — honest
+    about an unproven hypothesis rather than asserting one.
     """
     thresholds = {
         "min_triads": float(min_triads),
@@ -330,9 +638,10 @@ def evaluate_proof(
             token_reduction_pct=None,
             grounding_regressions=0,
             reason=(
-                "No fully-measured enforced rows. The effort axis is produced, but "
-                "the token / grounding / shadow-replay axes are not wired yet, so the "
-                "hypothesis is not yet testable."
+                "No fully-measured, outer-gate-accepted lower-tier rows. One or "
+                "more routing, retry pairing, token, grounding, acceptance, or "
+                "opt-in shadow-replay measurements are missing, so the hypothesis "
+                "is not yet testable."
             ),
             thresholds=thresholds,
         )
@@ -347,7 +656,7 @@ def evaluate_proof(
             token_reduction_pct=_reduction_pct(counted),
             grounding_regressions=regressions,
             reason=(
-                f"{regressions} AC(s) lost grounding at lower effort "
+                f"{regressions} AC(s) lost grounding at a lower model tier "
                 "(newly-rejected TraceGuard claim) — do not merge."
             ),
             thresholds=thresholds,
@@ -428,6 +737,11 @@ def _distinct_runs(rows: list[FrugalityTriadRow]) -> int:
 def _reduction_pct(rows: list[FrugalityTriadRow]) -> float | None:
     baseline = sum(r.baseline_token_spend or 0.0 for r in rows)
     spent = sum(r.token_spend or 0.0 for r in rows)
-    if baseline <= 0:
+    # Individual rows are finite, but summing a large cohort can still overflow
+    # to infinity. A non-finite aggregate would make ``(inf - inf) / inf`` NaN;
+    # comparing NaN with the threshold is always false and could otherwise fall
+    # through to a false PASS. Treat overflow as unmeasurable instead.
+    if not math.isfinite(baseline) or not math.isfinite(spent) or baseline <= 0:
         return None
-    return (baseline - spent) / baseline * 100.0
+    reduction = (baseline - spent) / baseline * 100.0
+    return reduction if math.isfinite(reduction) else None

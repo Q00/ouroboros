@@ -103,6 +103,67 @@ def deterministic_claim_term_guard(
     return ClaimTermGuardVerdict(accepted=True)
 
 
+def strict_deterministic_claim_term_guard(
+    *,
+    ac_id: str,
+    facts: tuple[ClaimTermGuardFact, ...],
+) -> ClaimTermGuardVerdict:
+    """Fail closed unless every journal-backed claim is semantically checkable.
+
+    The ordinary deterministic guard intentionally leaves prose-only claims to a
+    later semantic evaluator.  The live frugality proof has no such later stage:
+    accepting a prose-only claim after checking only that its evidence handle
+    exists would let the claim mint its own ``fact_id`` and circularly validate
+    itself.  This strict variant therefore requires at least one explicit
+    ``key=value`` term per fact, then applies the same deterministic term matching
+    as :func:`deterministic_claim_term_guard`.
+
+    An empty fact set is rejected as well.  That protects callers from treating a
+    TraceGuard adapter/mapping bug as an accepted grounding measurement.
+    """
+    del ac_id
+    if not facts:
+        return ClaimTermGuardVerdict(
+            accepted=False,
+            rejected_reasons=(
+                "semantic_miss: no journal-backed facts were available for strict validation",
+            ),
+        )
+
+    rejected_fact_ids: list[str] = []
+    rejected_reasons: list[str] = []
+    for fact in facts:
+        if not _structured_terms(fact.statement):
+            rejected_fact_ids.append(fact.fact_id)
+            rejected_reasons.append(
+                "semantic_miss: "
+                f"{fact.fact_id} cites {fact.evidence_handle} but its statement "
+                "contains no structured key=value term"
+            )
+            continue
+
+        missing = _missing_structured_terms(
+            statement=fact.statement,
+            evidence_text=fact.evidence_text,
+        )
+        if not missing:
+            continue
+        rejected_fact_ids.append(fact.fact_id)
+        rejected_reasons.append(
+            "semantic_miss: "
+            f"{fact.fact_id} cites {fact.evidence_handle} but evidence text lacks "
+            f"required term(s): {', '.join(missing)}"
+        )
+
+    if rejected_reasons:
+        return ClaimTermGuardVerdict(
+            accepted=False,
+            rejected_fact_ids=tuple(rejected_fact_ids),
+            rejected_reasons=tuple(rejected_reasons),
+        )
+    return ClaimTermGuardVerdict(accepted=True)
+
+
 def _missing_structured_terms(*, statement: str, evidence_text: str) -> tuple[str, ...]:
     terms = _structured_terms(statement)
     if not terms:
@@ -186,4 +247,5 @@ __all__ = [
     "ClaimTermGuardFact",
     "ClaimTermGuardVerdict",
     "deterministic_claim_term_guard",
+    "strict_deterministic_claim_term_guard",
 ]

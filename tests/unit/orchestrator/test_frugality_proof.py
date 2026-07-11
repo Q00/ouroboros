@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ouroboros.orchestrator.frugality_proof import (
+    EVENT_AC_OUTCOME_FINALIZED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
+    EVENT_MODEL_ROUTED,
     EVENT_SHADOW_REPLAY,
     EVENT_TOKEN_ATTRIBUTION,
     FrugalityTriadRow,
@@ -18,11 +22,21 @@ def _evt(etype: str, **data) -> dict:
     return {"type": etype, "data": data}
 
 
-def _triad_events(ac: str, run: str, **effort_overrides) -> list[dict]:
-    """A full, valid 4-axis triad for one (ac, run) — overridable on the effort event."""
+def _triad_events(
+    ac: str,
+    run: str,
+    *,
+    retry_attempt: int = 0,
+    root_ac_index: int = 0,
+    final_success: bool = True,
+    **effort_overrides,
+) -> list[dict]:
+    """A full, accepted model/token/grounding/baseline row for one attempt."""
     effort = {
         "ac_id": ac,
         "seed_run_id": run,
+        "root_ac_index": root_ac_index,
+        "retry_attempt": retry_attempt,
         "effort_level": "low",
         "effort_mode": "enforced",
         "is_decomposed_child": True,
@@ -30,22 +44,54 @@ def _triad_events(ac: str, run: str, **effort_overrides) -> list[dict]:
     effort.update(effort_overrides)
     return [
         _evt(EVENT_EFFORT_ROUTED, **effort),
-        _evt(EVENT_TOKEN_ATTRIBUTION, ac_id=ac, seed_run_id=run, token_spend=80.0),
+        _evt(
+            EVENT_MODEL_ROUTED,
+            ac_id=ac,
+            seed_run_id=run,
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
+            model_tier="frugal",
+            model="claude-haiku-4-5",
+            model_mode="enforced",
+            is_decomposed_child=True,
+        ),
+        _evt(
+            EVENT_TOKEN_ATTRIBUTION,
+            ac_id=ac,
+            seed_run_id=run,
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
+            token_spend=80.0,
+        ),
         _evt(
             EVENT_SHADOW_REPLAY,
             ac_id=ac,
             seed_run_id=run,
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
             baseline_token_spend=100.0,
             baseline_mode="shadow_replay",
+            baseline_tier="standard",
+            baseline_model="claude-sonnet-4-6",
             decomposition_trustworthy=True,
         ),
         _evt(
             EVENT_DELIVER_VERDICT,
             ac_id=ac,
             seed_run_id=run,
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
             traceguard_verdict="accepted",
             unsupported_claim_rate=0.0,
             grounding_regression=False,
+        ),
+        _evt(
+            EVENT_AC_OUTCOME_FINALIZED,
+            seed_run_id=run,
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
+            success=final_success,
+            is_decomposed=True,
         ),
     ]
 
@@ -58,50 +104,36 @@ def _full_row(ac_id: str, *, run: str, token: float, baseline: float, regression
         decomposition_trustworthy=True,
         effort_level="medium",
         effort_mode="enforced",
+        model_tier="frugal",
+        model="claude-haiku-4-5",
+        model_mode="enforced",
+        baseline_tier="standard",
+        baseline_model="claude-sonnet-4-6",
+        model_lowering_enforced=True,
         token_spend=token,
         baseline_token_spend=baseline,
         baseline_mode="shadow_replay",
-        traceguard_verdict="accepted",
-        unsupported_claim_rate=0.0,
+        traceguard_verdict="rejected" if regression else "accepted",
+        unsupported_claim_rate=1.0 if regression else 0.0,
         grounding_regression=regression,
+        authoritatively_accepted=True,
+        attempts_paired=True,
     )
 
 
 class TestAssembleTriads:
     def test_joins_all_axes_by_ac_id(self) -> None:
-        events = [
-            _evt(
-                EVENT_EFFORT_ROUTED,
-                ac_id="ac1",
-                effort_level="medium",
-                effort_mode="enforced",
-                is_decomposed_child=True,
-                seed_run_id="r1",
-            ),
-            _evt(EVENT_TOKEN_ATTRIBUTION, ac_id="ac1", seed_run_id="r1", token_spend=80.0),
-            _evt(
-                EVENT_SHADOW_REPLAY,
-                ac_id="ac1",
-                seed_run_id="r1",
-                baseline_token_spend=100.0,
-                baseline_mode="shadow_replay",
-                decomposition_trustworthy=True,
-            ),
-            _evt(
-                EVENT_DELIVER_VERDICT,
-                ac_id="ac1",
-                seed_run_id="r1",
-                traceguard_verdict="accepted",
-                unsupported_claim_rate=0.0,
-                grounding_regression=False,
-            ),
-        ]
+        events = _triad_events("ac1", "r1", effort_level="medium")
         rows = assemble_triads(events)
         assert len(rows) == 1
         r = rows[0]
         assert r.effort_mode == "enforced" and r.effort_level == "medium"
+        assert r.model_mode == "enforced" and r.model_tier == "frugal"
+        assert r.baseline_tier == "standard"
+        assert r.baseline_model == "claude-sonnet-4-6"
         assert r.token_spend == 80.0 and r.baseline_token_spend == 100.0
         assert r.grounding_regression is False
+        assert r.authoritatively_accepted and r.attempts_paired
         assert r.has_all_axes and r.counts_in_proof
 
     def test_effort_only_row_does_not_count(self) -> None:
@@ -110,13 +142,16 @@ class TestAssembleTriads:
                 _evt(EVENT_EFFORT_ROUTED, ac_id="ac1", effort_level="high", effort_mode="enforced"),
             ]
         )
-        assert rows[0].is_enforced
+        assert rows[0].is_effort_enforced
+        assert not rows[0].is_enforced
         assert not rows[0].has_all_axes
         assert not rows[0].counts_in_proof  # token/grounding/baseline missing
 
-    def test_advised_row_never_counts(self) -> None:
+    def test_advised_model_row_never_counts(self) -> None:
         r = _full_row("ac1", run="r1", token=80, baseline=100)
-        advised = FrugalityTriadRow(**{**r.__dict__, "effort_mode": "advised"})
+        advised = FrugalityTriadRow(
+            **{**r.__dict__, "model_mode": "advised", "model_lowering_enforced": False}
+        )
         assert not advised.counts_in_proof
 
     def test_untrustworthy_decomposition_never_counts(self) -> None:
@@ -156,36 +191,7 @@ class TestAssembleTriads:
             is_decomposed_child=False,
         )
         # Even joined with a real per-AC triad, the whole-seed event contributes no row.
-        rows = assemble_triads(
-            [
-                runner_effort,
-                _evt(
-                    EVENT_EFFORT_ROUTED,
-                    ac_id="ac1",
-                    seed_run_id="r1",
-                    effort_level="low",
-                    effort_mode="enforced",
-                    is_decomposed_child=True,
-                ),
-                _evt(EVENT_TOKEN_ATTRIBUTION, ac_id="ac1", seed_run_id="r1", token_spend=80.0),
-                _evt(
-                    EVENT_SHADOW_REPLAY,
-                    ac_id="ac1",
-                    seed_run_id="r1",
-                    baseline_token_spend=100.0,
-                    baseline_mode="shadow_replay",
-                    decomposition_trustworthy=True,
-                ),
-                _evt(
-                    EVENT_DELIVER_VERDICT,
-                    ac_id="ac1",
-                    seed_run_id="r1",
-                    traceguard_verdict="accepted",
-                    unsupported_claim_rate=0.0,
-                    grounding_regression=False,
-                ),
-            ]
-        )
+        rows = assemble_triads([runner_effort, *_triad_events("ac1", "r1")])
         assert len(rows) == 1  # only the per-AC row; the whole-seed event added none
         assert rows[0].ac_id == "ac1"
 
@@ -239,34 +245,8 @@ class TestAssembleTriads:
         # (run, ac_id) keeps one row per run so min_runs can be satisfied.
         events: list[dict] = []
         for run in ("r1", "r2", "r3"):
-            for ac in ("ac1", "ac2"):
-                events += [
-                    _evt(
-                        EVENT_EFFORT_ROUTED,
-                        ac_id=ac,
-                        seed_run_id=run,
-                        effort_level="low",
-                        effort_mode="enforced",
-                        is_decomposed_child=True,
-                    ),
-                    _evt(EVENT_TOKEN_ATTRIBUTION, ac_id=ac, seed_run_id=run, token_spend=80.0),
-                    _evt(
-                        EVENT_SHADOW_REPLAY,
-                        ac_id=ac,
-                        seed_run_id=run,
-                        baseline_token_spend=100.0,
-                        baseline_mode="shadow_replay",
-                        decomposition_trustworthy=True,
-                    ),
-                    _evt(
-                        EVENT_DELIVER_VERDICT,
-                        ac_id=ac,
-                        seed_run_id=run,
-                        traceguard_verdict="accepted",
-                        unsupported_claim_rate=0.0,
-                        grounding_regression=False,
-                    ),
-                ]
+            for root_ac_index, ac in enumerate(("ac1", "ac2")):
+                events += _triad_events(ac, run, root_ac_index=root_ac_index)
         rows = assemble_triads(events)
         assert len(rows) == 6  # 2 ACs x 3 runs, not collapsed to 2
         assert {r.seed_run_id for r in rows} == {"r1", "r2", "r3"}
@@ -285,6 +265,337 @@ class TestAssembleTriads:
         rows = assemble_triads(events)
         assert len(rows) == 2
         assert {r.seed_run_id for r in rows} == {"exec_a", "exec_b"}
+
+    @pytest.mark.parametrize(
+        "spends",
+        [
+            (10.0, 25.0, 5.0),
+            (5.0, 25.0, 10.0),
+        ],
+    )
+    def test_sums_retry_token_spend_independent_of_event_order(
+        self, spends: tuple[float, ...]
+    ) -> None:
+        events = [
+            _evt(
+                EVENT_TOKEN_ATTRIBUTION,
+                ac_id="ac1",
+                seed_run_id="r1",
+                retry_attempt=index,
+                token_spend=spend,
+            )
+            for index, spend in enumerate(spends)
+        ]
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 1
+        assert rows[0].token_spend == 40.0
+
+    @pytest.mark.parametrize("malformed", [None, True, -1.0, float("nan"), float("inf"), "10"])
+    @pytest.mark.parametrize("malformed_first", [False, True])
+    def test_malformed_retry_token_spend_invalidates_axis_regardless_of_order(
+        self, malformed: object, malformed_first: bool
+    ) -> None:
+        valid = _evt(
+            EVENT_TOKEN_ATTRIBUTION,
+            ac_id="ac1",
+            seed_run_id="r1",
+            retry_attempt=0,
+            token_spend=10.0,
+        )
+        invalid = _evt(
+            EVENT_TOKEN_ATTRIBUTION,
+            ac_id="ac1",
+            seed_run_id="r1",
+            retry_attempt=1,
+            token_spend=malformed,
+        )
+
+        rows = assemble_triads([invalid, valid] if malformed_first else [valid, invalid])
+
+        assert len(rows) == 1
+        assert rows[0].token_spend is None
+        assert rows[0].has_all_axes is False
+
+    def test_retry_spend_cannot_false_pass_frugality_gate(self) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        retry_events = _triad_events("ac1", "r1", retry_attempt=1)
+        for event in retry_events:
+            if event["type"] == EVENT_TOKEN_ATTRIBUTION:
+                event["data"]["token_spend"] = 130.0
+        events += retry_events
+
+        verdict = evaluate_proof(assemble_triads(events), min_triads=1, min_runs=1)
+
+        # The original attempt spent 80 and the retry spent 130. Their paired
+        # baselines total 200, so the real aggregate is 210 (-5% reduction), not
+        # whichever single attempt EventStore happened to return last.
+        assert verdict.status is ProofStatus.FAIL_NO_FRUGALITY
+        assert verdict.token_reduction_pct == -5.0
+
+    def test_unpaired_retry_spend_is_excluded_not_underreported(self) -> None:
+        events = _triad_events("ac1", "r1")
+        events.append(
+            _evt(
+                EVENT_TOKEN_ATTRIBUTION,
+                ac_id="ac1",
+                seed_run_id="r1",
+                root_ac_index=0,
+                retry_attempt=1,
+                token_spend=30.0,
+            )
+        )
+        events.append(
+            _evt(
+                EVENT_AC_OUTCOME_FINALIZED,
+                seed_run_id="r1",
+                root_ac_index=0,
+                retry_attempt=1,
+                success=True,
+                is_decomposed=True,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+        assert row.token_spend == 110.0
+        assert row.attempts_paired is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize("newest_first", [False, True])
+    def test_retry_grounding_regression_is_order_independent(self, newest_first: bool) -> None:
+        initial = _triad_events("ac1", "r1", retry_attempt=0)
+        retry = _triad_events("ac1", "r1", retry_attempt=1)
+        for event in retry:
+            if event["type"] == EVENT_DELIVER_VERDICT:
+                event["data"].update(
+                    traceguard_verdict="rejected",
+                    unsupported_claim_rate=0.5,
+                    grounding_regression=True,
+                )
+        events = retry + initial if newest_first else initial + retry
+
+        verdict = evaluate_proof(assemble_triads(events), min_triads=1, min_runs=1)
+
+        assert verdict.status is ProofStatus.FAIL_GROUNDING_REGRESSION
+        assert verdict.grounding_regressions == 1
+
+    def test_outer_gate_rejection_excludes_otherwise_complete_row(self) -> None:
+        events = _triad_events("ac1", "r1", final_success=False)
+
+        row = assemble_triads(events)[0]
+
+        assert row.has_all_axes
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    def test_missing_outer_gate_marker_fails_closed(self) -> None:
+        events = [
+            event
+            for event in _triad_events("ac1", "r1")
+            if event["type"] != EVENT_AC_OUTCOME_FINALIZED
+        ]
+
+        row = assemble_triads(events)[0]
+
+        assert row.has_all_axes
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize("latest_is_decomposed", [False, None, "true"])
+    def test_latest_marker_requires_strict_decomposed_success(
+        self, latest_is_decomposed: object
+    ) -> None:
+        events = _triad_events("ac1", "r1")
+        marker = next(event for event in events if event["type"] == EVENT_AC_OUTCOME_FINALIZED)
+        marker["data"]["is_decomposed"] = latest_is_decomposed
+
+        row = assemble_triads(events)[0]
+
+        assert row.has_all_axes
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    def test_stale_child_cannot_hitchhike_on_later_root_success(self) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        events.append(
+            _evt(
+                EVENT_AC_OUTCOME_FINALIZED,
+                seed_run_id="r1",
+                root_ac_index=0,
+                retry_attempt=1,
+                success=True,
+                is_decomposed=True,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        # This child only participated in failed/obsolete attempt 0. A later root
+        # success cannot retroactively accept it when attempt 1 has no matching axes.
+        assert row.attempts_paired
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    def test_stale_child_cannot_hitchhike_on_later_atomic_success(self) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        events.append(
+            _evt(
+                EVENT_AC_OUTCOME_FINALIZED,
+                seed_run_id="r1",
+                root_ac_index=0,
+                retry_attempt=1,
+                success=True,
+                is_decomposed=False,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize("duplicate_success", [True, False])
+    def test_duplicate_or_conflicting_latest_marker_fails_closed(
+        self, duplicate_success: bool
+    ) -> None:
+        events = _triad_events("ac1", "r1")
+        events.append(
+            _evt(
+                EVENT_AC_OUTCOME_FINALIZED,
+                seed_run_id="r1",
+                root_ac_index=0,
+                retry_attempt=0,
+                success=duplicate_success,
+                is_decomposed=True,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize("malformed_attempt", [None, True, -1, "1", 1.0])
+    def test_malformed_outcome_marker_poisons_known_root(self, malformed_attempt: object) -> None:
+        events = _triad_events("ac1", "r1")
+        malformed = _evt(
+            EVENT_AC_OUTCOME_FINALIZED,
+            seed_run_id="r1",
+            root_ac_index=0,
+            retry_attempt=malformed_attempt,
+            success=True,
+            is_decomposed=True,
+        )
+        if malformed_attempt is None:
+            malformed["data"].pop("retry_attempt")
+        events.append(malformed)
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    def test_missing_retry_attempt_never_defaults_into_a_complete_row(self) -> None:
+        events = _triad_events("ac1", "r1")
+        for event in events:
+            event["data"].pop("retry_attempt", None)
+
+        row = assemble_triads(events)[0]
+
+        assert row.attempts_paired is False
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            EVENT_MODEL_ROUTED,
+            EVENT_TOKEN_ATTRIBUTION,
+            EVENT_DELIVER_VERDICT,
+            EVENT_SHADOW_REPLAY,
+        ],
+    )
+    def test_duplicate_axis_event_for_same_attempt_invalidates_row(self, event_type: str) -> None:
+        events = _triad_events("ac1", "r1")
+        original = next(event for event in events if event["type"] == event_type)
+        events.append({"type": original["type"], "data": dict(original["data"])})
+
+        row = assemble_triads(events)[0]
+
+        assert row.attempts_paired is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize(
+        ("unsupported_claim_rate", "grounding_regression"),
+        [(0.5, False), (0.0, True)],
+    )
+    def test_semantically_inconsistent_accepted_verdict_invalidates_row(
+        self,
+        unsupported_claim_rate: float,
+        grounding_regression: bool,
+    ) -> None:
+        events = _triad_events("ac1", "r1")
+        verdict = next(event for event in events if event["type"] == EVENT_DELIVER_VERDICT)
+        verdict["data"].update(
+            unsupported_claim_rate=unsupported_claim_rate,
+            grounding_regression=grounding_regression,
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.attempts_paired is False
+        assert not row.counts_in_proof
+
+    def test_default_effort_none_still_counts_enforced_lower_model(self) -> None:
+        events = [
+            event for event in _triad_events("ac1", "r1") if event["type"] != EVENT_EFFORT_ROUTED
+        ]
+
+        row = assemble_triads(events)[0]
+
+        assert row.effort_level is None
+        assert row.model_lowering_enforced
+        assert row.counts_in_proof
+
+    @pytest.mark.parametrize(
+        ("child_tier", "baseline_tier", "mode"),
+        [
+            ("standard", "standard", "enforced"),
+            ("frontier", "standard", "enforced"),
+            ("frugal", "standard", "advised"),
+            ("custom", "standard", "enforced"),
+        ],
+    )
+    def test_non_lower_or_unenforced_model_never_counts(
+        self, child_tier: str, baseline_tier: str, mode: str
+    ) -> None:
+        events = _triad_events("ac1", "r1")
+        for event in events:
+            if event["type"] == EVENT_MODEL_ROUTED:
+                event["data"].update(model_tier=child_tier, model_mode=mode)
+            elif event["type"] == EVENT_SHADOW_REPLAY:
+                event["data"]["baseline_tier"] = baseline_tier
+
+        row = assemble_triads(events)[0]
+
+        assert not row.model_lowering_enforced
+        assert not row.counts_in_proof
+
+    def test_sparse_tier_fallback_to_same_model_never_counts(self) -> None:
+        """Tier labels cannot claim a reduction when both calls used one model."""
+        events = _triad_events("ac1", "r1")
+        for event in events:
+            if event["type"] == EVENT_MODEL_ROUTED:
+                event["data"]["model"] = "claude-sonnet-4-6"
+
+        row = assemble_triads(events)[0]
+
+        assert row.model_tier == "frugal"
+        assert row.baseline_tier == "standard"
+        assert row.model == row.baseline_model
+        assert not row.model_lowering_enforced
+        assert not row.counts_in_proof
 
 
 class TestEvaluateProof:
@@ -385,6 +696,14 @@ class TestEvaluateProof:
             assert row.has_all_axes is False
             assert row.counts_in_proof is False
 
+    def test_oversized_integer_token_spend_does_not_crash(self) -> None:
+        # JSON permits integers too large to convert to float. Treat corrupted
+        # telemetry as missing instead of raising while assembling a verdict.
+        row = _full_row("ac1", run="r1", token=10**10_000, baseline=100)
+
+        assert row.has_all_axes is False
+        assert row.counts_in_proof is False
+
     def test_zero_token_spend_is_valid(self) -> None:
         # Zero spend is legitimate — a child that cost nothing is maximally frugal.
         row = _full_row("ac1", run="r1", token=0.0, baseline=100)
@@ -400,6 +719,23 @@ class TestEvaluateProof:
         assert v.status is ProofStatus.INSUFFICIENT_DATA
         assert v.counted_rows == 0
         assert not v.passed
+
+    def test_finite_rows_whose_aggregate_overflows_never_pass(self) -> None:
+        rows = [
+            _full_row(
+                f"ac{i}",
+                run=f"r{i % 3}",
+                token=5e307,
+                baseline=1e308,
+            )
+            for i in range(21)
+        ]
+
+        verdict = evaluate_proof(rows)
+
+        assert verdict.status is ProofStatus.INSUFFICIENT_DATA
+        assert verdict.token_reduction_pct is None
+        assert not verdict.passed
 
     def test_missing_grounding_measurement_does_not_count(self) -> None:
         # grounding_regression=False alone is not a grounding measurement. The axis

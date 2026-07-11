@@ -22,6 +22,7 @@ from ouroboros.orchestrator.model_routing import (
     ModelRouter,
     build_model_router,
     decide_model,
+    deserialize_model_router,
     lower_one_notch,
     raise_one_notch,
     resolve_execute_model,
@@ -125,6 +126,16 @@ class TestBuildModelRouter:
         router = build_model_router(_economics(), runtime_backend="claude_code")
         assert router is not None
         assert router.runtime_backend == "claude_code"  # recorded for the redispatch guard
+
+    def test_claude_worker_backend_routes(self) -> None:
+        router = build_model_router(_economics(), runtime_backend="claude_mcp")
+        assert router is not None
+        assert router.runtime_backend == "claude_mcp"
+        assert router.tier_models == {
+            "frugal": "haiku-x",
+            "standard": "sonnet-x",
+            "frontier": "opus-x",
+        }
 
     def test_codex_cli_backend_resolves_openai_tier_models(self) -> None:
         # A codex runtime reports runtime_backend "codex_cli" -> openai provider.
@@ -239,6 +250,37 @@ class TestBuildModelRouter:
         assert router.tier_models["standard"] == DEFAULT_SONNET_MODEL
 
 
+class TestDeserializeModelRouter:
+    @staticmethod
+    def _payload(**router_overrides: object) -> dict[str, object]:
+        router: dict[str, object] = {
+            "tier_models": {"frugal": "haiku-x", "standard": "sonnet-x"},
+            "runtime_backend": "claude",
+            "child_tier": "frugal",
+            "base_tier": "standard",
+            "escalation_retry_threshold": 2,
+        }
+        router.update(router_overrides)
+        return {"version": 1, "enabled": True, "router": router}
+
+    @pytest.mark.parametrize("threshold", [0, -1, True, 1.0])
+    def test_rejects_threshold_outside_economics_contract(self, threshold: object) -> None:
+        recognized, router = deserialize_model_router(
+            self._payload(escalation_retry_threshold=threshold)
+        )
+
+        assert recognized is False
+        assert router is None
+
+    def test_rejects_whitespace_normalized_duplicate_tiers(self) -> None:
+        recognized, router = deserialize_model_router(
+            self._payload(tier_models={"frugal": "haiku-x", " frugal ": "other-haiku"})
+        )
+
+        assert recognized is False
+        assert router is None
+
+
 def _legacy_persisted_economics() -> EconomicsConfig:
     """Economics as an OLD release would have persisted it to ~/.ouroboros/config.yaml.
 
@@ -332,6 +374,23 @@ class TestLegacyTierModelNormalization:
         assert router is not None
         assert router.tier_models == {"standard": "gpt-5.6-sol"}
 
+    def test_legacy_looking_id_under_other_provider_is_preserved(self) -> None:
+        # This value was historically shipped only for OpenAI. Under Anthropic it
+        # cannot be an untouched old default; it is an explicit proxy/model alias.
+        economics = _economics(
+            tiers={
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[ModelConfig(provider="anthropic", model="gpt-4o")],
+                ),
+            }
+        )
+
+        router = build_model_router(economics, runtime_backend="claude")
+
+        assert router is not None
+        assert router.tier_models == {"standard": "gpt-4o"}
+
 
 class TestDecideModel:
     def test_router_none_is_dormant(self) -> None:
@@ -417,7 +476,9 @@ class TestDecideModel:
 
     def test_missing_tier_walks_up_to_stronger_model(self) -> None:
         # frugal tier absent -> a child dropped to frugal walks UP to standard,
-        # never silently substituting something cheaper than decided.
+        # never silently substituting something cheaper than decided. The
+        # decision reports the tier that actually supplied the model so proof
+        # telemetry cannot claim a frugal execution that really ran standard.
         router = ModelRouter(
             tier_models={"standard": "sonnet-x", "frontier": "opus-x"},
             runtime_backend="claude",
@@ -426,7 +487,7 @@ class TestDecideModel:
             escalation_retry_threshold=2,
         )
         d = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=True)
-        assert d.tier == "frugal"
+        assert d.tier == "standard"
         assert d.model == "sonnet-x"  # walked up, not down
 
     def test_missing_tier_walks_down_as_last_resort(self) -> None:
@@ -439,7 +500,7 @@ class TestDecideModel:
             escalation_retry_threshold=2,
         )
         d = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=False)
-        assert d.tier == "standard"
+        assert d.tier == "frugal"
         assert d.model == "haiku-x"  # only cheaper model left
 
     def test_empty_map_yields_mode_none(self) -> None:

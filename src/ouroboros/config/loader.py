@@ -266,6 +266,15 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # which changes runtime cost and behavior. Follows the same trusted-source
         # policy as the runtime/permission overrides above (RFC #1405).
         "OUROBOROS_AGENT_REASONING_EFFORT",
+        # Explicit constructor model pin. Besides changing cost/capability, this
+        # disables tier routing by design, so an untrusted project .env must not
+        # be able to force an arbitrary model or bypass the frugality policy.
+        "OUROBOROS_EXECUTION_MODEL",
+        # Model-tier experiment controls are the same trust class: a cloned repo
+        # must not disable frugal child routing or opt the user into shadow replay,
+        # which re-executes successful children and can double token spend.
+        "OUROBOROS_MODEL_TIER_ROUTING",
+        "OUROBOROS_SHADOW_REPLAY",
     }
 )
 

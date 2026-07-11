@@ -124,11 +124,15 @@ def _file_claim_matches_runtime_path(
             return False
         return runtime_absolute == claimed_absolute
 
+    # Without a trusted cwd, an absolute runtime path cannot prove that the
+    # claimed relative file belongs to the task workspace. Basename/suffix
+    # matching would admit arbitrary out-of-scope files. A structured relative
+    # path may still match exactly because both sides remain workspace-relative.
+    if runtime_candidate.is_absolute() or ".." in runtime_candidate.parts:
+        return False
     normalized_claim = claim_path.as_posix().lower()
     normalized_runtime = runtime_candidate.as_posix().lower()
-    return normalized_runtime == normalized_claim or normalized_runtime.endswith(
-        "/" + normalized_claim
-    )
+    return normalized_runtime == normalized_claim
 
 
 def _workspace_relative_file_claim(value: str, *, task_cwd: str | None) -> str | None:
@@ -314,26 +318,25 @@ def _runtime_messages_support_file_claim(
     # Workspace is UNKNOWN (``task_cwd`` is None — the original live case where no
     # cwd was threaded to the verifier). Be conservative and scope to the
     # transcript's own structured mutation events: accept only an exact
-    # basename-with-parent-dir match to an Edit/Write/NotebookEdit path, whose
-    # tool identity supplies the mutation semantics and whose recorded path
-    # confirms the same file. This rescues the relative↔absolute form mismatch
-    # (claim ``hello.py`` vs Edit ``/private/tmp/<run>/hello.py``;
-    # ``_file_claim_matches_runtime_path`` resolves both sides so ``/tmp`` <->
-    # ``/private/tmp`` compare equal) WITHOUT trusting arbitrary
-    # ``touch <abspath>`` command text — which could name a file outside any
-    # workspace and cannot be scope-checked when the workspace is unknown.
-    # ``_file_claim_matches_runtime_path`` also rejects absolute claims and ``..``
-    # traversal outright, so a fabricated or out-of-tree claim still fails.
+    # exact workspace-relative Edit/Write/NotebookEdit path. An absolute runtime
+    # path cannot be scoped without a trusted cwd and is rejected rather than
+    # matched by basename/suffix; arbitrary ``touch <abspath>`` command text is
+    # likewise never trusted here.
     raw_claim = value.strip()
     if not raw_claim:
         return False
     return any(
         message.tool_name in {"Edit", "Write", "NotebookEdit"}
+        and _runtime_message_has_success_evidence(
+            message,
+            messages=messages,
+            index=index,
+        )
         and any(
             _file_claim_matches_runtime_path(raw_claim, path, task_cwd=None)
             for path in _runtime_message_file_path_values(message)
         )
-        for message in messages
+        for index, message in enumerate(messages)
     )
 
 
@@ -358,7 +361,11 @@ def _runtime_message_supports_file_reference(
             and _runtime_message_has_success_evidence(message, messages=messages, index=index)
         )
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
-        return any(
+        return _runtime_message_has_success_evidence(
+            message,
+            messages=messages,
+            index=index,
+        ) and any(
             _file_claim_matches_runtime_path(reference, path, task_cwd=task_cwd)
             for path in _runtime_message_file_path_values(message)
         )
@@ -426,33 +433,93 @@ def _bash_command_mutates_file_reference(message: AgentMessage, normalized_refer
 
 
 def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
-    """Return True when one runtime message carries successful completion evidence."""
+    """Return True only for explicit, machine-readable tool success evidence.
+
+    Free-form words such as ``success`` are deliberately not sufficient here:
+    a failed tool result can contain those words in a path, command, or error
+    message.  Mutation evidence must be tied to a normalized status, exit code,
+    or structured tool-result error bit.
+    """
     if message.is_error:
         return False
-    exit_code = message.data.get("exit_code")
-    if isinstance(exit_code, int):
-        return exit_code == 0
+    tool_result = message.data.get("tool_result")
+    if message.data.get("is_error_invalid") is True:
+        return False
+    if "is_error" in message.data and not isinstance(message.data["is_error"], bool):
+        return False
+    if isinstance(message.data.get("is_error"), bool) and message.data["is_error"]:
+        return False
+    if tool_result is not None and not isinstance(tool_result, dict):
+        return False
+    if isinstance(tool_result, dict):
+        if tool_result.get("is_error_invalid") is True:
+            return False
+        if "is_error" in tool_result and not isinstance(tool_result["is_error"], bool):
+            return False
+        if tool_result.get("is_error") is True:
+            return False
+    is_completion = _runtime_message_is_tool_completion(message)
+    success_signal = is_completion and (
+        message.data.get("is_error") is False
+        or (isinstance(tool_result, dict) and tool_result.get("is_error") is False)
+    )
+    if "exit_code" in message.data:
+        exit_code = message.data["exit_code"]
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            return False
+        if exit_code != 0:
+            return False
+        success_signal = True
     if message.data.get("subtype") == "success":
-        return True
+        success_signal = True
     status = message.data.get("status")
-    if isinstance(status, str) and status.strip().lower() in {
-        "completed",
-        "success",
-        "succeeded",
-    }:
+    if isinstance(status, str):
+        normalized_status = status.strip().lower()
+        if normalized_status in {"failed", "error"}:
+            return False
+        if normalized_status in {"completed", "success", "succeeded"}:
+            success_signal = True
+    runtime_event_type = message.data.get("runtime_event_type")
+    if isinstance(runtime_event_type, str):
+        normalized_event_type = runtime_event_type.strip().lower()
+        if normalized_event_type.endswith((".failed", ".error")):
+            return False
+        if normalized_event_type.endswith((".completed", ".succeeded")):
+            success_signal = True
+    return success_signal
+
+
+def _runtime_message_tool_call_id(message: AgentMessage) -> str | None:
+    """Return the normalized tool-call correlation id carried by a message."""
+    for key in ("tool_call_id", "tool_use_id", "call_id"):
+        value = message.data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        for key in ("tool_call_id", "tool_use_id", "call_id"):
+            value = tool_result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        meta = tool_result.get("meta")
+        if isinstance(meta, dict):
+            for key in ("tool_call_id", "tool_use_id", "call_id"):
+                value = meta.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+def _runtime_message_is_tool_completion(message: AgentMessage) -> bool:
+    """Return whether a message is a normalized tool completion/result."""
+    if message.type == "tool_result" or message.data.get("subtype") == "tool_result":
         return True
-    text = "\n".join(
-        str(part)
-        for part in (
-            message.content,
-            message.data.get("result_preview"),
-            message.data.get("output"),
-            message.data.get("stdout"),
-            message.data.get("stderr"),
-        )
-        if isinstance(part, str)
-    ).lower()
-    return bool(re.search(r"\b(exit\s*code\s*0|completed|succeeded|success)\b", text))
+    if isinstance(message.data.get("tool_result"), dict):
+        return True
+    runtime_event_type = message.data.get("runtime_event_type")
+    return isinstance(runtime_event_type, str) and runtime_event_type.strip().lower().endswith(
+        ("tool.completed", "tool.failed")
+    )
 
 
 def _runtime_message_has_success_evidence(
@@ -461,21 +528,72 @@ def _runtime_message_has_success_evidence(
     messages: tuple[AgentMessage, ...],
     index: int,
 ) -> bool:
-    """Return True when a tool-call message itself or its result proves success."""
+    """Return True when a tool call itself or its correlated result proves success.
+
+    Calls with ids require an exact id match. Legacy id-less streams are
+    accepted only when the next tool-related message is one unambiguous result
+    for the same named tool (or an unnamed adjacent result). Missing, failed, or
+    ambiguous completion evidence fails closed.
+    """
+    call_id = _runtime_message_tool_call_id(message)
+    if call_id is not None:
+        matching_starts = tuple(
+            candidate
+            for candidate in messages
+            if candidate.tool_name is not None
+            and not _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+        )
+        if len(matching_starts) != 1:
+            return False
     if _runtime_message_has_success_signal(message):
         return True
     return _runtime_message_has_following_success(messages, index)
 
 
 def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], index: int) -> bool:
-    """Return True when a tool-call message is followed by a successful result."""
+    """Return True when a tool call has one correlated successful completion."""
+    start = messages[index]
+    start_call_id = _runtime_message_tool_call_id(start)
+    if start_call_id is not None:
+        matching_starts = tuple(
+            candidate
+            for candidate in messages
+            if candidate.tool_name is not None
+            and not _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == start_call_id
+        )
+        if len(matching_starts) != 1:
+            return False
+        matching_completions = tuple(
+            candidate
+            for candidate in messages[index + 1 :]
+            if _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == start_call_id
+        )
+        return (
+            len(matching_completions) == 1
+            and (
+                matching_completions[0].tool_name is None
+                or matching_completions[0].tool_name == start.tool_name
+            )
+            and _runtime_message_has_success_signal(matching_completions[0])
+        )
+
     for candidate in messages[index + 1 :]:
-        if candidate.type == "tool":
+        candidate_call_id = _runtime_message_tool_call_id(candidate)
+        if _runtime_message_is_tool_completion(candidate):
+            # An id-bearing result cannot be safely assigned to an id-less
+            # start, and an explicit different tool name is contradictory.
+            if candidate_call_id is not None:
+                return False
+            if candidate.tool_name is not None and candidate.tool_name != start.tool_name:
+                return False
+            return _runtime_message_has_success_signal(candidate)
+
+        # A subsequent tool invocation makes an id-less association ambiguous.
+        if candidate.tool_name is not None and not _runtime_message_is_tool_completion(candidate):
             return False
-        if candidate.is_error:
-            return False
-        if _runtime_message_has_success_signal(candidate):
-            return True
     return False
 
 

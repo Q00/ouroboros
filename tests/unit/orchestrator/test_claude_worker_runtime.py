@@ -27,12 +27,22 @@ class TestParseTurn:
                 "is_error": False,
                 "result": "PONG",
                 "session_id": "abc-123",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 40,
+                },
             }
         )
         turn = ClaudeWorkerTransport._parse_turn(payload, "", 0)
         assert turn.text == "PONG"
         assert turn.session_id == "abc-123"
         assert turn.is_error is False
+        assert turn.usage == {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_read_input_tokens": 40,
+        }
 
     def test_is_error_flag_propagates(self) -> None:
         payload = json.dumps({"is_error": True, "result": "", "session_id": "s"})
@@ -108,6 +118,32 @@ class TestRuntimeWiring:
         assert messages[0].resume_handle is None
         assert messages[0].data["session_id"] == "nonpersisted-id"
 
+    @pytest.mark.asyncio
+    async def test_runtime_result_propagates_cli_usage(self) -> None:
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return WorkerTurn(
+                text="ok",
+                session_id="worker-id",
+                usage={
+                    "input_tokens": 5,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 20,
+                },
+            )
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "cache_creation_input_tokens": 20,
+        }
+
     def test_resume_is_cwd_pinned(self) -> None:
         # The transport must pin cwd so --resume targets the session's store.
         transport = ClaudeWorkerTransport(cli_path="claude", cwd="/project/x")
@@ -140,6 +176,23 @@ async def _capture_spawn(transport: ClaudeWorkerTransport, **kwargs) -> list[str
         reasoning_effort=kwargs.get("reasoning_effort"),
         fork_from_session_id=kwargs.get("fork_from_session_id"),
         label=kwargs.get("label"),
+    )
+    return captured["command"]
+
+
+async def _capture_resume(transport: ClaudeWorkerTransport, **kwargs) -> list[str]:
+    captured: dict[str, list[str]] = {}
+
+    async def _fake_run(command: list[str], prompt: str, cwd: str | None) -> WorkerTurn:
+        captured["command"] = command
+        return WorkerTurn(text="ok", session_id="s1")
+
+    transport._run = _fake_run  # type: ignore[method-assign]
+    await transport.resume(
+        session_id=kwargs.get("session_id", "s1"),
+        prompt=kwargs.get("prompt", "again"),
+        model=kwargs.get("model"),
+        reasoning_effort=kwargs.get("reasoning_effort"),
     )
     return captured["command"]
 
@@ -221,6 +274,33 @@ class TestPerCallModelArg:
         transport = ClaudeWorkerTransport(cli_path="claude")
         command = await _capture_spawn(transport)
         assert "--model" not in command
+
+
+class TestPersistedResumeControls:
+    @pytest.mark.asyncio
+    async def test_resume_enforces_model_and_effort_flags(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", persist_sessions=True)
+        command = await _capture_resume(
+            transport,
+            model="claude-haiku-4-5",
+            reasoning_effort="high",
+        )
+
+        assert command[command.index("--resume") + 1] == "s1"
+        assert command[command.index("--model") + 1] == "claude-haiku-4-5"
+        assert command[command.index("--effort") + 1] == "high"
+
+    @pytest.mark.asyncio
+    async def test_resume_omits_default_model_and_unsupported_effort(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", persist_sessions=True)
+        command = await _capture_resume(
+            transport,
+            model="default",
+            reasoning_effort="unbounded",
+        )
+
+        assert "--model" not in command
+        assert "--effort" not in command
 
 
 class TestContextReferenceAddDirs:

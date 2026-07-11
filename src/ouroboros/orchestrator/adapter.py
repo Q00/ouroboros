@@ -181,24 +181,52 @@ _USAGE_TOKEN_KEYS: tuple[str, ...] = (
 )
 
 
-def _normalized_usage(obj: object) -> dict[str, int | float] | None:
-    """Extract a plain dict of finite numeric token counts from a usage payload.
+class _InvalidUsage:
+    """Sentinel type preserving malformed usage across message normalization."""
+
+
+_INVALID_USAGE = _InvalidUsage()
+
+
+def _normalized_usage(obj: object) -> dict[str, int | float] | _InvalidUsage | None:
+    """Extract an all-or-nothing dict of valid token counts from usage.
 
     Reads only the known token keys (:data:`_USAGE_TOKEN_KEYS`) from either a
-    ``Mapping`` or an attribute-bearing object, keeping a value only when it is a
-    finite ``int``/``float`` (bools rejected). Returns ``None`` when nothing
-    usable is present, so the deterministic frugality proof treats a malformed or
-    empty measurement as *missing* rather than trusting garbage. Never raises.
+    ``Mapping`` or an attribute-bearing object. If any *present* recognized key
+    is non-numeric, boolean, negative, non-finite, or too large to convert to a
+    finite float, the whole payload is rejected. Silently dropping one malformed
+    component would undercount spend and can manufacture a false frugality PASS.
+    Returns :data:`_INVALID_USAGE` for malformed recognized telemetry and
+    ``None`` for an absent/empty measurement. Keeping those states distinct lets
+    the leaf-level harvester invalidate the whole attempt even when a later
+    message carries valid counters. Never raises.
     """
     if obj is None:
         return None
+    if isinstance(obj, (str, bytes, bool, int, float, list, tuple, set)):
+        return _INVALID_USAGE
     result: dict[str, int | float] = {}
+    missing = object()
     for key in _USAGE_TOKEN_KEYS:
-        value = obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
+        if isinstance(obj, Mapping):
+            if key not in obj:
+                continue
+            value = obj[key]
+        else:
+            try:
+                value = getattr(obj, key, missing)
+            except Exception:
+                return _INVALID_USAGE
+            if value is missing:
+                continue
         if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        if not math.isfinite(value):
-            continue
+            return _INVALID_USAGE
+        try:
+            normalized = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return _INVALID_USAGE
+        if not math.isfinite(normalized) or normalized < 0:
+            return _INVALID_USAGE
         result[key] = value
     return result or None
 
@@ -1703,6 +1731,12 @@ class ClaudeAgentAdapter:
                     tool_input = getattr(block, "input", {}) or {}
                     data["tool_input"] = tool_input
                     data["tool_detail"] = _format_tool_detail(tool_name, tool_input)
+                    tool_call_id = getattr(block, "id", None) or getattr(block, "tool_use_id", None)
+                    if isinstance(tool_call_id, str) and tool_call_id.strip():
+                        # Preserve the SDK correlation id so later evidence
+                        # validation can pair a mutation request with its actual
+                        # (possibly failed) ToolResultBlock.
+                        data["tool_call_id"] = tool_call_id.strip()
 
                 elif block_type == "ThinkingBlock":
                     thinking = getattr(block, "thinking", "") or getattr(block, "text", "")
@@ -1726,7 +1760,9 @@ class ClaudeAgentAdapter:
             # ``total_cost_usd``; normalize defensively and omit anything
             # malformed (the deterministic proof treats such as missing).
             usage = _normalized_usage(getattr(sdk_message, "usage", None))
-            if usage is not None:
+            if usage is _INVALID_USAGE:
+                data["usage_invalid"] = True
+            elif usage is not None:
                 data["usage"] = usage
             total_cost_usd = getattr(sdk_message, "total_cost_usd", None)
             if (
@@ -1757,12 +1793,43 @@ class ClaudeAgentAdapter:
 
         elif class_name == "UserMessage":
             msg_type = "user"
-            # Tool result message
+            # Tool result message. Claude's SDK reports ToolResultBlock on a
+            # UserMessage and, historically, this adapter kept only its prose.
+            # Preserve the call id + structured error bit so failed Edit/Write
+            # calls can never become accepted mutation evidence.
             content_blocks = getattr(sdk_message, "content", [])
             for block in content_blocks:
                 if hasattr(block, "content"):
                     content = str(block.content)[:500]
-                    break
+                block_type = type(block).__name__
+                tool_call_id = getattr(block, "tool_use_id", None) or getattr(block, "id", None)
+                is_tool_result = block_type == "ToolResultBlock" or isinstance(tool_call_id, str)
+                if not is_tool_result:
+                    continue
+                msg_type = "tool_result"
+                data["subtype"] = "tool_result"
+                if isinstance(tool_call_id, str) and tool_call_id.strip():
+                    data["tool_call_id"] = tool_call_id.strip()
+                result_tool_name = getattr(block, "tool_name", None) or getattr(block, "name", None)
+                if isinstance(result_tool_name, str) and result_tool_name.strip():
+                    tool_name = result_tool_name.strip()
+                raw_is_error = getattr(block, "is_error", None)
+                if isinstance(raw_is_error, bool):
+                    data["is_error"] = raw_is_error
+                if isinstance(raw_is_error, bool):
+                    data["tool_result"] = {
+                        "content": [],
+                        "text_content": content,
+                        "is_error": raw_is_error,
+                        "meta": {
+                            **(
+                                {"tool_call_id": tool_call_id.strip()}
+                                if isinstance(tool_call_id, str) and tool_call_id.strip()
+                                else {}
+                            )
+                        },
+                    }
+                break
 
         else:
             # Unknown message type

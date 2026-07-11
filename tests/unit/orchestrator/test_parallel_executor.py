@@ -32,6 +32,7 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
     MAX_STALL_RETRIES,
@@ -1003,6 +1004,70 @@ def test_tests_passed_accepts_versioned_python_codex_command(
     )
 
 
+@pytest.mark.parametrize(("is_error", "expected"), ((False, True), (True, False)))
+def test_tests_passed_respects_correlated_bash_result_status(
+    is_error: bool,
+    expected: bool,
+) -> None:
+    """A failed Bash result vetoes success text from the same tool call."""
+    command = "pytest tests/test_app.py"
+    started = AgentMessage(
+        type="tool",
+        content="run tests",
+        tool_name="Bash",
+        data={
+            "tool_call_id": "bash_test_1",
+            "tool_input": {"command": command},
+        },
+    )
+    completed = AgentMessage(
+        type="tool_result",
+        content="1 passed in 0.01s",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "bash_test_1",
+            "is_error": is_error,
+            "output": "1 passed in 0.01s",
+        },
+    )
+
+    assert (
+        _runtime_messages_support_test_claim(
+            value=command,
+            backed_commands=(command,),
+            messages=(started, completed),
+            task_cwd=None,
+        )
+        is expected
+    )
+
+
+def test_tests_passed_rejects_node_id_from_assistant_narration_only() -> None:
+    """A broad successful run cannot prove a node-id mentioned only by the agent."""
+    started = AgentMessage(
+        type="tool",
+        content="run suite",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "pytest"},
+            "exit_code": 0,
+            "output": "1 passed in 0.01s",
+        },
+    )
+    narration = AgentMessage(
+        type="assistant",
+        content="tests/test_unobserved.py::test_unobserved passed",
+        data={},
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value="tests/test_unobserved.py::test_unobserved",
+        backed_commands=("pytest",),
+        messages=(started, narration),
+        task_cwd=None,
+    )
+
+
 @pytest.mark.parametrize(
     "ac_content",
     (
@@ -1149,6 +1214,22 @@ class _FinalMessageRuntime:
         self.last_prompt = prompt
         self.last_system_prompt = system_prompt
         for message in self._support_messages:
+            if (
+                message.tool_name in {"Edit", "Write", "NotebookEdit"}
+                and "subtype" not in message.data
+                and "runtime_event_type" not in message.data
+                and "exit_code" not in message.data
+            ):
+                # These scripted support messages model already-completed
+                # OpenCode/Codex file-change events, not bare dispatch starts.
+                message = replace(
+                    message,
+                    data={
+                        **message.data,
+                        "subtype": "success",
+                        "runtime_event_type": "tool.completed",
+                    },
+                )
             yield message
         yield AgentMessage(
             type="result",
@@ -1392,7 +1473,19 @@ def test_atomic_verifier_classifies_dependent_masked_test_evidence_as_form_misma
                 type="tool",
                 content="Edit src/app.py",
                 tool_name="Edit",
-                data={"tool_input": {"file_path": str(source_file)}},
+                data={
+                    "tool_call_id": "edit_app",
+                    "tool_input": {"file_path": str(source_file)},
+                },
+            ),
+            AgentMessage(
+                type="tool_result",
+                content="updated",
+                data={
+                    "subtype": "tool_result",
+                    "tool_call_id": "edit_app",
+                    "is_error": False,
+                },
             ),
             AgentMessage(
                 type="tool",
@@ -1452,7 +1545,19 @@ def _greeting_repro_messages(edit_path: str) -> tuple[AgentMessage, ...]:
             type="tool",
             content="Edit hello.py",
             tool_name="Edit",
-            data={"tool_input": {"file_path": edit_path}},
+            data={
+                "tool_call_id": "edit_hello",
+                "tool_input": {"file_path": edit_path},
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="updated hello.py",
+            data={
+                "subtype": "tool_result",
+                "tool_call_id": "edit_hello",
+                "is_error": False,
+            },
         ),
         AgentMessage(
             type="tool",
@@ -1476,16 +1581,8 @@ _GREETING_INNER_COMMAND = (
 )
 
 
-def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_without_cwd() -> None:
-    """Release blocker (files_touched half): relative claim matches wrapped absolute transcript.
-
-    The worker claims ``files_touched: hello.py`` while the transcript Edit event
-    records ``/private/tmp/.../hello.py`` and no workspace cwd was threaded
-    (``task_cwd`` None). ``commands_run`` is a shell-wrapped inline command. On a
-    contract-carrying AC (``has_success_contract=True``) ``tests_passed`` is
-    delegated to the orchestrator verify-gate, so only files_touched +
-    commands_run are gated here — both must back cleanly.
-    """
+def test_atomic_verifier_rejects_absolute_transcript_path_when_cwd_is_unknown() -> None:
+    """An arbitrary absolute Edit path cannot prove workspace ownership."""
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory=None),
         event_store=AsyncMock(),
@@ -1509,8 +1606,9 @@ def test_atomic_verifier_accepts_relative_claim_against_absolute_transcript_with
         verify_gate_active=True,
     )
 
-    assert verdict.passed is True, verdict.reasons
-    assert verdict.failure_class is None
+    assert verdict.passed is False
+    assert verdict.failure_class == "FABRICATION_SUSPECTED"
+    assert "files_touched: hello.py" in verdict.reasons[0]
 
 
 def test_atomic_verifier_accepts_symlinked_cwd_against_resolved_transcript_path(
@@ -1687,10 +1785,26 @@ def test_files_touched_accepts_in_workspace_relative_vs_absolute_edit(tmp_path) 
         type="tool",
         content="edit",
         tool_name="Edit",
-        data={"tool_input": {"file_path": str(workspace / "hello.py")}},
+        data={
+            "tool_call_id": "edit_hello",
+            "tool_input": {"file_path": str(workspace / "hello.py")},
+        },
+    )
+    completed = AgentMessage(
+        type="tool_result",
+        content="updated",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit_hello",
+            "is_error": False,
+        },
     )
 
-    assert _runtime_messages_support_file_claim("hello.py", (edit,), task_cwd=str(workspace))
+    assert _runtime_messages_support_file_claim(
+        "hello.py",
+        (edit, completed),
+        task_cwd=str(workspace),
+    )
 
 
 def test_files_touched_task_cwd_none_rejects_touch_command_text() -> None:
@@ -1703,16 +1817,190 @@ def test_files_touched_task_cwd_none_rejects_touch_command_text() -> None:
     )
     # Command-text mutation is not trusted when the workspace is unknown.
     assert not _runtime_messages_support_file_claim("outside.py", (touch,), task_cwd=None)
-    # But a structured Edit/Write event under an unknown-cwd absolute path IS
-    # matched by basename+parent suffix (the original live-fix shape).
+    # Absolute structured paths are also out-of-scope without a trusted cwd.
     edit = AgentMessage(
         type="tool",
         content="edit",
         tool_name="Edit",
-        data={"tool_input": {"file_path": "/private/tmp/ooo-run/hello.py"}},
+        data={
+            "tool_call_id": "edit_hello",
+            "tool_input": {"file_path": "/private/tmp/ooo-run/hello.py"},
+        },
     )
-    assert _runtime_messages_support_file_claim("hello.py", (edit,), task_cwd=None)
-    assert not _runtime_messages_support_file_claim("goodbye.py", (edit,), task_cwd=None)
+    completed = AgentMessage(
+        type="tool_result",
+        content="updated",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit_hello",
+            "is_error": False,
+        },
+    )
+    messages = (edit, completed)
+    assert not _runtime_messages_support_file_claim("hello.py", messages, task_cwd=None)
+    assert not _runtime_messages_support_file_claim("goodbye.py", messages, task_cwd=None)
+
+    relative_edit = replace(
+        edit,
+        data={
+            "tool_call_id": "edit_relative",
+            "tool_input": {"file_path": "hello.py"},
+        },
+    )
+    relative_completed = replace(
+        completed,
+        data={**completed.data, "tool_call_id": "edit_relative"},
+    )
+    assert _runtime_messages_support_file_claim(
+        "hello.py",
+        (relative_edit, relative_completed),
+        task_cwd=None,
+    )
+
+
+@pytest.mark.parametrize("is_error", [True, None])
+def test_files_touched_rejects_failed_or_missing_edit_completion(
+    tmp_path,
+    is_error: bool | None,
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    edit = AgentMessage(
+        type="tool",
+        content="edit",
+        tool_name="Edit",
+        data={
+            "tool_call_id": "edit_hello",
+            "tool_input": {"file_path": str(workspace / "hello.py")},
+        },
+    )
+    messages: tuple[AgentMessage, ...] = (edit,)
+    if is_error is not None:
+        messages += (
+            AgentMessage(
+                type="tool_result",
+                content="edit failed",
+                data={
+                    "subtype": "tool_result",
+                    "tool_call_id": "edit_hello",
+                    "is_error": is_error,
+                },
+            ),
+        )
+
+    assert not _runtime_messages_support_file_claim(
+        "hello.py",
+        messages,
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_duplicate_start_or_completion_correlation(tmp_path) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    start = AgentMessage(
+        type="tool",
+        content="edit",
+        tool_name="Edit",
+        data={
+            "tool_call_id": "edit_hello",
+            "tool_input": {"file_path": str(workspace / "hello.py")},
+        },
+    )
+    success = AgentMessage(
+        type="tool_result",
+        content="updated",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit_hello",
+            "is_error": False,
+        },
+    )
+    failure = replace(success, content="failed", data={**success.data, "is_error": True})
+
+    assert not _runtime_messages_support_file_claim(
+        "hello.py",
+        (start, replace(start), success),
+        task_cwd=str(workspace),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "hello.py",
+        (start, success, failure),
+        task_cwd=str(workspace),
+    )
+    self_completed = replace(
+        start,
+        data={
+            **start.data,
+            "subtype": "success",
+            "runtime_event_type": "tool.completed",
+        },
+    )
+    assert not _runtime_messages_support_file_claim(
+        "hello.py",
+        (self_completed, replace(self_completed)),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_malformed_is_error_even_with_completed_status(tmp_path) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    start = AgentMessage(
+        type="tool",
+        content="edit",
+        tool_name="Edit",
+        data={
+            "tool_call_id": "edit_hello",
+            "tool_input": {"file_path": str(workspace / "hello.py")},
+        },
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="unknown",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit_hello",
+            "is_error": "true",
+            "runtime_event_type": "tool.completed",
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "hello.py",
+        (start, malformed),
+        task_cwd=str(workspace),
+    )
+
+
+def test_correlated_tool_result_name_requires_one_exact_call_id_match() -> None:
+    start = AgentMessage(
+        type="tool",
+        content="edit",
+        tool_name="Edit",
+        data={"tool_call_id": "edit_1"},
+    )
+    result = AgentMessage(
+        type="tool_result",
+        content="updated",
+        data={"subtype": "tool_result", "tool_call_id": "edit_1", "is_error": False},
+    )
+
+    assert _correlated_tool_result_name([start, result], result) == "Edit"
+    assert (
+        _correlated_tool_result_name(
+            [replace(start, data={"tool_call_id": "other"}), result],
+            result,
+        )
+        is None
+    )
+    assert (
+        _correlated_tool_result_name(
+            [start, replace(start, tool_name="Write"), result],
+            result,
+        )
+        is None
+    )
 
 
 def test_effective_schema_drops_tests_passed_for_contract_ac() -> None:
@@ -1868,7 +2156,17 @@ def test_legacy_ac_verifier_keeps_strict_formal_runner_tests_passed() -> None:
             type="tool",
             content="edit",
             tool_name="Edit",
-            data={"tool_input": {"file_path": "/private/tmp/ooo-repro-blos/src/mod.py"}},
+            data={
+                "subtype": "success",
+                "runtime_event_type": "tool.completed",
+                "tool_input": {"file_path": "/private/tmp/ooo-repro-blos/src/mod.py"},
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="updated",
+            tool_name="Edit",
+            data={"subtype": "tool_result", "is_error": False},
         ),
         AgentMessage(
             type="tool",
@@ -5484,9 +5782,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": command}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="command completed with exit code 0",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                     AgentMessage(
                         type="tool",
@@ -5495,9 +5793,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest tests/test_generated.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="tests/test_generated.py passed",
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result", "is_error": False},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -10323,6 +10621,12 @@ class TestParallelACExecutor:
         )
 
         appended_events = [call.args[0] for call in executor._event_store.append.await_args_list]
+        outcome_events = [
+            event for event in appended_events if event.type == "execution.ac.outcome_finalized"
+        ]
+        coordinator_events = [
+            event for event in appended_events if event.type.startswith("execution.coordinator.")
+        ]
 
         assert result.success_count == 2
         assert len(result.stages) == 1
@@ -10332,13 +10636,15 @@ class TestParallelACExecutor:
         assert result.stages[0].coordinator_review.artifact_owner == "coordinator"
         assert result.stages[0].coordinator_review.artifact_owner_id == "level_1_coordinator"
 
-        assert [event.type for event in appended_events] == [
+        assert len(outcome_events) == 2
+        assert all(event.data["success"] is True for event in outcome_events)
+        assert [event.type for event in coordinator_events] == [
             "execution.coordinator.started",
             "execution.coordinator.tool.started",
             "execution.coordinator.thinking",
             "execution.coordinator.completed",
         ]
-        for event in appended_events:
+        for event in coordinator_events:
             assert event.aggregate_id == "exec_coord_scope:l0:coord"
             assert event.data["scope"] == "level"
             assert event.data["session_role"] == "coordinator"
@@ -10348,12 +10654,12 @@ class TestParallelACExecutor:
             assert "ac_index" not in event.data
             assert "acceptance_criterion" not in event.data
 
-        assert appended_events[-1].data["artifact_type"] == "coordinator_review"
-        assert appended_events[-1].data["artifact_scope"] == "level"
-        assert appended_events[-1].data["artifact_owner"] == "coordinator"
-        assert appended_events[-1].data["artifact_owner_id"] == "level_1_coordinator"
+        assert coordinator_events[-1].data["artifact_type"] == "coordinator_review"
+        assert coordinator_events[-1].data["artifact_scope"] == "level"
+        assert coordinator_events[-1].data["artifact_owner"] == "coordinator"
+        assert coordinator_events[-1].data["artifact_owner_id"] == "level_1_coordinator"
         assert (
-            appended_events[-1].data["artifact"]
+            coordinator_events[-1].data["artifact"]
             == '{"review_summary":"Resolved shared.py conflict","fixes_applied":["Merged overlapping import edits"],"warnings_for_next_level":["Verify shared.py integration paths"],"conflicts_resolved":["src/shared.py"]}'
         )
 

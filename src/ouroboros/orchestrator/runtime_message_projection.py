@@ -271,6 +271,13 @@ def serialize_runtime_message_metadata(
     if isinstance(error_type, str) and error_type.strip():
         metadata["error_type"] = error_type.strip()
 
+    if "is_error" in message.data:
+        raw_is_error = message.data.get("is_error")
+        if isinstance(raw_is_error, bool):
+            metadata["is_error"] = raw_is_error
+        else:
+            metadata["is_error_invalid"] = True
+
     permission_request_id = message.data.get("permission_request_id")
     if isinstance(permission_request_id, str) and permission_request_id.strip():
         metadata["permission_request_id"] = permission_request_id.strip()
@@ -455,7 +462,6 @@ def _normalize_tool_result_payload(tool_result: object) -> dict[str, Any] | None
     normalized: dict[str, Any] = {
         "content": [],
         "text_content": "",
-        "is_error": False,
         "meta": {},
     }
 
@@ -486,9 +492,15 @@ def _normalize_tool_result_payload(tool_result: object) -> dict[str, Any] | None
     if isinstance(text_content, str) and text_content.strip():
         normalized["text_content"] = text_content.strip()
 
-    is_error = tool_result.get("is_error")
-    if isinstance(is_error, bool):
-        normalized["is_error"] = is_error
+    if "is_error" in tool_result:
+        is_error = tool_result.get("is_error")
+        if isinstance(is_error, bool):
+            normalized["is_error"] = is_error
+        else:
+            # Preserve invalidity explicitly. Dropping a malformed-present
+            # status would let a surrounding ``tool.completed`` lifecycle
+            # signal launder an unknown/failing result into success.
+            normalized["is_error_invalid"] = True
 
     meta = tool_result.get("meta")
     if isinstance(meta, Mapping):
