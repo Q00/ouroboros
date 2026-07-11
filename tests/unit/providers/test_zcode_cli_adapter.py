@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config.models import OuroborosConfig
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
 
@@ -219,6 +220,79 @@ def test_build_child_env_strips_legacy_runtime_selector(monkeypatch: pytest.Monk
     assert "OUROBOROS_LLM_BACKEND" not in env
     assert "OUROBOROS_RUNTIME" not in env
     assert env["CLAUDECODE"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_complete_rejects_missing_explicit_profile_before_subprocess() -> None:
+    adapter = _make_adapter()
+    config = OuroborosConfig(llm_profiles={})
+
+    with (
+        patch("ouroboros.providers.profiles.load_config", return_value=config) as mock_load_config,
+        patch(
+            "ouroboros.providers.zcode_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=AssertionError("subprocess should not start"),
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="hello")],
+            CompletionConfig(model="default", profile="definitely_missing_profile"),
+        )
+
+    assert result.is_err
+    mock_load_config.assert_called_once()
+    assert "Invalid LLM profile configuration" in result.error.message
+    assert result.error.details["config_key"] == "llm_profiles.definitely_missing_profile"
+
+
+@pytest.mark.asyncio
+async def test_structured_complete_rejects_missing_explicit_profile_before_subprocess() -> None:
+    adapter = _make_adapter()
+    config = OuroborosConfig(llm_profiles={})
+
+    with (
+        patch("ouroboros.providers.profiles.load_config", return_value=config) as mock_load_config,
+        patch(
+            "ouroboros.providers.zcode_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=AssertionError("subprocess should not start"),
+        ),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="hello")],
+            CompletionConfig(
+                model="default",
+                profile="definitely_missing_profile",
+                response_format={"type": "json_object"},
+            ),
+        )
+
+    assert result.is_err
+    mock_load_config.assert_called_once()
+    assert "Invalid LLM profile configuration" in result.error.message
+    assert result.error.details["config_key"] == "llm_profiles.definitely_missing_profile"
+
+
+@pytest.mark.asyncio
+async def test_complete_resolves_role_profile_before_zcode_request() -> None:
+    event = _load("summary_simple.json")
+    process = _FakeProcess(stdout=json.dumps(event).encode("utf-8"), returncode=0)
+    adapter = _make_adapter()
+    config = OuroborosConfig(
+        llm_profiles={"fast": {"model": "profile-model", "max_turns": 1}},
+        llm_role_profiles={"qa": "fast"},
+    )
+
+    with (
+        patch("ouroboros.providers.profiles.load_config", return_value=config),
+        _patch_subprocess(process),
+    ):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="say OK")],
+            CompletionConfig(model="default", role="qa"),
+        )
+
+    assert result.is_ok
+    assert result.value.model == "profile-model"
 
 
 # -- complete() response parsing -----------------------------------------

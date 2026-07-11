@@ -47,6 +47,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.runtime.child_env import build_child_env
 
 log = structlog.get_logger(__name__)
@@ -362,12 +363,22 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
         inherited Codex NDJSON event-stream parsing entirely — the shapes are
         not compatible, and zcode has no ``--output-last-message`` file to read.
         """
-        prompt = self._build_prompt(messages, max_turns=getattr(config, "max_turns", None))
+        profile_result = resolve_completion_profile_result(
+            config, backend=self._completion_profile_backend
+        )
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        effective_config = profile_result.value.config
+
+        prompt = self._build_prompt(
+            messages,
+            max_turns=getattr(effective_config, "max_turns", None),
+        )
         command = self._build_command(
             output_last_message_path="",  # unused by zcode
             output_schema_path=None,
-            model=self._normalize_model(config.model),
-            profile=None,
+            model=self._normalize_model(effective_config.model),
+            profile=profile_result.value.backend_profile,
             prompt=prompt,
         )
         try:
@@ -481,7 +492,7 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
         return Result.ok(
             CompletionResponse(
                 content=response,
-                model=config.model or "zcode",
+                model=effective_config.model or "zcode",
                 usage=self._extract_usage(event.get("usage")),
                 finish_reason="stop",
                 raw_response={
@@ -499,23 +510,32 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
         """Make a Zcode completion request, including structured output support."""
-        if not config.response_format:
-            return await super().complete(messages, config)
+        # Mirror the shared adapter contract: role/profile resolution happens
+        # before any provider subprocess is launched.
+        profile_result = resolve_completion_profile_result(
+            config, backend=self._completion_profile_backend
+        )
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        effective_config = profile_result.value.config
 
-        directive = self._build_response_format_directive(config.response_format)
+        if not effective_config.response_format:
+            return await super().complete(messages, effective_config)
+
+        directive = self._build_response_format_directive(effective_config.response_format)
         if not directive:
             return Result.err(
                 ProviderError(
                     message="Unsupported Zcode structured response_format request",
                     provider=self._provider_name,
                     details={
-                        "response_format_type": config.response_format.get("type"),
+                        "response_format_type": effective_config.response_format.get("type"),
                     },
                 )
             )
 
         patched_messages = [Message(role=MessageRole.SYSTEM, content=directive), *messages]
-        patched_config = replace(config, response_format=None)
+        patched_config = replace(effective_config, response_format=None)
         attempts = max(1, self._max_retries)
         last_response_preview = ""
         for _attempt in range(attempts):
@@ -528,7 +548,7 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
                 continue
             validation_error = self._validate_response_format_payload(
                 extracted,
-                config.response_format,
+                effective_config.response_format,
             )
             if validation_error is None:
                 return Result.ok(replace(result.value, content=extracted))
