@@ -270,7 +270,7 @@ Configures the PAL Router (Progressive Adaptive LLM): cost tiers, escalation on 
 ```yaml
 economics:
   default_tier: frugal          # "frugal" | "standard" | "frontier"
-  escalation_threshold: 2       # Consecutive failures before upgrading tier
+  escalation_threshold: 2       # Retry attempt escalation begins; then +1 tier per retry
   downgrade_success_streak: 5   # Consecutive successes before downgrading tier
   tiers:
     frugal:
@@ -318,7 +318,7 @@ economics:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
-| `escalation_threshold` | `int >= 1` | `2` | Number of consecutive failures at the current tier before escalating to the next tier. |
+| `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier — a persistently failing unit walks the whole ladder rather than stalling one tier up. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
 | `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. |
 

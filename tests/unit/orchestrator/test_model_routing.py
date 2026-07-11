@@ -431,6 +431,89 @@ class TestDecideModel:
         assert first.tier == "frugal"  # below threshold, no raise yet
         assert second.tier == "standard"  # drop then raise = back to base
 
+    def test_progressive_escalation_threshold_one_reaches_frontier(self) -> None:
+        # threshold=1: a persistently failing unit climbs one tier per retry.
+        # Child ladder (drop then progressive raise) walks frugal->standard->
+        # frontier; top-level walks standard->frontier->frontier (ceiling cap).
+        router = build_model_router(_economics(escalation_threshold=1), runtime_backend="claude")
+        assert router is not None
+        child_tiers = [
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=True,
+                retry_attempt=attempt,
+            ).tier
+            for attempt in range(3)
+        ]
+        top_tiers = [
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=False,
+                retry_attempt=attempt,
+            ).tier
+            for attempt in range(3)
+        ]
+        assert child_tiers == ["frugal", "standard", "frontier"]
+        assert top_tiers == ["standard", "frontier", "frontier"]
+
+    def test_progressive_escalation_threshold_two_matches_legacy_first_step(self) -> None:
+        # At the SHIPPED default threshold=2, the first escalation step (attempt 2)
+        # is byte-identical to the old single-notch rule: child climbs back to the
+        # base tier, top-level climbs one notch. Only attempt 3+ diverges.
+        router = build_model_router(_economics(escalation_threshold=2), runtime_backend="claude")
+        assert router is not None
+        child_tiers = [
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=True,
+                retry_attempt=attempt,
+            ).tier
+            for attempt in range(4)
+        ]
+        top_tiers = [
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=False,
+                retry_attempt=attempt,
+            ).tier
+            for attempt in range(4)
+        ]
+        assert child_tiers == ["frugal", "frugal", "standard", "frontier"]
+        assert top_tiers == ["standard", "standard", "frontier", "frontier"]
+
+    def test_escalation_capped_at_frontier_ceiling(self) -> None:
+        # A large retry_attempt cannot climb past the frontier ceiling.
+        router = build_model_router(_economics(escalation_threshold=2), runtime_backend="claude")
+        assert router is not None
+        d = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            retry_attempt=10,
+        )
+        assert d.tier == "frontier"
+        assert d.model == "opus-x"
+
+    def test_escalation_composes_after_suggested_tier(self) -> None:
+        # Escalation is applied AFTER the child drop even when the starting tier
+        # comes from suggested_tier: frugal suggested -> child drop stays frugal
+        # (floor) -> one progressive notch at threshold=1 lands on standard.
+        router = build_model_router(_economics(escalation_threshold=1), runtime_backend="claude")
+        assert router is not None
+        d = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            retry_attempt=1,
+            suggested_tier="frugal",
+        )
+        assert d.tier == "standard"
+        assert d.model == "sonnet-x"
+
     def test_suggested_tier_overrides_base_upward(self) -> None:
         router = build_model_router(_economics(), runtime_backend="claude")
         assert router is not None
