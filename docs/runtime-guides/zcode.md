@@ -74,6 +74,40 @@ non-default model is requested so the mismatch is visible.
 
 ## Quick Start: Runtime Execution
 
+The shortest terminal entry point is:
+
+```bash
+ouroboros zcode "Build a REST API"
+```
+
+That starts an Ouroboros interview with Zcode selected for both authoring and
+the later workflow handoff. Two shorter convenience subcommands cover the common
+follow-up actions:
+
+```bash
+ouroboros zcode qa ./some-file.txt --quality-bar "PASS if this is clear."
+ouroboros zcode run seed.yaml
+```
+
+The short `zcode run` alias keeps the common path small. If you need MCP
+configuration flags such as `--mcp-config` or `--mcp-tool-prefix`, use the full
+`ouroboros run workflow ... --runtime zcode` form below.
+
+The convenience command automatically uses the standard macOS ZCode.app CLI path
+when it exists:
+
+```text
+/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+```
+
+Use the explicit environment variable only when your Zcode CLI is elsewhere:
+
+```bash
+export OUROBOROS_ZCODE_CLI_PATH=/path/to/zcode.cjs
+```
+
+## Full Terminal Options
+
 Use Zcode as the execution runtime:
 
 ```bash
