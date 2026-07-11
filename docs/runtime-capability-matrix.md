@@ -34,7 +34,8 @@ You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` 
 > predate the runtime-only backends added more recently. Their per-capability
 > contract lives in the per-runtime guide rather than as a column here:
 > Antigravity (`agy`) → [runtime-guides/antigravity.md](runtime-guides/antigravity.md);
-> Grok (`grok`) → [runtime-guides/grok.md](runtime-guides/grok.md).
+> Grok (`grok`) → [runtime-guides/grok.md](runtime-guides/grok.md);
+> Zcode (`zcode`) → [runtime-guides/zcode.md](runtime-guides/zcode.md).
 
 ### Workflow Layer (identical across runtimes)
 
@@ -228,6 +229,7 @@ The table below covers the currently shipped backends. Because Ouroboros uses a 
 - [GitHub Copilot CLI runtime guide](runtime-guides/copilot.md)
 - [Pi CLI runtime guide](runtime-guides/pi.md)
 - [GJC runtime guide](runtime-guides/gjc.md)
+- [Zcode runtime guide](runtime-guides/zcode.md)
 - [Pi JSON mode documentation](https://pi.dev/docs/latest/json)
 - [Platform support matrix](platform-support.md) (OS and Python version compatibility)
 - [Architecture overview](architecture.md) — including [How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter)
