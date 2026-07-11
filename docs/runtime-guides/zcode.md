@@ -83,10 +83,19 @@ export OUROBOROS_ZCODE_CLI_PATH=/Applications/ZCode.app/Contents/Resources/glm/z
 ouroboros run workflow seed.yaml --runtime zcode
 ```
 
-That command is the intended workflow entry point once a Seed is available. The
-smoke test below proves the lower-level terminal contract that this path depends
-on: Ouroboros can construct a Zcode runtime and execute a real Zcode task from a
-shell process.
+That command is the workflow entry point once a Seed is available.
+`--runtime zcode` is also accepted by terminal-facing orchestration commands
+that hand work to an agent runtime:
+
+```bash
+ouroboros init start --runtime zcode "Build a REST API"
+ouroboros auto --runtime zcode "Update this project"
+ouroboros mcp serve --runtime zcode
+```
+
+The smoke test below proves the lower-level terminal contract that these paths
+depend on: Ouroboros can construct a Zcode runtime and execute a real Zcode task
+from a shell process.
 
 For a local smoke test against the real Zcode CLI:
 
@@ -120,6 +129,13 @@ export OUROBOROS_ZCODE_CLI_PATH=/Applications/ZCode.app/Contents/Resources/glm/z
 ouroboros qa ./some-artifact.txt \
   --artifact-type document \
   --quality-bar "PASS if the artifact is internally consistent."
+```
+
+For commands that expose an LLM backend flag, the explicit form is:
+
+```bash
+ouroboros init start --llm-backend zcode "Design a CLI tool"
+ouroboros mcp serve --llm-backend zcode
 ```
 
 The adapter requests `zcode --prompt --json`, parses Zcode's single JSON

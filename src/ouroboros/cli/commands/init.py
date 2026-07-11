@@ -74,6 +74,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GJC = "gjc"
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
+    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -88,6 +89,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     GOOSE = "goose"
     KIRO = "kiro"
     PI = "pi"
+    ZCODE = "zcode"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
@@ -834,7 +836,8 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi)."
+                "(claude, codex, opencode, hermes, gemini, copilot, goose, kiro, "
+                "pi, gjc, antigravity, grok, or zcode)."
             ),
             case_sensitive=False,
         ),
@@ -845,7 +848,8 @@ def start(
             "--llm-backend",
             help=(
                 "LLM backend for interview, ambiguity scoring, and seed generation "
-                "(claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
+                "(claude_code, litellm, codex, copilot, opencode, gemini, goose, "
+                "kiro, pi, or zcode)."
             ),
             case_sensitive=False,
         ),

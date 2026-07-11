@@ -122,6 +122,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GJC = "gjc"
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
+    ZCODE = "zcode"
 
 
 app = typer.Typer(
@@ -145,7 +146,9 @@ def auto_command(
                 "MCP authoring handler) AND (b) the run-handoff that dispatches "
                 "the executor. The first interview question is generated "
                 "in-process even when --runtime is set to a heavyweight backend "
-                "like codex; see docs/auto-runtime-semantics.md."
+                "like codex; see docs/auto-runtime-semantics.md. Supported "
+                "values include claude, codex, opencode, hermes, gemini, "
+                "copilot, kiro, pi, gjc, antigravity, grok, and zcode."
             ),
             case_sensitive=False,
         ),
