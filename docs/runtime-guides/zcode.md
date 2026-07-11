@@ -77,21 +77,29 @@ non-default model is requested so the mismatch is visible.
 The shortest terminal entry point is:
 
 ```bash
-ouroboros zcode "Build a REST API"
+ozo "Build a REST API"
 ```
 
-That starts an Ouroboros interview with Zcode selected for both authoring and
-the later workflow handoff. Two shorter convenience subcommands cover the common
-follow-up actions:
+That is equivalent to `ouroboros zcode "Build a REST API"` and starts an
+Ouroboros interview with Zcode selected for both authoring and the later workflow
+handoff. Two shorter convenience subcommands cover the common follow-up actions:
 
 ```bash
+ozo qa ./some-file.txt --quality-bar "PASS if this is clear."
+ozo run seed.yaml
+```
+
+The longer first-party form still works:
+
+```bash
+ouroboros zcode "Build a REST API"
 ouroboros zcode qa ./some-file.txt --quality-bar "PASS if this is clear."
 ouroboros zcode run seed.yaml
 ```
 
-The short `zcode run` alias keeps the common path small. If you need MCP
-configuration flags such as `--mcp-config` or `--mcp-tool-prefix`, use the full
-`ouroboros run workflow ... --runtime zcode` form below.
+The short `ozo run` / `zcode run` alias keeps the common path small. If you need
+MCP configuration flags such as `--mcp-config` or `--mcp-tool-prefix`, use the
+full `ouroboros run workflow ... --runtime zcode` form below.
 
 The convenience command automatically uses the standard macOS ZCode.app CLI path
 when it exists:

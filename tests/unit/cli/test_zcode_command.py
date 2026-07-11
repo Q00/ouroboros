@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from importlib.metadata import entry_points
 import os
 from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands import init as init_command
@@ -12,6 +15,73 @@ from ouroboros.cli.commands import zcode as zcode_command
 from ouroboros.cli.main import app
 
 runner = CliRunner(env={"COLUMNS": "240"})
+
+
+def test_ozo_console_script_points_to_zcode_app() -> None:
+    pyproject_path = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text())
+
+    assert pyproject["project"]["scripts"]["ozo"] == "ouroboros.cli.commands.zcode:app"
+
+
+def test_ozo_installed_entrypoint_points_to_zcode_app() -> None:
+    scripts = entry_points(group="console_scripts")
+    ozo_scripts = [script for script in scripts if script.name == "ozo"]
+    if not ozo_scripts:
+        pytest.skip("ozo console script metadata is available after package install")
+
+    assert any(script.value == "ouroboros.cli.commands.zcode:app" for script in ozo_scripts)
+
+
+def test_ozo_entrypoint_starts_interview_with_zcode() -> None:
+    with patch("ouroboros.cli.commands.zcode.init_command.start") as mock_start:
+        result = runner.invoke(zcode_command.app, ["Build a small CLI"])
+
+    assert result.exit_code == 0, result.output
+    mock_start.assert_called_once()
+    assert mock_start.call_args.kwargs["context"] == "Build a small CLI"
+    assert mock_start.call_args.kwargs["orchestrator"] is True
+    assert mock_start.call_args.kwargs["runtime"] is init_command.AgentRuntimeBackend.ZCODE
+    assert mock_start.call_args.kwargs["llm_backend"] is init_command.LLMBackend.ZCODE
+
+
+def test_ozo_entrypoint_qa_sets_llm_backend_and_delegates(monkeypatch) -> None:
+    monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+    monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", "/tmp/zcode.cjs")
+
+    with patch("ouroboros.cli.commands.zcode.qa_command_module.qa_command") as mock_qa:
+        result = runner.invoke(
+            zcode_command.app,
+            [
+                "qa",
+                "draft.txt",
+                "--artifact-type",
+                "document",
+                "--quality-bar",
+                "PASS if clear.",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["OUROBOROS_LLM_BACKEND"] == "zcode"
+    assert mock_qa.call_args.kwargs["artifact"] == "draft.txt"
+    assert mock_qa.call_args.kwargs["artifact_type"] == "document"
+    assert mock_qa.call_args.kwargs["quality_bar"] == "PASS if clear."
+
+
+def test_ozo_entrypoint_run_delegates_to_workflow_with_zcode_runtime(tmp_path: Path) -> None:
+    seed_path = tmp_path / "seed.yaml"
+    seed_path.write_text("goal: test\n")
+
+    with patch("ouroboros.cli.commands.zcode.run_command.workflow") as mock_workflow:
+        result = runner.invoke(zcode_command.app, ["run", str(seed_path), "--no-qa"])
+
+    assert result.exit_code == 0, result.output
+    mock_workflow.assert_called_once()
+    assert mock_workflow.call_args.kwargs["seed_file"] == seed_path
+    assert mock_workflow.call_args.kwargs["orchestrator"] is True
+    assert mock_workflow.call_args.kwargs["runtime"] is run_command.AgentRuntimeBackend.ZCODE
+    assert mock_workflow.call_args.kwargs["no_qa"] is True
 
 
 def test_zcode_command_is_registered() -> None:
