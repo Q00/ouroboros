@@ -207,6 +207,20 @@ def test_normalize_model_returns_none_and_warns() -> None:
     assert adapter._normalize_model("") is None
 
 
+def test_build_child_env_strips_legacy_runtime_selector(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "zcode")
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "zcode")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "zcode")
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+    env = _make_adapter()._build_child_env()
+
+    assert "OUROBOROS_AGENT_RUNTIME" not in env
+    assert "OUROBOROS_LLM_BACKEND" not in env
+    assert "OUROBOROS_RUNTIME" not in env
+    assert env["CLAUDECODE"] == "1"
+
+
 # -- complete() response parsing -----------------------------------------
 
 

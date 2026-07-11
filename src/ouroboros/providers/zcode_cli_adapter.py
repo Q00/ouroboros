@@ -9,7 +9,7 @@ with top-level ``response`` / ``usage`` / ``sessionId`` fields.
 The adapter inherits :class:`CodexCliLLMAdapter`'s prompt building, retry, and
 ``complete`` scaffolding and overrides only the zcode-specific surface: CLI
 command construction (``--prompt --json --mode``), permission mapping, child
-env (strips ``OUROBOROS_LLM_BACKEND`` to prevent recursion), and the
+env (strips ``OUROBOROS_LLM_BACKEND`` and ``OUROBOROS_RUNTIME`` to prevent recursion), and the
 single-JSON-summary response parsing.
 
 Model selection: zcode has **no** ``--model`` flag (a hard ``Unknown option``
@@ -68,9 +68,14 @@ _MAX_OUROBOROS_DEPTH = 5
 # Child-env strip set for Zcode. Zcode does NOT strip CLAUDECODE (unlike
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed. ``OUROBOROS_LLM_BACKEND`` MUST be stripped so the zcode child
-# does not inherit an LLM-backend override that could route its own nested
-# ouroboros calls back into zcode (recursion). Matches ``ZcodeCLIRuntime``.
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+# does not inherit an LLM-backend override; ``OUROBOROS_RUNTIME`` is the legacy
+# selector honored by both runtime and LLM resolution. Leaking either can route
+# nested ouroboros calls back into zcode (recursion). Matches ``ZcodeCLIRuntime``.
+_CHILD_ENV_STRIP_KEYS = (
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_LLM_BACKEND",
+    "OUROBOROS_RUNTIME",
+)
 
 
 class ZcodeCliLLMAdapter(CodexCliLLMAdapter):

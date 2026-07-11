@@ -209,6 +209,21 @@ def test_startup_output_timeout_execute_seed_zero_contract() -> None:
     assert rt._startup_output_timeout_seconds is None
 
 
+def test_build_child_env_strips_legacy_runtime_selector(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "zcode")
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "zcode")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "zcode")
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+    rt = ZcodeCLIRuntime(cli_path="/tmp/zcode.cjs", permission_mode="acceptEdits")
+    env = rt._build_child_env()
+
+    assert "OUROBOROS_AGENT_RUNTIME" not in env
+    assert "OUROBOROS_LLM_BACKEND" not in env
+    assert "OUROBOROS_RUNTIME" not in env
+    assert env["CLAUDECODE"] == "1"
+
+
 def test_build_command_path_executable_invoked_directly_without_node() -> None:
     """A PATH-resolved `zcode` executable (not a .cjs script) is invoked
     directly. ``node <executable>`` would try to parse the binary as JS and

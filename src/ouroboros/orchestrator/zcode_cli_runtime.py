@@ -72,7 +72,11 @@ _MAX_OUROBOROS_DEPTH = 5
 # Child-env strip set for Zcode. Zcode does NOT strip CLAUDECODE (unlike
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
-_CHILD_ENV_STRIP_KEYS = ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND")
+_CHILD_ENV_STRIP_KEYS = (
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_LLM_BACKEND",
+    "OUROBOROS_RUNTIME",
+)
 
 
 class ZcodeCLIRuntime(CodexCliRuntime):
