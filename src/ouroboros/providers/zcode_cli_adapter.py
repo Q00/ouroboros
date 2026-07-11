@@ -21,19 +21,29 @@ rejection). The model is selected via ``~/.zcode/cli/config.json``
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import (
+    SchemaError as JsonSchemaError,
+)
+from jsonschema.exceptions import (
+    ValidationError as JsonSchemaValidationError,
+)
 import structlog
 
 from ouroboros.config import get_zcode_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
     CompletionResponse,
     Message,
+    MessageRole,
     UsageInfo,
 )
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
@@ -236,6 +246,82 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
         """Return False — zcode doesn't need an interactive stdin pipe."""
         return False
 
+    # -- Structured output -----------------------------------------------
+
+    def _build_response_format_directive(
+        self,
+        response_format: dict[str, object] | None,
+    ) -> str | None:
+        """Translate response_format into cooperative Zcode prompt instructions.
+
+        Zcode has no Codex-style ``--output-schema`` flag. Preserve the shared
+        provider contract by asking for JSON in the prompt, extracting JSON from
+        the response, and validating it before returning success.
+        """
+        if not response_format:
+            return None
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            return (
+                "Respond with ONLY a valid JSON object. Do not use markdown fences, "
+                "headers, or explanatory text."
+            )
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return None
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
+            top_type = (
+                schema_payload.get("type", "object")
+                if isinstance(schema_payload, dict)
+                else "object"
+            )
+            type_noun = {"array": "JSON array", "object": "JSON object"}.get(
+                str(top_type), "JSON value"
+            )
+            try:
+                rendered = json.dumps(schema_payload, indent=2, sort_keys=True)
+            except (TypeError, ValueError):
+                rendered = str(schema_payload)
+            return (
+                f"Respond with ONLY a valid {type_noun} that matches this schema. "
+                "Do not use markdown fences, headers, or explanatory text.\n\n"
+                f"JSON schema:\n{rendered}"
+            )
+        return None
+
+    def _validate_response_format_payload(
+        self,
+        payload: str,
+        response_format: dict[str, object],
+    ) -> str | None:
+        """Validate extracted JSON against the requested response_format."""
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            return f"invalid JSON: {exc}"
+
+        fmt_type = response_format.get("type")
+        if fmt_type == "json_object":
+            return None if isinstance(parsed, dict) else "expected a JSON object"
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema")
+            if not isinstance(schema, dict):
+                return "json_schema response_format is missing a schema object"
+            schema_payload = (
+                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+            )
+            try:
+                Draft202012Validator.check_schema(schema_payload)
+                Draft202012Validator(schema_payload).validate(parsed)
+            except JsonSchemaError as exc:
+                return f"invalid JSON schema: {exc.message}"
+            except JsonSchemaValidationError as exc:
+                return exc.message
+        return None
+
     # -- Response parsing (single JSON summary) --------------------------
 
     def _extract_session_id_from_event(self, event: dict[str, Any]) -> str | None:
@@ -399,6 +485,54 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
                     "usage": event.get("usage"),
                     "eventCount": event.get("eventCount"),
                 },
+            )
+        )
+
+    async def complete(
+        self,
+        messages: list[Message],
+        config: CompletionConfig,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Make a Zcode completion request, including structured output support."""
+        if not config.response_format:
+            return await super().complete(messages, config)
+
+        directive = self._build_response_format_directive(config.response_format)
+        if not directive:
+            return Result.err(
+                ProviderError(
+                    message="Unsupported Zcode structured response_format request",
+                    provider=self._provider_name,
+                    details={
+                        "response_format_type": config.response_format.get("type"),
+                    },
+                )
+            )
+
+        patched_messages = [Message(role=MessageRole.SYSTEM, content=directive), *messages]
+        patched_config = replace(config, response_format=None)
+        attempts = max(1, self._max_retries)
+        last_response_preview = ""
+        for _attempt in range(attempts):
+            result = await self._complete_once(patched_messages, patched_config)
+            if result.is_err:
+                return result
+            last_response_preview = result.value.content[:240]
+            extracted = extract_json_payload(result.value.content)
+            if not extracted:
+                continue
+            validation_error = self._validate_response_format_payload(
+                extracted,
+                config.response_format,
+            )
+            if validation_error is None:
+                return Result.ok(replace(result.value, content=extracted))
+
+        return Result.err(
+            ProviderError(
+                message="JSON format required but Zcode returned non-conforming output",
+                provider=self._provider_name,
+                details={"last_response_preview": last_response_preview},
             )
         )
 

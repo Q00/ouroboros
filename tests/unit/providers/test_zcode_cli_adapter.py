@@ -86,6 +86,20 @@ def _patch_subprocess(process: _FakeProcess):
     )
 
 
+def _patch_subprocess_sequence(processes: list[_FakeProcess]):
+    """Patch subprocess creation with one fake process per attempt."""
+
+    attempts = list(processes)
+
+    async def _fake_create(*_args: Any, **_kwargs: Any) -> _FakeProcess:
+        return attempts.pop(0)
+
+    return patch(
+        "ouroboros.providers.zcode_cli_adapter.asyncio.create_subprocess_exec",
+        side_effect=_fake_create,
+    )
+
+
 # -- command construction ------------------------------------------------
 
 
@@ -296,6 +310,205 @@ async def test_complete_missing_usage_defaults_to_zero() -> None:
     assert result.is_ok
     assert result.value.usage.prompt_tokens == 0
     assert result.value.usage.completion_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_json_object_response_format_extracts_json() -> None:
+    process = _FakeProcess(
+        stdout=json.dumps(
+            {
+                "sessionId": "sess_json",
+                "response": '```json\n{"ok": true}\n```',
+            }
+        ).encode("utf-8"),
+        returncode=0,
+    )
+    adapter = _make_adapter()
+    with _patch_subprocess(process) as create_process:
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="return status")],
+            CompletionConfig(
+                model="default",
+                response_format={"type": "json_object"},
+            ),
+        )
+    assert result.is_ok
+    assert json.loads(result.value.content) == {"ok": True}
+
+    cmd = create_process.call_args.args
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert "Respond with ONLY a valid JSON object" in prompt
+    assert create_process.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_json_schema_response_format_validates_payload() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"score": {"type": "number"}},
+        "required": ["score"],
+        "additionalProperties": False,
+    }
+    process = _FakeProcess(
+        stdout=json.dumps(
+            {
+                "sessionId": "sess_schema",
+                "response": '{"score": 0.95}',
+            }
+        ).encode("utf-8"),
+        returncode=0,
+    )
+    adapter = _make_adapter()
+    with _patch_subprocess(process) as create_process:
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="score it")],
+            CompletionConfig(
+                model="default",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "Score", "schema": schema},
+                },
+            ),
+        )
+    assert result.is_ok
+    assert json.loads(result.value.content) == {"score": 0.95}
+
+    cmd = create_process.call_args.args
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert "JSON schema:" in prompt
+    assert '"score"' in prompt
+    assert create_process.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_response_format_retries_then_fails_non_json() -> None:
+    processes = [
+        _FakeProcess(
+            stdout=json.dumps({"sessionId": "sess_1", "response": "plain prose"}).encode("utf-8"),
+            returncode=0,
+        ),
+        _FakeProcess(
+            stdout=json.dumps({"sessionId": "sess_2", "response": "still prose"}).encode("utf-8"),
+            returncode=0,
+        ),
+    ]
+    adapter = _make_adapter(max_retries=2)
+    with _patch_subprocess_sequence(processes) as create_process:
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="return JSON")],
+            CompletionConfig(
+                model="default",
+                response_format={"type": "json_object"},
+            ),
+        )
+    assert result.is_err
+    assert "non-conforming" in result.error.message
+    assert result.error.details["last_response_preview"] == "still prose"
+    assert create_process.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_json_schema_response_format_rejects_schema_mismatch() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"score": {"type": "number"}},
+        "required": ["score"],
+        "additionalProperties": False,
+    }
+    process = _FakeProcess(
+        stdout=json.dumps(
+            {
+                "sessionId": "sess_bad_schema",
+                "response": '{"score": "high"}',
+            }
+        ).encode("utf-8"),
+        returncode=0,
+    )
+    adapter = _make_adapter(max_retries=1)
+    with _patch_subprocess(process):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="score it")],
+            CompletionConfig(
+                model="default",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "Score", "schema": schema},
+                },
+            ),
+        )
+    assert result.is_err
+    assert "non-conforming" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_complete_json_object_response_format_rejects_array_payload() -> None:
+    process = _FakeProcess(
+        stdout=json.dumps(
+            {
+                "sessionId": "sess_array",
+                "response": "[1, 2]",
+            }
+        ).encode("utf-8"),
+        returncode=0,
+    )
+    adapter = _make_adapter(max_retries=1)
+    with _patch_subprocess(process):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="return JSON")],
+            CompletionConfig(
+                model="default",
+                response_format={"type": "json_object"},
+            ),
+        )
+    assert result.is_err
+    assert "non-conforming" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_complete_json_schema_response_format_rejects_invalid_schema() -> None:
+    process = _FakeProcess(
+        stdout=json.dumps(
+            {
+                "sessionId": "sess_invalid_schema",
+                "response": '{"score": 1}',
+            }
+        ).encode("utf-8"),
+        returncode=0,
+    )
+    adapter = _make_adapter(max_retries=1)
+    with _patch_subprocess(process):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="score it")],
+            CompletionConfig(
+                model="default",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "Score",
+                        "schema": {
+                            "type": "not-a-json-schema-type",
+                            "properties": {"score": {"type": "number"}},
+                        },
+                    },
+                },
+            ),
+        )
+    assert result.is_err
+    assert "non-conforming" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_complete_unsupported_response_format_returns_error() -> None:
+    adapter = _make_adapter()
+    result = await adapter.complete(
+        [Message(role=MessageRole.USER, content="x")],
+        CompletionConfig(
+            model="default",
+            response_format={"type": "text"},
+        ),
+    )
+    assert result.is_err
+    assert "Unsupported Zcode structured response_format request" in result.error.message
 
 
 # -- factory routing -----------------------------------------------------
