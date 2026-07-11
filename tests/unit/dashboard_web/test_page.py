@@ -25,6 +25,15 @@ class TestLivePage:
         assert "EventSource" in INDEX_HTML
         assert "/events?run=" in INDEX_HTML
 
+    def test_index_html_renders_frugality_telemetry(self) -> None:
+        # The page must carry the client-side logic for the three telemetry axes.
+        assert "TIER_SYMBOL" in INDEX_HTML
+        assert "fmtTokens" in INDEX_HTML
+        assert "m-tokens" in INDEX_HTML
+        assert "m-frugality" in INDEX_HTML
+        assert "c.model_tier" in INDEX_HTML
+        assert "Frugality:" in INDEX_HTML
+
     def test_index_html_polls_for_pending_run(self) -> None:
         # The daemon base URL is published before a run exists (auto flow links it
         # while interview/seed are still running). The page must NOT dead-end on the
@@ -93,3 +102,28 @@ class TestStaticSnapshot:
         # terminate the surrounding JS string literal either.
         assert "&#x27;" in html
         assert "';alert(1);//" not in html
+
+    def test_static_snapshot_inlines_telemetry_fields(self) -> None:
+        board = {
+            "meta": {"total_tokens": 1500.0, "frugality": {"status": "proven", "reason": "ok"}},
+            "columns": {
+                "pending": [],
+                "executing": [
+                    {
+                        "id": "n1",
+                        "title": "AC 1",
+                        "status": "executing",
+                        "model_tier": "frugal",
+                        "tokens": 1500.0,
+                    }
+                ],
+                "completed": [],
+                "failed": [],
+            },
+            "providers": [],
+        }
+        html = static_html(board, run_id="exec_1")
+        # The telemetry values survive into the inlined board JSON.
+        assert "model_tier" in html and "frugal" in html
+        assert "1500" in html
+        assert "proven" in html

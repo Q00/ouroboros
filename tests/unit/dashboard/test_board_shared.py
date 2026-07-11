@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ouroboros.dashboard.board import ProviderLedger, fold_provider_event, reduce_board
+from ouroboros.dashboard.board import (
+    ProviderLedger,
+    fold_provider_event,
+    fold_telemetry_event,
+    reduce_board,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.tui.app import OuroborosTUI
 
@@ -128,6 +133,78 @@ class TestNoDualReducerDrift:
         assert fold_provider_event("execution.session.started", payload, ledger=ledger) is True
         # Same provider again: no change, so a consumer must not re-render.
         assert fold_provider_event("execution.session.started", payload, ledger=ledger) is False
+
+
+# A run carrying frugality telemetry: ac_1 is routed frugal then escalated to
+# frontier (latest wins) and spends tokens across two attempts; ac_2 is routed
+# standard with a single spend. Mirrors ``_RUN`` for the telemetry axes.
+_TELEMETRY_RUN: list[tuple[str, dict[str, Any]]] = [
+    ("execution.node.created", {"node_id": "ac_1", "label": "First AC", "status": "executing"}),
+    ("execution.ac.model_routed", {"node_id": "ac_1", "model_tier": "frugal", "model": "haiku"}),
+    ("execution.ac.token_attribution.reported", {"node_id": "ac_1", "token_spend": 1200.0}),
+    ("execution.ac.model_routed", {"node_id": "ac_1", "model_tier": "frontier", "model": "opus"}),
+    ("execution.ac.token_attribution.reported", {"node_id": "ac_1", "token_spend": 300.0}),
+    ("execution.node.created", {"node_id": "ac_2", "label": "Second AC", "status": "executing"}),
+    ("execution.ac.model_routed", {"node_id": "ac_2", "model_tier": "standard", "model": "sonnet"}),
+    ("execution.ac.token_attribution.reported", {"node_id": "ac_2", "token_spend": 500.0}),
+]
+
+
+class TestTelemetryFoldAgreement:
+    """The frugality telemetry axes fold through the SAME ledger as provider, so a
+    batch ``reduce_board`` and repeated ``fold_telemetry_event`` derive identical
+    per-node tier/model/tokens — mirroring the provider anti-drift contract."""
+
+    def test_reduce_board_and_incremental_fold_agree_on_tier_and_tokens(self) -> None:
+        ledger = ProviderLedger()
+        for event_type, payload in _TELEMETRY_RUN:
+            fold_telemetry_event(event_type, payload, ledger=ledger)
+
+        raw = [{"event_type": t, "payload": d} for t, d in _TELEMETRY_RUN]
+        board = reduce_board(raw, execution_id="exec_1")
+        cards = {c["id"]: c for column in board["columns"].values() for c in column}
+
+        # Latest routing wins (escalated retry overwrites); spend sums per node.
+        assert ledger.resolve_tier("ac_1") == "frontier" == cards["ac_1"]["model_tier"]
+        assert ledger.resolve_model("ac_1") == "opus" == cards["ac_1"]["model"]
+        assert ledger.resolve_tokens("ac_1") == 1500.0 == cards["ac_1"]["tokens"]
+        assert ledger.resolve_tier("ac_2") == "standard" == cards["ac_2"]["model_tier"]
+        assert ledger.resolve_tokens("ac_2") == 500.0 == cards["ac_2"]["tokens"]
+        # Run total agrees with the ledger's incremental accumulation.
+        assert ledger.total_tokens == 2000.0 == board["meta"]["total_tokens"]
+
+    def test_fold_reports_change_only_on_movement(self) -> None:
+        ledger = ProviderLedger()
+        # Non-telemetry event folds to False (no telemetry state moves).
+        assert (
+            fold_telemetry_event("execution.node.created", {"node_id": "ac_1"}, ledger=ledger)
+            is False
+        )
+        routed = {"node_id": "ac_1", "model_tier": "frugal", "model": "haiku"}
+        assert fold_telemetry_event("execution.ac.model_routed", routed, ledger=ledger) is True
+        # Same routing again: no change.
+        assert fold_telemetry_event("execution.ac.model_routed", routed, ledger=ledger) is False
+        # A malformed spend never moves the total.
+        assert (
+            fold_telemetry_event(
+                "execution.ac.token_attribution.reported",
+                {"node_id": "ac_1", "token_spend": "nope"},
+                ledger=ledger,
+            )
+            is False
+        )
+        assert ledger.total_tokens == 0.0
+
+    def test_reset_clears_telemetry_state(self) -> None:
+        ledger = ProviderLedger()
+        for event_type, payload in _TELEMETRY_RUN:
+            fold_telemetry_event(event_type, payload, ledger=ledger)
+        assert ledger.tier_by_node and ledger.tokens_by_node and ledger.total_tokens
+        ledger.reset()
+        assert ledger.tier_by_node == {}
+        assert ledger.model_by_node == {}
+        assert ledger.tokens_by_node == {}
+        assert ledger.total_tokens == 0.0
 
 
 class TestProviderIdentityReachesTui:

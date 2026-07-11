@@ -242,6 +242,100 @@ class TestTerminalStickiness:
         assert [c["id"] for c in board["columns"]["completed"]] == ["n1"]
 
 
+class TestFrugalityTelemetry:
+    """execution.ac.model_routed / token_attribution / frugality_proof — three
+    events that already exist in the store but were filtered out of the Kanban."""
+
+    def test_model_routed_stamps_tier_and_model(self) -> None:
+        board = reduce_board(
+            [
+                _ev("execution.node.created", node_id="n1", content="AC", status="executing"),
+                _ev(
+                    "execution.ac.model_routed",
+                    node_id="n1",
+                    model_tier="frugal",
+                    model="claude-haiku-4-5",
+                ),
+            ]
+        )
+        card = board["columns"]["executing"][0]
+        assert card["model_tier"] == "frugal"
+        assert card["model"] == "claude-haiku-4-5"
+
+    def test_escalated_retry_overwrites_tier(self) -> None:
+        # A later routing (escalated retry) wins over the earlier one.
+        board = reduce_board(
+            [
+                _ev("execution.node.created", node_id="n1", content="AC", status="executing"),
+                _ev("execution.ac.model_routed", node_id="n1", model_tier="frugal"),
+                _ev("execution.ac.model_routed", node_id="n1", model_tier="frontier"),
+            ]
+        )
+        assert board["columns"]["executing"][0]["model_tier"] == "frontier"
+
+    def test_token_spend_accumulates_per_node_and_run_total(self) -> None:
+        board = reduce_board(
+            [
+                _ev("execution.node.created", node_id="n1", content="AC", status="executing"),
+                _ev("execution.ac.token_attribution.reported", node_id="n1", token_spend=1200.0),
+                _ev("execution.ac.token_attribution.reported", node_id="n1", token_spend=300.0),
+                _ev("execution.node.created", node_id="n2", content="AC", status="executing"),
+                _ev("execution.ac.token_attribution.reported", node_id="n2", token_spend=500.0),
+            ]
+        )
+        by_id = {c["id"]: c for c in board["columns"]["executing"]}
+        assert by_id["n1"]["tokens"] == 1500.0
+        assert by_id["n2"]["tokens"] == 500.0
+        assert board["meta"]["total_tokens"] == 2000.0
+
+    def test_missing_or_malformed_values_are_omitted_not_none(self) -> None:
+        # No telemetry at all → tokens/tier resolve to None (card carries the key
+        # like provider does, but the surface omits it); a malformed spend never
+        # accumulates into the run total.
+        board = reduce_board(
+            [
+                _ev("execution.node.created", node_id="n1", content="AC", status="executing"),
+                _ev("execution.ac.token_attribution.reported", node_id="n1", token_spend="oops"),
+                _ev("execution.ac.model_routed", node_id="n1", model_tier=None),
+            ]
+        )
+        card = board["columns"]["executing"][0]
+        assert card["tokens"] is None
+        assert card["model_tier"] is None
+        assert board["meta"]["total_tokens"] == 0.0
+
+    def test_frugality_proof_summary_reaches_meta(self) -> None:
+        board = reduce_board(
+            [
+                _ev(
+                    "execution.frugality_proof.evaluated",
+                    status="insufficient_data",
+                    counted_rows=2,
+                    token_reduction_pct=17.5,
+                    reason="need >=3 runs",
+                )
+            ]
+        )
+        assert board["meta"]["frugality"] == {
+            "status": "insufficient_data",
+            "token_reduction_pct": 17.5,
+            "reason": "need >=3 runs",
+        }
+
+    def test_frugality_proof_omits_malformed_reduction(self) -> None:
+        board = reduce_board(
+            [
+                _ev(
+                    "execution.frugality_proof.evaluated",
+                    status="proven",
+                    token_reduction_pct=None,
+                    reason="ok",
+                )
+            ]
+        )
+        assert board["meta"]["frugality"] == {"status": "proven", "reason": "ok"}
+
+
 class TestToolAndMeta:
     def test_tool_activity_attached_to_node(self) -> None:
         board = reduce_board(

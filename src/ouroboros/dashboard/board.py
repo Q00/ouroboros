@@ -51,6 +51,12 @@ _TOOL_EVENTS = frozenset(
         "execution.coordinator.tool.started",
     }
 )
+_TELEMETRY_EVENTS = frozenset(
+    {
+        "execution.ac.model_routed",
+        "execution.ac.token_attribution.reported",
+    }
+)
 
 
 # Terminal statuses: once an AUTHORITATIVE event sets one, a node is finished
@@ -60,12 +66,19 @@ _TERMINAL = frozenset({"completed", "failed"})
 
 @dataclass
 class ProviderLedger:
-    """Incrementally folded provider identity — ONE derivation, two consumers.
+    """Incrementally folded per-node board identity — ONE derivation, two consumers.
 
     Encapsulates exactly the provider rules :func:`reduce_board` applies:
     per-worker ``runtime_backend`` from ``execution.session.started`` (keyed by
     ``node_id``) wins; the run-level backend from ``orchestrator.session.started``
     is the fallback for nodes without a per-worker session (simple runs).
+
+    It also folds the frugality telemetry the Kanban badges: per-node model tier /
+    model id (``execution.ac.model_routed``, latest routing wins so an escalated
+    retry overwrites) and cumulative runtime token spend
+    (``execution.ac.token_attribution.reported``, summed across attempts plus a
+    run total). These share the ledger so the batch web reduce and any live fold
+    derive identical values — the same anti-drift guarantee as the provider axis.
 
     ``reduce_board`` folds its events through a ledger internally, and the TUI
     folds live events through its own ledger via :func:`fold_provider_event` —
@@ -74,12 +87,34 @@ class ProviderLedger:
 
     provider_by_node: dict[str, str] = field(default_factory=dict)
     run_provider: str | None = None
+    tier_by_node: dict[str, str] = field(default_factory=dict)
+    model_by_node: dict[str, str] = field(default_factory=dict)
+    tokens_by_node: dict[str, float] = field(default_factory=dict)
+    total_tokens: float = 0.0
 
     def resolve(self, node_id: object) -> str | None:
         """Provider for a node: per-worker if known, else the run-level backend."""
         if isinstance(node_id, str) and node_id in self.provider_by_node:
             return self.provider_by_node[node_id]
         return self.run_provider
+
+    def resolve_tier(self, node_id: object) -> str | None:
+        """Model tier a node was routed to (latest routing), or None if unknown."""
+        if isinstance(node_id, str):
+            return self.tier_by_node.get(node_id)
+        return None
+
+    def resolve_model(self, node_id: object) -> str | None:
+        """Concrete model id a node was routed to (latest), or None if unknown."""
+        if isinstance(node_id, str):
+            return self.model_by_node.get(node_id)
+        return None
+
+    def resolve_tokens(self, node_id: object) -> float | None:
+        """Cumulative runtime token spend for a node, or None if never reported."""
+        if isinstance(node_id, str):
+            return self.tokens_by_node.get(node_id)
+        return None
 
     def providers(self) -> list[str]:
         """Sorted provider legend for the run (per-worker + run-level)."""
@@ -91,6 +126,10 @@ class ProviderLedger:
     def reset(self) -> None:
         self.provider_by_node.clear()
         self.run_provider = None
+        self.tier_by_node.clear()
+        self.model_by_node.clear()
+        self.tokens_by_node.clear()
+        self.total_tokens = 0.0
 
 
 def fold_provider_event(
@@ -120,6 +159,57 @@ def fold_provider_event(
             if ledger.run_provider != backend_str:
                 ledger.run_provider = backend_str
                 return True
+    return False
+
+
+def _coerce_spend(value: object) -> float | None:
+    """A finite, non-bool numeric token spend, else None (omit — never render NaN)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    spend = float(value)
+    if spend != spend or spend in (float("inf"), float("-inf")):  # NaN / inf guard
+        return None
+    return spend
+
+
+def fold_telemetry_event(
+    event_type: str,
+    payload: Mapping[str, Any],
+    *,
+    ledger: ProviderLedger,
+) -> bool:
+    """Fold ONE frugality-telemetry event into ``ledger`` (merge, in place).
+
+    Mirrors :func:`fold_provider_event`: ``execution.ac.model_routed`` sets a
+    node's model tier / model (latest routing wins, so an escalated retry
+    overwrites) and ``execution.ac.token_attribution.reported`` adds its
+    ``token_spend`` to the node's running total and the run total. Malformed
+    values are dropped so a card never shows ``None``/``NaN``. Returns True when
+    the ledger changed. The frugality *proof* is run-level, not per-node, so it is
+    handled directly in :func:`reduce_board`, not here.
+    """
+    if event_type == "execution.ac.model_routed":
+        node_id = payload.get("node_id")
+        if not isinstance(node_id, str) or not node_id:
+            return False
+        changed = False
+        tier = payload.get("model_tier")
+        if tier and ledger.tier_by_node.get(node_id) != str(tier):
+            ledger.tier_by_node[node_id] = str(tier)
+            changed = True
+        model = payload.get("model")
+        if model and ledger.model_by_node.get(node_id) != str(model):
+            ledger.model_by_node[node_id] = str(model)
+            changed = True
+        return changed
+    if event_type == "execution.ac.token_attribution.reported":
+        node_id = payload.get("node_id")
+        spend = _coerce_spend(payload.get("token_spend"))
+        if not isinstance(node_id, str) or not node_id or spend is None:
+            return False
+        ledger.tokens_by_node[node_id] = ledger.tokens_by_node.get(node_id, 0.0) + spend
+        ledger.total_tokens += spend
+        return True
     return False
 
 
@@ -236,6 +326,8 @@ def reduce_board(
         "completed": 0,
         "total": 0,
         "provider": None,
+        "total_tokens": 0.0,
+        "frugality": None,
     }
 
     for ev in events:
@@ -296,6 +388,27 @@ def reduce_board(
             if isinstance(node_id, str) and node_id and tool:
                 tool_by_node[node_id] = str(tool)
 
+        elif event_type in _TELEMETRY_EVENTS:
+            # Per-AC model tier/model + runtime token spend — folded through the
+            # SAME ledger as provider so batch reduce and any live fold agree.
+            fold_telemetry_event(event_type, payload, ledger=ledger)
+
+        elif event_type == "execution.frugality_proof.evaluated":
+            # Run-end frugality proof (run-level, not per-node): a compact summary
+            # for the header. Omit malformed fields rather than render None/NaN.
+            frugality: dict[str, Any] = {}
+            status = payload.get("status")
+            if status:
+                frugality["status"] = str(status)
+            reduction = _coerce_spend(payload.get("token_reduction_pct"))
+            if reduction is not None:
+                frugality["token_reduction_pct"] = reduction
+            reason = payload.get("reason")
+            if reason:
+                frugality["reason"] = str(reason)
+            if frugality:
+                meta["frugality"] = frugality
+
         elif event_type == "workflow.progress.updated":
             if payload.get("completed_count") is not None:
                 meta["completed"] = payload["completed_count"]
@@ -335,8 +448,16 @@ def reduce_board(
         card["provider"] = ledger.resolve(node_id)
         card["session_id"] = session_by_node.get(node_id)
         card["tool"] = tool_by_node.get(node_id)
+        # Frugality telemetry, stamped exactly like the provider above (per-node,
+        # None when the run never reported it — the surface omits absent fields).
+        card["model_tier"] = ledger.resolve_tier(node_id)
+        card["model"] = ledger.resolve_model(node_id)
+        card["tokens"] = ledger.resolve_tokens(node_id)
         card.setdefault("title", node_id)
         card.setdefault("status", "pending")
+
+    # Run-total token spend for the header (0.0 when no attribution was reported).
+    meta["total_tokens"] = ledger.total_tokens
 
     columns: dict[str, list[dict[str, Any]]] = {col: [] for col in COLUMNS}
     for card in sorted(
@@ -351,4 +472,10 @@ def reduce_board(
     return {"meta": meta, "columns": columns, "providers": ledger.providers()}
 
 
-__all__ = ["COLUMNS", "ProviderLedger", "fold_provider_event", "reduce_board"]
+__all__ = [
+    "COLUMNS",
+    "ProviderLedger",
+    "fold_provider_event",
+    "fold_telemetry_event",
+    "reduce_board",
+]

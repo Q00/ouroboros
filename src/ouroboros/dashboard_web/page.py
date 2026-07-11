@@ -51,6 +51,8 @@ _PAGE_TEMPLATE = """<!doctype html>
     font-weight:600; letter-spacing:.3px; }
   .ac { color: var(--muted); }
   .tool { color: var(--executing); }
+  .tok { color: var(--muted); }
+  #m-frugality { color: var(--muted); }
   .empty { color: var(--muted); font-size: 11px; padding: 8px 12px; }
   .st-pending  .col-head { color: var(--pending); }
   .st-executing .col-head { color: var(--executing); }
@@ -68,6 +70,8 @@ _PAGE_TEMPLATE = """<!doctype html>
   <span class="meta" id="m-status"><span class="dot" style="background:var(--muted)"></span>connecting…</span>
   <span class="meta" id="m-progress"></span>
   <span class="meta" id="m-phase"></span>
+  <span class="meta" id="m-tokens"></span>
+  <span class="meta" id="m-frugality"></span>
   <div id="legend"></div>
 </header>
 <div id="board"></div>
@@ -85,6 +89,16 @@ function colorFor(p) {
   return providerColor[p];
 }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+// Model-tier badge glyphs/colors. Unknown tiers fall back to a neutral dot.
+const TIER_SYMBOL = { frugal: "⚡", standard: "•", frontier: "▲" };
+const TIER_COLOR  = { frugal: "#2ea043", standard: "#6e7681", frontier: "#d29922" };
+function fmtTokens(n) {
+  if (n == null) return "";
+  const v = Number(n);
+  if (!isFinite(v) || v <= 0) return "";
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\\.0$/, "") + "k tok";
+  return Math.round(v) + " tok";
+}
 
 function render(board) {
   const { meta, columns, providers } = board;
@@ -92,6 +106,14 @@ function render(board) {
     (meta.total ? `${meta.completed}/${meta.total} ACs` : "");
   document.getElementById("m-phase").textContent =
     [meta.phase, meta.activity].filter(Boolean).join(" · ");
+  document.getElementById("m-tokens").textContent = fmtTokens(meta.total_tokens);
+  // textContent auto-escapes — set raw strings, like m-phase above.
+  const fr = meta.frugality;
+  document.getElementById("m-frugality").textContent = fr && fr.status
+    ? "Frugality: " + fr.status
+        + (fr.token_reduction_pct != null ? ` (${Number(fr.token_reduction_pct).toFixed(1)}% ↓)` : "")
+        + (fr.reason ? " — " + String(fr.reason).slice(0, 80) : "")
+    : "";
   // legend
   const legend = document.getElementById("legend");
   legend.innerHTML = (providers||[]).map(p =>
@@ -112,12 +134,17 @@ function render(board) {
 function cardHtml(c) {
   const prov = c.provider
     ? `<span class="badge" style="background:${colorFor(c.provider)}">${esc(c.provider)}</span>` : "";
+  const tier = c.model_tier
+    ? `<span class="badge" style="background:${TIER_COLOR[c.model_tier]||"#6e7681"}">${TIER_SYMBOL[c.model_tier]||"•"} ${esc(c.model_tier)}</span>`
+    : "";
   const ac = (c.ac_index!=null) ? `<span class="ac">AC ${esc(c.ac_index)}</span>` : "";
+  const tok = fmtTokens(c.tokens);
+  const tokHtml = tok ? `<span class="tok">${tok}</span>` : "";
   const tool = c.tool ? `<span class="tool">⚙ ${esc(c.tool)}</span>` : "";
   const indent = c.depth ? `style="margin-left:${Math.min(c.depth,4)*10}px"` : "";
   return `<div class="card st-${esc(c.status)}" ${indent}>
     <div class="title">${esc(c.title).slice(0,160)}</div>
-    <div class="sub">${prov}${ac}${tool}</div></div>`;
+    <div class="sub">${prov}${tier}${ac}${tokHtml}${tool}</div></div>`;
 }
 
 __BOOTSTRAP__

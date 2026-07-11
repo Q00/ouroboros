@@ -19,11 +19,14 @@ from textual.binding import Binding
 
 from ouroboros.dashboard.board import ProviderLedger, fold_provider_event
 from ouroboros.tui.events import (
+    ACModelRouted,
+    ACTokenAttribution,
     ACUpdated,
     AgentThinkingUpdated,
     CostUpdated,
     DriftUpdated,
     ExecutionUpdated,
+    FrugalityProofEvaluated,
     LogMessage,
     PauseRequested,
     PhaseChanged,
@@ -34,6 +37,7 @@ from ouroboros.tui.events import (
     TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
+    format_frugality_summary,
 )
 from ouroboros.tui.screens import (
     DashboardScreenV3,
@@ -568,6 +572,12 @@ class OuroborosTUI(App[None]):
         # state's provider_by_node dict, so resetting it clears both.
         self._provider_ledger.reset()
         self._state.board_providers.clear()
+        # Wipe frugality telemetry so the next run starts from zero.
+        self._state.tier_by_node.clear()
+        self._state.model_by_node.clear()
+        self._state.tokens_by_node.clear()
+        self._state.run_total_tokens = 0.0
+        self._state.frugality_summary = None
         self._state.add_log("info", "tui.main", f"Monitoring execution: {execution_id}")
         # Forward to logs screen
         try:
@@ -715,6 +725,51 @@ class OuroborosTUI(App[None]):
         """Handle agent thinking update."""
         self._state.thinking[message.ac_id] = message.thinking_text
         self._forward_to_dashboard("on_agent_thinking_updated", message)
+
+    @staticmethod
+    def _telemetry_node_key(node_id: str | None, ac_index: int) -> str | None:
+        """Resolve the tree-node key a frugality event should stamp.
+
+        Mirrors the tree's own node-key resolution: the stable ``node_id`` when
+        present, otherwise the ``ac_<index>`` fallback the tree uses for a bare AC.
+        Returns None when neither is usable so we never stamp the wrong node.
+        """
+        if node_id:
+            return node_id
+        if ac_index >= 0:
+            return f"ac_{ac_index}"
+        return None
+
+    def on_acmodel_routed(self, message: ACModelRouted) -> None:
+        """Fold per-AC model-tier routing (latest-wins per node) into state."""
+        key = self._telemetry_node_key(message.node_id, message.ac_index)
+        if key is None:
+            return
+        if message.model_tier:
+            self._state.tier_by_node[key] = message.model_tier
+        if message.model:
+            self._state.model_by_node[key] = message.model
+        self._notify_ac_tree_updated()
+
+    def on_actoken_attribution(self, message: ACTokenAttribution) -> None:
+        """Fold per-AC token spend into state: per-node accumulate + run total."""
+        if message.token_spend < 0:
+            return
+        self._state.run_total_tokens += message.token_spend
+        key = self._telemetry_node_key(message.node_id, message.ac_index)
+        if key is not None:
+            self._state.tokens_by_node[key] = (
+                self._state.tokens_by_node.get(key, 0.0) + message.token_spend
+            )
+        self._notify_ac_tree_updated()
+
+    def on_frugality_proof_evaluated(self, message: FrugalityProofEvaluated) -> None:
+        """Fold the run-end frugality verdict once, then hand it to the dashboard."""
+        if self._state.frugality_summary is None:
+            self._state.frugality_summary = format_frugality_summary(
+                message.status, message.token_reduction_pct
+            )
+        self._forward_to_dashboard("on_frugality_proof_evaluated", message)
 
     def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
         # Update state with AC tree from workflow progress (smart merge)
@@ -1037,7 +1092,14 @@ class OuroborosTUI(App[None]):
         not a board card and is never tagged.
         """
         ledger = self._provider_ledger
-        if not ledger.provider_by_node and not ledger.run_provider:
+        state = self._state
+        if (
+            not ledger.provider_by_node
+            and not ledger.run_provider
+            and not state.tier_by_node
+            and not state.model_by_node
+            and not state.tokens_by_node
+        ):
             return
         nodes = self._state.ac_tree.get("nodes")
         if not isinstance(nodes, dict):
@@ -1046,13 +1108,28 @@ class OuroborosTUI(App[None]):
         for node_id, node in nodes.items():
             if node_id == root_id or not isinstance(node, dict):
                 continue
+            embedded_id = str(node.get("node_id") or "")
             provider = (
                 ledger.provider_by_node.get(node_id)
-                or ledger.provider_by_node.get(str(node.get("node_id") or ""))
+                or ledger.provider_by_node.get(embedded_id)
                 or ledger.run_provider
             )
             if provider:
                 node["provider"] = provider
+            # Frugality telemetry — identical resolution to provider (node_id key,
+            # then the embedded node_id), so a tier/model/token learned before OR
+            # after the node was created still lands on it.
+            tier = state.tier_by_node.get(node_id) or state.tier_by_node.get(embedded_id)
+            if tier:
+                node["model_tier"] = tier
+            model = state.model_by_node.get(node_id) or state.model_by_node.get(embedded_id)
+            if model:
+                node["model"] = model
+            tokens = state.tokens_by_node.get(node_id)
+            if tokens is None:
+                tokens = state.tokens_by_node.get(embedded_id)
+            if tokens is not None:
+                node["tokens"] = tokens
 
     def _notify_ac_tree_updated(self) -> None:
         """Notify dashboard that AC tree has been updated."""

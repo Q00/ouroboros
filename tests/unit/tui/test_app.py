@@ -12,9 +12,12 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.tui.app import OuroborosTUI, _EventSubscriptionContext
 from ouroboros.tui.events import (
+    ACModelRouted,
+    ACTokenAttribution,
     CostUpdated,
     DriftUpdated,
     ExecutionUpdated,
+    FrugalityProofEvaluated,
     PauseRequested,
     PhaseChanged,
     ResumeRequested,
@@ -233,6 +236,119 @@ class TestOuroborosTUIMessageHandlers:
 
         assert app.state.total_tokens == 10000
         assert app.state.total_cost_usd == 0.05
+
+    def test_on_acmodel_routed_folds_tier_latest_wins(self) -> None:
+        """Model routing folds tier/model per node, latest-wins."""
+        app = OuroborosTUI()
+
+        app.on_acmodel_routed(
+            ACModelRouted(
+                node_id="node_1",
+                ac_index=0,
+                model_tier="frugal",
+                model="claude-haiku-4-5",
+                model_mode="enforced",
+                retry_attempt=0,
+            )
+        )
+        assert app.state.tier_by_node["node_1"] == "frugal"
+        assert app.state.model_by_node["node_1"] == "claude-haiku-4-5"
+
+        # A later routing for the same node overwrites (retry escalated the tier).
+        app.on_acmodel_routed(
+            ACModelRouted(
+                node_id="node_1",
+                ac_index=0,
+                model_tier="standard",
+                model="claude-sonnet-5",
+                model_mode="enforced",
+                retry_attempt=1,
+            )
+        )
+        assert app.state.tier_by_node["node_1"] == "standard"
+        assert app.state.model_by_node["node_1"] == "claude-sonnet-5"
+
+    def test_on_acmodel_routed_uses_ac_index_key_without_node_id(self) -> None:
+        """Without a node_id the fold keys on the ac_<index> fallback."""
+        app = OuroborosTUI()
+
+        app.on_acmodel_routed(
+            ACModelRouted(
+                node_id=None,
+                ac_index=3,
+                model_tier="frugal",
+                model=None,
+                model_mode="advised",
+                retry_attempt=0,
+            )
+        )
+
+        assert app.state.tier_by_node["ac_3"] == "frugal"
+
+    def test_on_actoken_attribution_accumulates_per_node_and_run_total(self) -> None:
+        """Token spend accumulates per node and sums into the run total."""
+        app = OuroborosTUI()
+
+        app.on_actoken_attribution(
+            ACTokenAttribution(node_id="node_1", ac_index=0, token_spend=100.0, model_tier="frugal")
+        )
+        app.on_actoken_attribution(
+            ACTokenAttribution(node_id="node_1", ac_index=0, token_spend=50.0, model_tier="frugal")
+        )
+        app.on_actoken_attribution(
+            ACTokenAttribution(node_id="node_2", ac_index=1, token_spend=25.0, model_tier="frugal")
+        )
+
+        assert app.state.tokens_by_node["node_1"] == 150.0
+        assert app.state.tokens_by_node["node_2"] == 25.0
+        assert app.state.run_total_tokens == 175.0
+
+    def test_on_frugality_proof_evaluated_sets_summary_once(self) -> None:
+        """The run-end verdict is folded into frugality_summary exactly once."""
+        app = OuroborosTUI()
+
+        app.on_frugality_proof_evaluated(
+            FrugalityProofEvaluated(status="pass", token_reduction_pct=20.0, reason="saved 20%")
+        )
+        assert app.state.frugality_summary == "⚖ frugal −20% tok"
+
+        # A second (spurious) verdict must not overwrite the first.
+        app.on_frugality_proof_evaluated(
+            FrugalityProofEvaluated(status="fail_no_frugality", token_reduction_pct=None, reason="")
+        )
+        assert app.state.frugality_summary == "⚖ frugal −20% tok"
+
+    def test_apply_provider_tags_stamps_frugality_telemetry_onto_tree(self) -> None:
+        """Folded tier/model/tokens are stamped onto the AC tree node for rendering."""
+        app = OuroborosTUI()
+        app.state.ac_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {"id": "root", "children_ids": ["node_1"]},
+                "node_1": {"id": "node_1", "node_id": "node_1", "children_ids": []},
+            },
+        }
+
+        app.on_acmodel_routed(
+            ACModelRouted(
+                node_id="node_1",
+                ac_index=0,
+                model_tier="frugal",
+                model="claude-haiku-4-5",
+                model_mode="enforced",
+                retry_attempt=0,
+            )
+        )
+        app.on_actoken_attribution(
+            ACTokenAttribution(
+                node_id="node_1", ac_index=0, token_spend=1200.0, model_tier="frugal"
+            )
+        )
+
+        node = app.state.ac_tree["nodes"]["node_1"]
+        assert node["model_tier"] == "frugal"
+        assert node["model"] == "claude-haiku-4-5"
+        assert node["tokens"] == 1200.0
 
     def test_on_subtask_updated_preserves_runtime_activity_on_tree_node(self) -> None:
         """Sub-AC runtime snapshots should remain attached to the rendered tree node."""
