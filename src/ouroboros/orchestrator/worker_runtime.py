@@ -120,6 +120,7 @@ class LeaderDrivenWorkerRuntime:
         model: str | None = None,
         reasoning_effort_support: ParamSupport = ParamSupport.IGNORED,
         enforceable_reasoning_efforts: frozenset[str] | None = None,
+        model_override_support: ParamSupport = ParamSupport.IGNORED,
         targeted_resume: bool = True,
     ) -> None:
         self._transport = transport
@@ -130,6 +131,7 @@ class LeaderDrivenWorkerRuntime:
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support
         self._enforceable_reasoning_efforts = enforceable_reasoning_efforts
+        self._model_override_support = model_override_support
         self._targeted_resume = targeted_resume
         self._provider_name = runtime_backend
 
@@ -166,6 +168,7 @@ class LeaderDrivenWorkerRuntime:
             tool_restriction_support=ParamSupport.IGNORED,
             reasoning_effort_support=self._reasoning_effort_support,
             enforceable_reasoning_efforts=self._enforceable_reasoning_efforts,
+            model_override_support=self._model_override_support,
             subagent_orchestration=SubagentOrchestration.EXTERNAL_LEADER_DRIVEN,
         )
 
@@ -191,12 +194,19 @@ class LeaderDrivenWorkerRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Spawn (or resume) a worker turn and stream normalized messages.
 
         ``tools`` is accepted for Protocol compatibility but intentionally NOT
         enforced — native passthrough lets the worker use whatever its provider
         natively exposes.
+
+        ``model`` is a per-call model-tier override; when set it WINS over the
+        constructor pin (``self._model``) for a fresh spawn, when ``None`` (the
+        default) the constructor model is used, so existing callers are unchanged.
+        It only reaches a NEW session — a resumed worker keeps the model its
+        session was created with (there is no per-turn re-target on resume).
         """
         # A handle carrying ``fork_session`` is the HOST session delegated by the
         # parent (its native_session_id is the human's LIVE conversation). It is a
@@ -222,7 +232,7 @@ class LeaderDrivenWorkerRuntime:
                     system_prompt=system_prompt,
                     cwd=self._cwd,
                     permission_mode=self._permission_mode,
-                    model=self._model,
+                    model=model or self._model,
                     reasoning_effort=reasoning_effort,
                     fork_from_session_id=fork_from_session_id,
                     label=derive_session_label(prompt),

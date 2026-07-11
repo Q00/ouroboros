@@ -18,10 +18,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+import math
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -168,6 +169,38 @@ def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:
     if detail and len(detail) > 80:
         detail = detail[:77] + "..."
     return f"{tool_name}: {detail}" if detail else tool_name
+
+
+_USAGE_TOKEN_KEYS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "total_tokens",
+)
+
+
+def _normalized_usage(obj: object) -> dict[str, int | float] | None:
+    """Extract a plain dict of finite numeric token counts from a usage payload.
+
+    Reads only the known token keys (:data:`_USAGE_TOKEN_KEYS`) from either a
+    ``Mapping`` or an attribute-bearing object, keeping a value only when it is a
+    finite ``int``/``float`` (bools rejected). Returns ``None`` when nothing
+    usable is present, so the deterministic frugality proof treats a malformed or
+    empty measurement as *missing* rather than trusting garbage. Never raises.
+    """
+    if obj is None:
+        return None
+    result: dict[str, int | float] = {}
+    for key in _USAGE_TOKEN_KEYS:
+        value = obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
+        if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(value):
+            continue
+        result[key] = value
+    return result or None
 
 
 def _optional_str(value: object) -> str | None:
@@ -875,6 +908,15 @@ class RuntimeCapabilities:
     # enforced — keeping the proof's enforced rows truthful. ``None`` means "no
     # per-level restriction" (any level is enforced when support is NATIVE).
     enforceable_reasoning_efforts: frozenset[str] | None = None
+    # The per-call model-tier lever for frugality routing (RFC #1405 sibling): how
+    # the runtime honors a ``model`` override handed to ``execute_task`` for a
+    # single call. Like ``reasoning_effort_support`` it defaults to IGNORED — most
+    # runtimes pin one model at construction and cannot re-target per call. A
+    # runtime opts in to NATIVE only when it can verifiably route a per-call model
+    # id to its backend (Claude SDK ``model`` option, claude-worker/codex
+    # ``--model`` argv). This lets the orchestrator route a cheaper model to a
+    # decomposed child and escalate on retry only where the choice is enforced.
+    model_override_support: ParamSupport = ParamSupport.IGNORED
     # How the orchestrator may fan work out to sub-agents on this backend (see
     # :class:`SubagentOrchestration`). Defaults to NONE so a backend opts in to
     # INTERNAL/EXTERNAL only when its surface demonstrably supports it — this is
@@ -1093,13 +1135,14 @@ class ClaudeAgentAdapter:
     @property
     def capabilities(self) -> RuntimeCapabilities:
         # The Claude runtime drives the Claude Agent SDK, which honors the
-        # per-call ``effort`` option natively (see execute_task), so it opts in
-        # to NATIVE reasoning-effort support. Other capabilities match the
-        # first-class default.
+        # per-call ``effort`` and ``model`` options natively (see execute_task),
+        # so it opts in to NATIVE reasoning-effort AND model-override support.
+        # Other capabilities match the first-class default.
         return replace(
             FULL_CAPABILITIES,
             reasoning_effort_support=ParamSupport.NATIVE,
             enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
+            model_override_support=ParamSupport.NATIVE,
         )
 
     def _is_transient_error(self, error: Exception) -> bool:
@@ -1375,6 +1418,7 @@ class ClaudeAgentAdapter:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task and yield progress messages.
 
@@ -1387,6 +1431,9 @@ class ClaudeAgentAdapter:
             system_prompt: Optional custom system prompt.
             resume_handle: Backend-neutral handle to resume from.
             resume_session_id: Legacy Claude session ID to resume from.
+            model: Per-call model override from model-tier routing. When set it
+                WINS over the constructor pin (``self._model``); when ``None``
+                (the default) behavior is byte-identical to before.
 
         Yields:
             AgentMessage for each SDK message (assistant reasoning, tool calls, results).
@@ -1474,8 +1521,14 @@ class ClaudeAgentAdapter:
                     ]
                 }
 
-                if self._model:
-                    options_kwargs["model"] = self._model
+                # Per-call model-tier override (RFC #1405 sibling) wins over the
+                # constructor pin; ``model is None`` falls back to ``self._model``
+                # so existing call sites are byte-identical. The Claude Agent SDK
+                # honors ``model`` natively per call, which is what makes
+                # ``model_override_support = NATIVE`` truthful for this runtime.
+                effective_model = model or self._model
+                if effective_model:
+                    options_kwargs["model"] = effective_model
 
                 if reasoning_effort:
                     # Effort-first investment dial (RFC #1405). The Claude Agent
@@ -1668,6 +1721,21 @@ class ClaudeAgentAdapter:
             data["subtype"] = getattr(sdk_message, "subtype", "success")
             data["is_error"] = getattr(sdk_message, "is_error", False)
             data["session_id"] = getattr(sdk_message, "session_id", None)
+            # Surface token usage so a later executor can attribute per-AC spend.
+            # The SDK ResultMessage carries ``usage`` (a dict) and
+            # ``total_cost_usd``; normalize defensively and omit anything
+            # malformed (the deterministic proof treats such as missing).
+            usage = _normalized_usage(getattr(sdk_message, "usage", None))
+            if usage is not None:
+                data["usage"] = usage
+            total_cost_usd = getattr(sdk_message, "total_cost_usd", None)
+            if (
+                total_cost_usd is not None
+                and not isinstance(total_cost_usd, bool)
+                and isinstance(total_cost_usd, (int, float))
+                and math.isfinite(total_cost_usd)
+            ):
+                data["total_cost_usd"] = total_cost_usd
             log.info(
                 "orchestrator.adapter.result_message",
                 result_content=content[:200] if content else "empty",

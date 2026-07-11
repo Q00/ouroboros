@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import inspect
 import math
+import os
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -126,6 +127,7 @@ if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
     from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+    from ouroboros.orchestrator.model_routing import ModelRouter
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
@@ -534,6 +536,7 @@ class OrchestratorRunner:
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         max_parallel_workers: int = 3,
         fat_harness_mode: bool = False,
+        base_model_tier: str | None = None,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -564,6 +567,11 @@ class OrchestratorRunner:
                 explicitly; the low-level constructor default stays False so
                 direct runner/resume callers are not silently converted to a
                 stricter contract they cannot satisfy.
+            base_model_tier: Force the top-level model-routing tier instead of
+                deriving it from the config default. Threaded by the MCP
+                ``execute_seed`` handler from its ``model_tier`` tool arg
+                (small/medium/large → frugal/standard/frontier); the CLI passes
+                nothing so routing derives its own base tier.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -587,19 +595,64 @@ class OrchestratorRunner:
         from ouroboros.config import get_agent_reasoning_effort
 
         self._reasoning_effort = get_agent_reasoning_effort()
+        # Model-tier investment router (the frugality sibling of reasoning_effort),
+        # built once so a single runner instance routes every unit consistently.
+        # Global escape hatch: routing is on by default, so honor an explicit kill
+        # switch (a custom-proxy codex user may need to disable it entirely).
+        self._model_router: ModelRouter | None = None
+        _model_routing_disabled = os.environ.get(
+            "OUROBOROS_MODEL_TIER_ROUTING", ""
+        ).strip().lower() in {"0", "off", "false"}
+        # An explicit user model pin disables routing (routing must never override
+        # it). The DEFAULT sonnet pin that execution_handlers/run.py pass to
+        # create_agent_runtime is a SHIPPED default, not a user pin — only the env
+        # var counts here.
+        _model_pin = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+        _model_pin = _model_pin.strip() or None if _model_pin else None
         # Verify-by-default execution knobs (PR-V). Read once from config with a
         # safe fallback so direct/test construction never fails on config IO.
         try:
             from ouroboros.config import load_config
 
-            _execution_config = load_config().execution
+            _config = load_config()
+            _execution_config = _config.execution
             self._run_verify_commands = _execution_config.run_verify_commands
             self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
             self._ac_retry_attempts = _execution_config.ac_retry_attempts
+            if not _model_routing_disabled:
+                from ouroboros.orchestrator.model_routing import build_model_router
+
+                self._model_router = build_model_router(
+                    _config.economics,
+                    runtime_backend=getattr(adapter, "runtime_backend", None),
+                    pinned_model=_model_pin,
+                    base_tier_override=base_model_tier,
+                )
         except Exception:  # pragma: no cover - defensive config fallback
             self._run_verify_commands = True
             self._verify_command_timeout_seconds = 600
             self._ac_retry_attempts = 2
+        # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
+        # here next to the router build and threaded to the parallel executor.
+        # Default OFF: replaying every decomposed child at the parent tier doubles
+        # token cost, so it is an experiment lever, never a production default.
+        from ouroboros.orchestrator.shadow_replay import shadow_replay_enabled_from_env
+
+        self._shadow_replay_enabled = shadow_replay_enabled_from_env()
+        if self._shadow_replay_enabled:
+            log.warning(
+                "orchestrator.runner.shadow_replay_enabled",
+                note=(
+                    "OUROBOROS_SHADOW_REPLAY is ON — every decomposed child is "
+                    "RE-EXECUTED at the parent tier to measure a baseline. This "
+                    "DOUBLES token cost and is an experiment harness only."
+                ),
+            )
+            self._console.print(
+                "[bold yellow]⚠ Shadow-replay baseline harness ENABLED "
+                "(OUROBOROS_SHADOW_REPLAY): decomposed children are re-executed at "
+                "the parent tier — this DOUBLES token cost. Experiment only.[/bold yellow]"
+            )
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
@@ -626,17 +679,18 @@ class OrchestratorRunner:
         execution_id: str | None,
         session_id: str | None,
     ) -> dict[str, str]:
-        """Lay the runner's own execute_task paths on the effort contract.
+        """Lay the runner's own execute_task paths on BOTH investment contracts.
 
         These direct paths (single-AC execution, resume) do not go through
-        ParallelACExecutor, so without this they would silently skip effort
-        routing. Returns the execute_task kwargs (empty unless the runtime
-        enforces effort).
+        ParallelACExecutor, so without this they would silently skip effort AND
+        model-tier routing. Returns the merged execute_task kwargs (empty unless
+        the runtime enforces the respective parameter).
 
-        It also records an ``execution.ac.effort_routed`` event for
-        OBSERVABILITY — so a direct run's effort routing is visible in the event
-        stream exactly like the parallel path's. This event is deliberately NOT a
-        frugality-proof contribution: a direct run is a single top-level unit
+        It also records an ``execution.ac.effort_routed`` event (and, when a model
+        is decided, an ``execution.ac.model_routed`` event) for OBSERVABILITY — so
+        a direct run's routing is visible in the event stream exactly like the
+        parallel path's. These events are deliberately NOT a frugality-proof
+        contribution: a direct run is a single top-level unit
         (``is_decomposed_child=False``) with no per-AC decomposition, so the
         payload carries no ``ac_id``. The deterministic proof excludes it on both
         counts — ``assemble_triads`` skips ``ac_id``-less events, and
@@ -646,12 +700,21 @@ class OrchestratorRunner:
         origin so the two emission paths are distinguishable in the stream.
         """
         from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+        from ouroboros.orchestrator.model_routing import resolve_execute_model
 
         decision, kwargs = resolve_execute_effort(
             self._adapter,
             base_effort=self._reasoning_effort,
             is_decomposed_child=False,
         )
+        model_decision, model_kwargs = resolve_execute_model(
+            self._adapter,
+            router=self._model_router,
+            is_decomposed_child=False,
+        )
+        # Merge the model override; kwargs carry a parameter ONLY for runtimes that
+        # enforce it, so an advised runtime is never handed one.
+        kwargs = {**kwargs, **model_kwargs}
         if decision.level is not None:
             from ouroboros.events.base import BaseEvent
 
@@ -685,7 +748,85 @@ class OrchestratorRunner:
                     effort_level=decision.level,
                     effort_mode=decision.mode,
                 )
+        if model_decision.model is not None:
+            from ouroboros.events.base import BaseEvent
+
+            # Same observe-only contract as the effort event above: a degraded
+            # event store must degrade to a warning, never fail dispatch/resume.
+            try:
+                await self._event_store.append(
+                    BaseEvent(
+                        type="execution.ac.model_routed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id or "",
+                        data={
+                            "execution_id": execution_id,
+                            "session_id": session_id,
+                            "is_decomposed_child": False,
+                            "model_tier": model_decision.tier,
+                            "model": model_decision.model,
+                            "model_mode": model_decision.mode,
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "call_site": "runner",
+                        },
+                    )
+                )
+            except Exception as exc:
+                log.warning(
+                    "orchestrator.runner.model_routed.persist_failed",
+                    error=str(exc),
+                    model_tier=model_decision.tier,
+                    model_mode=model_decision.mode,
+                )
         return kwargs
+
+    async def _evaluate_frugality_proof(self, execution_id: str) -> None:
+        """Run the deterministic frugality proof over this execution's events.
+
+        Best-effort, run-end telemetry: it queries the execution's per-AC events,
+        assembles frugality triads, and emits an
+        ``execution.frugality_proof.evaluated`` event plus one console line with the
+        verdict. The token, effort and (opt-in) shadow-replay baseline axes are
+        now produced, but the grounding axis's ``grounding_regression`` flag is
+        not — the shadow-replay harness cannot compute a baseline deliver verdict
+        offline (see ``shadow_replay`` module docstring), so a counted row is still
+        unreachable and this honestly reports INSUFFICIENT_DATA in production. Any
+        failure degrades to a warning; the proof never fails the run.
+        """
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.frugality_proof import assemble_triads, evaluate_proof
+
+        try:
+            events = await self._event_store.query_execution_related_events(
+                execution_id,
+                limit=None,
+            )
+            rows = assemble_triads(events)
+            verdict = evaluate_proof(rows)
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.frugality_proof.evaluated",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id,
+                    data={
+                        "execution_id": execution_id,
+                        "status": verdict.status.value,
+                        "counted_rows": verdict.counted_rows,
+                        "runs": verdict.runs,
+                        "token_reduction_pct": verdict.token_reduction_pct,
+                        "grounding_regressions": verdict.grounding_regressions,
+                        "reason": verdict.reason,
+                        "thresholds": dict(verdict.thresholds),
+                    },
+                )
+            )
+            self._console.print(f"Frugality proof: {verdict.status.value} — {verdict.reason}")
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.frugality_proof.eval_failed",
+                execution_id=execution_id,
+                error=str(exc),
+            )
 
     def _plan_parallel_workers(self) -> int:
         """Return the effective fan-out worker count for the connected backend.
@@ -2796,6 +2937,10 @@ class OrchestratorRunner:
             )
             await self._event_store.append(terminal_event)
 
+            # Deterministic frugality proof over this execution's per-AC triads.
+            # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
+            await self._evaluate_frugality_proof(exec_id)
+
             log.info(
                 "orchestrator.runner.execute_completed",
                 execution_id=exec_id,
@@ -3023,9 +3168,11 @@ class OrchestratorRunner:
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
             reasoning_effort=self._reasoning_effort,
+            model_router=self._model_router,
             run_verify_commands=self._run_verify_commands,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,
+            shadow_replay_enabled=self._shadow_replay_enabled,
         )
 
         # Check for cancellation before starting parallel execution

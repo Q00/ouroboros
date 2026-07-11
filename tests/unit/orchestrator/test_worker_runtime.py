@@ -97,6 +97,46 @@ class TestSpawn:
         assert result.value.resume_handle.native_session_id == "s9"
 
 
+class TestModelOverride:
+    """Per-call model-tier override (RFC #1405 sibling) threads to spawn and wins
+    over the constructor pin; None falls back to it (existing callers unchanged)."""
+
+    def _runtime_with_model(
+        self, transport: _FakeTransport, *, model: str | None
+    ) -> LeaderDrivenWorkerRuntime:
+        return LeaderDrivenWorkerRuntime(
+            transport=transport,
+            runtime_backend="codex_mcp",
+            llm_backend="codex",
+            cwd="/tmp",
+            model=model,
+            model_override_support=ParamSupport.NATIVE,
+        )
+
+    def test_capability_defaults_to_ignored(self) -> None:
+        rt = _runtime(_FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1")))
+        assert rt.capabilities.model_override_support is ParamSupport.IGNORED
+
+    def test_declared_support_is_surfaced(self) -> None:
+        t = _FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1"))
+        rt = self._runtime_with_model(t, model="pin")
+        assert rt.capabilities.model_override_support is ParamSupport.NATIVE
+
+    @pytest.mark.asyncio
+    async def test_per_call_model_wins_over_constructor_pin(self) -> None:
+        t = _FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1"))
+        rt = self._runtime_with_model(t, model="pinned-model")
+        _ = [m async for m in rt.execute_task(prompt="hi", model="haiku-child")]
+        assert t.spawn_calls[0]["model"] == "haiku-child"
+
+    @pytest.mark.asyncio
+    async def test_none_model_falls_back_to_constructor_pin(self) -> None:
+        t = _FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1"))
+        rt = self._runtime_with_model(t, model="pinned-model")
+        _ = [m async for m in rt.execute_task(prompt="hi")]
+        assert t.spawn_calls[0]["model"] == "pinned-model"
+
+
 class TestResume:
     @pytest.mark.asyncio
     async def test_resume_uses_session_and_skips_spawn(self) -> None:

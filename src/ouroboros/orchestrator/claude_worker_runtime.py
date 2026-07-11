@@ -337,6 +337,10 @@ def build_claude_worker_runtime(
         model=model,
         reasoning_effort_support=ParamSupport.NATIVE,
         enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
+        # The transport routes a per-call model to ``claude --model`` (see
+        # ClaudeWorkerTransport.spawn), so the worker enforces a model-tier
+        # override natively — matching the in-process ClaudeAgentAdapter.
+        model_override_support=ParamSupport.NATIVE,
         targeted_resume=persist_sessions,
     )
 

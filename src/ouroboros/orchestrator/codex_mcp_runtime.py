@@ -287,6 +287,12 @@ def build_codex_mcp_worker_runtime(
         model=model,
         reasoning_effort_support=ParamSupport.NATIVE,
         enforceable_reasoning_efforts=_CODEX_REASONING_EFFORT_LEVELS,
+        # model_override_support is intentionally left at its IGNORED default: a
+        # per-call model can be pinned only at thread creation (the ``codex`` call),
+        # but ``codex-reply`` (this runtime's resume path) has no model argument, so
+        # a warm thread cannot be re-targeted mid-session. Declaring NATIVE would be
+        # a lie for the resume leg, so the runtime honestly opts out — mirroring how
+        # it declines targeted_resume for the same process-bound reason.
         # codex mcp-server sessions are PROCESS-BOUND (in-memory threadId,
         # addressable only by the SAME server process) and the warm pool is
         # aclose()d after each parallel run, so a persisted RuntimeHandle is

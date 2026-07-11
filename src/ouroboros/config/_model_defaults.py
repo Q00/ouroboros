@@ -34,6 +34,12 @@ DEFAULT_OPUS_MODEL = "claude-opus-4-8"
 # Sonnet release.
 DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 
+# Frugal execution tier for decomposed children (model-tier routing): the RLM
+# thesis says a verified-MECE child is easy enough to run on the cheapest model,
+# so decomposed leaves route here while top-level ACs keep the Sonnet default.
+# Anthropic-direct API id. Bump on each new Haiku release.
+DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
+
 # OpenRouter-routed Opus for the multi-provider consensus roster. This is the
 # OpenRouter slug (dotted ``claude-opus-4.8``), which differs from the
 # Anthropic-direct id above — LiteLLM forwards it verbatim to OpenRouter, so it

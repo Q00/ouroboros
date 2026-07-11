@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
+    DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
 )
@@ -678,14 +679,18 @@ def get_default_config() -> OuroborosConfig:
     return OuroborosConfig(
         economics=EconomicsConfig(
             default_tier="frugal",
+            # openai entries are the currently documented Codex CLI model ids per
+            # tier (frugal/standard/frontier). Codex users on a custom
+            # model_providers config or a proxy should override economics.tiers or
+            # pin OUROBOROS_EXECUTION_MODEL, since those ids are not routable there.
             tiers={
                 "frugal": TierConfig(
                     cost_factor=1,
                     intelligence_range=(9, 11),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-4o-mini"),
+                        ModelConfig(provider="openai", model="gpt-5.1-codex-mini"),
                         ModelConfig(provider="google", model="gemini-2.0-flash"),
-                        ModelConfig(provider="anthropic", model="claude-3-5-haiku"),
+                        ModelConfig(provider="anthropic", model=DEFAULT_HAIKU_MODEL),
                     ],
                     use_cases=["routine_coding", "log_analysis", "stage1_fix"],
                 ),
@@ -693,7 +698,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=10,
                     intelligence_range=(14, 16),
                     models=[
-                        ModelConfig(provider="openai", model="gpt-4o"),
+                        ModelConfig(provider="openai", model="gpt-5-codex"),
                         ModelConfig(provider="anthropic", model=DEFAULT_SONNET_MODEL),
                         ModelConfig(provider="google", model="gemini-2.5-pro"),
                     ],
@@ -703,7 +708,7 @@ def get_default_config() -> OuroborosConfig:
                     cost_factor=30,
                     intelligence_range=(18, 20),
                     models=[
-                        ModelConfig(provider="openai", model="o3"),
+                        ModelConfig(provider="openai", model="gpt-5.2"),
                         ModelConfig(provider="anthropic", model=DEFAULT_OPUS_MODEL),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],

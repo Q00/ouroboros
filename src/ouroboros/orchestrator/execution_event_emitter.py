@@ -19,6 +19,11 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     build_ac_runtime_scope,
     build_level_coordinator_runtime_scope,
 )
+from ouroboros.orchestrator.frugality_proof import (
+    EVENT_DELIVER_VERDICT,
+    EVENT_SHADOW_REPLAY,
+    EVENT_TOKEN_ATTRIBUTION,
+)
 from ouroboros.orchestrator.parallel_executor_models import StageExecutionOutcome
 from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
@@ -329,6 +334,197 @@ class ExecutionEventEmitter:
                     "effort_mode": effort_mode,
                     "base_reasoning_effort": base_reasoning_effort,
                     "runtime_backend": runtime_backend,
+                },
+            )
+        )
+
+    async def emit_model_routed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str | None,
+        session_id: str,
+        ac_index: int,
+        is_sub_ac: bool,
+        model_tier: str | None,
+        model: str | None,
+        model_mode: str,
+        retry_attempt: int,
+        runtime_backend: str | None,
+    ) -> None:
+        """Persist per-AC model-tier-routing telemetry.
+
+        The sibling of :meth:`emit_effort_routed`: where that records how much
+        reasoning a unit got, this records which model tier ran it. Both feed the
+        frugality proof, and both are observe-only telemetry routed through
+        ``_safe_emit_event`` so a degraded event store never blocks dispatch.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.model_routed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_id": runtime_identity.ac_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_index": ac_index,
+                    "is_decomposed_child": is_sub_ac,
+                    "model_tier": model_tier,
+                    "model": model,
+                    "model_mode": model_mode,
+                    "retry_attempt": retry_attempt,
+                    "runtime_backend": runtime_backend,
+                },
+            )
+        )
+
+    async def emit_token_attribution(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str | None,
+        session_id: str,
+        ac_index: int,
+        is_sub_ac: bool,
+        retry_attempt: int,
+        token_spend: float,
+        usage_breakdown: dict[str, float],
+        model: str | None,
+        model_tier: str | None,
+        model_mode: str | None,
+        effort_level: str | None,
+        runtime_backend: str | None,
+    ) -> None:
+        """Persist per-AC runtime-measured token spend (frugality-proof token axis).
+
+        The token sibling of :meth:`emit_effort_routed` / :meth:`emit_model_routed`:
+        the deterministic frugality proof joins this ``token_spend`` with the effort
+        and grounding axes by ``ac_id`` + run anchor, so the payload carries
+        ``execution_id`` exactly like the effort event does. ``token_source`` is
+        pinned to ``"runtime_usage"`` because the spend is harvested from real
+        runtime usage telemetry, never a character proxy. Observe-only: routed
+        through ``_safe_emit_event`` so a degraded event store never blocks dispatch.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type=EVENT_TOKEN_ATTRIBUTION,
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_id": runtime_identity.ac_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_index": ac_index,
+                    "is_decomposed_child": is_sub_ac,
+                    "retry_attempt": retry_attempt,
+                    "token_spend": token_spend,
+                    "usage_breakdown": usage_breakdown,
+                    "token_source": "runtime_usage",
+                    "model": model,
+                    "model_tier": model_tier,
+                    "model_mode": model_mode,
+                    "effort_level": effort_level,
+                    "runtime_backend": runtime_backend,
+                },
+            )
+        )
+
+    async def emit_deliver_verdict(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str | None,
+        session_id: str | None,
+        is_sub_ac: bool,
+        traceguard_verdict: str,
+        unsupported_claim_rate: float,
+        rejected_reasons: list[str],
+        accepted_fact_count: int,
+        grounding_regression: bool | None = None,
+    ) -> None:
+        """Persist a per-AC TraceGuard deliver verdict (frugality-proof grounding axis).
+
+        Observe-only telemetry: it records whether the leaf's delivered claim was
+        grounded in cited evidence, never changing AC success/failure. Routed
+        through ``_safe_emit_event``.
+
+        ``grounding_regression`` is only included in the payload when a caller
+        explicitly measured it against a baseline (a child at the cheap tier
+        newly rejecting a claim the baseline accepted). The live deliver-verdict
+        path leaves it ``None`` so the key is ABSENT — the honest default, since
+        the shadow-replay harness cannot compute a baseline verdict offline (see
+        :mod:`ouroboros.orchestrator.shadow_replay`). The parameter exists so the
+        deterministic proof machine can be closed once a baseline-verdict source
+        exists, without changing this event contract.
+        """
+        data: dict[str, Any] = {
+            **runtime_identity.to_metadata(),
+            "ac_id": runtime_identity.ac_id,
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "is_decomposed_child": is_sub_ac,
+            "traceguard_verdict": traceguard_verdict,
+            "unsupported_claim_rate": unsupported_claim_rate,
+            "rejected_reasons": rejected_reasons,
+            "accepted_fact_count": accepted_fact_count,
+        }
+        # Strict bool only: a non-bool would be dropped by the proof's
+        # ``_strict_bool`` guard anyway, so never smuggle a truthy string here.
+        if isinstance(grounding_regression, bool):
+            data["grounding_regression"] = grounding_regression
+        await self._safe_emit_event(
+            BaseEvent(
+                type=EVENT_DELIVER_VERDICT,
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data=data,
+            )
+        )
+
+    async def emit_shadow_replay(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str | None,
+        session_id: str | None,
+        ac_index: int,
+        is_sub_ac: bool,
+        baseline_token_spend: float,
+        baseline_mode: str,
+        baseline_model: str | None,
+        baseline_tier: str | None,
+        decomposition_trustworthy: bool,
+    ) -> None:
+        """Persist a decomposed child's parent-tier baseline (frugality-proof AC5).
+
+        The baseline axis the deterministic proof joins by ``ac_id`` + run anchor:
+        ``baseline_token_spend`` is what the SAME child cost when re-executed at
+        the PARENT's model tier / reasoning effort in an isolated workspace (see
+        :mod:`ouroboros.orchestrator.shadow_replay`). ``decomposition_trustworthy``
+        excludes forced-atomic children from the proof. Observe-only, routed
+        through ``_safe_emit_event`` so a degraded event store never blocks the
+        (already-completed) real AC.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type=EVENT_SHADOW_REPLAY,
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_id": runtime_identity.ac_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_index": ac_index,
+                    "is_decomposed_child": is_sub_ac,
+                    "baseline_token_spend": baseline_token_spend,
+                    "baseline_mode": baseline_mode,
+                    "baseline_model": baseline_model,
+                    "baseline_tier": baseline_tier,
+                    "decomposition_trustworthy": decomposition_trustworthy,
                 },
             )
         )

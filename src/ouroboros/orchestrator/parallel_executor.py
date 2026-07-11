@@ -28,9 +28,11 @@ Example:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -40,6 +42,19 @@ import anyio
 from rich.console import Console
 
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
+
+# Import the harness submodules directly, NOT the ``ouroboros.harness`` package
+# aggregate: ``harness.__init__`` pulls in ``deliver_routing`` which imports from
+# ``ouroboros.orchestrator``, so importing the aggregate here would re-enter a
+# partially-initialized ``harness`` during ``orchestrator`` package import. The
+# concrete submodules below import nothing from ``orchestrator``, breaking the cycle.
+from ouroboros.harness.deliver_gate import (
+    DeliverEvidenceClaim,
+    DeliverEvidenceFact,
+    evaluate_deliver_claim,
+    load_ac_evidence_manifest,
+)
+from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
@@ -221,6 +236,10 @@ from ouroboros.orchestrator.level_context import (
     extract_level_context,
     serialize_level_contexts,
 )
+from ouroboros.orchestrator.model_routing import (
+    resolve_execute_model,
+    tier_from_profile_hint,
+)
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -228,7 +247,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
 )
-from ouroboros.orchestrator.profile_loader import ExecutionProfile
+from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
     RateLimitBackoff,
     RateLimitGate,
@@ -238,6 +257,7 @@ from ouroboros.orchestrator.rate_limit import (
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
+from ouroboros.orchestrator.shadow_replay import run_shadow_replay
 from ouroboros.orchestrator.verifier import (
     Verifier,
     VerifierContractError,
@@ -253,9 +273,137 @@ if TYPE_CHECKING:
         DependencyGraph,
         StagedExecutionPlan,
     )
+    from ouroboros.orchestrator.model_routing import ModelRouter
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+
+
+# -- Frugality-proof producer helpers ----------------------------------------
+# Token keys the deliver-verdict claim surface may carry a handle under. Mirrors
+# the vocabulary traceguard_validator._CHUNK_ID_KEYS accepts, so a leaf-emitted
+# structured fact is not misread as "no evidence handle".
+_DELIVER_CLAIM_SURFACE_KEYS: tuple[str, ...] = (
+    "evidence_claims",
+    "observed_facts",
+    "retained_facts",
+)
+_DELIVER_FACT_ID_KEYS: tuple[str, ...] = ("fact_id",)
+_DELIVER_EVIDENCE_HANDLE_KEYS: tuple[str, ...] = (
+    "evidence_handle",
+    "chunk_id",
+    "evidence",
+    "chunk",
+)
+
+
+def _finite_nonneg_number(value: object) -> float | None:
+    """Return ``value`` as a finite, non-negative float, else ``None``.
+
+    Mirrors ``frugality_proof._finite_number`` (rejects ``None``, booleans,
+    non-numerics, NaN/inf) and additionally rejects negatives: a token count is a
+    spend, and a negative spend is malformed telemetry that must be dropped rather
+    than counted (a negative would understate the run's real spend and skew the
+    proof's aggregate reduction).
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _harvest_token_spend(
+    messages: list[AgentMessage],
+) -> tuple[float, dict[str, float]] | None:
+    """Sum runtime-reported token usage across a leaf's message stream.
+
+    Sums ``input_tokens + output_tokens`` (the billable spend) over every message
+    carrying a well-formed ``data["usage"]`` mapping, counting only finite
+    non-negative numerics. A message whose ``usage`` is absent or entirely
+    malformed contributes nothing; when NO usage is observed at all the function
+    returns ``None`` so the caller emits nothing — the deterministic proof treats
+    missing as missing and never fabricates a char-proxy spend.
+
+    Multiple usage-bearing messages in one stream (e.g. a Claude result message
+    plus Codex ``turn.completed`` messages) are summed, so a decomposed child's
+    full spend is attributed even when the runtime reports it in pieces.
+
+    Returns:
+        ``(token_spend, usage_breakdown)`` where ``usage_breakdown`` is the summed
+        per-key total for every usable key, or ``None`` when no usage was seen.
+    """
+    breakdown: dict[str, float] = {}
+    observed = False
+    for message in messages:
+        data = getattr(message, "data", None)
+        if not isinstance(data, dict):
+            continue
+        usage = data.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        for key, raw_value in usage.items():
+            number = _finite_nonneg_number(raw_value)
+            if number is None:
+                continue
+            breakdown[key] = breakdown.get(key, 0.0) + number
+            observed = True
+    if not observed:
+        return None
+    token_spend = breakdown.get("input_tokens", 0.0) + breakdown.get("output_tokens", 0.0)
+    return token_spend, breakdown
+
+
+def _first_nonblank_str(entry: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _structured_deliver_facts(
+    typed_evidence: EvidenceRecord | None,
+) -> list[DeliverEvidenceFact]:
+    """Extract genuinely-present ``(fact_id, evidence_handle)`` claim facts.
+
+    Reads only an EXPLICIT structured claim array the leaf emitted (one of
+    :data:`_DELIVER_CLAIM_SURFACE_KEYS`, each item a mapping bearing a non-blank
+    ``fact_id`` and a non-blank evidence handle). Returns ``[]`` when the evidence
+    carries no such surface — the common non-fat-harness case — so the caller
+    SKIPs rather than fabricating facts from prose, which would reward-hack the
+    very proof the deliver gate exists to keep honest.
+    """
+    if typed_evidence is None:
+        return []
+    data = getattr(typed_evidence, "data", None)
+    if not isinstance(data, Mapping):
+        return []
+    facts: list[DeliverEvidenceFact] = []
+    seen: set[str] = set()
+    for surface_key in _DELIVER_CLAIM_SURFACE_KEYS:
+        entries = data.get(surface_key)
+        if not isinstance(entries, (list, tuple)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            fact_id = _first_nonblank_str(entry, _DELIVER_FACT_ID_KEYS)
+            handle = _first_nonblank_str(entry, _DELIVER_EVIDENCE_HANDLE_KEYS)
+            if fact_id is None or handle is None or fact_id in seen:
+                continue
+            seen.add(fact_id)
+            statement = entry.get("statement")
+            facts.append(
+                DeliverEvidenceFact(
+                    fact_id=fact_id,
+                    evidence_handle=handle,
+                    statement=statement if isinstance(statement, str) else "",
+                )
+            )
+    return facts
+
 
 # Decomposition constants
 # Depth >= max_decomposition_depth forces atomic execution as a soft safety net.
@@ -450,10 +598,12 @@ class ParallelACExecutor:
         fat_harness_mode: bool = False,
         atomic_verifier: Verifier | None = None,
         reasoning_effort: str | None = None,
+        model_router: ModelRouter | None = None,
         run_verify_commands: bool = True,
         verify_command_timeout_seconds: int = 600,
         ac_retry_attempts: int = 0,
         cross_harness_redispatch: bool | None = None,
+        shadow_replay_enabled: bool = False,
     ):
         """Initialize executor.
 
@@ -504,6 +654,18 @@ class ParallelACExecutor:
         # routing dormant (execute_task receives no level → no behavior change),
         # so laying the executor on the capability contract is safe by default.
         self._reasoning_effort = reasoning_effort
+        # Model-tier investment dial (the frugality sibling of reasoning_effort).
+        # The router maps a per-unit tier decision to a backend-executable model id;
+        # ``None`` leaves model routing dormant (execute_task receives no model
+        # override → byte-identical to today's behavior), so laying the executor on
+        # the model capability contract is safe by default.
+        self._model_router = model_router
+        # Opt-in shadow-replay baseline harness (frugality-proof AC5). Default OFF:
+        # replaying a decomposed child at the parent tier doubles token cost, so
+        # this is an experiment lever, never a production default. When on, a
+        # successful decomposed child is re-executed in an isolated workspace to
+        # measure its parent-tier baseline spend. See ``shadow_replay`` module.
+        self._shadow_replay_enabled = shadow_replay_enabled
         self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
@@ -2386,7 +2548,14 @@ class ParallelACExecutor:
             fat_harness_mode=self._fat_harness_mode,
             atomic_verifier=self._atomic_verifier,
             reasoning_effort=self._reasoning_effort,
+            # The router's backend-mismatch guard makes it inert on a different
+            # backend, so passing it to the alt-harness executor is safe.
+            model_router=self._model_router,
             cross_harness_redispatch=False,
+            # The router is inert on a different backend, so the baseline resolves
+            # no parent-tier model and the replay self-skips — threading the flag
+            # just keeps the throwaway executor's behavior consistent.
+            shadow_replay_enabled=self._shadow_replay_enabled,
         )
         return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
 
@@ -2978,6 +3147,57 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         # reasoning_effort ONLY for runtimes that enforce it; advised runtimes that
         # do not accept the parameter are never handed it.
 
+        # Sibling of the effort routing above: decide WHICH model tier runs this
+        # unit (a decomposed child drops one tier cheaper; a hard AC on its
+        # escalation retry is raised one notch) and classify how the chosen runtime
+        # will honor it — enforced via a native per-call override, or merely advised.
+        # A profile's suggested_model_tier seeds the starting tier ONLY when it is
+        # something other than the shipped default MEDIUM ("no opinion"); MEDIUM
+        # leaves precedence with the router's own base/child logic and any explicit
+        # model_tier arg. Dormant by default (router None → no model override).
+        suggested_tier: str | None = None
+        if (
+            self._execution_profile is not None
+            and self._execution_profile.suggested_model_tier is not SuggestedModelTier.MEDIUM
+        ):
+            suggested_tier = tier_from_profile_hint(
+                self._execution_profile.suggested_model_tier.value
+            )
+        model_decision, execute_model_kwargs = resolve_execute_model(
+            self._adapter,
+            router=self._model_router,
+            is_decomposed_child=is_sub_ac,
+            retry_attempt=retry_attempt,
+            suggested_tier=suggested_tier,
+        )
+        if model_decision.model is not None:
+            log.debug(
+                "orchestrator.executor.model_routed",
+                ac_index=ac_index,
+                is_sub_ac=is_sub_ac,
+                model_tier=model_decision.tier,
+                model=model_decision.model,
+                model_mode=model_decision.mode,
+                backend=getattr(self._adapter, "runtime_backend", None),
+            )
+            await self._event_emitter.emit_model_routed(
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                ac_index=ac_index,
+                is_sub_ac=is_sub_ac,
+                model_tier=model_decision.tier,
+                model=model_decision.model,
+                model_mode=model_decision.mode,
+                retry_attempt=retry_attempt,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            )
+        # Merge the model override into the effort kwargs. The merged dict flows
+        # through LeafDispatcher.stream → execute_task unchanged (LeafDispatcher
+        # itself is untouched); ``model`` is present ONLY for runtimes that enforce
+        # a per-call override, so an advised runtime is never handed one.
+        execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
+
         # Runtime dispatch + streaming/heartbeat consumption. The dispatcher owns
         # the stall-scoped CancelScope and the per-message loop; it mutates
         # ``dispatch_state`` in place (including on the exception path) so the
@@ -3144,6 +3364,41 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
+            # Frugality-proof grounding axis (seed AC4). Only when the leaf was
+            # accepted AND emitted a structured evidence claim (the fat-harness
+            # case) do we run the deterministic TraceGuard verdict; the common
+            # non-fat-harness leaf has no structured claim surface and is skipped.
+            await self._observe_deliver_verdict(
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                is_sub_ac=is_sub_ac,
+                success=success,
+                typed_evidence=typed_evidence,
+            )
+            # Frugality-proof baseline axis (seed AC5), OPT-IN experiment. Only an
+            # accepted decomposed child has a parent baseline to price against; the
+            # harness re-executes it at the parent tier/effort in an ISOLATED
+            # workspace and emits ``execution.ac.shadow_replay``. Default OFF
+            # (doubles token cost) and fire-and-forget — it never changes this AC's
+            # result. Forced-atomic children are marked untrustworthy so the proof
+            # excludes them (mirrors the depth-limit canary in _execute_single_ac).
+            if self._shadow_replay_enabled and is_sub_ac and success:
+                decomposition_trustworthy = not (
+                    self._enable_decomposition and depth >= self._max_decomposition_depth
+                )
+                await run_shadow_replay(
+                    self,
+                    runtime_identity=runtime_identity,
+                    execution_id=execution_context_id,
+                    session_id=session_id,
+                    ac_index=ac_index,
+                    is_sub_ac=is_sub_ac,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    decomposition_trustworthy=decomposition_trustworthy,
+                )
             await self._emit_ac_runtime_event(
                 event_type=(
                     "execution.session.completed" if success else "execution.session.failed"
@@ -3245,6 +3500,22 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 runtime_handle=dispatch_state.runtime_handle,
             )
         finally:
+            # Frugality-proof token axis (seed AC2). Attribute this leaf's real
+            # runtime-measured spend on EVERY exit — success, stall, and the
+            # mid-stream exception path all consumed tokens, and spend is spend.
+            # ``messages`` is the same list the dispatcher mutates in place, so the
+            # partial stream is attributed even when the runtime raised.
+            await self._emit_token_attribution_for_leaf(
+                messages=messages,
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                ac_index=ac_index,
+                is_sub_ac=is_sub_ac,
+                retry_attempt=retry_attempt,
+                model_decision=model_decision,
+                effort_decision=effort_decision,
+            )
             if clear_cached_runtime_handle:
                 await self._terminate_runtime_handle(
                     dispatch_state.runtime_handle,
@@ -3259,6 +3530,114 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     node_identity=node_identity,
                     retry_attempt=retry_attempt,
                 )
+
+    async def _emit_token_attribution_for_leaf(
+        self,
+        *,
+        messages: list[AgentMessage],
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str,
+        session_id: str,
+        ac_index: int,
+        is_sub_ac: bool,
+        retry_attempt: int,
+        model_decision: Any,
+        effort_decision: Any,
+    ) -> None:
+        """Harvest and emit this leaf's runtime token spend (frugality-proof AC2).
+
+        Emits nothing when the stream carried no runtime usage telemetry — the
+        proof treats missing as missing rather than fabricating a spend. Observe-only:
+        any failure degrades to a warning so token attribution never disrupts the
+        leaf's teardown or result.
+        """
+        try:
+            harvested = _harvest_token_spend(messages)
+            if harvested is None:
+                return
+            token_spend, usage_breakdown = harvested
+            await self._event_emitter.emit_token_attribution(
+                runtime_identity=runtime_identity,
+                execution_id=execution_id,
+                session_id=session_id,
+                ac_index=ac_index,
+                is_sub_ac=is_sub_ac,
+                retry_attempt=retry_attempt,
+                token_spend=token_spend,
+                usage_breakdown=usage_breakdown,
+                model=getattr(model_decision, "model", None),
+                model_tier=getattr(model_decision, "tier", None),
+                model_mode=getattr(model_decision, "mode", None),
+                effort_level=getattr(effort_decision, "level", None),
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            )
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.ac.token_attribution.observe_failed",
+                ac_index=ac_index,
+                error=str(exc),
+            )
+
+    async def _observe_deliver_verdict(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str,
+        session_id: str,
+        is_sub_ac: bool,
+        success: bool,
+        typed_evidence: EvidenceRecord | None,
+    ) -> None:
+        """Evaluate + emit the TraceGuard deliver verdict for an accepted leaf (AC4).
+
+        Skips silently (debug log) when the leaf was not accepted or carries no
+        structured evidence claim — the manifest is loaded and the deterministic
+        TraceGuard verdict is only run against a genuine ``(fact_id,
+        evidence_handle)`` claim surface. HARD RULE: observe-only. This never
+        changes AC success/failure, retries, or routing; any failure degrades to a
+        warning.
+        """
+        if not success:
+            return
+        try:
+            facts = _structured_deliver_facts(typed_evidence)
+            if not facts:
+                log.debug(
+                    "parallel_executor.ac.deliver_verdict.skipped_no_claim_surface",
+                    ac_id=runtime_identity.ac_id,
+                )
+                return
+            ac_id = runtime_identity.ac_id
+            claim = DeliverEvidenceClaim(ac_id=ac_id, facts=tuple(facts))
+            # Bound the manifest to this execution only; the execution_id anchor
+            # already isolates it, and omitting the session filter avoids pruning
+            # execution-scoped journal rows that carry a different runtime session.
+            manifest = await load_ac_evidence_manifest(
+                self._event_store,
+                ac_id=ac_id,
+                execution_id=execution_id,
+            )
+            verdict = evaluate_deliver_claim(
+                manifest,
+                claim,
+                traceguard_validator=validate_evidence_claims,
+            )
+            await self._event_emitter.emit_deliver_verdict(
+                runtime_identity=runtime_identity,
+                execution_id=execution_id,
+                session_id=session_id,
+                is_sub_ac=is_sub_ac,
+                traceguard_verdict="accepted" if verdict.accepted else "rejected",
+                unsupported_claim_rate=verdict.unsupported_claim_rate,
+                rejected_reasons=list(verdict.rejected_reasons),
+                accepted_fact_count=len(verdict.accepted_fact_ids),
+            )
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.ac.deliver_verdict.observe_failed",
+                ac_id=runtime_identity.ac_id,
+                error=str(exc),
+            )
 
     def _observe_atomic_typed_evidence(
         self,

@@ -6,7 +6,11 @@ import json
 
 import pytest
 
-from ouroboros.orchestrator.adapter import SubagentOrchestration, is_leader_driven_worker
+from ouroboros.orchestrator.adapter import (
+    ParamSupport,
+    SubagentOrchestration,
+    is_leader_driven_worker,
+)
 from ouroboros.orchestrator.claude_worker_runtime import (
     ClaudeWorkerTransport,
     build_claude_worker_runtime,
@@ -83,6 +87,12 @@ class TestRuntimeWiring:
     def test_persisted_runtime_declares_targeted_resume(self) -> None:
         rt = build_claude_worker_runtime(cwd="/tmp", persist_sessions=True)
         assert rt.capabilities.targeted_resume is True
+
+    def test_declares_native_model_override(self) -> None:
+        # The transport routes a per-call model to ``claude --model``, so the
+        # worker enforces a model-tier override natively (RFC #1405 sibling).
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        assert rt.capabilities.model_override_support is ParamSupport.NATIVE
 
     @pytest.mark.asyncio
     async def test_default_runtime_does_not_emit_resumable_handle(self) -> None:
@@ -187,6 +197,30 @@ class TestForkAndLabelSpawnOptIn:
         assert "--fork-session" not in command
         assert "--resume" not in command
         assert command[command.index("--name") + 1] == "ooo: ship it"
+
+
+class TestPerCallModelArg:
+    """The per-call model (routed by frugality tiering) reaches ``claude --model``.
+    ``LeaderDrivenWorkerRuntime`` resolves ``model or self._model`` before spawn, so
+    the transport only needs to forward whatever value it is handed."""
+
+    @pytest.mark.asyncio
+    async def test_model_becomes_model_flag(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude")
+        command = await _capture_spawn(transport, model="claude-haiku-4-5")
+        assert command[command.index("--model") + 1] == "claude-haiku-4-5"
+
+    @pytest.mark.asyncio
+    async def test_default_sentinel_emits_no_model_flag(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude")
+        command = await _capture_spawn(transport, model="default")
+        assert "--model" not in command
+
+    @pytest.mark.asyncio
+    async def test_no_model_emits_no_model_flag(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude")
+        command = await _capture_spawn(transport)
+        assert "--model" not in command
 
 
 class TestContextReferenceAddDirs:

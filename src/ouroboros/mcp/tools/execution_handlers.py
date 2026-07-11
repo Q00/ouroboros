@@ -64,6 +64,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.model_routing import tier_from_model_tier_arg
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -510,7 +511,11 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 MCPToolParameter(
                     name="model_tier",
                     type=ToolInputType.STRING,
-                    description="Model tier to use (small, medium, large). Default: medium",
+                    description=(
+                        "Model-tier routing: small/medium/large → frugal/standard/frontier "
+                        "execution tier (decomposed children run one tier below; retries "
+                        "escalate). Default: medium"
+                    ),
                     required=False,
                     default="medium",
                     enum=("small", "medium", "large"),
@@ -832,6 +837,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     checkpoint_store=checkpoint_store,
                     max_parallel_workers=max_parallel_workers,
                     fat_harness_mode=fat_harness_mode,
+                    # Drive model-tier routing from the MCP model_tier arg
+                    # (small/medium/large → frugal/standard/frontier top-level tier).
+                    base_model_tier=tier_from_model_tier_arg(model_tier),
                 )
 
                 skip_qa = arguments.get("skip_qa", False)

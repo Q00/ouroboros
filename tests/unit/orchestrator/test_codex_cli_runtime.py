@@ -876,6 +876,65 @@ class TestCodexCliRuntime:
             "/tmp/project/test_hello.py",
         ]
 
+    def test_convert_turn_completed_with_usage_emits_system_usage_message(self) -> None:
+        """turn.completed with token usage surfaces a non-final system message."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 512,
+                    "cached_input_tokens": 128,
+                    "output_tokens": 64,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.type == "system"
+        assert message.content == ""
+        assert message.is_final is False
+        assert message.data["subtype"] == "turn.completed"
+        assert message.data["usage"] == {
+            "input_tokens": 512,
+            "cached_input_tokens": 128,
+            "output_tokens": 64,
+        }
+
+    def test_convert_turn_completed_filters_malformed_usage(self) -> None:
+        """Non-numeric usage fields are dropped; only valid counts survive."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": "512",  # string → dropped
+                    "output_tokens": 64,  # valid → kept
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        assert messages[0].data["usage"] == {"output_tokens": 64}
+
+    def test_convert_turn_completed_without_usage_is_dropped(self) -> None:
+        """turn.completed without a usable usage object stays a dropped event."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        assert runtime._convert_event({"type": "turn.completed"}, current_handle=None) == []
+        assert (
+            runtime._convert_event(
+                {"type": "turn.completed", "usage": {"input_tokens": "x"}},
+                current_handle=None,
+            )
+            == []
+        )
+
     def test_runtime_does_not_expose_local_dispatch_parser_helpers(self) -> None:
         """Dispatch parsing and metadata resolution live in the shared router."""
         obsolete_helpers = {

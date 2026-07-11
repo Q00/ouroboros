@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
+import math
 import os
 from pathlib import Path
 import re
@@ -61,6 +62,41 @@ log = get_logger(__name__)
 _TOP_LEVEL_EVENT_MESSAGE_TYPES: dict[str, str] = {
     "error": "assistant",
 }
+
+# Token-usage keys Codex's ``turn.completed`` event may carry. Kept in sync by
+# convention with the adapter's ``_USAGE_TOKEN_KEYS`` (a tiny duplicated helper,
+# not a shared module, per the token-attribution seam design).
+_USAGE_TOKEN_KEYS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "total_tokens",
+)
+
+
+def _normalized_usage(obj: object) -> dict[str, int | float] | None:
+    """Extract a plain dict of finite numeric token counts from a usage payload.
+
+    Reads only the known token keys (:data:`_USAGE_TOKEN_KEYS`) from either a
+    ``Mapping`` or an attribute-bearing object, keeping a value only when it is a
+    finite ``int``/``float`` (bools rejected). Returns ``None`` when nothing
+    usable is present, so the deterministic frugality proof treats a malformed or
+    empty measurement as *missing* rather than trusting garbage. Never raises.
+    """
+    if obj is None:
+        return None
+    result: dict[str, int | float] = {}
+    for key in _USAGE_TOKEN_KEYS:
+        value = obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
+        if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(value):
+            continue
+        result[key] = value
+    return result or None
+
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
@@ -181,6 +217,12 @@ class CodexCliRuntime:
             # level outside this set is silently dropped, so declare the vocabulary
             # to keep enforced/advised classification truthful.
             enforceable_reasoning_efforts=_CODEX_REASONING_EFFORT_LEVELS,
+            # Model-tier override IS enforced natively: ``codex exec`` accepts a
+            # per-invocation ``--model`` (see _build_command), so a per-call model
+            # the orchestrator routes is honored, not merely advised. (The router's
+            # provider map is anthropic-only today, so codex is not yet routed —
+            # but the plumbing is truthful and ready.)
+            model_override_support=ParamSupport.NATIVE,
             # Codex can self-parallelize inside a session, but ``codex mcp-server``
             # exposes only ``codex`` / ``codex-reply`` — its native multi-agent
             # team tools are not reachable by an external driver. So ouroboros can
@@ -843,6 +885,7 @@ class CodexCliRuntime:
         prompt: str | None = None,
         runtime_handle: RuntimeHandle | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
@@ -873,7 +916,11 @@ class CodexCliRuntime:
         if reasoning_effort and reasoning_effort in _CODEX_REASONING_EFFORT_LEVELS:
             command.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
 
-        normalized_model = self._normalize_model(self._model)
+        # Per-call model-tier override (RFC #1405 sibling) wins over the
+        # constructor pin; ``model is None`` falls back to ``self._model`` so
+        # existing call sites are byte-identical. Only when neither yields a model
+        # do we consult the runtime profile below (unchanged fallback order).
+        normalized_model = self._normalize_model(model or self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
         else:
@@ -1541,7 +1588,24 @@ class CodexCliRuntime:
             ]
 
         if event_type == "turn.completed":
-            return []  # benign lifecycle event; no action needed
+            # Codex's ``turn.completed`` carries a ``usage`` object (input_tokens
+            # / cached_input_tokens / output_tokens). Surface it as a non-final
+            # system message so a later executor can attribute per-AC token spend.
+            # With empty content and subtype "turn.completed" this projects to a
+            # benign, non-terminal system message (see runtime_message_projection:
+            # the completed-status branch keys on runtime_event_type, not on this
+            # subtype). Without usage it stays a dropped lifecycle event.
+            usage = _normalized_usage(event.get("usage"))
+            if usage is None:
+                return []
+            return [
+                AgentMessage(
+                    type="system",
+                    content="",
+                    data={"subtype": "turn.completed", "usage": usage},
+                    resume_handle=current_handle,
+                )
+            ]
 
         if event_type in _TOP_LEVEL_EVENT_MESSAGE_TYPES:
             content = self._extract_text(event)
@@ -1591,6 +1655,7 @@ class CodexCliRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via Codex CLI and stream normalized messages."""
         async for msg in self._execute_task_impl(
@@ -1600,6 +1665,7 @@ class CodexCliRuntime:
             resume_handle=resume_handle,
             resume_session_id=resume_session_id,
             reasoning_effort=reasoning_effort,
+            model=model,
             _resume_depth=0,
         ):
             yield msg
@@ -1612,6 +1678,7 @@ class CodexCliRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
         _resume_depth: int = 0,
     ) -> AsyncIterator[AgentMessage]:
         """Internal implementation with resume-depth tracking."""
@@ -1661,6 +1728,12 @@ class CodexCliRuntime:
             # that enforce it, so a None level is correctly dropped here.
             if reasoning_effort is not None:
                 build_kwargs["reasoning_effort"] = reasoning_effort
+            # Same guard as reasoning_effort: only advised CLI subclasses override
+            # ``_build_command`` and may not accept a ``model`` kwarg, so a None
+            # override (the orchestrator's default for runtimes that do not enforce
+            # it) is dropped here rather than forwarded. Codex-native enforces it.
+            if model is not None:
+                build_kwargs["model"] = model
             command = self._build_command(**build_kwargs)
         except Exception as e:
             yield AgentMessage(
@@ -1938,6 +2011,7 @@ class CodexCliRuntime:
                     system_prompt=system_prompt,
                     resume_handle=recovery_handle,
                     reasoning_effort=reasoning_effort,
+                    model=model,
                     _resume_depth=_resume_depth + 1,
                 ):
                     yield message
