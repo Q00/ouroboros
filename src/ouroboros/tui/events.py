@@ -562,6 +562,73 @@ class AgentThinkingUpdated(Message):
         self.thinking_text = thinking_text
 
 
+class ACModelRouted(Message):
+    """Per-AC model-tier routing telemetry (frugality proof's routing axis).
+
+    Emitted from ``execution.ac.model_routed``: records which model tier ran a
+    unit of work so the dashboard can show a per-AC tier badge. ``node_id`` is the
+    stable per-worker identity when present; ``ac_index`` is the fallback join key.
+    """
+
+    def __init__(
+        self,
+        node_id: str | None,
+        ac_index: int,
+        model_tier: str | None,
+        model: str | None,
+        model_mode: str,
+        retry_attempt: int,
+    ) -> None:
+        super().__init__()
+        self.node_id = node_id
+        self.ac_index = ac_index
+        self.model_tier = model_tier
+        self.model = model
+        self.model_mode = model_mode
+        self.retry_attempt = retry_attempt
+
+
+class ACTokenAttribution(Message):
+    """Per-AC runtime-measured token spend (frugality proof's token axis).
+
+    Emitted from ``execution.ac.token_attribution.reported``. ``token_spend`` is a
+    real runtime-usage measurement (never a character proxy); the dashboard folds
+    it per node and into the run total.
+    """
+
+    def __init__(
+        self,
+        node_id: str | None,
+        ac_index: int,
+        token_spend: float,
+        model_tier: str | None,
+    ) -> None:
+        super().__init__()
+        self.node_id = node_id
+        self.ac_index = ac_index
+        self.token_spend = token_spend
+        self.model_tier = model_tier
+
+
+class FrugalityProofEvaluated(Message):
+    """Run-end deterministic frugality-proof verdict.
+
+    Emitted once from ``execution.frugality_proof.evaluated``: a PASS/FAIL verdict
+    computed over a same-seed cohort with no model in the loop.
+    """
+
+    def __init__(
+        self,
+        status: str,
+        token_reduction_pct: float | None,
+        reason: str,
+    ) -> None:
+        super().__init__()
+        self.status = status
+        self.token_reduction_pct = token_reduction_pct
+        self.reason = reason
+
+
 # =============================================================================
 # Event Subscription State
 # =============================================================================
@@ -614,6 +681,18 @@ class TUIState:
     # when stamping tree nodes. ``board_providers`` is the run's provider legend.
     provider_by_node: dict[str, str] = field(default_factory=dict)
     board_providers: list[str] = field(default_factory=list)
+
+    # Frugality telemetry, folded from the per-AC routing/token events and the
+    # run-end proof. ``tier_by_node`` / ``model_by_node`` are latest-wins per node
+    # (node_id when present, else ``ac_<index>``); ``tokens_by_node`` accumulates
+    # per node and ``run_total_tokens`` sums the whole run. ``frugality_summary`` is
+    # the one-line run-end verdict, set once. Stamped onto tree nodes the same
+    # order-safe way providers are (``_apply_provider_tags``).
+    tier_by_node: dict[str, str] = field(default_factory=dict)
+    model_by_node: dict[str, str] = field(default_factory=dict)
+    tokens_by_node: dict[str, float] = field(default_factory=dict)
+    run_total_tokens: float = 0.0
+    frugality_summary: str | None = None
 
     # P1: Tool/thinking tracking for dashboard
     active_tools: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -890,16 +969,98 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             thinking_text=data.get("thinking_text", ""),
         )
 
+    elif event_type == "execution.ac.model_routed":
+        node_id = data.get("node_id") if isinstance(data.get("node_id"), str) else None
+        ac_index = data.get("ac_index")
+        ac_index = ac_index if type(ac_index) is int else -1
+        if node_id is None and ac_index < 0:
+            # No usable join key — drop rather than stamp the wrong node.
+            return None
+        return ACModelRouted(
+            node_id=node_id,
+            ac_index=ac_index,
+            model_tier=data.get("model_tier") if isinstance(data.get("model_tier"), str) else None,
+            model=data.get("model") if isinstance(data.get("model"), str) else None,
+            model_mode=data.get("model_mode") if isinstance(data.get("model_mode"), str) else "",
+            retry_attempt=_coerce_event_int(data.get("retry_attempt")) or 0,
+        )
+
+    elif event_type == "execution.ac.token_attribution.reported":
+        token_spend = data.get("token_spend")
+        # Mirror the board reducer's finite-number guard (dashboard.board._coerce_spend):
+        # reject bool, non-numeric, NaN, ±Inf and negative spend at parse time so a
+        # malformed payload never produces a message (it can no longer poison the run
+        # total downstream, where negatives were previously dropped after the fact).
+        if not isinstance(token_spend, (int, float)) or isinstance(token_spend, bool):
+            return None
+        spend = float(token_spend)
+        if spend != spend or spend in (float("inf"), float("-inf")) or spend < 0:
+            return None
+        node_id = data.get("node_id") if isinstance(data.get("node_id"), str) else None
+        ac_index = data.get("ac_index")
+        ac_index = ac_index if type(ac_index) is int else -1
+        return ACTokenAttribution(
+            node_id=node_id,
+            ac_index=ac_index,
+            token_spend=spend,
+            model_tier=data.get("model_tier") if isinstance(data.get("model_tier"), str) else None,
+        )
+
+    elif event_type == "execution.frugality_proof.evaluated":
+        status = data.get("status")
+        if not isinstance(status, str) or not status:
+            return None
+        pct = data.get("token_reduction_pct")
+        return FrugalityProofEvaluated(
+            status=status,
+            token_reduction_pct=(
+                float(pct) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else None
+            ),
+            reason=data.get("reason") if isinstance(data.get("reason"), str) else "",
+        )
+
     # Return None for unhandled event types
     return None
 
 
+_FRUGALITY_STATUS_LABELS = {
+    "pass": "frugal",
+    "fail_grounding_regression": "grounding regressed",
+    "fail_no_frugality": "no savings",
+    "insufficient_sample": "insufficient sample",
+    "insufficient_data": "insufficient data",
+}
+
+
+def format_frugality_summary(
+    status: str,
+    token_reduction_pct: float | None,
+) -> str:
+    """Return a one-line frugality-proof verdict for run-end display.
+
+    Shared by the app (folds it into ``TUIState.frugality_summary``) and the
+    dashboard bar so the two never phrase the same verdict differently. The ``⚖``
+    glyph doubles as a dedup marker when appended to an existing progress line.
+    """
+    label = _FRUGALITY_STATUS_LABELS.get(status, status or "unknown")
+    if (
+        status == "pass"
+        and isinstance(token_reduction_pct, (int, float))
+        and not isinstance(token_reduction_pct, bool)
+    ):
+        return f"⚖ {label} −{float(token_reduction_pct):.0f}% tok"
+    return f"⚖ {label}"
+
+
 __all__ = [
+    "ACModelRouted",
+    "ACTokenAttribution",
     "ACUpdated",
     "AgentThinkingUpdated",
     "CostUpdated",
     "DriftUpdated",
     "ExecutionUpdated",
+    "FrugalityProofEvaluated",
     "GenerationSelected",
     "LineageSelected",
     "LogMessage",
@@ -914,4 +1075,5 @@ __all__ = [
     "ToolCallStarted",
     "WorkflowProgressUpdated",
     "create_message_from_event",
+    "format_frugality_summary",
 ]

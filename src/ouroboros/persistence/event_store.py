@@ -83,11 +83,18 @@ def _session_related_event_conditions(
     session_id: str,
     execution_id: str | None,
 ) -> list[Any]:
-    """Build aggregate-id predicates for a session and its execution scopes."""
-    conditions: list[Any] = [
-        events_table.c.aggregate_id == session_id,
-        func.json_extract(events_table.c.payload, "$.session_id") == session_id,
-    ]
+    """Build aggregate-id predicates for a session and its execution scopes.
+
+    An empty ``session_id`` contributes no session predicate: matching
+    ``json_extract(payload,'$.session_id') == ''`` would pull unrelated rows
+    that happen to persist a blank session field. Callers with only an
+    execution scope (e.g. a TUI poll whose context has no session yet) still
+    match worker-scoped events through the ``execution_id`` predicates below.
+    """
+    conditions: list[Any] = []
+    if session_id:
+        conditions.append(events_table.c.aggregate_id == session_id)
+        conditions.append(func.json_extract(events_table.c.payload, "$.session_id") == session_id)
     if not execution_id:
         return conditions
 
@@ -997,6 +1004,11 @@ class EventStore:
         session_started_at = await self._resolve_session_started_at(session_id)
 
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
+        if not conditions:
+            # Fail closed: a blank session with no resolvable execution produces zero
+            # scope predicates, and ``or_()`` over an empty list emits NO WHERE clause
+            # — SQLAlchemy would then return the ENTIRE store. Select nothing instead.
+            return []
 
         try:
             async with self._engine.begin() as conn:
@@ -1127,6 +1139,11 @@ class EventStore:
         )
         session_started_at = await self._resolve_session_started_at(session_id)
         conditions = _session_related_event_conditions(session_id, resolved_execution_id)
+        if not conditions:
+            # Fail closed (see query_session_related_events): ``or_()`` over an empty
+            # list emits NO WHERE clause and would scan the whole store. A blank scope
+            # must yield no rows and leave the cursor unchanged so the poll is idempotent.
+            return [], last_row_id
 
         try:
             async with self._engine.begin() as conn:

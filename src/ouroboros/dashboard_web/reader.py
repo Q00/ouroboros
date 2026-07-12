@@ -34,6 +34,12 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     # Carries the run-level runtime_backend (provider) — lets the board tag the
     # provider on SIMPLE runs that emit no per-worker execution.session.started.
     "orchestrator.session.started",
+    # Frugality telemetry: per-AC model tier/model routing, per-AC runtime token
+    # spend, and the run-end frugality proof — already emitted, previously filtered
+    # out of the Kanban tail.
+    "execution.ac.model_routed",
+    "execution.ac.token_attribution.reported",
+    "execution.frugality_proof.evaluated",
 )
 
 
