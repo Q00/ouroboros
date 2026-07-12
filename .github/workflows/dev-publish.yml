@@ -91,7 +91,7 @@ jobs:
       # PyPI via release.yml on a v* tag.
       - name: Upload dev build artifact
         if: steps.check.outputs.skip == 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ouroboros-ai-${{ steps.build.outputs.version }}
           path: dist/*
