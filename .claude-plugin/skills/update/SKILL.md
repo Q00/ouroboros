@@ -95,26 +95,26 @@ When the user invokes this skill:
    - If installed via **uv tool** (most common with install.sh):
      ```bash
      # For pre-release targets:
-     uv tool install --upgrade --prerelease=allow ouroboros-ai[mcp,claude]
+     uv tool install --upgrade --prerelease=allow 'ouroboros-ai[mcp,claude]'
      # For stable targets:
-     uv tool install --upgrade ouroboros-ai[mcp,claude]
+     uv tool install --upgrade 'ouroboros-ai[mcp,claude]'
      ```
 
    - If installed via **pipx**:
      > `pipx upgrade` cannot add extras to an existing venv — use `install --force` to reinstall with extras.
      ```bash
      # For pre-release targets:
-     pipx install --force --pip-args='--pre' ouroboros-ai[mcp,claude]
+     pipx install --force --pip-args='--pre' 'ouroboros-ai[mcp,claude]'
      # For stable targets:
-     pipx install --force ouroboros-ai[mcp,claude]
+     pipx install --force 'ouroboros-ai[mcp,claude]'
      ```
 
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     python3 -m pip install --upgrade --pre ouroboros-ai[mcp,claude]
+     python3 -m pip install --upgrade --pre 'ouroboros-ai[mcp,claude]'
      # For stable targets:
-     python3 -m pip install --upgrade ouroboros-ai[mcp,claude]
+     python3 -m pip install --upgrade 'ouroboros-ai[mcp,claude]'
      ```
 
    > **Note**: The `[mcp,claude]` extras are critical. Omitting `[mcp]` makes the MCP

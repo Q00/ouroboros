@@ -168,13 +168,13 @@ pipx list 2>/dev/null | grep -q ouroboros && echo "PIPX" || echo "NOT_PIPX"
   ```bash
   pipx runpip ouroboros-ai show claude-agent-sdk 2>/dev/null && pipx runpip ouroboros-ai show mcp 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
   ```
-  If `DEPS_MISSING`: `pipx install --force ouroboros-ai[mcp,claude]`
+  If `DEPS_MISSING`: `pipx install --force 'ouroboros-ai[mcp,claude]'`
 
 - **pip users** (pip mode):
   ```bash
   python3 -c "import claude_agent_sdk, mcp" 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
   ```
-  If `DEPS_MISSING`: `python3 -m pip install ouroboros-ai[mcp,claude]`
+  If `DEPS_MISSING`: `python3 -m pip install 'ouroboros-ai[mcp,claude]'`
 
 If deps are missing and the user doesn't want to fix manually, recommend uv. Prefer
 package-manager paths over the vendor pipe-to-shell when the user's environment supports
