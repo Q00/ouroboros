@@ -162,12 +162,21 @@ def fold_provider_event(
     return False
 
 
-def _coerce_spend(value: object) -> float | None:
-    """A finite, non-bool numeric token spend, else None (omit — never render NaN)."""
+def _coerce_spend(value: object, *, reject_negative: bool = False) -> float | None:
+    """A finite, non-bool numeric value, else None (omit — never render NaN).
+
+    ``reject_negative`` additionally drops negative values — used for
+    ``token_spend`` (a cumulative counter; negative is malformed per the
+    frugality proof contract, mirroring the TUI's parse-time guard in
+    ``src/ouroboros/tui/events.py``) but NOT for ``token_reduction_pct``
+    (a signed delta where negative legitimately means spend increased).
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     spend = float(value)
     if spend != spend or spend in (float("inf"), float("-inf")):  # NaN / inf guard
+        return None
+    if reject_negative and spend < 0:
         return None
     return spend
 
@@ -204,7 +213,7 @@ def fold_telemetry_event(
         return changed
     if event_type == "execution.ac.token_attribution.reported":
         node_id = payload.get("node_id")
-        spend = _coerce_spend(payload.get("token_spend"))
+        spend = _coerce_spend(payload.get("token_spend"), reject_negative=True)
         if not isinstance(node_id, str) or not node_id or spend is None:
             return False
         ledger.tokens_by_node[node_id] = ledger.tokens_by_node.get(node_id, 0.0) + spend

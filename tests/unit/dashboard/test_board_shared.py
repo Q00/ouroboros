@@ -195,6 +195,32 @@ class TestTelemetryFoldAgreement:
         )
         assert ledger.total_tokens == 0.0
 
+    def test_negative_spend_is_rejected_like_the_tui_parser(self) -> None:
+        """Negative ``token_spend`` is malformed (mirrors the TUI's parse-time
+        guard in ``src/ouroboros/tui/events.py``) and must never be folded into
+        per-node or run totals — a stale/malformed event must not make the web
+        board under-report spend relative to what the TUI would show."""
+        ledger = ProviderLedger()
+        assert (
+            fold_telemetry_event(
+                "execution.ac.token_attribution.reported",
+                {"node_id": "ac_1", "token_spend": -100.0},
+                ledger=ledger,
+            )
+            is False
+        )
+        assert ledger.tokens_by_node == {}
+        assert ledger.total_tokens == 0.0
+
+        raw = [
+            {
+                "event_type": "execution.ac.token_attribution.reported",
+                "payload": {"node_id": "ac_1", "token_spend": -100.0},
+            }
+        ]
+        board = reduce_board(raw, execution_id="exec_1")
+        assert board["meta"]["total_tokens"] == 0.0
+
     def test_reset_clears_telemetry_state(self) -> None:
         ledger = ProviderLedger()
         for event_type, payload in _TELEMETRY_RUN:
