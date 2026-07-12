@@ -740,6 +740,29 @@ def _coerce_event_int(value: object) -> int | None:
     return value if type(value) is int else None
 
 
+def _coerce_finite_spend(value: object, *, reject_negative: bool = False) -> float | None:
+    """A finite, non-bool numeric value, else None (omit — never render NaN).
+
+    Mirrors ``dashboard.board._coerce_spend`` so a malformed telemetry payload
+    (non-numeric, NaN, ±Inf, or an int too large to convert to float) is dropped
+    the same way in the TUI as in the shared web board. ``reject_negative`` is
+    used for ``token_spend`` (a cumulative counter) but not for
+    ``token_reduction_pct`` (a signed delta where negative legitimately means
+    spend increased).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        spend = float(value)
+    except (OverflowError, ValueError):  # e.g. int too large to convert to float
+        return None
+    if spend != spend or spend in (float("inf"), float("-inf")):  # NaN / inf guard
+        return None
+    if reject_negative and spend < 0:
+        return None
+    return spend
+
+
 def _subtask_root_ac_index(data: dict[str, Any]) -> int:
     """Return the 1-based top-level AC index for subtask dashboard grouping."""
     root_ac_number = _coerce_event_int(data.get("root_ac_number"))
@@ -986,18 +1009,11 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
         )
 
     elif event_type == "execution.ac.token_attribution.reported":
-        token_spend = data.get("token_spend")
-        # Mirror the board reducer's finite-number guard (dashboard.board._coerce_spend):
-        # reject bool, non-numeric, NaN, ±Inf and negative spend at parse time so a
-        # malformed payload never produces a message (it can no longer poison the run
-        # total downstream, where negatives were previously dropped after the fact).
-        if not isinstance(token_spend, (int, float)) or isinstance(token_spend, bool):
-            return None
-        try:
-            spend = float(token_spend)
-        except (OverflowError, ValueError):  # e.g. int too large to convert to float
-            return None
-        if spend != spend or spend in (float("inf"), float("-inf")) or spend < 0:
+        # reject_negative=True: a malformed payload never produces a message (it
+        # can no longer poison the run total downstream, where negatives were
+        # previously dropped only after the fact).
+        spend = _coerce_finite_spend(data.get("token_spend"), reject_negative=True)
+        if spend is None:
             return None
         node_id = data.get("node_id") if isinstance(data.get("node_id"), str) else None
         ac_index = data.get("ac_index")
@@ -1013,12 +1029,10 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
         status = data.get("status")
         if not isinstance(status, str) or not status:
             return None
-        pct = data.get("token_reduction_pct")
         return FrugalityProofEvaluated(
             status=status,
-            token_reduction_pct=(
-                float(pct) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else None
-            ),
+            # reject_negative=False: a negative pct legitimately means spend increased.
+            token_reduction_pct=_coerce_finite_spend(data.get("token_reduction_pct")),
             reason=data.get("reason") if isinstance(data.get("reason"), str) else "",
         )
 
