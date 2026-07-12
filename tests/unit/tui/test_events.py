@@ -778,12 +778,14 @@ class TestFrugalityTelemetryEvents:
             float("-inf"),
             -1,
             -0.5,
+            10**400,
         ],
     )
     def test_token_attribution_rejects_non_finite_or_negative_spend(
         self, token_spend: float
     ) -> None:
-        """Non-finite (NaN/±Inf) or negative spend is malformed and dropped at parse.
+        """Non-finite (NaN/±Inf), negative, or unconvertible (``OverflowError``) spend
+        is malformed and dropped at parse.
 
         Mirrors the board reducer's finite-number guard so a poisoned payload never
         reaches the run total (negatives were previously dropped only downstream).
@@ -816,6 +818,51 @@ class TestFrugalityTelemetryEvents:
         assert msg.status == "pass"
         assert msg.token_reduction_pct == 18.0
         assert msg.reason.startswith("18%")
+
+    def test_frugality_proof_negative_reduction_pct_is_kept(self) -> None:
+        """A negative ``token_reduction_pct`` legitimately means spend increased —
+        unlike ``token_spend``, it must NOT be dropped."""
+        event = BaseEvent(
+            type="execution.frugality_proof.evaluated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"status": "fail_no_frugality", "token_reduction_pct": -5.0},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityProofEvaluated)
+        assert msg.token_reduction_pct == -5.0
+
+    @pytest.mark.parametrize(
+        "token_reduction_pct",
+        [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            10**400,
+        ],
+    )
+    def test_frugality_proof_rejects_non_finite_or_unconvertible_pct(
+        self, token_reduction_pct: float
+    ) -> None:
+        """Non-finite (NaN/±Inf) or unconvertible (``OverflowError``) ``token_reduction_pct``
+        is malformed and omitted (never crashes ``create_message_from_event``).
+
+        Mirrors the board reducer's finite-number guard (``dashboard.board._coerce_spend``)
+        so a poisoned payload never crashes live TUI event polling.
+        """
+        event = BaseEvent(
+            type="execution.frugality_proof.evaluated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"status": "pass", "token_reduction_pct": token_reduction_pct},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityProofEvaluated)
+        assert msg.token_reduction_pct is None
 
     def test_frugality_proof_without_status_returns_none(self) -> None:
         """A frugality_proof event lacking a status string is dropped."""
