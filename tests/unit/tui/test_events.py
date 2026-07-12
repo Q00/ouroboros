@@ -778,12 +778,14 @@ class TestFrugalityTelemetryEvents:
             float("-inf"),
             -1,
             -0.5,
+            10**400,
         ],
     )
     def test_token_attribution_rejects_non_finite_or_negative_spend(
         self, token_spend: float
     ) -> None:
-        """Non-finite (NaN/±Inf) or negative spend is malformed and dropped at parse.
+        """Non-finite (NaN/±Inf), negative, or unconvertible (``OverflowError``) spend
+        is malformed and dropped at parse.
 
         Mirrors the board reducer's finite-number guard so a poisoned payload never
         reaches the run total (negatives were previously dropped only downstream).

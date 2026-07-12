@@ -221,6 +221,30 @@ class TestTelemetryFoldAgreement:
         board = reduce_board(raw, execution_id="exec_1")
         assert board["meta"]["total_tokens"] == 0.0
 
+    def test_oversized_int_spend_is_omitted_not_crashed(self) -> None:
+        """An int too large to convert to float (``OverflowError``) is malformed
+        telemetry and must be omitted, not raise out of ``reduce_board()``."""
+        ledger = ProviderLedger()
+        assert (
+            fold_telemetry_event(
+                "execution.ac.token_attribution.reported",
+                {"node_id": "ac_1", "token_spend": 10**400},
+                ledger=ledger,
+            )
+            is False
+        )
+        assert ledger.tokens_by_node == {}
+        assert ledger.total_tokens == 0.0
+
+        raw = [
+            {
+                "event_type": "execution.ac.token_attribution.reported",
+                "payload": {"node_id": "ac_1", "token_spend": 10**400},
+            }
+        ]
+        board = reduce_board(raw, execution_id="exec_1")
+        assert board["meta"]["total_tokens"] == 0.0
+
     def test_reset_clears_telemetry_state(self) -> None:
         ledger = ProviderLedger()
         for event_type, payload in _TELEMETRY_RUN:

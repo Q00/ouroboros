@@ -173,7 +173,10 @@ def _coerce_spend(value: object, *, reject_negative: bool = False) -> float | No
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    spend = float(value)
+    try:
+        spend = float(value)
+    except (OverflowError, ValueError):  # e.g. int too large to convert to float
+        return None
     if spend != spend or spend in (float("inf"), float("-inf")):  # NaN / inf guard
         return None
     if reject_negative and spend < 0:

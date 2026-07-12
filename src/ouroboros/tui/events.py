@@ -993,7 +993,10 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
         # total downstream, where negatives were previously dropped after the fact).
         if not isinstance(token_spend, (int, float)) or isinstance(token_spend, bool):
             return None
-        spend = float(token_spend)
+        try:
+            spend = float(token_spend)
+        except (OverflowError, ValueError):  # e.g. int too large to convert to float
+            return None
         if spend != spend or spend in (float("inf"), float("-inf")) or spend < 0:
             return None
         node_id = data.get("node_id") if isinstance(data.get("node_id"), str) else None
