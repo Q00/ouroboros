@@ -118,7 +118,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 <summary><strong>Kiro CLI quick start</strong></summary>
 
 ```bash
-pip install 'ouroboros-ai[claude]'
+pip install 'ouroboros-ai[mcp,claude]'
 ouroboros setup            # detects Kiro CLI and registers MCP server
 ```
 
@@ -159,7 +159,7 @@ Then run `ooo setup` inside a Claude Code session.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # base
-pip install ouroboros-ai[claude]        # + Claude Code deps
+pip install ouroboros-ai[claude]        # + Claude Code deps; pair with [mcp] for the MCP server
 pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
 pip install ouroboros-ai[mcp]           # + MCP server/client support
 pip install ouroboros-ai[tui]           # + Textual terminal UI

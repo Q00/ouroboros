@@ -140,7 +140,10 @@ class TestCheckMcpImport:
             with patch("builtins.__import__", side_effect=_import_error_for("mcp")):
                 result = check_mcp_import()
         assert result.status == "fail"
-        assert result.remediation != ""
+        # The remediation must name the canonical extras: uv tool install
+        # replaces the tool env with exactly the requested extras, so a
+        # subset spec would strip the user's other extras.
+        assert "[mcp,claude]" in result.remediation
 
     def test_passes_when_installed_returns_version(self):
         # mcp is installed — check that version string is included in the message
@@ -178,7 +181,7 @@ class TestCheckClaudeAgentSdkImport:
         ):
             result = check_claude_agent_sdk_import()
         assert result.status == "fail"
-        assert result.remediation != ""
+        assert "[mcp,claude]" in result.remediation
 
     def test_warns_when_not_importable_on_codex_backend(self):
         """Missing SDK on a Codex runtime is only a warning, not a failure."""

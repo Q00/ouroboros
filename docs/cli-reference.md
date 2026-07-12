@@ -1055,8 +1055,7 @@ To register manually, add to `~/.claude/mcp.json`:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"],
-      "timeout": 600
+      "args": ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]
     }
   }
 }
@@ -1069,8 +1068,7 @@ If Ouroboros is installed directly (not via `uvx`), use:
   "mcpServers": {
     "ouroboros": {
       "command": "ouroboros",
-      "args": ["mcp", "serve"],
-      "timeout": 600
+      "args": ["mcp", "serve"]
     }
   }
 }

@@ -98,7 +98,7 @@ def check_ouroboros_version() -> CheckResult:
             name="ouroboros_version",
             status="fail",
             message="ouroboros-ai not found in installed packages",
-            remediation="pip install ouroboros-ai  or  uv add ouroboros-ai",
+            remediation="pip install ouroboros-ai  or  uv tool install ouroboros-ai",
         )
 
 
@@ -111,7 +111,10 @@ def check_mcp_import() -> CheckResult:
             name="mcp_import",
             status="fail",
             message="mcp package not importable",
-            remediation="pip install 'ouroboros-ai[mcp]'  or  uv add 'ouroboros-ai[mcp]'",
+            remediation=(
+                "pip install 'ouroboros-ai[mcp,claude]'  or  "
+                "uv tool install 'ouroboros-ai[mcp,claude]'"
+            ),
         )
 
     try:
@@ -183,13 +186,18 @@ def check_claude_agent_sdk_import() -> CheckResult:
                 name="claude_agent_sdk_import",
                 status="fail",
                 message="claude-agent-sdk not importable",
-                remediation="pip install 'ouroboros-ai[claude]'  or  uv add 'ouroboros-ai[claude]'",
+                remediation=(
+                    "pip install 'ouroboros-ai[mcp,claude]'  or  "
+                    "uv tool install 'ouroboros-ai[mcp,claude]'"
+                ),
             )
         return CheckResult(
             name="claude_agent_sdk_import",
             status="warn",
             message=f"claude-agent-sdk not installed (not required for {runtime} runtime)",
-            remediation="Install if switching to Claude runtime: pip install 'ouroboros-ai[claude]'",
+            remediation=(
+                "Install if switching to Claude runtime: pip install 'ouroboros-ai[mcp,claude]'"
+            ),
         )
 
 
@@ -212,7 +220,10 @@ def check_litellm_import() -> CheckResult:
             name="litellm_import",
             status="warn",
             message="litellm not installed (optional)",
-            remediation="pip install 'ouroboros-ai[litellm]'  or  uv add 'ouroboros-ai[litellm]'",
+            remediation=(
+                "pip install 'ouroboros-ai[litellm]'  or  "
+                "uv tool install 'ouroboros-ai[mcp,claude,litellm]'"
+            ),
         )
 
 

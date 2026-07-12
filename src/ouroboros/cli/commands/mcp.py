@@ -921,7 +921,11 @@ def serve(
         _stderr_console.print("[blue]MCP Server stopped[/blue]")
     except ImportError as e:
         _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
-        _stderr_console.print("[blue]Install with: uv add mcp[/blue]")
+        _stderr_console.print(
+            "[blue]Fix for uv tool installs: uv tool install 'ouroboros-ai\\[mcp,claude]'\n"
+            "For pip/pipx installs: install 'ouroboros-ai\\[mcp,claude]' into the "
+            "environment that runs this server.[/blue]"
+        )
         raise typer.Exit(1) from e
     except OSError as e:
         _stderr_console.print(f"[red]MCP Server failed to start: {e}[/red]")

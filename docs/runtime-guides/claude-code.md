@@ -21,7 +21,7 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 - Python >= 3.12
 - Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
 
-> The `[claude]` extra (`pip install ouroboros-ai[claude]`) installs `claude-agent-sdk` and `anthropic` -- required for Claude Code runtime integration. The base `ouroboros-ai` package does not include these.
+> Install with the `[mcp,claude]` extras (`pip install ouroboros-ai[mcp,claude]`): `[claude]` installs `claude-agent-sdk` and `anthropic` -- required for Claude Code runtime integration -- and `[mcp]` installs the MCP server runtime. The base `ouroboros-ai` package includes neither.
 
 ## Configuration
 
