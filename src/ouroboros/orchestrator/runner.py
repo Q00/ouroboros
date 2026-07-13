@@ -303,6 +303,11 @@ def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> Executi
     return get_strategy(seed.task_type)
 
 
+def _seed_has_investment_metadata(seed: Seed) -> bool:
+    """Return whether any AC requires per-criterion investment routing."""
+    return any(criterion.investment is not None for criterion in seed.acceptance_criteria)
+
+
 def build_system_prompt(
     seed: Seed,
     strategy: ExecutionStrategy | None = None,
@@ -735,10 +740,12 @@ class OrchestratorRunner:
     ) -> dict[str, str]:
         """Lay the runner's own execute_task paths on BOTH investment contracts.
 
-        These direct paths (single-AC execution, resume) do not go through
-        ParallelACExecutor, so without this they would silently skip effort AND
-        model-tier routing. Returns the merged execute_task kwargs (empty unless
-        the runtime enforces the respective parameter).
+        These legacy direct paths do not go through ParallelACExecutor, so without
+        this they would silently skip effort AND model-tier routing. Seeds carrying
+        AC investment metadata are routed through the AC executor instead, and
+        resume fails closed until it can restore per-AC authority. Returns the
+        merged execute_task kwargs (empty unless the runtime enforces the respective
+        parameter).
 
         It records ``execution.ac.investment_assessed`` plus the applicable
         ``execution.ac.effort_routed`` and ``execution.ac.model_routed`` events for
@@ -3585,10 +3592,14 @@ class OrchestratorRunner:
 
             # Check for fat-harness / parallel execution mode. Fat-harness
             # uses the AC executor even for single-AC or --sequential runs so
-            # the evidence gate is never silently bypassed.
+            # the evidence gate is never silently bypassed. Investment metadata
+            # likewise requires per-AC dispatch so direct whole-seed execution
+            # cannot discard difficulty/stakes authority.
+            has_investment_metadata = _seed_has_investment_metadata(seed)
             if (
                 self._fat_harness_mode
                 or force_sequential_levels
+                or has_investment_metadata
                 or (parallel and len(seed.acceptance_criteria) > 1)
             ):
                 parallel_kwargs: dict[str, Any] = {
@@ -3602,7 +3613,9 @@ class OrchestratorRunner:
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
-                if force_sequential_levels or (self._fat_harness_mode and not parallel):
+                if force_sequential_levels or (
+                    not parallel and (self._fat_harness_mode or has_investment_metadata)
+                ):
                     parallel_kwargs["force_sequential_levels"] = True
 
                 return await self._execute_parallel(**parallel_kwargs)
@@ -4536,6 +4549,28 @@ class OrchestratorRunner:
                         "execution_id": tracker.execution_id,
                         "fat_harness_mode": True,
                         "resume_blocked": "typed_evidence_gate_required",
+                    },
+                )
+            )
+
+        if _seed_has_investment_metadata(seed):
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=(
+                        "Resume is blocked because this resume path cannot preserve "
+                        "per-AC investment authority; restart the run so each AC goes "
+                        "through the investment-aware AC executor."
+                    ),
+                    details={
+                        "session_id": session_id,
+                        "execution_id": tracker.execution_id,
+                        "investment_metadata_present": True,
+                        "resume_blocked": "investment_authority_required",
                     },
                 )
             )

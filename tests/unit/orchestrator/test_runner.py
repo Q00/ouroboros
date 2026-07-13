@@ -11,10 +11,12 @@ import pytest
 
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     BrownfieldContext,
     ContextReference,
     EvaluationPrinciple,
     ExitCondition,
+    InvestmentSpec,
     OntologyField,
     OntologySchema,
     Seed,
@@ -1451,6 +1453,62 @@ class TestOrchestratorRunner:
         release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
 
     @pytest.mark.asyncio
+    async def test_resume_investment_seed_is_blocked_before_ungated_direct_execution(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume must fail closed until it can restore per-AC investment authority."""
+        from ouroboros.core.types import Result
+
+        investment_seed = sample_seed.model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Rotate production signing keys",
+                        investment=InvestmentSpec(
+                            difficulty="medium",
+                            stakes="high",
+                            provenance="declared",
+                            confidence="high",
+                        ),
+                    ),
+                )
+            }
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(running_tracker),
+            ),
+            patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
+            patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_resume", investment_seed)
+
+        assert result.is_err
+        assert "Resume is blocked" in result.error.message
+        assert "per-AC investment authority" in result.error.message
+        assert result.error.details["resume_blocked"] == "investment_authority_required"
+        get_merged_tools.assert_not_called()
+        execute_task.assert_not_called()
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
     async def test_resume_session_tool_setup_failure_cleans_up_workspace_lock(
         self,
         mock_adapter: MagicMock,
@@ -2598,6 +2656,172 @@ class TestOrchestratorRunner:
         assert result is expected
         assert execute.await_args.kwargs["seed"] is single_ac_seed
         assert "force_sequential_levels" not in execute.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_single_ac_investment_uses_ac_executor_path(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Structured investment authority must not be lost on direct dispatch."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        investment_seed = sample_seed.model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Rotate production signing keys",
+                        investment=InvestmentSpec(
+                            difficulty="medium",
+                            stakes="high",
+                            provenance="declared",
+                            confidence="high",
+                        ),
+                    ),
+                )
+            }
+        )
+        tracker = SessionTracker.create("exec_investment_single", investment_seed.metadata.seed_id)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        expected = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+            ),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(
+                investment_seed,
+                tracker,
+                parallel=True,
+            )
+
+        assert result is expected
+        assert execute.await_args.kwargs["seed"] is investment_seed
+        assert "force_sequential_levels" not in execute.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_incomplete_investment_metadata_uses_ac_executor_path(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Any explicit metadata uses per-AC routing, even without lowering authority."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        investment_seed = sample_seed.model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Inspect the deployment boundary",
+                        investment=InvestmentSpec(stakes="medium"),
+                    ),
+                )
+            }
+        )
+        tracker = SessionTracker.create(
+            "exec_investment_incomplete",
+            investment_seed.metadata.seed_id,
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        expected = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+            ),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(
+                investment_seed,
+                tracker,
+                parallel=True,
+            )
+
+        assert result is expected
+        assert execute.await_args.kwargs["seed"] is investment_seed
+
+    @pytest.mark.asyncio
+    async def test_sequential_investment_seed_preserves_one_ac_per_stage(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Investment-bearing legacy sequential runs retain sequential semantics."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        investment_seed = sample_seed.model_copy(
+            update={
+                "acceptance_criteria": (
+                    sample_seed.acceptance_criteria[0],
+                    AcceptanceCriterionSpec(
+                        description="Migrate the payment ledger",
+                        investment=InvestmentSpec(
+                            difficulty="high",
+                            stakes="high",
+                            provenance="measured",
+                            confidence="high",
+                        ),
+                    ),
+                )
+            }
+        )
+        tracker = SessionTracker.create(
+            "exec_investment_sequential",
+            investment_seed.metadata.seed_id,
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        expected = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+            ),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(
+                investment_seed,
+                tracker,
+                parallel=False,
+            )
+
+        assert result is expected
+        assert execute.await_args.kwargs["seed"] is investment_seed
+        assert execute.await_args.kwargs["force_sequential_levels"] is True
 
     @pytest.mark.asyncio
     async def test_fat_harness_sequential_run_uses_sequential_ac_executor_plan(

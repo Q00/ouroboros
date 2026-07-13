@@ -356,6 +356,11 @@ accepts `declared`, `measured`, `inferred`, or `absent`; `confidence` accepts
 low-confidence metadata cannot authorize cheaper execution. See the
 [investment assessment RFC](../rfc/spend-estimator.md) for policy precedence.
 
+Any Seed containing investment metadata executes through the per-AC executor,
+including single-criterion and explicit sequential runs. Whole-session resume is
+blocked for those Seeds until resume can restore per-AC investment authority;
+restart the run instead of resuming through the legacy whole-seed path.
+
 ## Validation
 
 > **Note — `--dry-run` is not functional in the current implementation.** In the default orchestrator mode (`--orchestrator` is `True` by default), the `--dry-run` flag is silently ignored and execution proceeds normally. In non-orchestrator mode (`--no-orchestrator`), `--dry-run` prints a placeholder message without performing any YAML or schema checks. This limitation is tracked for a future release.

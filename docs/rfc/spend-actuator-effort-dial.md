@@ -23,6 +23,12 @@ routed by `orchestrator/runner.py`. The old PAL/complexity router and off-path t
 machinery were already removed. The current model-tier router is live and remains
 part of the runtime/proof surface.
 
+Any Seed carrying AC investment metadata is routed through the per-AC executor,
+even when it has one criterion or the caller requests sequential execution. The
+legacy whole-seed resume path is blocked for those Seeds because it cannot restore
+per-AC authority; callers must restart so each criterion is assessed independently.
+Metadata-free direct and resume calls retain the explicit absent assessment.
+
 The executor emits three related events:
 
 - `execution.ac.investment_assessed` records exact assessment inputs and policy
