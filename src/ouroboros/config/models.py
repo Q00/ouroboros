@@ -529,9 +529,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - ~ expansion: ~/.local/bin/grok
             - None: Resolve from PATH at runtime (or OUROBOROS_GROK_CLI_PATH)
         zcode_cli_path: Path to the Zcode CLI entry script (``zcode.cjs``).
-            The Zcode runtime launches the CLI via ``node <zcode_cli_path>``,
-            so this points at the app-bundle ``zcode.cjs`` script, not a bare
-            binary. Supports:
+            Official app-bundle scripts launch through ZCode's bundled
+            Electron/Node runtime; standalone scripts use the system Node.
+            Directly executable wrappers are also accepted. Supports:
             - Absolute path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
             - ~ expansion supported
             - None: Resolve from config/env or fall back to the macOS app-bundle

@@ -155,7 +155,7 @@ def _is_placeholder_api_key(value: str) -> bool:
 # Environment variables that determine HOW Ouroboros executes work. This
 # is the single authoritative trust boundary: a cloned repository's `.env`
 # must not be able to change which binary runs or whether the user's
-# approval gate applies. Three classes, all remote-code-execution sinks
+# approval gate applies. Four classes, all remote-code-execution sinks
 # when sourced from an untrusted location:
 #   1. Explicit CLI path overrides fed straight into a subprocess.
 #   2. Runtime/backend selectors that pick which adapter (and therefore
@@ -164,6 +164,8 @@ def _is_placeholder_api_key(value: str) -> bool:
 #   3. Permission-mode overrides — setting acceptEdits/bypassPermissions
 #      silently removes the human approval gate, letting a malicious repo
 #      auto-approve arbitrary tool calls (effectively RCE).
+#   4. Runtime-native preload hooks such as NODE_OPTIONS, which can execute
+#      attacker-controlled code before a spawned JavaScript CLI starts.
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
 # the project-directory .env that travels with a cloned repo. Trusted .env
@@ -175,6 +177,9 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
     {
         # Search PATH used by shutil.which()/bare executable spawning.
         "PATH",
+        # Node/Electron preload hook. A project .env could otherwise inject a
+        # --require/--import payload before a spawned JavaScript CLI starts.
+        "NODE_OPTIONS",
         # Explicit executable-path overrides.
         "OUROBOROS_CLI_PATH",
         "OUROBOROS_CODEX_CLI_PATH",
@@ -1562,8 +1567,10 @@ def get_zcode_cli_path() -> str | None:
         3. macOS app-bundle default (/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs)
         4. None (resolve from PATH at runtime)
 
-    The zcode CLI is executed via Node.js: the returned path should point to the
-    zcode.cjs script, and the runtime wrapper will invoke it as ``node <cli_path>``.
+    The returned path may point to the app-bundle ``zcode.cjs`` script or to a
+    directly executable wrapper. Official macOS app bundles declare an
+    ``electron-node`` runtime in sibling metadata; the runtime wrapper then
+    uses ZCode's bundled Electron/Node executable instead of the system Node.
 
     Stale env var / config values that don't point to an executable file are
     treated as missing so callers can fall back to PATH discovery instead of

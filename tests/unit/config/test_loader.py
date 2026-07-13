@@ -43,6 +43,7 @@ from ouroboros.config.loader import (
     get_semantic_model,
     get_usage_limit_pause_seconds,
     get_wonder_model,
+    get_zcode_cli_path,
     load_config,
     load_credentials,
 )
@@ -655,6 +656,44 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_grok_cli_path() is None
+
+    def test_get_zcode_cli_path_returns_existing_env_script(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode.cjs"
+        fake.write_text("// zcode", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(fake))
+
+        assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_rejects_stale_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(tmp_path / "missing.cjs"))
+        with patch("ouroboros.config.loader.load_config", side_effect=ConfigError("missing")):
+            assert get_zcode_cli_path() is None
+
+    def test_get_zcode_cli_path_falls_back_to_config(self, tmp_path: Path) -> None:
+        fake = tmp_path / "zcode.cjs"
+        fake.write_text("// zcode", encoding="utf-8")
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(zcode_cli_path=str(fake)))
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_rejects_stale_config(self, tmp_path: Path) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(zcode_cli_path=str(tmp_path / "missing.cjs"))
+        )
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() is None
 
     def test_get_kiro_cli_path_returns_executable_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

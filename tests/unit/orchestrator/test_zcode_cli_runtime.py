@@ -1,8 +1,9 @@
 """Tests for :class:`ZcodeCLIRuntime`.
 
-Pinned to the **measured** behaviour of
-``node zcode.cjs --prompt ... --json`` (captured against a live run with a
-working model config), not to an assumed event schema:
+Pinned to the **measured** behaviour of an official ZCode app-bundle
+``zcode.cjs --prompt ... --json`` run through its bundled Electron/Node runtime
+(captured against a live run with a working model config), not to an assumed
+event schema:
 
 - zcode emits a SINGLE pretty-printed JSON summary object (not an NDJSON stream):
   ``{sessionId, traceId, turnId, response, usage, eventCount, projection}``.
@@ -10,7 +11,8 @@ working model config), not to an assumed event schema:
   do not appear as discrete stdout events.
 - Real CLI flags are ``--json``, ``--prompt``, ``--cwd``, ``--mode``, ``--resume``
   (there is **no** ``--non-interactive`` and **no** ``--approval-mode``).
-- The CLI is invoked as ``node <cli_path>``.
+- Official app bundles use their Electron/Node runtime; standalone scripts use
+  ``node <cli_path>`` and PATH executables run directly.
 
 Captured fixtures live under ``tests/fixtures/zcode/``.
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import plistlib
 from typing import Any
 
 import pytest
@@ -37,9 +40,33 @@ def _load(name: str) -> dict[str, Any]:
 @pytest.fixture
 def runtime() -> ZcodeCLIRuntime:
     return ZcodeCLIRuntime(
-        cli_path="/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        cli_path="/tmp/zcode.cjs",
         permission_mode="acceptEdits",
     )
+
+
+def _fake_electron_node_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    contents = tmp_path / "ZCode.app" / "Contents"
+    cli_path = contents / "Resources" / "glm" / "zcode.cjs"
+    electron_node = contents / "MacOS" / "ZCode"
+    cli_path.parent.mkdir(parents=True)
+    electron_node.parent.mkdir(parents=True)
+    cli_path.write_text("// zcode", encoding="utf-8")
+    cli_path.with_name(".node-bundle-meta.json").write_text(
+        json.dumps(
+            {
+                "runtime": "electron-node",
+                "entry": "zcode.cjs",
+                "platform": "darwin-arm64",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with (contents / "Info.plist").open("wb") as stream:
+        plistlib.dump({"CFBundleExecutable": "ZCode"}, stream)
+    electron_node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    electron_node.chmod(0o755)
+    return cli_path, electron_node
 
 
 # -- capabilities ----------------------------------------------------------
@@ -50,6 +77,17 @@ def test_capabilities_declared_correctly(runtime: ZcodeCLIRuntime) -> None:
     assert caps.structured_output is True
     assert caps.targeted_resume is True
     assert caps.reasoning_effort_support == ParamSupport.IGNORED
+
+
+def test_direct_runtime_uses_completion_capable_llm_backend() -> None:
+    """Zcode is runtime-only, so direct construction needs a valid fallback
+    for built-in interview/seed/evaluate/qa handlers."""
+    from ouroboros.providers import resolve_llm_backend
+
+    runtime = ZcodeCLIRuntime(cli_path="/tmp/zcode.cjs")
+
+    assert runtime.llm_backend == "claude_code"
+    assert resolve_llm_backend(runtime.llm_backend) == "claude_code"
 
 
 # -- _convert_event: measured single-JSON summary --------------------------
@@ -123,6 +161,142 @@ def test_build_command_uses_real_flags(runtime: ZcodeCLIRuntime) -> None:
     assert "auto_edit" not in cmd
 
 
+def test_build_command_app_bundle_uses_bundled_electron_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path, electron_node = _fake_electron_node_bundle(tmp_path)
+    monkeypatch.setenv("NODE_OPTIONS", "--require ./evil.js")
+    runtime = ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+    cmd = runtime._build_command("/tmp/unused", prompt="hi")
+
+    assert cmd[:2] == [str(electron_node), str(cli_path)]
+    assert cmd[2:7] == ["--json", "--prompt", "hi", "--mode", "edit"]
+    assert "--cwd" in cmd
+    child_env = runtime._build_child_env()
+    assert child_env["ELECTRON_RUN_AS_NODE"] == "1"
+    assert "NODE_OPTIONS" not in child_env
+
+
+def test_app_bundle_detection_does_not_depend_on_resource_depth(tmp_path: Path) -> None:
+    cli_path, electron_node = _fake_electron_node_bundle(tmp_path)
+    nested_dir = cli_path.parent / "nested" / "deeper"
+    nested_dir.mkdir(parents=True)
+    nested_cli = nested_dir / cli_path.name
+    nested_metadata = nested_dir / ".node-bundle-meta.json"
+    cli_path.replace(nested_cli)
+    cli_path.with_name(".node-bundle-meta.json").replace(nested_metadata)
+
+    runtime = ZcodeCLIRuntime(cli_path=nested_cli, permission_mode="acceptEdits")
+
+    assert runtime._build_command("/tmp/unused", prompt="hi")[:2] == [
+        str(electron_node),
+        str(nested_cli),
+    ]
+
+
+def test_build_command_plain_cjs_uses_system_node_without_electron_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "zcode.cjs"
+    cli_path.write_text("// standalone zcode", encoding="utf-8")
+    monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--require ./evil.js")
+    runtime = ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+    cmd = runtime._build_command("/tmp/unused", prompt="hi")
+
+    assert cmd[:2] == ["node", str(cli_path)]
+    child_env = runtime._build_child_env()
+    assert "ELECTRON_RUN_AS_NODE" not in child_env
+    assert "NODE_OPTIONS" not in child_env
+
+
+@pytest.mark.parametrize(
+    ("metadata_content", "error_match"),
+    [
+        (None, "missing or unreadable"),
+        ("{", "invalid JSON"),
+        (json.dumps([]), "must be a JSON object"),
+        (json.dumps({"runtime": "node", "entry": "zcode.cjs"}), "unsupported runtime"),
+        (
+            json.dumps({"runtime": "electron-node", "entry": "other.cjs"}),
+            "entry does not match",
+        ),
+        (json.dumps({"runtime": "electron-node"}), "entry does not match"),
+    ],
+)
+def test_app_bundle_invalid_node_metadata_fails_closed(
+    tmp_path: Path,
+    metadata_content: str | None,
+    error_match: str,
+) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    metadata_path = cli_path.with_name(".node-bundle-meta.json")
+    if metadata_content is None:
+        metadata_path.unlink()
+    else:
+        metadata_path.write_text(metadata_content, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=error_match):
+        ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+
+def test_app_bundle_unreadable_node_metadata_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    metadata_path = cli_path.with_name(".node-bundle-meta.json")
+    original_read_text = Path.read_text
+
+    def _raise_for_metadata(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == metadata_path:
+            raise PermissionError("denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_metadata)
+
+    with pytest.raises(RuntimeError, match="missing or unreadable"):
+        ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+
+def test_app_bundle_non_dictionary_plist_fails_closed(tmp_path: Path) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    info_plist = cli_path.parents[2] / "Info.plist"
+    with info_plist.open("wb") as stream:
+        plistlib.dump(["not", "a", "dictionary"], stream)
+
+    with pytest.raises(RuntimeError, match="must be a dictionary"):
+        ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+
+@pytest.mark.parametrize("executable_name", ["../ZCode", "nested/ZCode", r"..\ZCode", ".."])
+def test_app_bundle_rejects_executable_path_traversal(
+    tmp_path: Path,
+    executable_name: str,
+) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    info_plist = cli_path.parents[2] / "Info.plist"
+    with info_plist.open("wb") as stream:
+        plistlib.dump({"CFBundleExecutable": executable_name}, stream)
+
+    with pytest.raises(RuntimeError, match="without path separators"):
+        ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+
+def test_app_bundle_missing_electron_runtime_fails_with_actionable_error(
+    tmp_path: Path,
+) -> None:
+    cli_path, electron_node = _fake_electron_node_bundle(tmp_path)
+    electron_node.unlink()
+
+    with pytest.raises(RuntimeError, match="electron-node CLI"):
+        ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
+
+
 def test_build_command_bypass_permissions_maps_to_yolo() -> None:
     rt = ZcodeCLIRuntime(
         cli_path="/tmp/zcode.cjs",
@@ -134,7 +308,7 @@ def test_build_command_bypass_permissions_maps_to_yolo() -> None:
 
 
 # -- _build_command: NO --model flag, ever (zcode has no model CLI flag) -----
-# zcode has NO ``--model`` flag — verified on 0.14.5 and 0.15.0, where
+# zcode has NO ``--model`` flag — verified on 0.14.5, 0.15.0, and 0.15.2, where
 # ``--model`` is a hard ``Unknown option`` rejection that aborts the run before
 # zcode does any work (reproduced: ``node zcode.cjs --model glm-4.6 --version``
 # → "Unknown option '--model'"). The constructor warns when a non-default model
@@ -173,6 +347,37 @@ def test_build_command_never_emits_model_flag_even_when_explicit_non_default(
     assert "--model" not in cmd
     # And the model id must not leak in as a bare positional either.
     assert "glm-4.6" not in cmd
+
+
+def test_build_command_ignores_per_call_model_override(runtime: ZcodeCLIRuntime) -> None:
+    """The shared runtime API may supply a per-call model even though Zcode
+    cannot enforce one; accepting and dropping it must not fail preparation."""
+    cmd = runtime._build_command(
+        "/tmp/unused",
+        prompt="hi",
+        model="glm-5.2",
+    )
+
+    assert "--model" not in cmd
+    assert "glm-5.2" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_execute_task_accepts_ignored_per_call_model(tmp_path: Path) -> None:
+    """Exercise the public API, not only the command helper: a routed model
+    must not fail preparation for a runtime that truthfully declares it ignored."""
+    fake_zcode = tmp_path / "zcode"
+    fake_zcode.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"sessionId":"sess_fake","response":"OK"}\'\n',
+        encoding="utf-8",
+    )
+    fake_zcode.chmod(0o755)
+    runtime = ZcodeCLIRuntime(cli_path=fake_zcode)
+
+    messages = [message async for message in runtime.execute_task("hi", model="glm-5.2")]
+
+    assert any(message.type == "assistant" and message.content == "OK" for message in messages)
+    assert not any("unexpected keyword argument 'model'" in message.content for message in messages)
 
 
 # -- startup timeout: disabled by default for zcode's buffered output ---------
@@ -224,6 +429,7 @@ def test_build_command_path_executable_invoked_directly_without_node() -> None:
     assert "node" not in cmd
     assert "--json" in cmd
     assert "--prompt" in cmd
+    assert "ELECTRON_RUN_AS_NODE" not in rt._build_child_env()
 
 
 def test_build_command_includes_cwd_and_resume() -> None:
@@ -333,3 +539,19 @@ def test_validate_runtime_backend_accepts_zcode() -> None:
     from ouroboros.config.models import _validate_runtime_backend
 
     assert _validate_runtime_backend("zcode", field_name="test") == "zcode"
+
+
+def test_cli_runtime_enums_accept_zcode() -> None:
+    from ouroboros.cli.commands.init import AgentRuntimeBackend as InitBackend
+    from ouroboros.cli.commands.mcp import AgentRuntimeBackend as McpBackend
+    from ouroboros.cli.commands.run import AgentRuntimeBackend as RunBackend
+
+    assert InitBackend("zcode") is InitBackend.ZCODE
+    assert McpBackend("zcode") is McpBackend.ZCODE
+    assert RunBackend("zcode") is RunBackend.ZCODE
+
+
+def test_auto_cli_runtime_enum_accepts_zcode() -> None:
+    from ouroboros.cli.commands.auto import AgentRuntimeBackend as AutoBackend
+
+    assert AutoBackend("zcode") is AutoBackend.ZCODE
