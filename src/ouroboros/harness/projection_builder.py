@@ -62,8 +62,24 @@ _ARTIFACT_RECORDED_TYPES = frozenset(
 _VERDICT_RECORDED_TYPES = frozenset(
     {"verdict.recorded", "harness.verdict.recorded", "evaluation.verdict.recorded"}
 )
+_GUIDANCE_INJECTED = "orchestrator.guidance.injected"
 
 _SHELL_TOOL_NAMES = frozenset({"Bash"})
+_MAX_GUIDANCE_REFS = 16
+_MAX_GUIDANCE_REF_VALUE_LENGTH = 512
+_GUIDANCE_REF_ALLOWED_KEYS = frozenset(
+    {
+        "id",
+        "stable_id",
+        "source",
+        "kind",
+        "stage",
+        "role",
+        "path",
+        "content_hash",
+        "size_bytes",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +262,7 @@ class ProjectionBuilder:
             (verdict.verdict_id for verdict in reversed(verdicts) if verdict.scope == "run"),
             None,
         )
+        run_metadata = _run_metadata_from_events(self._identity_events)
 
         stage = StageRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
@@ -266,6 +283,7 @@ class ProjectionBuilder:
             ended_at=ended_at,
             stage_ids=(stage_id,),
             verdict_id=run_verdict_id,
+            metadata=run_metadata,
         )
 
         return ProjectionBuildResult(
@@ -485,6 +503,77 @@ def _event_identity_part(event: BaseEvent) -> str:
     )
 
 
+def _run_metadata_from_events(events: Sequence[BaseEvent]) -> dict[str, Any]:
+    guidance = _latest_guidance_metadata(events)
+    if guidance is None:
+        return {}
+    return {"guidance": guidance}
+
+
+def _latest_guidance_metadata(events: Sequence[BaseEvent]) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for event in sorted(events, key=_event_sort_key):
+        if event.type != _GUIDANCE_INJECTED:
+            continue
+        metadata = _guidance_metadata_from_event(event)
+        if metadata is not None:
+            latest = metadata
+    return latest
+
+
+def _guidance_metadata_from_event(event: BaseEvent) -> dict[str, Any] | None:
+    if not isinstance(event.data, dict):
+        return None
+    stage = _optional_str(event.data.get("stage"))
+    role = _optional_str(event.data.get("role"))
+    provenance_scope = _optional_str(event.data.get("provenance_scope"))
+    if (
+        stage != "execute"
+        or role != "implementation"
+        or provenance_scope != "ouroboros_declared_guidance_only"
+    ):
+        return None
+
+    execution_id = _optional_str(event.data.get("execution_id"))
+    session_id = _optional_str(event.data.get("session_id")) or (
+        event.aggregate_id.strip()
+        if event.aggregate_type == "session" and event.aggregate_id.strip()
+        else None
+    )
+    fragment_hash = _bounded_guidance_value(event.data.get("fragment_hash"))
+    fragment_size_bytes = _optional_int(event.data.get("fragment_size_bytes"))
+    delivery_mode = _bounded_guidance_value(event.data.get("delivery_mode"))
+    guidance_refs = _bounded_guidance_refs(event.data.get("guidance_refs"))
+    if (
+        execution_id is None
+        or session_id is None
+        or fragment_hash is None
+        or fragment_size_bytes is None
+        or fragment_size_bytes == 0
+        or delivery_mode is None
+        or not guidance_refs
+    ):
+        return None
+
+    metadata: dict[str, Any] = {
+        "source_event_id": event.id,
+        "event_type": event.type,
+        "session_id": session_id,
+        "execution_id": execution_id,
+        "guidance_refs": guidance_refs,
+        "fragment_hash": fragment_hash,
+        "fragment_size_bytes": fragment_size_bytes,
+        "stage": stage,
+        "role": role,
+        "delivery_mode": delivery_mode,
+        "provenance_scope": provenance_scope,
+    }
+    injected_at = _bounded_guidance_value(event.data.get("injected_at"))
+    if injected_at is not None:
+        metadata["injected_at"] = injected_at
+    return metadata
+
+
 def _stable_run_id(source_key: str) -> str:
     digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:run:{source_key}").hex[:12]
     return f"run_{digest}"
@@ -691,6 +780,49 @@ def _bounded_anchor_value(value: Any) -> str | None:
     if not stripped or len(stripped) > 512:
         return None
     return stripped
+
+
+def _bounded_guidance_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped[:_MAX_GUIDANCE_REF_VALUE_LENGTH]
+
+
+def _bounded_guidance_refs(value: Any) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    refs: list[dict[str, str]] = []
+    for raw_ref in value[:_MAX_GUIDANCE_REFS]:
+        if not isinstance(raw_ref, dict):
+            continue
+        ref: dict[str, str] = {}
+        for key, raw_value in raw_ref.items():
+            if not isinstance(key, str):
+                continue
+            normalized_key = key.strip()
+            if normalized_key not in _GUIDANCE_REF_ALLOWED_KEYS:
+                continue
+            normalized_value = _bounded_guidance_ref_value(raw_value)
+            if normalized_value is not None:
+                ref[normalized_key] = normalized_value
+        if ref:
+            refs.append(ref)
+    return tuple(refs)
+
+
+def _bounded_guidance_ref_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+    elif isinstance(value, int | float | bool):
+        normalized = str(value)
+    else:
+        return None
+    if not normalized:
+        return None
+    return normalized[:_MAX_GUIDANCE_REF_VALUE_LENGTH]
 
 
 def _verdict_outcome(data: dict[str, Any]) -> VerdictOutcome | None:

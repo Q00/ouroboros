@@ -280,6 +280,114 @@ class TestRunRecordAggregation:
         assert tuple(s.step_id for s in result.steps) == result.stages[0].step_ids
 
 
+class TestGuidanceMetadataProjection:
+    def test_guidance_injected_event_surfaces_bounded_run_metadata(self) -> None:
+        t0 = datetime.now(UTC)
+        event = BaseEvent(
+            id="evt_guidance",
+            type="orchestrator.guidance.injected",
+            timestamp=t0,
+            aggregate_type="session",
+            aggregate_id="sess_1",
+            data={
+                "session_id": "sess_1",
+                "execution_id": "exec_1",
+                "guidance_refs": [
+                    {
+                        "stable_id": "guidance:project:team",
+                        "source": "project",
+                        "instructions": "must not project",
+                    }
+                ],
+                "fragment_hash": "sha256:abc123",
+                "fragment_size_bytes": 2048,
+                "stage": "execute",
+                "role": "implementation",
+                "delivery_mode": "system_message_fragment",
+                "provenance_scope": "ouroboros_declared_guidance_only",
+                "injected_at": t0.isoformat(),
+            },
+        )
+
+        result = build_projection([event], seed_id="seed_abc")
+
+        guidance = result.run.metadata["guidance"]
+        assert guidance["source_event_id"] == "evt_guidance"
+        assert guidance["session_id"] == "sess_1"
+        assert guidance["execution_id"] == "exec_1"
+        assert guidance["guidance_refs"][0]["stable_id"] == "guidance:project:team"
+        assert guidance["fragment_hash"] == "sha256:abc123"
+        assert guidance["fragment_size_bytes"] == 2048
+        assert guidance["stage"] == "execute"
+        assert guidance["role"] == "implementation"
+        assert "instructions" not in guidance["guidance_refs"][0]
+
+    def test_latest_valid_guidance_event_wins_deterministically(self) -> None:
+        t0 = datetime.now(UTC)
+        older = BaseEvent(
+            id="evt_guidance_older",
+            type="orchestrator.guidance.injected",
+            timestamp=t0,
+            aggregate_type="session",
+            aggregate_id="sess_1",
+            data={
+                "execution_id": "exec_1",
+                "guidance_refs": [{"stable_id": "guidance:project:team"}],
+                "fragment_hash": "sha256:older",
+                "fragment_size_bytes": 10,
+                "stage": "execute",
+                "role": "implementation",
+                "delivery_mode": "native",
+                "provenance_scope": "ouroboros_declared_guidance_only",
+            },
+        )
+        newer = BaseEvent(
+            id="evt_guidance_newer",
+            type="orchestrator.guidance.injected",
+            timestamp=t0 + timedelta(seconds=1),
+            aggregate_type="session",
+            aggregate_id="sess_1",
+            data={
+                "execution_id": "exec_1",
+                "guidance_refs": [{"stable_id": "guidance:project:team"}],
+                "fragment_hash": "sha256:newer",
+                "fragment_size_bytes": 20,
+                "stage": "execute",
+                "role": "implementation",
+                "delivery_mode": "translated",
+                "provenance_scope": "ouroboros_declared_guidance_only",
+            },
+        )
+
+        result = build_projection([newer, older], seed_id="seed_abc")
+
+        guidance = result.run.metadata["guidance"]
+        assert guidance["source_event_id"] == "evt_guidance_newer"
+        assert guidance["fragment_hash"] == "sha256:newer"
+
+    def test_malformed_guidance_event_is_ignored(self) -> None:
+        event = BaseEvent(
+            id="evt_bad_guidance",
+            type="orchestrator.guidance.injected",
+            aggregate_type="session",
+            aggregate_id="sess_1",
+            data={
+                "execution_id": "exec_1",
+                "guidance_refs": [{"stable_id": "guidance:project:team"}],
+                "fragment_hash": "sha256:bad",
+                "fragment_size_bytes": 0,
+                "stage": "execute",
+                "role": "implementation",
+                "delivery_mode": "native",
+                "provenance_scope": "ouroboros_declared_guidance_only",
+            },
+        )
+
+        result = build_projection([event], seed_id="seed_abc")
+
+        assert "guidance" not in result.run.metadata
+
+
 class TestIncrementalIngestion:
     def test_add_event_is_chainable(self) -> None:
         builder = ProjectionBuilder(seed_id="seed_abc")

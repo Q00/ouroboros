@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ouroboros.orchestrator.capabilities import build_capability_graph
 from ouroboros.orchestrator.events import (
+    create_guidance_injected_event,
     create_policy_capabilities_evaluated_event,
     create_progress_event,
     create_session_cancelled_event,
@@ -162,6 +163,46 @@ class TestSessionEvents:
         assert event.data["reason"] == "User requested pause"
         assert event.data["resume_hint"] == "Continue from AC #3"
         assert "paused_at" in event.data
+
+
+class TestGuidanceEvents:
+    def test_create_guidance_injected_event_carries_bounded_audit_metadata(self) -> None:
+        event = create_guidance_injected_event(
+            session_id="sess_123",
+            execution_id="exec_456",
+            guidance_refs=[
+                {
+                    "id": "team",
+                    "stable_id": "guidance:project:team",
+                    "source": "project",
+                    "path": ".ouroboros/guidance/team/GUIDANCE.md",
+                    "content_hash": "sha256:def456",
+                    "size_bytes": 128,
+                    "instructions": "must not be serialized",
+                }
+            ],
+            fragment_hash="sha256:abc123",
+            fragment_size_bytes=2048,
+            delivery_mode="system_message_fragment",
+        )
+
+        assert event.type == "orchestrator.guidance.injected"
+        assert event.aggregate_id == "sess_123"
+        assert event.data["execution_id"] == "exec_456"
+        assert event.data["stage"] == "execute"
+        assert event.data["role"] == "implementation"
+        assert event.data["provenance_scope"] == "ouroboros_declared_guidance_only"
+        assert event.data["guidance_refs"] == [
+            {
+                "id": "team",
+                "stable_id": "guidance:project:team",
+                "source": "project",
+                "path": ".ouroboros/guidance/team/GUIDANCE.md",
+                "content_hash": "sha256:def456",
+                "size_bytes": "128",
+            }
+        ]
+        assert "instructions" not in event.data["guidance_refs"][0]
 
 
 class TestProgressEvents:

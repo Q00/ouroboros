@@ -369,12 +369,37 @@ Controls Phase 2 — the Double Diamond execution loop.
 execution:
   max_iterations_per_ac: 10   # Maximum execution iterations per acceptance criterion
   retrospective_interval: 3   # Iterations between automatic retrospectives
+  project_guidance:            # Explicit project-local execution guidance allowlist
+    - team
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
+| `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
+
+### Project Execution Guidance
+
+`project_guidance` is an explicit allowlist. Ouroboros does not scan the repository,
+user home directory, Codex skills, Claude configuration, or other provider-local
+instruction stores. For the example above, the only loaded file is:
+
+```text
+<project-root>/.ouroboros/guidance/team/GUIDANCE.md
+```
+
+IDs must be safe single path segments containing letters, numbers, `.`, `_`, or
+`-`. Files must be non-empty UTF-8 text, are resolved in deterministic ID order,
+and are limited to 16 KiB per file and 32 KiB in total. Missing files, path or
+symlink escapes, invalid encoding, and size violations fail before execution.
+
+The Seed and its Acceptance Criteria remain authoritative. Guidance cannot grant
+tools, change sandbox or approval policy, alter evaluation requirements, bypass
+evaluation, or redefine acceptance criteria. A run persists guidance paths,
+hashes, and sizes without storing the raw body; resume reloads those persisted IDs
+and fails closed if the files changed. A runtime that ignores system prompts also
+rejects runs with enabled project guidance.
 
 ---
 
