@@ -23,6 +23,10 @@ from typing import TYPE_CHECKING, Any
 
 from textual.message import Message
 
+from ouroboros.observability.frugality_retrospective import (
+    project_frugality_retrospective,
+)
+
 if TYPE_CHECKING:
     from ouroboros.events.base import BaseEvent
 
@@ -630,26 +634,12 @@ class FrugalityProofEvaluated(Message):
 
 
 class FrugalityRetrospectiveReported(Message):
-    """Run-end neutral frugality evidence summary.
+    """Neutral execution-finalized frugality evidence summary."""
 
-    Emitted from ``execution.frugality_retrospective.reported`` after hard
-    execution finalization. It is evidence-only: no waste claim and no guardrail.
-    """
-
-    def __init__(
-        self,
-        retry_associated_spend: float,
-        unaccepted_spend: float,
-        measured_attempts: int,
-        unknown_attempts: int,
-        invalid_attempts: int,
-    ) -> None:
+    def __init__(self, execution_id: str, summary: dict[str, Any]) -> None:
         super().__init__()
-        self.retry_associated_spend = retry_associated_spend
-        self.unaccepted_spend = unaccepted_spend
-        self.measured_attempts = measured_attempts
-        self.unknown_attempts = unknown_attempts
-        self.invalid_attempts = invalid_attempts
+        self.execution_id = execution_id
+        self.summary = dict(summary)
 
 
 # =============================================================================
@@ -716,6 +706,7 @@ class TUIState:
     tokens_by_node: dict[str, float] = field(default_factory=dict)
     run_total_tokens: float = 0.0
     frugality_summary: str | None = None
+    frugality_retrospective: dict[str, Any] | None = None
     frugality_retrospective_summary: str | None = None
 
     # P1: Tool/thinking tracking for dashboard
@@ -1061,26 +1052,17 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
         )
 
     elif event_type == "execution.frugality_retrospective.reported":
-        coverage = data.get("coverage")
-        if not isinstance(coverage, dict):
+        summary = project_frugality_retrospective(data)
+        if summary is None:
             return None
-        retry_associated = _coerce_finite_spend(
-            data.get("retry_associated_spend"), reject_negative=True
-        )
-        unaccepted = _coerce_finite_spend(data.get("unaccepted_spend"), reject_negative=True)
-        measured = _coerce_event_int(coverage.get("measured_attempts"))
-        unknown = _coerce_event_int(coverage.get("unknown_attempts"))
-        invalid = _coerce_event_int(coverage.get("invalid_attempts"))
-        if None in (retry_associated, unaccepted, measured, unknown, invalid):
-            return None
-        if measured < 0 or unknown < 0 or invalid < 0:
-            return None
+        execution_id = data.get("execution_id")
         return FrugalityRetrospectiveReported(
-            retry_associated_spend=retry_associated,
-            unaccepted_spend=unaccepted,
-            measured_attempts=measured,
-            unknown_attempts=unknown,
-            invalid_attempts=invalid,
+            execution_id=(
+                execution_id
+                if isinstance(execution_id, str) and execution_id
+                else event.aggregate_id
+            ),
+            summary=summary,
         )
 
     # Return None for unhandled event types
@@ -1116,22 +1098,31 @@ def format_frugality_summary(
     return f"⚖ {label}"
 
 
-def format_frugality_retrospective_summary(message: FrugalityRetrospectiveReported) -> str:
-    """Return a compact evidence-only frugality retrospective line."""
-    return (
-        "evidence "
-        f"retry {_compact_evidence_tokens(message.retry_associated_spend)} tok, "
-        f"unaccepted {_compact_evidence_tokens(message.unaccepted_spend)} tok, "
-        f"{message.measured_attempts} measured/"
-        f"{message.unknown_attempts} unknown/"
-        f"{message.invalid_attempts} invalid"
+def _format_evidence_tokens(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "0 tok"
+    tokens = float(value)
+    if tokens >= 1000:
+        return f"{tokens / 1000:.1f}".rstrip("0").rstrip(".") + "k tok"
+    return f"{tokens:.0f} tok"
+
+
+def format_frugality_retrospective_summary(summary: dict[str, Any]) -> str:
+    """Return one neutral evidence line for the execution-finalized report."""
+    parts: list[str] = []
+    if summary.get("retry_associated_attempts"):
+        parts.append(
+            "retry-associated " + _format_evidence_tokens(summary.get("retry_associated_tokens"))
+        )
+    if summary.get("unaccepted_attempts"):
+        parts.append("unaccepted " + _format_evidence_tokens(summary.get("unaccepted_tokens")))
+    parts.append(
+        "coverage "
+        f"{summary.get('measured_attempts', 0)} measured/"
+        f"{summary.get('unknown_attempts', 0)} unknown/"
+        f"{summary.get('invalid_attempts', 0)} invalid"
     )
-
-
-def _compact_evidence_tokens(value: float) -> str:
-    if value >= 1000:
-        return f"{value / 1000:.1f}".rstrip("0").rstrip(".") + "k"
-    return str(int(round(value)))
+    return "Evidence: " + " | ".join(parts)
 
 
 __all__ = [

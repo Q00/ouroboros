@@ -54,9 +54,6 @@ from ouroboros.orchestrator.frugality_proof import (
     assemble_triads,
     evaluate_proof,
 )
-from ouroboros.orchestrator.frugality_retrospective import (
-    EVENT_FRUGALITY_RETROSPECTIVE_REPORTED,
-)
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
@@ -1365,44 +1362,6 @@ class TestFrugalityProofConsumer:
 
         assert [e for e in appended if e.type == "execution.frugality_proof.evaluated"] == []
 
-    @pytest.mark.asyncio
-    async def test_retrospective_report_emits_on_hard_finalization_only(self) -> None:
-        runner, appended, _console = _consumer_runner(
-            [
-                *_triad_events("run-0", "ac-0", spend=50, baseline=100),
-                BaseEvent(
-                    type="execution.frugality_proof.evaluated",
-                    aggregate_type="execution",
-                    aggregate_id="run-0",
-                    data={"status": "insufficient_data"},
-                ),
-            ]
-        )
-
-        await runner._emit_frugality_retrospective_report(
-            "run-0",
-            terminal_status="paused",
-        )
-        assert [e for e in appended if e.type == EVENT_FRUGALITY_RETROSPECTIVE_REPORTED] == []
-
-        await runner._emit_frugality_retrospective_report(
-            "run-0",
-            terminal_status="completed",
-        )
-
-        emitted = [e for e in appended if e.type == EVENT_FRUGALITY_RETROSPECTIVE_REPORTED]
-        assert len(emitted) == 1
-        data = emitted[0].data
-        assert data["terminal_status"] == "completed"
-        assert data["retry_associated_spend"] == 0.0
-        assert data["unaccepted_spend"] == 0.0
-        assert data["coverage"] == {
-            "measured_attempts": 1,
-            "unknown_attempts": 0,
-            "invalid_attempts": 0,
-        }
-        assert data["frugality_proof"]["status"] == "insufficient_data"
-
 
 # -- End-to-end honesty check: produced events → contract match --------------
 class TestProducedEventsMatchProofContract:
@@ -1604,6 +1563,11 @@ class TestLiveRunPathsTriggerProof:
                 _FakeParallelExecutor,
             ),
             patch.object(runner, "_evaluate_frugality_proof", AsyncMock()) as proof,
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=True),
+            ) as retrospective,
         ):
             result = await runner._execute_parallel(
                 seed=seed,
@@ -1618,3 +1582,8 @@ class TestLiveRunPathsTriggerProof:
         assert result.is_ok
         # The proof was evaluated for THIS execution after the terminal event.
         proof.assert_awaited_once_with("exec_parallel")
+        retrospective.assert_awaited_once_with(
+            execution_id="exec_parallel",
+            session_id=tracker.session_id,
+            terminal_status="completed",
+        )

@@ -40,60 +40,23 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import math
 
-
-def _finite_number(value: object) -> float | None:
-    """Return ``value`` as a finite float, or ``None`` if it is not a usable number.
-
-    Rejects ``None``, booleans (``True``/``False`` are ints in Python but are never
-    a valid token measurement), non-numeric types, and non-finite floats (NaN/inf).
-    The deterministic proof is fed by event payloads from not-yet-wired producers, so
-    a malformed measurement must be treated as *missing*, never silently trusted.
-    """
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        f = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    return f if math.isfinite(f) else None
-
-
-def _strict_bool(value: object) -> bool | None:
-    """Return ``value`` only if it is a real boolean, else ``None``.
-
-    Proof-admission flags (``is_decomposed_child``, ``decomposition_trustworthy``,
-    ``grounding_regression``) must never be derived via Python truthiness: a JSON
-    boolean deserializes to ``bool``, but a malformed string payload like
-    ``"false"`` would coerce to ``True`` under ``bool("false")`` and flip an
-    admission flag the wrong way. Anything that is not already a ``bool`` is treated
-    as unknown so the caller can fail safe (exclude the row) rather than admit it.
-    """
-    return value if isinstance(value, bool) else None
-
-
-def strict_retry_attempt(data: Mapping) -> int | None:
-    """Return a valid retry-attempt index from an event payload, else ``None``.
-
-    Retry identity is part of the frugality evidence schema, not an optional
-    convenience. Defaulting a missing field to attempt zero lets malformed events
-    pair with a real final marker and manufacture complete evidence.
-    """
-    if "retry_attempt" not in data:
-        return None
-    value = data.get("retry_attempt")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
-
-
-def strict_root_ac_index(data: Mapping) -> int | None:
-    """Return a valid root AC index from the accepted frugality payload keys."""
-    for key in ("root_ac_index", "parent_ac_index", "ac_index"):
-        value = data.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-    return None
-
+from ouroboros.orchestrator.evidence.common import (
+    event_data as _event_data,
+)
+from ouroboros.orchestrator.evidence.common import (
+    event_type as _event_type,
+)
+from ouroboros.orchestrator.evidence.common import (
+    execution_run_anchor,
+    parse_retry_attempt,
+    parse_root_ac_index,
+)
+from ouroboros.orchestrator.evidence.common import (
+    finite_number as _finite_number,
+)
+from ouroboros.orchestrator.evidence.common import (
+    strict_bool as _strict_bool,
+)
 
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
@@ -248,20 +211,6 @@ class ProofVerdict:
         return self.status is ProofStatus.PASS
 
 
-def _event_type(event: object) -> str | None:
-    if isinstance(event, Mapping):
-        return event.get("type") or event.get("event_type")
-    return getattr(event, "type", None) or getattr(event, "event_type", None)
-
-
-def _event_data(event: object) -> Mapping:
-    if isinstance(event, Mapping):
-        data = event.get("data") or event.get("payload") or {}
-    else:
-        data = getattr(event, "data", None) or getattr(event, "payload", None) or {}
-    return data if isinstance(data, Mapping) else {}
-
-
 def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     """Join the per-axis events into one triad row per ``(run, ac_id)``.
 
@@ -293,12 +242,8 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     ] = {}
     finalized_invalid: set[tuple[str | None, int]] = set()
 
-    def run_anchor(data: Mapping) -> str | None:
-        run = data.get("seed_run_id") or data.get("execution_id")
-        return str(run) if run is not None else None
-
     def merge_root(row: dict, data: Mapping) -> None:
-        observed = strict_root_ac_index(data)
+        observed = parse_root_ac_index(data)
         if observed is None:
             return
         current = row.get("root_ac_index")
@@ -322,16 +267,16 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         ac_id = data.get("ac_id")
         if not ac_id:
             return None
-        run_key = run_anchor(data)
+        run_key = execution_run_anchor(data)
         return acc.setdefault((run_key, str(ac_id)), {"ac_id": str(ac_id), "seed_run_id": run_key})
 
     for event in events:
         etype = _event_type(event)
         data = _event_data(event)
         if etype == EVENT_AC_OUTCOME_FINALIZED:
-            run_key = run_anchor(data)
-            root_index = strict_root_ac_index(data)
-            attempt = strict_retry_attempt(data)
+            run_key = execution_run_anchor(data)
+            root_index = parse_root_ac_index(data)
+            attempt = parse_retry_attempt(data)
             success = _strict_bool(data.get("success"))
             is_decomposed = _strict_bool(data.get("is_decomposed"))
             if root_index is None:
@@ -365,7 +310,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             merge_root(row, data)
             merge_decomposed(row, data)
-            attempt = strict_retry_attempt(data)
+            attempt = parse_retry_attempt(data)
             if attempt is None:
                 row["model_invalid"] = True
                 continue
@@ -392,7 +337,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
-            attempt = strict_retry_attempt(data)
+            attempt = parse_retry_attempt(data)
             # One logical AC may emit one attribution event per retry/resume
             # attempt. Spend is cumulative across those attempts, and EventStore
             # query order is newest-first, so replacement would both undercount
@@ -417,7 +362,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
-            attempt = strict_retry_attempt(data)
+            attempt = parse_retry_attempt(data)
             verdict = data.get("traceguard_verdict")
             claim_rate = _finite_number(data.get("unsupported_claim_rate"))
             grounding = _strict_bool(data.get("grounding_regression"))
@@ -450,7 +395,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
-            attempt = strict_retry_attempt(data)
+            attempt = parse_retry_attempt(data)
             baseline = _finite_number(data.get("baseline_token_spend"))
             baseline_mode = data.get("baseline_mode")
             baseline_tier = data.get("baseline_tier")

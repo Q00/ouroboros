@@ -31,10 +31,12 @@ class TestLivePage:
         assert "fmtTokens" in INDEX_HTML
         assert "m-tokens" in INDEX_HTML
         assert "m-frugality" in INDEX_HTML
-        assert "m-frugality-retro" in INDEX_HTML
+        assert "m-frugality-evidence" in INDEX_HTML
         assert "c.model_tier" in INDEX_HTML
         assert "Frugality:" in INDEX_HTML
-        assert "Evidence:" in INDEX_HTML
+        assert "retry-associated" in INDEX_HTML
+        assert "unaccepted" in INDEX_HTML
+        assert "coverage" in INDEX_HTML
 
     def test_index_html_polls_for_pending_run(self) -> None:
         # The daemon base URL is published before a run exists (auto flow links it
@@ -107,7 +109,19 @@ class TestStaticSnapshot:
 
     def test_static_snapshot_inlines_telemetry_fields(self) -> None:
         board = {
-            "meta": {"total_tokens": 1500.0, "frugality": {"status": "proven", "reason": "ok"}},
+            "meta": {
+                "total_tokens": 1500.0,
+                "frugality": {"status": "proven", "reason": "ok"},
+                "frugality_retrospective": {
+                    "measured_attempts": 2,
+                    "unknown_attempts": 0,
+                    "invalid_attempts": 0,
+                    "retry_associated_tokens": 500.0,
+                    "retry_associated_attempts": 1,
+                    "unaccepted_tokens": 0.0,
+                    "unaccepted_attempts": 0,
+                },
+            },
             "columns": {
                 "pending": [],
                 "executing": [
@@ -129,3 +143,5 @@ class TestStaticSnapshot:
         assert "model_tier" in html and "frugal" in html
         assert "1500" in html
         assert "proven" in html
+        assert "frugality_retrospective" in html
+        assert "retry_associated_tokens" in html

@@ -878,46 +878,56 @@ class TestFrugalityTelemetryEvents:
         assert create_message_from_event(event) is None
 
     def test_frugality_retrospective_event(self) -> None:
-        """Neutral retrospective report events convert to evidence messages."""
         event = BaseEvent(
             type="execution.frugality_retrospective.reported",
             aggregate_type="execution",
             aggregate_id="exec_123",
             data={
-                "retry_associated_spend": 1250.0,
-                "unaccepted_spend": 50.0,
+                "execution_id": "exec_123",
+                "retrospective_version": "v1",
+                "trigger": "execution_finalized",
+                "terminal_status": "failed",
+                "evidence_only": True,
                 "coverage": {
-                    "measured_attempts": 2,
+                    "measured_attempts": 3,
                     "unknown_attempts": 1,
                     "invalid_attempts": 0,
+                    "total_measured_tokens": 250.0,
                 },
+                "evidence_signals": [
+                    {
+                        "name": "retry_associated_spend",
+                        "token_spend": 100.0,
+                        "attempt_count": 1,
+                    },
+                    {
+                        "name": "unaccepted_spend",
+                        "token_spend": 150.0,
+                        "attempt_count": 2,
+                    },
+                ],
             },
         )
 
         msg = create_message_from_event(event)
 
         assert isinstance(msg, FrugalityRetrospectiveReported)
-        assert msg.retry_associated_spend == 1250.0
-        assert msg.unaccepted_spend == 50.0
-        assert msg.measured_attempts == 2
-        assert (
-            format_frugality_retrospective_summary(msg)
-            == "evidence retry 1.2k tok, unaccepted 50 tok, 2 measured/1 unknown/0 invalid"
-        )
+        assert msg.execution_id == "exec_123"
+        assert msg.summary["retry_associated_tokens"] == 100.0
+        assert msg.summary["unaccepted_tokens"] == 150.0
 
-    def test_frugality_retrospective_rejects_malformed_payload(self) -> None:
+    def test_frugality_retrospective_malformed_event_returns_none(self) -> None:
         event = BaseEvent(
             type="execution.frugality_retrospective.reported",
             aggregate_type="execution",
             aggregate_id="exec_123",
             data={
-                "retry_associated_spend": -1.0,
-                "unaccepted_spend": 0.0,
-                "coverage": {
-                    "measured_attempts": 0,
-                    "unknown_attempts": 0,
-                    "invalid_attempts": 0,
-                },
+                "retrospective_version": "v1",
+                "trigger": "execution_finalized",
+                "terminal_status": "paused",
+                "evidence_only": True,
+                "coverage": {},
+                "evidence_signals": [],
             },
         )
 
@@ -930,3 +940,23 @@ class TestFrugalityTelemetryEvents:
     def test_format_frugality_summary_non_pass_omits_percentage(self) -> None:
         """A non-PASS verdict is a bare labelled line, no percentage."""
         assert format_frugality_summary("fail_no_frugality", None) == "⚖ no savings"
+
+    def test_format_frugality_retrospective_summary_is_neutral(self) -> None:
+        line = format_frugality_retrospective_summary(
+            {
+                "retry_associated_tokens": 1200.0,
+                "retry_associated_attempts": 1,
+                "unaccepted_tokens": 500.0,
+                "unaccepted_attempts": 1,
+                "measured_attempts": 3,
+                "unknown_attempts": 1,
+                "invalid_attempts": 0,
+            }
+        )
+
+        assert line == (
+            "Evidence: retry-associated 1.2k tok | unaccepted 500 tok | "
+            "coverage 3 measured/1 unknown/0 invalid"
+        )
+        assert "waste" not in line.lower()
+        assert "avoidable" not in line.lower()

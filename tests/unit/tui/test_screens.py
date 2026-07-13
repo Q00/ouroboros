@@ -2,10 +2,37 @@
 
 from datetime import UTC, datetime
 
-from ouroboros.tui.events import TUIState
+from ouroboros.tui.events import FrugalityRetrospectiveReported, TUIState
+from ouroboros.tui.screens.dashboard_v3 import DashboardScreenV3, DoubleDiamondBar
 from ouroboros.tui.screens.debug import DebugScreen, JsonViewer, StateInspector
 from ouroboros.tui.screens.execution import ExecutionScreen, PhaseOutputPanel
 from ouroboros.tui.screens.logs import LogEntry, LogFilterBar, LogsScreen
+
+
+class TestDashboardFrugalityRetrospective:
+    def test_retrospective_is_visible_in_phase_bar(self) -> None:
+        state = TUIState(frugality_summary="⚖ insufficient data")
+        screen = DashboardScreenV3(state)
+        screen._phase_bar = DoubleDiamondBar()
+        screen._phase_bar.progress_text = "[2/2 AC]"
+        message = FrugalityRetrospectiveReported(
+            execution_id="exec_1",
+            summary={
+                "retry_associated_tokens": 100.0,
+                "retry_associated_attempts": 1,
+                "unaccepted_tokens": 50.0,
+                "unaccepted_attempts": 1,
+                "measured_attempts": 2,
+                "unknown_attempts": 0,
+                "invalid_attempts": 0,
+            },
+        )
+
+        screen.on_frugality_retrospective_reported(message)
+
+        assert "⚖ insufficient data" in screen._phase_bar.progress_text
+        assert "Evidence: retry-associated 100 tok" in screen._phase_bar.progress_text
+        assert "unaccepted 50 tok" in screen._phase_bar.progress_text
 
 
 class TestPhaseOutputPanel:

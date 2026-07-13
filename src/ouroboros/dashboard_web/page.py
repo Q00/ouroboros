@@ -53,6 +53,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   .tool { color: var(--executing); }
   .tok { color: var(--muted); }
   #m-frugality { color: var(--muted); }
+  #m-frugality-evidence { color: var(--muted); }
   .empty { color: var(--muted); font-size: 11px; padding: 8px 12px; }
   .st-pending  .col-head { color: var(--pending); }
   .st-executing .col-head { color: var(--executing); }
@@ -72,7 +73,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   <span class="meta" id="m-phase"></span>
   <span class="meta" id="m-tokens"></span>
   <span class="meta" id="m-frugality"></span>
-  <span class="meta" id="m-frugality-retro"></span>
+  <span class="meta" id="m-frugality-evidence"></span>
   <div id="legend"></div>
 </header>
 <div id="board"></div>
@@ -100,13 +101,6 @@ function fmtTokens(n) {
   if (v >= 1000) return (v / 1000).toFixed(1).replace(/\\.0$/, "") + "k tok";
   return Math.round(v) + " tok";
 }
-function fmtEvidenceTokens(n) {
-  if (n == null) return "0 tok";
-  const v = Number(n);
-  if (!isFinite(v) || v < 0) return "0 tok";
-  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\\.0$/, "") + "k tok";
-  return Math.round(v) + " tok";
-}
 
 function render(board) {
   const { meta, columns, providers } = board;
@@ -123,11 +117,15 @@ function render(board) {
         + (fr.reason ? " — " + String(fr.reason).slice(0, 80) : "")
     : "";
   const retro = meta.frugality_retrospective;
-  const cov = retro && retro.coverage;
-  document.getElementById("m-frugality-retro").textContent = retro && cov
-    ? "Evidence: retry " + fmtEvidenceTokens(retro.retry_associated_spend)
-        + " · unaccepted " + fmtEvidenceTokens(retro.unaccepted_spend)
-        + ` · ${cov.measured_attempts} measured/${cov.unknown_attempts} unknown/${cov.invalid_attempts} invalid`
+  const retroParts = [];
+  if (retro && retro.retry_associated_attempts)
+    retroParts.push(`retry-associated ${fmtTokens(retro.retry_associated_tokens) || "0 tok"}`);
+  if (retro && retro.unaccepted_attempts)
+    retroParts.push(`unaccepted ${fmtTokens(retro.unaccepted_tokens) || "0 tok"}`);
+  if (retro)
+    retroParts.push(`coverage ${retro.measured_attempts} measured / ${retro.unknown_attempts} unknown / ${retro.invalid_attempts} invalid`);
+  document.getElementById("m-frugality-evidence").textContent = retro
+    ? "Evidence: " + retroParts.join(" · ")
     : "";
   // legend
   const legend = document.getElementById("legend");

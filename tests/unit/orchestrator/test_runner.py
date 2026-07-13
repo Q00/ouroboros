@@ -1162,6 +1162,11 @@ class TestOrchestratorRunner:
             patch.object(runner, "_unregister_session"),
             patch.object(runner._session_repo, "mark_paused", mark_paused),
             patch.object(runner._session_repo, "mark_failed", mark_failed),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ) as retrospective,
         ):
             result = await runner.execute_precreated_session(
                 seed=sample_seed,
@@ -1188,6 +1193,7 @@ class TestOrchestratorRunner:
         assert terminal.data["status"] == "paused"
         assert terminal.data["pause_seconds"] == 18000
         assert terminal.data["pause_kind"] == "usage_limit"
+        retrospective.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_seed_exception_marks_session_failed(
@@ -1545,6 +1551,11 @@ class TestOrchestratorRunner:
                 "mark_failed",
                 AsyncMock(return_value=Result.ok(None)),
             ) as mark_failed,
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ) as retrospective,
         ):
             result = await runner.resume_session("sess_resume", sample_seed)
 
@@ -1553,6 +1564,7 @@ class TestOrchestratorRunner:
         assert result.value.final_message == "Codex rejected the resume command"
         mark_paused.assert_awaited_once()
         mark_failed.assert_not_called()
+        retrospective.assert_not_awaited()
 
     def test_recoverable_failure_ignores_ordinary_429(
         self,
