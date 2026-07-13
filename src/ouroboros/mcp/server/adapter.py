@@ -1774,6 +1774,8 @@ def create_ouroboros_server(
 
     _scoped_reexecution_env = os.environ.get("OUROBOROS_SCOPED_REEXECUTION", "").strip().lower()
     _scoped_reexecution = _scoped_reexecution_env not in ("0", "false")
+    from ouroboros.plugin.rewind import build_lockfile_rewind_observer
+
     evolutionary_loop = EvolutionaryLoop(
         event_store=event_store,
         config=EvolutionaryLoopConfig(
@@ -1786,6 +1788,7 @@ def create_ouroboros_server(
         executor=_evolution_executor,
         evaluator=_evolution_evaluator,
         validator=_evolution_validator,
+        rewind_observer=build_lockfile_rewind_observer(event_store),
     )
     job_manager = JobManager(event_store)
 

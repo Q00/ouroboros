@@ -265,6 +265,11 @@ SHA. CI may surface drift as a warning until the schemas stabilize at v1;
 this is intentionally less strict than a hard error to keep bring-up
 smooth.
 
+Core-local schema v0.5 is reserved for #1462's artifact-write hook slice.
+Schema v0.6 implements #1464's observe-only `on_rewind` contract without
+modifying archived schemas; see
+[`plugin-rewind-hook-contract.md`](./plugin-rewind-hook-contract.md).
+
 ## Invocation Contract
 
 Every UserLevel plugin command flows through one wrapper —
@@ -337,6 +342,7 @@ the contract and keeps review scope small.
 | `after_artifact_write` | After artifact write completes | Observability | `fail_open` | `plugin:artifact:observe` | Deferred |
 | `on_error` | When the wrapper sees a plugin/runtime error | Observability / recovery hint | `fail_open`; MUST NOT mask the original error | `plugin:lifecycle:read` | **Included** |
 | `on_cancel` | When a plugin invocation is cancelled | Observability / cancellation summary | `fail_open`; MUST NOT perform cleanup side effects | `plugin:lifecycle:read` | **Included** |
+| `on_rewind` | After a successful harness-level lineage rewind commit | Observability only | `fail_open` only | `plugin:rewind:observe` | **Included in schema v0.6** |
 
 `on_error` and `on_cancel` are the terminal-outcome subset of the v1 hook
 vocabulary, promoted out of the deferred bucket by Wave 1 PR E (#1131, refs
@@ -359,8 +365,12 @@ vocabulary:
   path.
 - `on_event`: too broad for v1. It risks turning the audit/event stream into a
   plugin message bus.
-- `on_rewind`: rewind semantics depend on replay/projection contracts that are
-  not yet stable.
+
+`on_rewind` is no longer part of the excluded set. It is promoted only in
+schema v0.6 through the canonical post-commit observer boundary documented in
+[`plugin-rewind-hook-contract.md`](./plugin-rewind-hook-contract.md). It does
+not participate in the command invocation ordering below and has no veto,
+cleanup, checkpoint, retry, or checkout authority.
 
 ### Hook ordering
 
@@ -377,6 +387,18 @@ plugin.completed | plugin.failed
 after_invocation hook(s)
 on_error hook(s), only for failed launched commands
 return InvocationResult
+```
+
+Harness-level rewind observation follows a separate order:
+
+```text
+validate target
+truncate projected lineage
+append lineage.rewound
+capture CommittedRewindResult
+dispatch eligible on_rewind observers (fail-open, five-second global budget)
+return the captured committed result
+caller-owned checkout, if requested
 ```
 
 `plugin.permission_used*` keeps the current v0 behavior: one event for each
@@ -587,6 +609,12 @@ core ledger writer accepts these events as-is, with any core-level envelope
 (e.g. ledger-internal sequence numbers) added at a layer **above** the
 schema's `additionalProperties: false` boundary. No silent field truncation
 or expansion is permitted; mismatches produce errors, not warnings.
+
+Schema v0.6 allows exactly one audit subject: the existing `command` subject
+or the new typed `observation` subject. `on_rewind` uses
+`observation.kind="rewind"` and never invents a command name. The exact
+subject and bounded provenance contract lives in
+[`plugin-rewind-hook-contract.md`](./plugin-rewind-hook-contract.md#7-audit-contract).
 
 **Bounded payloads — argv handling.** The "tokens, channel IDs, and
 free-form user messages are forbidden" rule applies to **plugin-defined
@@ -1014,6 +1042,9 @@ Sub-issues of #725, organized by phase:
 | 4 | #735 | CI lint guard preventing domain keywords from leaking into `ooo auto` |
 | Cross-repo | #736 | Schema vendoring strategy (vendor / submodule / PyPI) |
 | Cross-repo | #737 | `audit-event.schema.json` compatibility with core ledger writer |
+| Follow-up | #1462 | Artifact/state hook dispatch behind a write-side service boundary |
+| Follow-up | #1463 | Typed read-only generic `on_event` observation hook |
+| Follow-up | #1464 | Harness-level `on_rewind` observation hook |
 
 Contract repo issues at
 [Q00/ouroboros-plugins](https://github.com/Q00/ouroboros-plugins):

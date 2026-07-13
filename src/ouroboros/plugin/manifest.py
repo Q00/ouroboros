@@ -40,6 +40,7 @@ from ouroboros.plugin.hooks import (
     HOOK_LIFECYCLE_POLICY_SCOPE,
     HOOK_LIFECYCLE_READ_SCOPE,
     HOOK_LIFECYCLE_SCOPES,
+    HOOK_REWIND_OBSERVE_SCOPE,
     HOOK_TOOL_CALL_AUDIT_EVENTS,
     HOOK_TOOL_CALL_SCOPES,
     HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
@@ -75,8 +76,11 @@ except ImportError as exc:  # pragma: no cover
 # audit event names. Standalone dispatcher helpers exist in the firewall, but
 # production command invocation is wired through the tool-call
 # boundary; v0.4 manifests may declare these hooks, and they fire when
-# a tool-mediation caller invokes the helpers.
-SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3", "0.4")
+# a tool-mediation caller invokes the helpers. Schema 0.5 is reserved by
+# #1462's artifact-hook contract and is intentionally absent until that slice
+# lands. v0.6 promotes the observe-only ``on_rewind`` hook without modifying
+# any archived schema.
+SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1", "0.2", "0.3", "0.4", "0.6")
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
 # paths and no parent-directory traversal. `local_path` resolves relative to
@@ -208,7 +212,7 @@ class AuditSpec:
                     HOOK_FAILED_EVENT,
                 )
             )
-        if schema_version == "0.4":
+        if schema_version in {"0.4", "0.6"}:
             # v0.4 keeps the v0.3 hook event family and additively
             # reserves the four ``plugin.tool.*`` event names locked
             # in ``docs/rfc/plugin-tool-call-hook-contract.md`` § 6.
@@ -615,6 +619,14 @@ def _build_hook(
         schema_version=schema_version,
     )
 
+    _validate_rewind_hook_permission(
+        raw,
+        declared_required_permission_scopes=declared_required_permission_scopes,
+        hook_index=hook_index,
+        manifest_path=manifest_path,
+        schema_version=schema_version,
+    )
+
     for permission_index, scope in enumerate(raw.get("permissions", ())):
         if scope not in declared_permission_scopes:
             raise PluginManifestError(
@@ -658,7 +670,7 @@ def _validate_hook_lifecycle_permission(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Require v0.3 / v0.4 lifecycle and tool-call hooks to declare required permissions.
+    """Require supported lifecycle and tool-call hooks to declare required permissions.
 
     ``plugin:lifecycle:read`` remains the permission boundary for
     observability hooks, and it must be a required top-level permission
@@ -681,12 +693,14 @@ def _validate_hook_lifecycle_permission(
     contract; JSON Schema cannot express that condition on a
     cross-referenced top-level array entry.
 
-    Enforce this only for the tightened v0.3 / v0.4 hook contract so
+    Enforce this only for the tightened v0.3 / v0.4 / v0.6 hook contract so
     supported v0.2 manifests keep their compatibility behavior until
     that schema version is retired deliberately.
     """
 
-    if schema_version not in {"0.3", "0.4"} or not is_v1_hook_kind(raw["name"]):
+    if schema_version not in {"0.3", "0.4", "0.6"} or not is_v1_hook_kind(raw["name"]):
+        return
+    if raw["name"] == HookKind.ON_REWIND.value:
         return
     if is_tool_call_hook_kind(raw["name"]):
         _validate_tool_call_hook_permission(
@@ -788,7 +802,7 @@ def _validate_tool_call_hook_permission(
     is sufficient for fail-open observation.
     """
 
-    if schema_version != "0.4":
+    if schema_version not in {"0.4", "0.6"}:
         return
     permissions = raw.get("permissions", ())
     declared_tool_scopes = HOOK_TOOL_CALL_SCOPES.intersection(permissions)
@@ -848,12 +862,50 @@ def _validate_tool_call_hook_permission(
     if HOOK_TOOL_INTERCEPT_SCOPE in declared_required_permission_scopes:
         return
     raise PluginManifestError(
-        "v0.4 fail_closed tool-call hook intercept permission must be required",
+        f"v{schema_version} fail_closed tool-call hook intercept permission must be required",
         path=str(manifest_path),
         json_pointer="/permissions",
         expected=f"top-level {HOOK_TOOL_INTERCEPT_SCOPE!r} permission with required=true",
         got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
     )
+
+
+def _validate_rewind_hook_permission(
+    raw: dict[str, Any],
+    *,
+    declared_required_permission_scopes: frozenset[str],
+    hook_index: int,
+    manifest_path: str | Path,
+    schema_version: str,
+) -> None:
+    """Enforce the v0.6 observe-only rewind permission boundary."""
+    if schema_version != "0.6" or raw["name"] != HookKind.ON_REWIND.value:
+        return
+    permissions = raw.get("permissions", ())
+    if raw["failure_policy"] != HookFailurePolicy.FAIL_OPEN.value:
+        raise PluginManifestError(
+            "on_rewind hooks must use fail_open",
+            path=str(manifest_path),
+            json_pointer=f"/hooks/{hook_index}/failure_policy",
+            expected="'fail_open' for on_rewind hooks",
+            got=raw["failure_policy"],
+        )
+    if tuple(permissions) != (HOOK_REWIND_OBSERVE_SCOPE,):
+        raise PluginManifestError(
+            "v0.6 on_rewind hook must declare only plugin:rewind:observe",
+            path=str(manifest_path),
+            json_pointer=f"/hooks/{hook_index}/permissions",
+            expected=f"hooks[].permissions == [{HOOK_REWIND_OBSERVE_SCOPE!r}]",
+            got=permissions,
+        )
+    if HOOK_REWIND_OBSERVE_SCOPE not in declared_required_permission_scopes:
+        raise PluginManifestError(
+            "v0.6 on_rewind permission must be required",
+            path=str(manifest_path),
+            json_pointer="/permissions",
+            expected=(f"top-level {HOOK_REWIND_OBSERVE_SCOPE!r} permission with required=true"),
+            got=f"required permissions {sorted(declared_required_permission_scopes)!r}",
+        )
 
 
 def _validate_hook_name(
@@ -863,13 +915,13 @@ def _validate_hook_name(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Reject v0.3 hook names that are not in the v1 vocabulary.
+    """Reject tightened-schema hook names outside the accepted vocabulary.
 
     v0.2 remains a supported manifest schema and its JSON Schema already
     defines the accepted hook-name enum for that version. Preserve that
     compatibility boundary here: v0.2 manifests keep their schema-level
-    contract, while v0.3 / v0.4 get the tightened v1-only Python guard.
-    v0.4 admits the tool-call hook family into the v1 vocabulary, so
+    contract, while v0.3 / v0.4 / v0.6 get the tightened Python guard.
+    v0.4 admits the tool-call hook family and v0.6 admits on_rewind, so
     ``is_v1_hook_kind`` returns True for those names; deferred and
     excluded names still reject identically.
     """
@@ -883,7 +935,7 @@ def _validate_hook_name(
             got=repr(name),
         )
 
-    if schema_version not in {"0.3", "0.4"} or is_v1_hook_kind(name):
+    if schema_version not in {"0.3", "0.4", "0.6"} or is_v1_hook_kind(name):
         return
 
     if is_deferred_hook_kind(name):
@@ -935,6 +987,7 @@ _OBSERVATION_ONLY_HOOK_NAMES: frozenset[str] = frozenset(
     {
         HookKind.AFTER_INVOCATION.value,
         HookKind.AFTER_TOOL_CALL.value,
+        HookKind.ON_REWIND.value,
         *TERMINAL_OBSERVABILITY_HOOK_NAMES,
     }
 )
@@ -948,7 +1001,7 @@ def _validate_after_invocation_policy(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Keep v0.3 / v0.4 observation-only hooks from acquiring veto authority.
+    """Keep observation-only hooks from acquiring veto authority.
 
     v0.3 lifecycle permissions are read-only, so terminal observability
     hooks (``after_invocation`` plus the additive ``on_error`` /
@@ -963,7 +1016,7 @@ def _validate_after_invocation_policy(
     """
 
     if (
-        schema_version not in {"0.3", "0.4"}
+        schema_version not in {"0.3", "0.4", "0.6"}
         or hook_name not in _OBSERVATION_ONLY_HOOK_NAMES
         or failure_policy != HookFailurePolicy.FAIL_CLOSED.value
     ):
@@ -997,7 +1050,7 @@ def _validate_hook_audit_events(
     complete v0.3 lifecycle vocabulary.
     """
 
-    if schema_version not in {"0.3", "0.4"} or not audit_was_explicit:
+    if schema_version not in {"0.3", "0.4", "0.6"} or not audit_was_explicit:
         return
     required_events = set(AuditSpec.standard_four_events().events)
     if hooks:
@@ -1007,7 +1060,9 @@ def _validate_hook_audit_events(
     # AuditSpec.standard_events_for_schema("0.4"). Requiring them in an
     # explicit audit.events block keeps the helper-dispatch contract honest
     # without implying production ``invoke_plugin`` dispatch is wired.
-    if schema_version == "0.4" and any(is_tool_call_hook_kind(hook.name) for hook in hooks):
+    if schema_version in {"0.4", "0.6"} and any(
+        is_tool_call_hook_kind(hook.name) for hook in hooks
+    ):
         required_events.update(HOOK_TOOL_CALL_AUDIT_EVENTS)
     missing_events = required_events.difference(audit.events)
     if not missing_events:

@@ -25,18 +25,20 @@ This adapter:
     Production wires it to `EventStore.append`; tests can wire it to a
     list.
 
-This module deliberately does NOT import `persistence/event_store.py`
-or its async machinery. It speaks the envelope shape, not the store.
-The CLI (#731) is the integration point that takes a real EventStore
-async session and bridges to `append_fn`.
+The typed async adapter depends only on a narrow EventStore protocol, not the
+concrete persistence implementation. Callers retain construction and lifecycle
+ownership of the real store.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 import copy
+from datetime import datetime, timedelta
+from typing import Protocol
 import uuid
 
+from ouroboros.events.base import BaseEvent
 from ouroboros.plugin.hooks import HOOK_EVENT_TYPES, HOOK_TOOL_CALL_AUDIT_EVENTS
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
@@ -170,10 +172,88 @@ def make_event_sink(
     return _sink
 
 
+class EventStoreLike(Protocol):
+    """Typed subset of EventStore required by plugin audit persistence."""
+
+    async def initialize(self) -> None: ...
+
+    async def append_batch(self, events: list[BaseEvent]) -> None: ...
+
+
+def plugin_event_to_base_event(
+    audit_event: dict,
+    *,
+    correlation_id: str,
+    aggregate_id: str | None = None,
+    envelope_id: str | None = None,
+) -> BaseEvent:
+    """Convert one schema-valid plugin audit event to a core event."""
+    envelope = wrap_plugin_event(
+        audit_event,
+        correlation_id=correlation_id,
+        aggregate_id=aggregate_id,
+        envelope_id=envelope_id,
+    )
+    timestamp = envelope["timestamp"]
+    if not isinstance(timestamp, str):
+        raise TypeError("plugin audit event occurred_at must be a string")
+    return BaseEvent(
+        id=envelope["id"],
+        type=envelope["event_type"],
+        timestamp=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
+        aggregate_type=envelope["aggregate_type"],
+        aggregate_id=envelope["aggregate_id"],
+        data=envelope["payload"],
+    )
+
+
+class PluginLedgerAdapter:
+    """Collect ordered audit events and flush them through ``append_batch``."""
+
+    def __init__(
+        self,
+        event_store: EventStoreLike,
+        *,
+        correlation_id: str,
+        aggregate_id: str | None = None,
+    ) -> None:
+        self._event_store = event_store
+        self._correlation_id = correlation_id
+        self._aggregate_id = aggregate_id
+        self._pending: list[BaseEvent] = []
+
+    @property
+    def pending_events(self) -> tuple[BaseEvent, ...]:
+        return tuple(self._pending)
+
+    def audit_sink(self, audit_event: dict) -> None:
+        event = plugin_event_to_base_event(
+            audit_event,
+            correlation_id=self._correlation_id,
+            aggregate_id=self._aggregate_id,
+        )
+        if self._pending and event.timestamp <= self._pending[-1].timestamp:
+            event = event.model_copy(
+                update={"timestamp": self._pending[-1].timestamp + timedelta(microseconds=1)}
+            )
+        self._pending.append(event)
+
+    async def flush(self) -> None:
+        if not self._pending:
+            return
+        await self._event_store.initialize()
+        batch = list(self._pending)
+        await self._event_store.append_batch(batch)
+        del self._pending[: len(batch)]
+
+
 __all__ = [
     "AUDIT_EVENT_TYPES",
+    "EventStoreLike",
     "PLUGIN_AGGREGATE_TYPE",
+    "PluginLedgerAdapter",
     "make_event_sink",
+    "plugin_event_to_base_event",
     "unwrap_plugin_event",
     "wrap_plugin_event",
 ]
