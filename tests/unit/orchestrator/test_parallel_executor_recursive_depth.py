@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.seed import AcceptanceCriterionSpec, InvestmentSpec
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
 
 
@@ -41,6 +42,17 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         )
 
     executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+    investment = InvestmentSpec(
+        difficulty="high",
+        stakes="high",
+        provenance="declared",
+        confidence="high",
+    )
+    parent_spec = AcceptanceCriterionSpec(
+        description="Root composite AC",
+        verify_command="pytest -q tests/root_contract.py",
+        investment=investment,
+    )
 
     with patch.object(
         executor,
@@ -57,6 +69,8 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
             seed_goal="Support recursive decomposition",
             depth=0,
             execution_id="exec_recursive_depth",
+            ac_spec=parent_spec,
+            investment_spec=investment,
         )
 
     assert result.success is True
@@ -126,3 +140,10 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         (None, None),
         (1, 1),
     ]
+    assert all(
+        call.kwargs["investment_spec"] is investment
+        for call in executor._execute_atomic_ac.await_args_list
+    )
+    assert all(
+        call.kwargs["ac_spec"] is None for call in executor._execute_atomic_ac.await_args_list
+    )

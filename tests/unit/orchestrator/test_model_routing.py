@@ -406,30 +406,92 @@ class TestDecideModel:
         assert d.model == "sonnet-x"
         assert d.mode == "enforced"
 
-    def test_decomposed_child_drops_one_tier(self) -> None:
+    def test_trusted_decomposed_child_drops_one_tier(self) -> None:
         router = build_model_router(_economics(), runtime_backend="claude")
         assert router is not None
-        d = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=True)
+        d = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
         assert d.tier == "frugal"  # standard base dropped one notch
         assert d.model == "haiku-x"
 
-    def test_retry_escalation_beats_child_drop(self) -> None:
+    def test_untrusted_decomposed_child_stays_at_base_tier(self) -> None:
+        router = build_model_router(_economics(), runtime_backend="claude")
+        assert router is not None
+        d = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=True)
+        assert d.tier == "standard"
+        assert d.model == "sonnet-x"
+
+    def test_decomposition_trust_must_be_exact_true(self) -> None:
+        router = build_model_router(_economics(), runtime_backend="claude")
+        assert router is not None
+        d = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=1,  # type: ignore[arg-type]
+        )
+        assert d.tier == "standard"
+        assert d.model == "sonnet-x"
+
+    def test_untrusted_decomposed_child_stays_at_suggested_tier(self) -> None:
+        router = build_model_router(_economics(), runtime_backend="claude")
+        assert router is not None
+        d = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            suggested_tier="frontier",
+        )
+        assert d.tier == "frontier"
+        assert d.model == "opus-x"
+
+    def test_trusted_retry_escalation_beats_child_drop(self) -> None:
         # A failing child earns a stronger model: escalation is applied AFTER the
         # child drop, so at the threshold it climbs back to (at least) the base.
         router = build_model_router(_economics(escalation_threshold=2), runtime_backend="claude")
         assert router is not None
         initial = decide_model(
-            ParamSupport.NATIVE, router=router, is_decomposed_child=True, retry_attempt=0
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            retry_attempt=0,
         )
         first = decide_model(
-            ParamSupport.NATIVE, router=router, is_decomposed_child=True, retry_attempt=1
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            retry_attempt=1,
         )
         second = decide_model(
-            ParamSupport.NATIVE, router=router, is_decomposed_child=True, retry_attempt=2
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+            retry_attempt=2,
         )
         assert initial.tier == "frugal"  # child drop
         assert first.tier == "frugal"  # below threshold, no raise yet
         assert second.tier == "standard"  # drop then raise = back to base
+
+    def test_untrusted_retry_escalation_starts_from_base_tier(self) -> None:
+        router = build_model_router(_economics(escalation_threshold=2), runtime_backend="claude")
+        assert router is not None
+        tiers = [
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=True,
+                retry_attempt=attempt,
+            ).tier
+            for attempt in range(4)
+        ]
+        assert tiers == ["standard", "standard", "frontier", "frontier"]
 
     def test_progressive_escalation_threshold_one_reaches_frontier(self) -> None:
         # threshold=1: a persistently failing unit climbs one tier per retry.
@@ -442,6 +504,7 @@ class TestDecideModel:
                 ParamSupport.NATIVE,
                 router=router,
                 is_decomposed_child=True,
+                decomposition_trustworthy=True,
                 retry_attempt=attempt,
             ).tier
             for attempt in range(3)
@@ -469,6 +532,7 @@ class TestDecideModel:
                 ParamSupport.NATIVE,
                 router=router,
                 is_decomposed_child=True,
+                decomposition_trustworthy=True,
                 retry_attempt=attempt,
             ).tier
             for attempt in range(4)
@@ -493,6 +557,7 @@ class TestDecideModel:
             ParamSupport.NATIVE,
             router=router,
             is_decomposed_child=True,
+            decomposition_trustworthy=True,
             retry_attempt=10,
         )
         assert d.tier == "frontier"
@@ -508,6 +573,7 @@ class TestDecideModel:
             ParamSupport.NATIVE,
             router=router,
             is_decomposed_child=True,
+            decomposition_trustworthy=True,
             retry_attempt=1,
             suggested_tier="frugal",
         )
@@ -569,9 +635,26 @@ class TestDecideModel:
             base_tier="standard",
             escalation_retry_threshold=2,
         )
-        d = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=True)
+        d = decide_model(
+            ParamSupport.NATIVE,
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
         assert d.tier == "standard"
         assert d.model == "sonnet-x"  # walked up, not down
+
+    def test_untrusted_child_sparse_tier_uses_base_exact_model(self) -> None:
+        router = ModelRouter(
+            tier_models={"standard": "sonnet-x", "frontier": "opus-x"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=2,
+        )
+        d = decide_model(ParamSupport.NATIVE, router=router, is_decomposed_child=True)
+        assert d.tier == "standard"
+        assert d.model == "sonnet-x"
 
     def test_missing_tier_walks_down_as_last_resort(self) -> None:
         # Nothing stronger than the decided tier exists -> walk down.
@@ -638,11 +721,42 @@ class TestResolveExecuteModel:
         assert decision.mode == "enforced"
         assert kwargs == {"model": "sonnet-x"}
 
+    def test_native_trusted_child_yields_lowered_model_kwarg(self, router: ModelRouter) -> None:
+        decision, kwargs = resolve_execute_model(
+            _Adapter(ParamSupport.NATIVE),
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
+        assert decision.mode == "enforced"
+        assert decision.tier == "frugal"
+        assert kwargs == {"model": "haiku-x"}
+
+    def test_native_untrusted_child_yields_base_model_kwarg(self, router: ModelRouter) -> None:
+        decision, kwargs = resolve_execute_model(
+            _Adapter(ParamSupport.NATIVE), router=router, is_decomposed_child=True
+        )
+        assert decision.mode == "enforced"
+        assert decision.tier == "standard"
+        assert kwargs == {"model": "sonnet-x"}
+
     def test_ignored_runtime_is_advised_with_empty_kwargs(self, router: ModelRouter) -> None:
         decision, kwargs = resolve_execute_model(
             _Adapter(ParamSupport.IGNORED), router=router, is_decomposed_child=False
         )
         assert decision.mode == "advised"
+        assert kwargs == {}
+
+    def test_ignored_trusted_child_is_advised_with_empty_kwargs(self, router: ModelRouter) -> None:
+        decision, kwargs = resolve_execute_model(
+            _Adapter(ParamSupport.IGNORED),
+            router=router,
+            is_decomposed_child=True,
+            decomposition_trustworthy=True,
+        )
+        assert decision.mode == "advised"
+        assert decision.tier == "frugal"
+        assert decision.model == "haiku-x"
         assert kwargs == {}
 
     def test_capabilities_without_field_defaults_to_ignored(self, router: ModelRouter) -> None:

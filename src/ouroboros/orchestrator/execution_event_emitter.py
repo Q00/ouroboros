@@ -304,6 +304,36 @@ class ExecutionEventEmitter:
         )
         await self._event_store.append(event)
 
+    async def emit_investment_assessed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str | None,
+        session_id: str,
+        ac_index: int,
+        is_sub_ac: bool,
+        assessment: dict[str, Any],
+        runtime_backend: str | None,
+    ) -> None:
+        """Persist the exact AC investment inputs used by effort policy."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.investment_assessed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_id": runtime_identity.ac_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_index": ac_index,
+                    "is_decomposed_child": is_sub_ac,
+                    **assessment,
+                    "runtime_backend": runtime_backend,
+                },
+            )
+        )
+
     async def emit_effort_routed(
         self,
         *,
@@ -316,6 +346,7 @@ class ExecutionEventEmitter:
         effort_mode: str,
         base_reasoning_effort: str | None,
         runtime_backend: str | None,
+        investment_assessment: dict[str, Any] | None = None,
     ) -> None:
         """Persist per-AC effort-routing telemetry."""
         await self._safe_emit_event(
@@ -334,6 +365,11 @@ class ExecutionEventEmitter:
                     "effort_mode": effort_mode,
                     "base_reasoning_effort": base_reasoning_effort,
                     "runtime_backend": runtime_backend,
+                    **(
+                        {"investment_assessment": investment_assessment}
+                        if investment_assessment is not None
+                        else {}
+                    ),
                 },
             )
         )
@@ -351,6 +387,7 @@ class ExecutionEventEmitter:
         model_mode: str,
         retry_attempt: int,
         runtime_backend: str | None,
+        decomposition_trustworthy: bool = False,
     ) -> None:
         """Persist per-AC model-tier-routing telemetry.
 
@@ -371,6 +408,8 @@ class ExecutionEventEmitter:
                     "session_id": session_id,
                     "ac_index": ac_index,
                     "is_decomposed_child": is_sub_ac,
+                    "decomposition_trustworthy": decomposition_trustworthy is True,
+                    "child_downgrade_authorized": (is_sub_ac and decomposition_trustworthy is True),
                     "model_tier": model_tier,
                     "model": model,
                     "model_mode": model_mode,

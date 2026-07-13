@@ -28,6 +28,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     # Seed
     "Seed": ("ouroboros.core.seed", "Seed"),
     "SeedMetadata": ("ouroboros.core.seed", "SeedMetadata"),
+    "InvestmentSpec": ("ouroboros.core.seed", "InvestmentSpec"),
     "OntologySchema": ("ouroboros.core.seed", "OntologySchema"),
     "OntologyField": ("ouroboros.core.seed", "OntologyField"),
     "EvaluationPrinciple": ("ouroboros.core.seed", "EvaluationPrinciple"),

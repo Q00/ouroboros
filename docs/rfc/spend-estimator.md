@@ -1,111 +1,130 @@
-# RFC — The spend estimator: difficulty + stakes from measured inputs
+# RFC - AC investment assessment: difficulty + stakes with explicit authority
 
-> Status: **Draft**
-> Relates to [discussion #1384](https://github.com/Q00/ouroboros/discussions/1384)
-> (complexity→investment mechanism). This is the **estimator half** of the split the
-> owner requested; the **actuator half** is the
-> [spend actuator (effort dial) RFC (#1405)](https://github.com/Q00/ouroboros/pull/1405).
-> Both serve the frugality stance: [#1377](https://github.com/Q00/ouroboros/discussions/1377) /
-> [frugality control loop (#1403)](https://github.com/Q00/ouroboros/pull/1403).
+> Status: **Implemented (v1 policy, 2026-07-13)**
+> Relates to [issue #1398](https://github.com/Q00/ouroboros/issues/1398) and
+> [discussion #1384](https://github.com/Q00/ouroboros/discussions/1384).
+> The execution-side policy is documented in the
+> [spend actuator RFC](spend-actuator-effort-dial.md).
 
 ## Summary
 
-Ouroboros's "spend the cheap option on cheap work" lever depends on something that
-reliably identifies cheap (and hard, and high-stakes) work. Today that estimate is
-**unprincipled** — and, as the owner verified, the routing built on it has **no
-live call site** at all. This RFC specifies the estimator: it produces, per unit of
-work, a **difficulty** estimate and a **stakes** estimate from **measured inputs**,
-with explicit confidence and faithful rationale. It does *not* decide what to do
-with that estimate — that is the [actuator RFC](https://github.com/Q00/ouroboros/pull/1405).
+Ouroboros does not infer that work is cheap from acceptance-criterion text,
+token length, tool count, artifact count, verification-command shape, or keyword
+scoring. Those signals do not establish difficulty or cost-of-being-wrong and
+cannot safely authorize lower investment.
 
-The owner accepted #1384's acceptance properties as the right direction with one
-restructure: the **safety properties are v1 invariants; calibration and cross-run
-learning demote to v2 maturity goals** (they collide with cold-start); and a **new
-property — runtime-scoped applicability** — is added.
+The v1 contract is an optional AC-level `investment` declaration. It records two
+axes, provenance, and confidence. The orchestrator normalizes that declaration to
+an auditable `InvestmentAssessment`; missing or weak authority fails closed and
+cannot make execution cheaper.
 
-## Context (grounded in current `main`)
+## Current-main disposition
 
-The estimate is computed but its consumers are unprincipled or absent:
+- The legacy PAL/complexity estimator and its off-path router were removed.
+- Reasoning-effort capability negotiation and per-call enforcement are live.
+- Model-tier routing is a separate live actuator used by the frugality proof.
+- Child model lowering is governed by decomposition trust, not by investment
+  metadata or child status alone.
+- Cross-run calibration remains deferred until qualified evidence exists.
 
-- **No live *routing* consumer.** The tier router — `PALRouter.route()` /
-  `ModelRouter.route()` (`routing/router.py`, `plugin/orchestration/router.py`) — has
-  **no non-test call site**, so the routing lever does not exist at runtime (the
-  [actuator RFC (#1405)](https://github.com/Q00/ouroboros/pull/1405) removes that tier
-  machinery). `estimate_complexity` itself *is* called once outside tests —
-  `execution/atomicity.py:271` — but that module is off the live path and slated for
-  deletion (see the [decomposition reliability RFC (#1406)](https://github.com/Q00/ouroboros/pull/1406)),
-  so **no live-path consumer of the estimate remains**. This RFC keeps and re-grounds
-  the *estimate*; its live consumer becomes the actuator.
-- **Length treated as difficulty.** Complexity is a weighted sum of three length-ish
-  scalars: tokens ×0.30 (÷4000), tools ×0.30 (÷5), depth ×0.40 (÷5). "Fix the race in
-  the lock-free queue" scores ≈0 and would rate trivial — the hardest units are
-  usually the shortest to state.
-- **Fabricated inputs.** The tool-dependency factor (30% weight) is a count
-  re-encoded as placeholder strings (`tool_dependencies=[f"tool_{i}" …]`) — no real
-  signal.
-- **Uncalibrated constants** (weights, thresholds, normalizers) with no empirical
-  basis, and the only adaptive signal is escalate-after-2-failures *within one run*.
+## Input contract
 
-## Proposal
+`AcceptanceCriterionSpec` accepts this additive field:
 
-### Two axes, measured inputs only
+```yaml
+acceptance_criteria:
+  - description: Rotate production payment signing keys
+    investment:
+      difficulty: medium
+      stakes: high
+      provenance: declared
+      confidence: high
+```
 
-The estimator returns, per unit: **`difficulty`**, **`stakes`**, and a
-**`confidence`** band, plus the real inputs that drove them.
+The v1 vocabulary is intentionally bounded:
 
-- **Difficulty** is decoupled from length — a short, conceptually hard unit must
-  rate hard and a long, mechanical one easy. Token count may inform but must not
-  dominate.
-- **Stakes** = cost-of-being-wrong: reversibility, blast radius, sensitivity. A
-  trivial-to-state but high-stakes unit (auth, a schema migration, a payment path)
-  must be investable on stakes alone.
-- **Every weighted factor derives from a real property of the unit.** A factor that
-  cannot be measured cannot carry weight — no counts re-encoded as lists.
+| Field | Values | Meaning |
+| --- | --- | --- |
+| `difficulty` | `low`, `medium`, `high`, or omitted | Work complexity independent of statement length |
+| `stakes` | `low`, `medium`, `high`, or omitted | Cost of being wrong, including reversibility and blast radius |
+| `provenance` | `declared`, `measured`, `inferred`, `absent` | Where the assessment authority came from |
+| `confidence` | `low`, `medium`, `high` | Confidence in the supplied assessment; defaults to `low` |
 
-### The acceptance properties (restructured per owner)
+Legacy string ACs and structured ACs without `investment` remain valid and keep
+their persisted representation unchanged.
 
-**v1 invariants** (a design violating any one is unacceptable):
+`declared` means an authorized Seed/profile producer chose the value. `measured`
+means an upstream producer asserts that the value came from concrete repository
+or runtime evidence; that producer must retain the evidence reference and must
+not relabel inference as measurement. In v1, both are explicit authority.
+`inferred` and `absent` are never lowering authority.
 
-- **(2) Two axes:** difficulty *and* stakes.
-- **(3) Fail-safe, safety-asymmetric:** under-powering a hard/high-stakes unit is far
-  worse than over-powering a trivial one; the estimator represents its own
-  uncertainty and, when uncertain, signals **escalate, not cheapen**.
-- **(8) Monotonic and stable:** more difficult / higher-stakes never maps cheaper;
-  small input changes produce small output changes — no threshold cliffs.
-- **(10) Faithful, auditable rationale:** every estimate emits which axis drove it,
-  the confidence, and the real inputs used — the recorded numbers are the ones
-  actually used, never decorative placeholders.
-- **(11, owner-added) Runtime-scoped applicability:** the estimate is consumed
-  differently per backend — *routable* where Ouroboros calls the LLM directly,
-  *advisory* where it delegates to a CLI runtime. The estimator records enough for
-  both; see the actuator RFC's capability matrix.
+## Normalized assessment
 
-**v2 maturity goals** (gated on cold-start — a single user's runs don't yield enough
-labeled outcomes; v1 only *records* their inputs):
+Every execution leaf receives an `InvestmentAssessment` containing:
 
-- **(6) Calibrated to observed outcomes, inspectably** — constants justified by
-  recorded success/failure/rework/cost.
-- **(7) Closed-loop across runs** — a unit that failed at a given investment level
-  shifts how similar future units are estimated.
+- normalized `difficulty` and `stakes` (`unknown` when absent);
+- `provenance` and `confidence`;
+- the signals used and the signals missing;
+- `can_cheapen`;
+- any minimum required effort;
+- a deterministic rationale derived from those exact inputs.
 
-Property **10** is the enabler: by recording real inputs and real outcomes in v1,
-the event stream becomes the data the v2 calibration loop reads.
+The assessment is emitted as `execution.ac.investment_assessed`. When effort is
+routed, the same assessment payload is embedded in
+`execution.ac.effort_routed`, preventing telemetry from drifting away from the
+values that made the decision.
 
-## Out of scope (deliberately)
+## Policy invariants
 
-- **What to do with the estimate** — model/effort selection, the escalation ladder,
-  and the capability matrix are the [actuator RFC](https://github.com/Q00/ouroboros/pull/1405).
-- **Cross-run calibration loop** — v2 (this RFC lays its event-stream groundwork).
-- **A perfect difficulty oracle** — "better than length, two-axis, and safe when
-  unsure" is the v1 bar.
+The base effort is the per-run `reasoning_effort` configured by the runner. The
+shared effort ladder is `minimal -> low -> medium -> high -> xhigh`; the one-notch
+discount has a `low` floor, while an explicitly configured `minimal` base remains
+unchanged. Policy order is: configured base, assessment floor/discount, then
+retry escalation. A runtime that cannot enforce the resulting level records it
+as advised and receives no unsupported effort parameter.
+
+1. Missing difficulty or stakes becomes `unknown` and cannot authorize lower
+   effort.
+2. `inferred` and `absent` provenance are observe-only or raise-only. They never
+   authorize cheapening.
+3. Only complete `low` difficulty + `low` stakes with `declared` or `measured`
+   provenance and `high` confidence may lower configured effort, by exactly one
+   notch.
+4. Any `high` axis imposes a minimum effort of `high` when a base effort is
+   configured.
+5. Retry escalation is applied after the assessment. Runtime failures may raise
+   later attempts, never retroactively justify a cheaper first attempt.
+6. When no base effort is configured, effort routing remains dormant; the
+   assessment is still recorded for observability.
+7. Decomposed children inherit the parent AC's investment metadata. They do not
+   inherit the parent's success contract unless a future decomposition protocol
+   produces a child-specific contract.
+
+## Separation from model-tier trust
+
+Investment assessment does not authorize a cheaper model. A decomposed child may
+drop one model tier only when `decomposition_trustworthy=True` is supplied by an
+explicit deterministic trust issuer. Current upstream `main` has no live issuer,
+so live decomposed children remain at the base tier. Retry escalation, explicit
+model pins, and the routing kill switch retain precedence. Trust production and
+verified-MECE decomposition remain tracked by issue #1466.
+
+## Out of scope
+
+- Natural-language difficulty or stakes scoring.
+- Token, tool, artifact, command, file, or keyword counts as lowering authority.
+- Cross-run learning or calibration.
+- Shadow-replay enablement or frugality-proof redesign.
+- New runtime/provider support.
 
 ## Acceptance criteria
 
-1. "Fix the race in the lock-free queue" rates **hard**; a long boilerplate unit
-   rates **easy** (difficulty decoupled from length).
-2. A short, high-stakes unit (auth / migration / payment) rates **high-stakes** and
-   is investable on stakes alone.
-3. Every emitted estimate carries `difficulty`, `stakes`, `confidence`, and the
-   **real** inputs used — and a test asserts no field is a hardcoded placeholder.
-4. The mapping is monotonic and cliff-free under small input perturbations.
-5. Under low confidence, the estimate signals **escalate**, never cheapen.
+1. Legacy AC serialization is stable and `investment` is additive.
+2. Missing, inferred, or low-confidence inputs cannot lower effort.
+3. A high-stakes short AC cannot run below the configured safety floor.
+4. An authorized low/low assessment lowers effort by at most one notch.
+5. Retry escalation composes after assessment and only raises later attempts.
+6. Direct, parallel, recursive-child, and resume paths use the same fail-safe
+   default.
+7. Events contain the exact inputs and rationale used by policy resolution.

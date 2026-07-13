@@ -18,14 +18,13 @@ an AC fails after retry exhaustion, a TraceGuard deliver verdict rejects the sam
 lineage repeatedly, or the frugality proof returns a FAIL status, nothing with
 semantic judgment reacts. The engine's deterministic recovery is the ceiling:
 reasoning-effort raise at `EFFORT_RAISE_RETRY_THRESHOLD = 2`
-(`orchestrator/effort_routing.py:38`), and one model-tier raise applied once at or
+(`orchestrator/effort_routing.py:38`), and progressive model-tier raises at or
 after the configured escalation retry threshold (`orchestrator/model_routing.py`,
-`raise_one_notch`). Later retries recompute from the same starting tier rather than
-climbing repeatedly: a normal decomposed child moves `frugal -> standard`, while a
-normal top-level AC moves `standard -> frontier`. Once the configured retry budget,
-including that stronger-model attempt where available, is exhausted, the run simply
-reports failure. The proven pattern for lifting that ceiling is a conductor main
-loop: woken by events, it re-verifies claims against ground truth and issues
+`raise_one_notch`). Top-level and untrusted decomposed work start at `standard`;
+only an explicitly trusted child may start at `frugal`. Once the configured retry
+budget, including stronger-model attempts where available, is exhausted, the run
+simply reports failure. The proven pattern for lifting that ceiling is a conductor
+main loop: woken by events, it re-verifies claims against ground truth and issues
 corrective, context-rich directives to workers.
 
 ## Decision
@@ -110,9 +109,10 @@ The conductor never re-drives an AC the engine is still retrying. Double-driving
 burns tokens and races the engine's own escalation ladder. The conductor engages
 only *after* the configured retry budget is closed and no engine-owned
 same-runtime or alternate-harness redispatch remains. Reaching `frontier` is
-neither required nor sufficient: a decomposed child normally exhausts its single
-raise at `standard`, while a top-level AC may reach `frontier` before its retry
-budget is closed.
+neither required nor sufficient: an untrusted decomposed child starts at the base
+tier, while an explicitly trusted child may start one tier lower and need an
+additional retry to reach `frontier`. Current live decomposition supplies no trust
+issuer. A top-level AC may reach `frontier` before its retry budget is closed.
 
 ## Frugality coupling
 

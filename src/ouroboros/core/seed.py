@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import math
 import re
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import (
@@ -214,6 +214,26 @@ class SeedMetadata(BaseModel, frozen=True):
         return data
 
 
+InvestmentLevel = Literal["low", "medium", "high"]
+InvestmentProvenance = Literal["declared", "measured", "inferred", "absent"]
+InvestmentConfidence = Literal["low", "medium", "high"]
+
+
+class InvestmentSpec(BaseModel, frozen=True):
+    """Bounded AC-level authority for execution investment decisions.
+
+    The schema intentionally carries declarations and provenance, not inferred
+    text features. Missing axes remain unknown at assessment time. Confidence
+    defaults to ``low`` so an incomplete declaration cannot silently authorize
+    cheaper execution.
+    """
+
+    difficulty: InvestmentLevel | None = None
+    stakes: InvestmentLevel | None = None
+    provenance: InvestmentProvenance = "declared"
+    confidence: InvestmentConfidence = "low"
+
+
 class AcceptanceCriterionSpec(BaseModel, frozen=True):
     """Structured success contract for one acceptance criterion."""
 
@@ -221,6 +241,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     verify_command: str | None = Field(default=None)
     expected_artifacts: tuple[str, ...] = Field(default_factory=tuple)
     output_assertion: str | None = Field(default=None)
+    investment: InvestmentSpec | None = Field(default=None)
 
     @field_validator("description", mode="before")
     @classmethod
@@ -271,7 +292,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
     def to_seed_value(self) -> str | dict[str, Any]:
         """Return the stable persisted representation for this AC."""
-        if not self.has_success_contract:
+        if not self.has_success_contract and self.investment is None:
             return self.description
         data: dict[str, Any] = {"description": self.description}
         if self.verify_command:
@@ -280,6 +301,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             data["expected_artifacts"] = list(self.expected_artifacts)
         if self.output_assertion:
             data["output_assertion"] = self.output_assertion
+        if self.investment is not None:
+            data["investment"] = self.investment.model_dump(mode="json", exclude_none=True)
         return data
 
     def __str__(self) -> str:

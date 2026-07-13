@@ -570,9 +570,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "bypassPermissions"
     )
     # Effort-first investment dial (RFC #1405): base reasoning-effort level for
-    # full-strength AC execution. Decomposed children run one notch lower. The
-    # level is ENFORCED on runtimes with a native per-call knob (Claude Agent SDK,
-    # Codex) and advised elsewhere. ``None`` leaves effort routing dormant.
+    # AC execution. Optional investment metadata may impose a floor or authorize
+    # one lower notch; decomposition alone never lowers effort. The level is
+    # ENFORCED on runtimes with a native per-call knob (Claude Agent SDK, Codex)
+    # and advised elsewhere. ``None`` leaves effort routing dormant.
     # Restricted to the vocabulary every native runtime accepts: Codex-only
     # ``minimal`` and Claude-only ``max`` are excluded so a single global value is
     # never forwarded as an invalid level to whichever runtime executes the AC.

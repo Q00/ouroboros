@@ -16,7 +16,9 @@ backend-specific effort path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
+from ouroboros.core.seed import InvestmentSpec
 from ouroboros.orchestrator.adapter import ParamSupport
 
 # Ordered weakest -> strongest. Shared vocabulary across the runtimes that expose
@@ -95,6 +97,129 @@ class EffortDecision:
         return self.mode == EFFORT_MODE_ENFORCED and self.level is not None
 
 
+@dataclass(frozen=True)
+class InvestmentAssessment:
+    """Normalized, auditable investment inputs used by effort policy."""
+
+    difficulty: str
+    stakes: str
+    provenance: str
+    confidence: str
+    used_signals: tuple[str, ...]
+    missing_signals: tuple[str, ...]
+    can_cheapen: bool
+    minimum_effort: str | None
+    rationale: str
+
+    def to_event_data(self) -> dict[str, Any]:
+        """Return the exact policy inputs and outcome for event telemetry."""
+        return {
+            "difficulty": self.difficulty,
+            "stakes": self.stakes,
+            "provenance": self.provenance,
+            "confidence": self.confidence,
+            "used_signals": list(self.used_signals),
+            "missing_signals": list(self.missing_signals),
+            "can_cheapen": self.can_cheapen,
+            "minimum_effort": self.minimum_effort,
+            "rationale": self.rationale,
+        }
+
+
+def assess_investment(spec: InvestmentSpec | None) -> InvestmentAssessment:
+    """Normalize optional AC metadata into a fail-safe policy assessment.
+
+    Only complete low/low assessments from declared or measured, high-confidence
+    inputs may authorize a one-notch reduction. Inferred or absent inputs are
+    observe-only/raise-only. Any high axis requires at least high effort.
+    """
+    if spec is None:
+        return InvestmentAssessment(
+            difficulty="unknown",
+            stakes="unknown",
+            provenance="absent",
+            confidence="low",
+            used_signals=(),
+            missing_signals=("difficulty", "stakes"),
+            can_cheapen=False,
+            minimum_effort=None,
+            rationale="missing difficulty and stakes; base effort preserved",
+        )
+
+    difficulty = spec.difficulty or "unknown"
+    stakes = spec.stakes or "unknown"
+    missing_signals = tuple(
+        signal
+        for signal, value in (("difficulty", spec.difficulty), ("stakes", spec.stakes))
+        if value is None
+    )
+    used_signals = tuple(
+        signal
+        for signal, value in (("difficulty", spec.difficulty), ("stakes", spec.stakes))
+        if value is not None
+    ) + ("provenance", "confidence")
+    minimum_effort = "high" if "high" in {difficulty, stakes} else None
+    can_cheapen = (
+        not missing_signals
+        and difficulty == "low"
+        and stakes == "low"
+        and spec.provenance in {"declared", "measured"}
+        and spec.confidence == "high"
+    )
+
+    if missing_signals:
+        rationale = f"missing {' and '.join(missing_signals)}; base effort preserved"
+    elif minimum_effort is not None:
+        high_axes = " and ".join(
+            axis
+            for axis, value in (("difficulty", difficulty), ("stakes", stakes))
+            if value == "high"
+        )
+        rationale = f"high {high_axes} requires at least high effort"
+    elif can_cheapen:
+        rationale = (
+            f"low difficulty and stakes with {spec.provenance} high-confidence evidence; "
+            "one-notch reduction authorized"
+        )
+    elif spec.provenance in {"inferred", "absent"}:
+        rationale = (
+            f"{spec.provenance} provenance cannot authorize cheapening; base effort preserved"
+        )
+    elif spec.confidence != "high":
+        rationale = (
+            f"{spec.confidence} confidence cannot authorize cheapening; base effort preserved"
+        )
+    else:
+        rationale = "assessment does not authorize cheapening; base effort preserved"
+
+    return InvestmentAssessment(
+        difficulty=difficulty,
+        stakes=stakes,
+        provenance=spec.provenance,
+        confidence=spec.confidence,
+        used_signals=used_signals,
+        missing_signals=missing_signals,
+        can_cheapen=can_cheapen,
+        minimum_effort=minimum_effort,
+        rationale=rationale,
+    )
+
+
+def _apply_investment_policy(level: str, assessment: InvestmentAssessment | None) -> str:
+    if assessment is None:
+        return level
+    if assessment.can_cheapen and level in EFFORT_LADDER:
+        current_index = EFFORT_LADDER.index(level)
+        floor_index = EFFORT_LADDER.index(DEFAULT_EFFORT_FLOOR)
+        if current_index > floor_index:
+            level = EFFORT_LADDER[current_index - 1]
+    if assessment.minimum_effort in EFFORT_LADDER and level in EFFORT_LADDER:
+        level = EFFORT_LADDER[
+            max(EFFORT_LADDER.index(level), EFFORT_LADDER.index(assessment.minimum_effort))
+        ]
+    return level
+
+
 def decide_effort(
     reasoning_effort_support: ParamSupport,
     *,
@@ -103,6 +228,7 @@ def decide_effort(
     retry_attempt: int = 0,
     ceiling: str = DEFAULT_EFFORT_CEILING,
     enforceable_levels: frozenset[str] | None = None,
+    investment_assessment: InvestmentAssessment | None = None,
 ) -> EffortDecision:
     """Decide the per-unit effort level and whether the runtime will enforce it.
 
@@ -125,6 +251,8 @@ def decide_effort(
             outside it is recorded as *advised* even on a NATIVE runtime, because the
             backend silently drops a level it does not accept (Codex ignores ``max``,
             Claude has no ``minimal``). ``None`` imposes no per-level restriction.
+        investment_assessment: Optional normalized AC assessment. It may authorize
+            one lower notch or impose a minimum effort before retry escalation.
 
     Returns:
         An :class:`EffortDecision`. ``mode`` is ``"enforced"`` only when the runtime
@@ -141,7 +269,7 @@ def decide_effort(
     if not base_effort:
         return EffortDecision(level=None, mode=EFFORT_MODE_NONE)
 
-    level = base_effort
+    level = _apply_investment_policy(base_effort, investment_assessment)
     if retry_attempt >= EFFORT_RAISE_RETRY_THRESHOLD:
         level = raise_one_notch(level, ceiling=ceiling)
     enforces_level = enforceable_levels is None or level in enforceable_levels
@@ -160,6 +288,7 @@ def resolve_execute_effort(
     is_decomposed_child: bool,
     retry_attempt: int = 0,
     ceiling: str = DEFAULT_EFFORT_CEILING,
+    investment_assessment: InvestmentAssessment | None = None,
 ) -> tuple[EffortDecision, dict[str, str]]:
     """Decide effort for one ``execute_task`` call and build its kwargs.
 
@@ -170,8 +299,8 @@ def resolve_execute_effort(
     runtime enforces effort**, so a runtime that does not accept the parameter is
     never handed it.
 
-    ``retry_attempt`` is forwarded so a hard AC on its second-or-later retry earns
-    one extra notch of reasoning (see :func:`decide_effort`).
+    ``investment_assessment`` is applied before ``retry_attempt``, so runtime
+    failures can only raise later attempts (see :func:`decide_effort`).
 
     Returns:
         ``(decision, execute_kwargs)``. ``execute_kwargs`` is ``{"reasoning_effort":
@@ -193,6 +322,7 @@ def resolve_execute_effort(
         retry_attempt=retry_attempt,
         ceiling=ceiling,
         enforceable_levels=enforceable_levels,
+        investment_assessment=investment_assessment,
     )
     kwargs = {"reasoning_effort": decision.level} if decision.is_enforced else {}
     return decision, kwargs

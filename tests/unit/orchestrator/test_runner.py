@@ -381,6 +381,12 @@ class TestOrchestratorRunner:
         assert data["call_site"] == "runner"
         assert data["effort_level"] == "high"
         assert data["effort_mode"] == "enforced"
+        assessed = [e for e in appended if e.type == "execution.ac.investment_assessed"]
+        assert len(assessed) == 1
+        assert "ac_id" not in assessed[0].data
+        assert assessed[0].data["provenance"] == "absent"
+        assert assessed[0].data["can_cheapen"] is False
+        assert assessed[0].data["call_site"] == "runner"
 
     @pytest.mark.asyncio
     async def test_route_call_effort_persist_failure_does_not_abort(

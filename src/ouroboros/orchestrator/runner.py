@@ -740,8 +740,9 @@ class OrchestratorRunner:
         model-tier routing. Returns the merged execute_task kwargs (empty unless
         the runtime enforces the respective parameter).
 
-        It also records an ``execution.ac.effort_routed`` event (and, when a model
-        is decided, an ``execution.ac.model_routed`` event) for OBSERVABILITY — so
+        It records ``execution.ac.investment_assessed`` plus the applicable
+        ``execution.ac.effort_routed`` and ``execution.ac.model_routed`` events for
+        OBSERVABILITY — so
         a direct run's routing is visible in the event stream exactly like the
         parallel path's. These events are deliberately NOT a frugality-proof
         contribution: a direct run is a single top-level unit
@@ -753,25 +754,49 @@ class OrchestratorRunner:
         direct call has nothing to say about. ``call_site="runner"`` marks the
         origin so the two emission paths are distinguishable in the stream.
         """
-        from ouroboros.orchestrator.effort_routing import resolve_execute_effort
+        from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
         from ouroboros.orchestrator.model_routing import resolve_execute_model
 
+        investment_assessment = assess_investment(None)
         decision, kwargs = resolve_execute_effort(
             self._adapter,
             base_effort=self._reasoning_effort,
             is_decomposed_child=False,
+            investment_assessment=investment_assessment,
         )
         model_decision, model_kwargs = resolve_execute_model(
             self._adapter,
             router=self._model_router,
             is_decomposed_child=False,
+            decomposition_trustworthy=False,
         )
         # Merge the model override; kwargs carry a parameter ONLY for runtimes that
         # enforce it, so an advised runtime is never handed one.
         kwargs = {**kwargs, **model_kwargs}
-        if decision.level is not None:
-            from ouroboros.events.base import BaseEvent
+        from ouroboros.events.base import BaseEvent
 
+        try:
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.ac.investment_assessed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id or "",
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "is_decomposed_child": False,
+                        **investment_assessment.to_event_data(),
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "call_site": "runner",
+                    },
+                )
+            )
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.investment_assessed.persist_failed",
+                error=str(exc),
+            )
+        if decision.level is not None:
             # Observability-only: this event must never make runtime dispatch/resume
             # depend on event-store health. _route_call_effort runs BEFORE
             # execute_task on the direct and resume paths, so a raw append would turn
@@ -791,6 +816,7 @@ class OrchestratorRunner:
                             "effort_mode": decision.mode,
                             "base_reasoning_effort": self._reasoning_effort,
                             "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "investment_assessment": investment_assessment.to_event_data(),
                             "call_site": "runner",
                         },
                     )
@@ -803,8 +829,6 @@ class OrchestratorRunner:
                     effort_mode=decision.mode,
                 )
         if model_decision.model is not None:
-            from ouroboros.events.base import BaseEvent
-
             # Same observe-only contract as the effort event above: a degraded
             # event store must degrade to a warning, never fail dispatch/resume.
             try:
@@ -817,6 +841,8 @@ class OrchestratorRunner:
                             "execution_id": execution_id,
                             "session_id": session_id,
                             "is_decomposed_child": False,
+                            "decomposition_trustworthy": False,
+                            "child_downgrade_authorized": False,
                             "model_tier": model_decision.tier,
                             "model": model_decision.model,
                             "model_mode": model_decision.mode,

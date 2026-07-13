@@ -575,25 +575,19 @@ async def test_retry_top_level_walks_whole_ladder_to_frontier(tmp_path: Any) -> 
 
 
 @pytest.mark.asyncio
-async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> None:
-    """A decomposed CHILD (routed one tier below top-level) must also walk its
-    whole ladder to ``frontier`` — the finding's expectation.
+async def test_retry_untrusted_decomposed_child_reaches_retry2_frontier(tmp_path: Any) -> None:
+    """A live decomposed child has no trust issuer and starts at the base tier.
 
     The batch retry loop carries top-level indices; the child start tier is not a
     loop input but a property of the routing seam (``resolve_execute_model`` /
-    ``decide_model`` with ``is_decomposed_child=True``). A decomposed parent
-    re-runs its children — routed one tier cheaper and sharing the parent's retry
-    counter — on every retry, so the early-stop predicate reads ``is_decomposed``
-    off the dispatched result and probes the CHILD ladder for a pending escalation.
-    This mirrors reality by returning a decomposed failing result and computing the
-    child tier the loop's per-attempt ``retry_attempt`` would route to, exactly as
-    the executor does inside ``_execute_single_ac``.
+    ``decide_model``). Child status alone is insufficient to lower, so the
+    early-stop probe must use the base-tier ladder while issue #1466 has no live
+    deterministic trust producer.
 
     ac_retry_attempts=3, threshold=2, identical failure class every attempt. The
-    child ladder is frugal, frugal, standard, frontier (retry 0..3), so reaching
-    ``frontier`` requires a 4th dispatch at retry 3. The ladder-truth predicate
-    keeps dispatching while the next retry resolves to a stronger enforced model
-    and resumes early-stop only once the frontier ceiling is reached.
+    live ladder is standard, standard, frontier (retry 0..2). The ladder-truth
+    predicate keeps dispatching through that enforced raise, then resumes
+    early-stop once the frontier ceiling is reached.
     """
     executor = _native_escalation_executor(tmp_path, ac_retry_attempts=3)
     router = executor._model_router
@@ -604,8 +598,7 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
     routed_tiers: list[str | None] = []
 
     def _decomposed_fail() -> ACExecutionResult:
-        # A decomposed parent whose children (routed one tier cheaper) failed:
-        # the predicate keys off ``is_decomposed`` to probe the child ladder.
+        # A decomposed parent whose untrusted children failed.
         base = _fail(0, "EVIDENCE_MISSING")
         return replace(base, is_decomposed=True)
 
@@ -616,6 +609,7 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
                 ParamSupport.NATIVE,
                 router=router,
                 is_decomposed_child=True,
+                decomposition_trustworthy=False,
                 retry_attempt=kwargs["ac_retry_attempts"][0],
             ).tier
         )
@@ -636,9 +630,10 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
         execution_counters=None,
     )
 
-    # The child is re-dispatched through retry 3 so its ladder reaches the
+    # The child is re-dispatched through retry 2 so the base ladder reaches the
     # frontier ceiling despite the repeated failure class.
-    assert calls == [[0], [0], [0], [0]]
+    assert calls == [[0], [0], [0]]
+    assert ac_retry_attempts[0] == 2
     assert routed_tiers[-1] == "frontier"
 
 

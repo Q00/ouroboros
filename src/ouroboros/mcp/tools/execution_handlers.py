@@ -552,8 +552,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     type=ToolInputType.STRING,
                     description=(
                         "Model-tier routing: small/medium/large → frugal/standard/frontier "
-                        "execution tier (decomposed children run one tier below; retries "
-                        "escalate). Default: medium"
+                        "execution tier (trusted decomposed children may run one tier below; "
+                        "retries escalate). Default: medium"
                     ),
                     required=False,
                     enum=("small", "medium", "large"),

@@ -34,9 +34,9 @@ DEFAULT_OPUS_MODEL = "claude-opus-4-8"
 # Sonnet release.
 DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 
-# Frugal execution tier for decomposed children (model-tier routing): the RLM
-# thesis says a verified-MECE child is easy enough to run on the cheapest model,
-# so decomposed leaves route here while top-level ACs keep the Sonnet default.
+# Frugal execution tier for explicitly trusted decomposed children. Child status
+# alone stays at the base tier; a deterministic trust issuer must authorize this
+# RLM discount while top-level ACs keep the Sonnet default.
 # Anthropic-direct API id. Bump on each new Haiku release.
 DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
 

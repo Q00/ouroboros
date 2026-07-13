@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.core.seed import InvestmentSpec
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -113,7 +114,17 @@ def _effort_events(events: list) -> list:
     return [e for e in events if getattr(e, "type", None) == "execution.ac.effort_routed"]
 
 
-async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool, retry_attempt: int = 0):
+def _investment_events(events: list) -> list:
+    return [e for e in events if getattr(e, "type", None) == "execution.ac.investment_assessed"]
+
+
+async def _run_one_ac(
+    executor: ParallelACExecutor,
+    *,
+    is_sub_ac: bool,
+    retry_attempt: int = 0,
+    investment_spec: InvestmentSpec | None = None,
+):
     return await executor._execute_atomic_ac(
         ac_index=1,
         ac_content="Implement a thing",
@@ -128,6 +139,7 @@ async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool, retry_at
         parent_ac_index=0 if is_sub_ac else None,
         sub_ac_index=0 if is_sub_ac else None,
         retry_attempt=retry_attempt,
+        investment_spec=investment_spec,
     )
 
 
@@ -197,6 +209,85 @@ async def test_second_retry_raises_effort_one_notch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_authorized_low_investment_lowers_effort_and_records_exact_inputs() -> None:
+    store, events = _capturing_event_store()
+    runtime = _EnforcedRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="high",
+    )
+    investment = InvestmentSpec(
+        difficulty="low",
+        stakes="low",
+        provenance="declared",
+        confidence="high",
+    )
+
+    await _run_one_ac(executor, is_sub_ac=False, investment_spec=investment)
+
+    assessed = _investment_events(events)
+    assert len(assessed) == 1
+    assert assessed[0].data["difficulty"] == "low"
+    assert assessed[0].data["stakes"] == "low"
+    assert assessed[0].data["provenance"] == "declared"
+    assert assessed[0].data["confidence"] == "high"
+    assert assessed[0].data["can_cheapen"] is True
+    assert assessed[0].data["used_signals"] == [
+        "difficulty",
+        "stakes",
+        "provenance",
+        "confidence",
+    ]
+    routed = _effort_events(events)[0].data
+    assert routed["effort_level"] == "medium"
+    assert routed["investment_assessment"] == {
+        key: assessed[0].data[key]
+        for key in (
+            "difficulty",
+            "stakes",
+            "provenance",
+            "confidence",
+            "used_signals",
+            "missing_signals",
+            "can_cheapen",
+            "minimum_effort",
+            "rationale",
+        )
+    }
+    assert runtime.received_effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_high_stakes_short_ac_raises_to_high_effort() -> None:
+    store, events = _capturing_event_store()
+    runtime = _EnforcedRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="low",
+    )
+
+    await _run_one_ac(
+        executor,
+        is_sub_ac=False,
+        investment_spec=InvestmentSpec(
+            difficulty="low",
+            stakes="high",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+
+    assert _effort_events(events)[0].data["effort_level"] == "high"
+    assert runtime.received_effort == "high"
+
+
+@pytest.mark.asyncio
 async def test_advised_runtime_records_advised_and_does_not_pass_kwarg() -> None:
     store, events = _capturing_event_store()
     runtime = _AdvisedRuntime()  # no capabilities, no effort kwarg
@@ -254,7 +345,7 @@ async def test_effort_event_store_failure_does_not_abort_ac() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dormant_when_no_base_effort_emits_no_event() -> None:
+async def test_dormant_effort_still_emits_absent_investment_assessment() -> None:
     store, events = _capturing_event_store()
     executor = ParallelACExecutor(
         adapter=_EnforcedRuntime(),
@@ -267,3 +358,8 @@ async def test_dormant_when_no_base_effort_emits_no_event() -> None:
     await _run_one_ac(executor, is_sub_ac=False)
 
     assert _effort_events(events) == []
+    assessed = _investment_events(events)
+    assert len(assessed) == 1
+    assert assessed[0].data["provenance"] == "absent"
+    assert assessed[0].data["can_cheapen"] is False
+    assert assessed[0].data["missing_signals"] == ["difficulty", "stakes"]

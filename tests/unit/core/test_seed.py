@@ -14,6 +14,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
+    InvestmentSpec,
     OntologyField,
     OntologySchema,
     Seed,
@@ -469,6 +470,72 @@ class TestSeed:
             "Tasks can be created",
             "Tasks can be listed",
         ]
+        assert all(criterion.investment is None for criterion in seed.acceptance_criteria)
+
+    def test_seed_acceptance_criteria_serialize_optional_investment_metadata(self) -> None:
+        """Investment metadata is additive and keeps authority explicit."""
+        seed = Seed(
+            goal="Build a CLI task manager",
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Rotate production payment signing keys",
+                    investment=InvestmentSpec(
+                        difficulty="medium",
+                        stakes="high",
+                        provenance="declared",
+                        confidence="high",
+                    ),
+                ),
+            ),
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.15),
+        )
+
+        criterion = seed.acceptance_criteria[0]
+        assert criterion.investment is not None
+        assert criterion.investment.stakes == "high"
+        assert seed.to_dict()["acceptance_criteria"] == [
+            {
+                "description": "Rotate production payment signing keys",
+                "investment": {
+                    "confidence": "high",
+                    "difficulty": "medium",
+                    "provenance": "declared",
+                    "stakes": "high",
+                },
+            }
+        ]
+
+    def test_investment_defaults_cannot_authorize_cheaper_execution(self) -> None:
+        """Omitted confidence stays low rather than silently becoming trusted."""
+        spec = InvestmentSpec(difficulty="low", stakes="low")
+
+        assert spec.provenance == "declared"
+        assert spec.confidence == "low"
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("difficulty", "trivial"),
+            ("stakes", "critical"),
+            ("provenance", "guessed"),
+            ("confidence", "certain"),
+        ],
+    )
+    def test_investment_rejects_unbounded_vocabulary(self, field: str, value: str) -> None:
+        data = {
+            "difficulty": "low",
+            "stakes": "low",
+            "provenance": "declared",
+            "confidence": "high",
+            field: value,
+        }
+
+        with pytest.raises(PydanticValidationError):
+            InvestmentSpec.model_validate(data)
 
     def test_seed_acceptance_criteria_serialize_structured_contract(self) -> None:
         """Contract-bearing ACs dump only populated fields."""

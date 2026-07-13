@@ -82,6 +82,8 @@ allow-list, and `permission_mode`. Each is one of:
 | `system_prompt` | native | translated | translated | translated | translated | translated | translated | translated | translated |
 | `permission_mode` | native | native | native | native | native | translated | translated | ignored | translated |
 | `tools` (allow-list) | native | translated | translated | translated | translated | translated | translated | translated | translated |
+| `reasoning_effort` | native | native | ignored | ignored | native | ignored | ignored | ignored | ignored |
+| `model` (per call) | native | native | ignored | ignored | ignored | ignored | ignored | ignored | ignored |
 
 > Most CLI runtimes compose the system prompt **into the user message** (e.g.
 > `## System Instructions\n...`) rather than passing a native system directive. Codex,
@@ -104,6 +106,14 @@ or `orchestrator.parallel_executor.param_degraded`) so the degradation is visibl
 silent. The shared announcer's fallback event is
 `orchestrator.runtime_params.param_degraded`. This is **informational only** — it does not
 change what is passed to the runtime.
+
+Per-AC investment decisions are separately observable. The executor emits
+`execution.ac.investment_assessed` for normalized difficulty/stakes authority,
+`execution.ac.effort_routed` for the enforced or advised effort result, and
+`execution.ac.model_routed` for model-tier resolution. A decomposed child cannot
+lower its model tier unless the routing call receives explicit trusted
+decomposition authorization. Current live decomposition supplies no such issuer,
+so live children stay at the base tier.
 
 ### Integration Surface (UX differences)
 

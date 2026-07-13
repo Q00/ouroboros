@@ -15,6 +15,8 @@ Event Types:
     - orchestrator.tool.called: Tool was invoked by agent
     - orchestrator.policy.capabilities.evaluated: Batched per-capability
       policy decisions for a session-scoped policy evaluation
+    - execution.ac.investment_assessed: Exact AC investment authority used by
+      effort policy
 """
 
 from __future__ import annotations

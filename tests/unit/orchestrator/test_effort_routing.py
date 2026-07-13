@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from ouroboros.core.seed import InvestmentSpec
 from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.effort_routing import (
     EFFORT_LADDER,
     EffortDecision,
+    InvestmentAssessment,
+    assess_investment,
     decide_effort,
     lower_one_notch,
     raise_one_notch,
@@ -110,6 +113,152 @@ class TestDecideEffort:
             ParamSupport.NATIVE, base_effort="low", is_decomposed_child=True, retry_attempt=2
         )
         assert d.level == "medium"
+
+
+class TestInvestmentAssessment:
+    def test_absent_metadata_is_unknown_and_cannot_cheapen(self) -> None:
+        assessment = assess_investment(None)
+
+        assert assessment == InvestmentAssessment(
+            difficulty="unknown",
+            stakes="unknown",
+            provenance="absent",
+            confidence="low",
+            used_signals=(),
+            missing_signals=("difficulty", "stakes"),
+            can_cheapen=False,
+            minimum_effort=None,
+            rationale="missing difficulty and stakes; base effort preserved",
+        )
+
+    def test_declared_low_axes_require_high_confidence_to_cheapen(self) -> None:
+        low_confidence = assess_investment(
+            InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="declared",
+                confidence="low",
+            )
+        )
+        high_confidence = assess_investment(
+            InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="declared",
+                confidence="high",
+            )
+        )
+
+        assert low_confidence.can_cheapen is False
+        assert high_confidence.can_cheapen is True
+
+    @pytest.mark.parametrize("provenance", ["inferred", "absent"])
+    def test_inferred_or_absent_inputs_never_authorize_cheaper_execution(
+        self, provenance: str
+    ) -> None:
+        assessment = assess_investment(
+            InvestmentSpec.model_construct(
+                difficulty="low",
+                stakes="low",
+                provenance=provenance,
+                confidence="high",
+            )
+        )
+
+        assert assessment.can_cheapen is False
+
+    def test_high_axis_imposes_high_effort_floor(self) -> None:
+        assessment = assess_investment(
+            InvestmentSpec(
+                difficulty="low",
+                stakes="high",
+                provenance="declared",
+                confidence="high",
+            )
+        )
+        decision = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="low",
+            is_decomposed_child=False,
+            investment_assessment=assessment,
+        )
+
+        assert assessment.minimum_effort == "high"
+        assert assessment.can_cheapen is False
+        assert decision.level == "high"
+
+    def test_authorized_low_investment_lowers_exactly_one_notch(self) -> None:
+        assessment = assess_investment(
+            InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="measured",
+                confidence="high",
+            )
+        )
+        decision = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="high",
+            is_decomposed_child=False,
+            investment_assessment=assessment,
+        )
+
+        assert decision.level == "medium"
+
+    def test_authorized_low_investment_never_raises_an_already_minimal_base(self) -> None:
+        assessment = assess_investment(
+            InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="declared",
+                confidence="high",
+            )
+        )
+
+        decision = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="minimal",
+            is_decomposed_child=False,
+            investment_assessment=assessment,
+        )
+
+        assert decision.level == "minimal"
+
+    def test_retry_raise_applies_after_investment_policy(self) -> None:
+        assessment = assess_investment(
+            InvestmentSpec(
+                difficulty="low",
+                stakes="high",
+                provenance="declared",
+                confidence="high",
+            )
+        )
+        decision = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="medium",
+            is_decomposed_child=False,
+            retry_attempt=2,
+            investment_assessment=assessment,
+        )
+
+        assert decision.level == "xhigh"
+
+    def test_no_base_effort_keeps_routing_dormant_even_with_assessment(self) -> None:
+        assessment = assess_investment(
+            InvestmentSpec(
+                difficulty="high",
+                stakes="high",
+                provenance="declared",
+                confidence="high",
+            )
+        )
+
+        assert decide_effort(
+            ParamSupport.NATIVE,
+            base_effort=None,
+            is_decomposed_child=False,
+            investment_assessment=assessment,
+        ) == EffortDecision(level=None, mode="none")
 
 
 class TestDecideEffortEnforceableLevels:

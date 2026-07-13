@@ -333,6 +333,29 @@ acceptance_criteria:
   - "Create app entry point that integrates auth and logging"
 ```
 
+## Optional Investment Metadata
+
+Use structured acceptance criteria when the executor needs explicit difficulty
+or cost-of-being-wrong authority. This metadata is optional; legacy string ACs
+remain valid.
+
+```yaml
+acceptance_criteria:
+  - description: "Rotate production payment signing keys"
+    verify_command: "pytest -q tests/security/test_key_rotation.py"
+    investment:
+      difficulty: medium
+      stakes: high
+      provenance: declared
+      confidence: high
+```
+
+`difficulty` and `stakes` accept `low`, `medium`, or `high`. `provenance`
+accepts `declared`, `measured`, `inferred`, or `absent`; `confidence` accepts
+`low`, `medium`, or `high` and defaults to `low`. Missing, inferred, or
+low-confidence metadata cannot authorize cheaper execution. See the
+[investment assessment RFC](../rfc/spend-estimator.md) for policy precedence.
+
 ## Validation
 
 > **Note — `--dry-run` is not functional in the current implementation.** In the default orchestrator mode (`--orchestrator` is `True` by default), the `--dry-run` flag is silently ignored and execution proceeds normally. In non-orchestrator mode (`--no-orchestrator`), `--dry-run` prints a placeholder message without performing any YAML or schema checks. This limitation is tracked for a future release.
