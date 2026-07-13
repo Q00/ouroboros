@@ -483,7 +483,7 @@ if [ "$HAS_UV" = true ]; then
       UV_ARGS+=(
         --with "mcp==1.28.1"
         --with "claude-agent-sdk==0.2.110"
-        --with "anthropic==0.112.0"
+        --with "anthropic==0.116.0"
       )
       ;;
     "[mcp,tui]")
@@ -493,14 +493,14 @@ if [ "$HAS_UV" = true ]; then
       UV_ARGS+=(
         --with "mcp==1.28.1"
         --with "claude-agent-sdk==0.2.110"
-        --with "anthropic==0.112.0"
-        --with "litellm==1.90.0"
+        --with "anthropic==0.116.0"
+        --with "litellm==1.91.0"
       )
       ;;
   esac
   # Every install ships the settings GUI (`ouroboros config`).
   UV_ARGS+=(
-    --with "textual==8.2.7"
+    --with "textual==8.2.8"
     --with "textual-serve==1.1.3"
   )
   uv "${UV_ARGS[@]}"
