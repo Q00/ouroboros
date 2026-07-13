@@ -27,6 +27,7 @@ from ouroboros.tui.events import (
     DriftUpdated,
     ExecutionUpdated,
     FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     LogMessage,
     PauseRequested,
     PhaseChanged,
@@ -37,6 +38,7 @@ from ouroboros.tui.events import (
     TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
+    format_frugality_retrospective_summary,
     format_frugality_summary,
 )
 from ouroboros.tui.screens import (
@@ -576,6 +578,8 @@ class OuroborosTUI(App[None]):
         self._state.tokens_by_node.clear()
         self._state.run_total_tokens = 0.0
         self._state.frugality_summary = None
+        self._state.frugality_retrospective = None
+        self._state.frugality_retrospective_summary = None
         self._state.add_log("info", "tui.main", f"Monitoring execution: {execution_id}")
         # Forward to logs screen
         try:
@@ -768,6 +772,18 @@ class OuroborosTUI(App[None]):
                 message.status, message.token_reduction_pct
             )
         self._forward_to_dashboard("on_frugality_proof_evaluated", message)
+
+    def on_frugality_retrospective_reported(
+        self,
+        message: FrugalityRetrospectiveReported,
+    ) -> None:
+        """Fold the execution-finalized evidence report once for live display."""
+        if self._state.frugality_retrospective is None:
+            self._state.frugality_retrospective = dict(message.summary)
+            self._state.frugality_retrospective_summary = format_frugality_retrospective_summary(
+                message.summary
+            )
+        self._forward_to_dashboard("on_frugality_retrospective_reported", message)
 
     def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
         # Update state with AC tree from workflow progress (smart merge)
