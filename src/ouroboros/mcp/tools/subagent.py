@@ -1153,6 +1153,8 @@ def build_interview_subagent(
     answer: str | None = None,
     cwd: str | None = None,
     transcript: str = "",
+    turn_context: Any | None = None,
+    adapter_question: str | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for Socratic interview.
 
@@ -1178,6 +1180,16 @@ def build_interview_subagent(
     if transcript:
         bounded_transcript = _compact_interview_transcript(transcript)
         transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
+
+    adapter_section = ""
+    if action != "start" and adapter_question:
+        adapter_section = (
+            "\n## Required Reference/Glossary Adapter Turn\n"
+            "Ask the following question exactly before any general Socratic question. "
+            "Treat glossary/reference material as vocabulary or contrast only, never "
+            "as a requirement or acceptance criterion.\n\n"
+            f"{adapter_question}\n"
+        )
 
     bounded_initial_context = _truncate_head(
         initial_context,
@@ -1230,6 +1242,7 @@ and ask the next clarifying question or declare ready only after the Seed-ready 
 {transcript_section}
 ## User's Latest Answer
 {bounded_answer}
+{adapter_section}
 
 Continue the interview."""
 
@@ -1245,6 +1258,7 @@ Review the conversation history and continue from where we left off.
 {transcript_section}
 {seed_ready_guard}
 {plugin_question_advisory}
+{adapter_section}
 
 ## Action: {action}
 
@@ -1256,6 +1270,12 @@ Continue the interview."""
         "initial_context": initial_context,
         "answer": answer,
         "cwd": cwd,
+        "turn_context": (
+            turn_context.model_dump(mode="json")
+            if hasattr(turn_context, "model_dump")
+            else turn_context
+        ),
+        "adapter_question": adapter_question,
         "question_advisory_strategy": "plugin_child_question_first_advisory",
     }
 
@@ -1507,6 +1527,7 @@ def build_generate_seed_subagent(
     transcript: str = "",
     client_gates: tuple[str, ...] = (),
     force: bool = False,
+    requirement_distillation: Any | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for seed generation from interview.
 
@@ -1537,6 +1558,27 @@ def build_generate_seed_subagent(
             "on ambiguity grounds.\n"
         )
 
+    distillation_note = ""
+    distillation_payload: Any | None = None
+    if requirement_distillation is not None:
+        from ouroboros.core.requirement_candidate import evaluate_promotion
+
+        promotion = evaluate_promotion(requirement_distillation)
+        distillation_payload = requirement_distillation.model_dump(mode="json")
+        policy_payload = {
+            "promoted": [candidate.model_dump(mode="json") for candidate in promotion.promoted],
+            "omitted": [candidate.model_dump(mode="json") for candidate in promotion.omitted],
+            "blockers": [decision.model_dump(mode="json") for decision in promotion.blockers],
+        }
+        distillation_note = (
+            "\n## Deterministic Requirement Promotion Policy\n"
+            "The server has already classified candidate authority. Use only promoted "
+            "candidates as hard requirements or acceptance criteria. Omitted candidates "
+            "are hypotheses and MUST NOT be promoted. Do not invent additional acceptance "
+            "criteria from references or model inference.\n\n"
+            f"```json\n{_bounded_json(policy_payload, 12000)}\n```\n"
+        )
+
     prompt = f"""{system_prompt}
 
 ---
@@ -1549,7 +1591,7 @@ criteria, ontology schema, evaluation principles, and exit conditions.
 
 ## Session ID
 {session_id}
-{ambiguity_note}{transcript_section}{force_note}
+{ambiguity_note}{transcript_section}{force_note}{distillation_note}
 Extract all requirements from the interview conversation and produce a
 complete YAML seed specification. The seed should be precise enough for
 autonomous execution."""
@@ -1559,6 +1601,7 @@ autonomous execution."""
         "ambiguity_score": ambiguity_score,
         "client_gates": client_gates,
         "force": force,
+        "requirement_distillation": distillation_payload,
     }
 
     return build_subagent_payload(

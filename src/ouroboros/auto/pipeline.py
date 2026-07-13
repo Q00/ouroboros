@@ -52,6 +52,9 @@ from ouroboros.auto.recovery_plan import (
     build_lateral_recovery_plan,
     build_manual_recovery_plan,
 )
+from ouroboros.auto.reference_candidate_bridge import (
+    apply_requirement_distillation_to_ledger,
+)
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -968,6 +971,27 @@ class AutoPipeline:
                     if not isinstance(seed, Seed):
                         msg = f"seed generator returned {type(seed).__name__}, expected Seed"
                         raise TypeError(msg)
+                    distillation = getattr(
+                        self.seed_generator,
+                        "last_requirement_distillation",
+                        None,
+                    )
+                    if distillation is not None:
+                        bridge_result = apply_requirement_distillation_to_ledger(
+                            distillation,
+                            ledger,
+                        )
+                        state.ledger = ledger.to_dict()
+                        if bridge_result.blockers:
+                            blocker = bridge_result.blockers[0]
+                            state.mark_blocked(
+                                "Requirement candidate confirmation is required before "
+                                f"auto Seed finalization: {blocker.candidate_id}",
+                                tool_name="reference_candidate_bridge",
+                                error_code=blocker.code,
+                            )
+                            self._save(state)
+                            return self._result(state, ledger, blocker=state.last_error)
                     seed = self._record_generated_seed(state, ledger, seed)
                 except TimeoutError as exc:
                     if self._enforce_deadline(state):

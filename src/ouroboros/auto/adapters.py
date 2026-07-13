@@ -15,6 +15,7 @@ from uuid import uuid4
 import yaml
 
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
+from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
@@ -186,6 +187,7 @@ class HandlerSeedGenerator:
 
     def __init__(self, handler: GenerateSeedHandler) -> None:
         self.handler = handler
+        self.last_requirement_distillation: RequirementDistillation | None = None
 
     async def __call__(self, session_id: str, *, force: bool = False) -> Seed:
         # AutoPipeline reaches this adapter only after its own interview driver
@@ -210,6 +212,12 @@ class HandlerSeedGenerator:
         result = _unwrap(
             await self.handler.handle(arguments),
             tool_name="ouroboros_generate_seed",
+        )
+        raw_distillation = result.meta.get("requirement_distillation")
+        self.last_requirement_distillation = (
+            RequirementDistillation.model_validate(raw_distillation)
+            if isinstance(raw_distillation, dict)
+            else None
         )
         text = result.content[0].text if result.content else ""
         seed_yaml = _extract_seed_yaml(text)
