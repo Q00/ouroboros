@@ -72,6 +72,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   <span class="meta" id="m-phase"></span>
   <span class="meta" id="m-tokens"></span>
   <span class="meta" id="m-frugality"></span>
+  <span class="meta" id="m-frugality-retro"></span>
   <div id="legend"></div>
 </header>
 <div id="board"></div>
@@ -99,6 +100,13 @@ function fmtTokens(n) {
   if (v >= 1000) return (v / 1000).toFixed(1).replace(/\\.0$/, "") + "k tok";
   return Math.round(v) + " tok";
 }
+function fmtEvidenceTokens(n) {
+  if (n == null) return "0 tok";
+  const v = Number(n);
+  if (!isFinite(v) || v < 0) return "0 tok";
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\\.0$/, "") + "k tok";
+  return Math.round(v) + " tok";
+}
 
 function render(board) {
   const { meta, columns, providers } = board;
@@ -113,6 +121,13 @@ function render(board) {
     ? "Frugality: " + fr.status
         + (fr.token_reduction_pct != null ? ` (${Number(fr.token_reduction_pct).toFixed(1)}% ↓)` : "")
         + (fr.reason ? " — " + String(fr.reason).slice(0, 80) : "")
+    : "";
+  const retro = meta.frugality_retrospective;
+  const cov = retro && retro.coverage;
+  document.getElementById("m-frugality-retro").textContent = retro && cov
+    ? "Evidence: retry " + fmtEvidenceTokens(retro.retry_associated_spend)
+        + " · unaccepted " + fmtEvidenceTokens(retro.unaccepted_spend)
+        + ` · ${cov.measured_attempts} measured/${cov.unknown_attempts} unknown/${cov.invalid_attempts} invalid`
     : "";
   // legend
   const legend = document.getElementById("legend");

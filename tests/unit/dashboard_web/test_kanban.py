@@ -335,6 +335,48 @@ class TestFrugalityTelemetry:
         )
         assert board["meta"]["frugality"] == {"status": "proven", "reason": "ok"}
 
+    def test_frugality_retrospective_summary_reaches_meta(self) -> None:
+        board = reduce_board(
+            [
+                _ev(
+                    "execution.frugality_retrospective.reported",
+                    retry_associated_spend=40.0,
+                    unaccepted_spend=100.0,
+                    coverage={
+                        "measured_attempts": 2,
+                        "unknown_attempts": 1,
+                        "invalid_attempts": 0,
+                    },
+                )
+            ]
+        )
+        assert board["meta"]["frugality_retrospective"] == {
+            "retry_associated_spend": 40.0,
+            "unaccepted_spend": 100.0,
+            "coverage": {
+                "measured_attempts": 2,
+                "unknown_attempts": 1,
+                "invalid_attempts": 0,
+            },
+        }
+
+    def test_frugality_retrospective_omits_malformed_summary(self) -> None:
+        board = reduce_board(
+            [
+                _ev(
+                    "execution.frugality_retrospective.reported",
+                    retry_associated_spend=-1.0,
+                    unaccepted_spend=100.0,
+                    coverage={
+                        "measured_attempts": 2,
+                        "unknown_attempts": 1,
+                        "invalid_attempts": 0,
+                    },
+                )
+            ]
+        )
+        assert board["meta"]["frugality_retrospective"] is None
+
 
 class TestToolAndMeta:
     def test_tool_activity_attached_to_node(self) -> None:

@@ -48,6 +48,7 @@ from ouroboros.tui.events import (
     DriftUpdated,
     ExecutionUpdated,
     FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     ParallelBatchCompleted,
     ParallelBatchStarted,
     PauseRequested,
@@ -57,6 +58,7 @@ from ouroboros.tui.events import (
     ToolCallCompleted,
     ToolCallStarted,
     WorkflowProgressUpdated,
+    format_frugality_retrospective_summary,
     format_frugality_summary,
 )
 
@@ -841,20 +843,21 @@ class DashboardScreenV3(Screen[None]):
                 run_total = self._state.run_total_tokens if self._state else 0.0
                 if run_total > 0:
                     parts.append(f"[dim]Σ {_compact_tokens(run_total)} tok[/]")
-                # Preserve a run-end frugality verdict already appended to the bar.
+                # Preserve run-end frugality evidence already appended to the bar.
                 verdict = self._frugality_verdict_suffix()
                 self._phase_bar.progress_text = "  ".join(parts) + verdict
 
     def _frugality_verdict_suffix(self) -> str:
-        """Return the ``⚖`` frugality verdict already on the bar, as an appendable suffix.
+        """Return frugality suffixes already on the bar, as an appendable suffix.
 
         Lets a live progress refresh rebuild the counter without dropping a
-        run-end verdict that landed earlier (the ``⚖`` glyph marks its start).
+        run-end verdict/evidence line that landed earlier.
         """
         if self._phase_bar is None:
             return ""
         current = self._phase_bar.progress_text
-        marker = current.find("⚖")
+        markers = [idx for idx in (current.find("⚖"), current.find("evidence ")) if idx >= 0]
+        marker = min(markers) if markers else -1
         return f"  {current[marker:]}" if marker >= 0 else ""
 
     def on_frugality_proof_evaluated(self, message: FrugalityProofEvaluated) -> None:
@@ -864,6 +867,17 @@ class DashboardScreenV3(Screen[None]):
         line = format_frugality_summary(message.status, message.token_reduction_pct)
         base = self._phase_bar.progress_text
         marker = base.find("⚖")
+        if marker >= 0:
+            base = base[:marker].rstrip()
+        self._phase_bar.progress_text = f"{base}  {line}" if base else line
+
+    def on_frugality_retrospective_reported(self, message: FrugalityRetrospectiveReported) -> None:
+        """Append the neutral run-end frugality evidence line to the phase bar."""
+        if self._phase_bar is None:
+            return
+        line = format_frugality_retrospective_summary(message)
+        base = self._phase_bar.progress_text
+        marker = base.find("evidence ")
         if marker >= 0:
             base = base[:marker].rstrip()
         self._phase_bar.progress_text = f"{base}  {line}" if base else line

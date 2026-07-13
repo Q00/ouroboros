@@ -31,8 +31,10 @@ class TestLivePage:
         assert "fmtTokens" in INDEX_HTML
         assert "m-tokens" in INDEX_HTML
         assert "m-frugality" in INDEX_HTML
+        assert "m-frugality-retro" in INDEX_HTML
         assert "c.model_tier" in INDEX_HTML
         assert "Frugality:" in INDEX_HTML
+        assert "Evidence:" in INDEX_HTML
 
     def test_index_html_polls_for_pending_run(self) -> None:
         # The daemon base URL is published before a run exists (auto flow links it

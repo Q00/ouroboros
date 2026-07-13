@@ -71,6 +71,30 @@ def _strict_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def strict_retry_attempt(data: Mapping) -> int | None:
+    """Return a valid retry-attempt index from an event payload, else ``None``.
+
+    Retry identity is part of the frugality evidence schema, not an optional
+    convenience. Defaulting a missing field to attempt zero lets malformed events
+    pair with a real final marker and manufacture complete evidence.
+    """
+    if "retry_attempt" not in data:
+        return None
+    value = data.get("retry_attempt")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def strict_root_ac_index(data: Mapping) -> int | None:
+    """Return a valid root AC index from the accepted frugality payload keys."""
+    for key in ("root_ac_index", "parent_ac_index", "ac_index"):
+        value = data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
+
+
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
 EVENT_MODEL_ROUTED = "execution.ac.model_routed"
@@ -273,26 +297,8 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         run = data.get("seed_run_id") or data.get("execution_id")
         return str(run) if run is not None else None
 
-    def retry_attempt(data: Mapping) -> int | None:
-        # Retry identity is part of the proof schema, not an optional legacy
-        # convenience. Defaulting a missing field to attempt zero lets malformed
-        # events pair with a real final marker and manufacture a complete row.
-        if "retry_attempt" not in data:
-            return None
-        value = data.get("retry_attempt")
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-        return value
-
-    def root_ac_index(data: Mapping) -> int | None:
-        for key in ("root_ac_index", "parent_ac_index", "ac_index"):
-            value = data.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                return value
-        return None
-
     def merge_root(row: dict, data: Mapping) -> None:
-        observed = root_ac_index(data)
+        observed = strict_root_ac_index(data)
         if observed is None:
             return
         current = row.get("root_ac_index")
@@ -324,8 +330,8 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         data = _event_data(event)
         if etype == EVENT_AC_OUTCOME_FINALIZED:
             run_key = run_anchor(data)
-            root_index = root_ac_index(data)
-            attempt = retry_attempt(data)
+            root_index = strict_root_ac_index(data)
+            attempt = strict_retry_attempt(data)
             success = _strict_bool(data.get("success"))
             is_decomposed = _strict_bool(data.get("is_decomposed"))
             if root_index is None:
@@ -359,7 +365,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             merge_root(row, data)
             merge_decomposed(row, data)
-            attempt = retry_attempt(data)
+            attempt = strict_retry_attempt(data)
             if attempt is None:
                 row["model_invalid"] = True
                 continue
@@ -386,7 +392,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
-            attempt = retry_attempt(data)
+            attempt = strict_retry_attempt(data)
             # One logical AC may emit one attribution event per retry/resume
             # attempt. Spend is cumulative across those attempts, and EventStore
             # query order is newest-first, so replacement would both undercount
@@ -411,7 +417,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
-            attempt = retry_attempt(data)
+            attempt = strict_retry_attempt(data)
             verdict = data.get("traceguard_verdict")
             claim_rate = _finite_number(data.get("unsupported_claim_rate"))
             grounding = _strict_bool(data.get("grounding_regression"))
@@ -444,7 +450,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
-            attempt = retry_attempt(data)
+            attempt = strict_retry_attempt(data)
             baseline = _finite_number(data.get("baseline_token_spend"))
             baseline_mode = data.get("baseline_mode")
             baseline_tier = data.get("baseline_tier")

@@ -340,6 +340,7 @@ def reduce_board(
         "provider": None,
         "total_tokens": 0.0,
         "frugality": None,
+        "frugality_retrospective": None,
     }
 
     for ev in events:
@@ -420,6 +421,31 @@ def reduce_board(
                 frugality["reason"] = str(reason)
             if frugality:
                 meta["frugality"] = frugality
+
+        elif event_type == "execution.frugality_retrospective.reported":
+            coverage = payload.get("coverage")
+            retry_associated = _coerce_spend(
+                payload.get("retry_associated_spend"), reject_negative=True
+            )
+            unaccepted = _coerce_spend(payload.get("unaccepted_spend"), reject_negative=True)
+            if (
+                isinstance(coverage, dict)
+                and retry_associated is not None
+                and unaccepted is not None
+            ):
+                measured = coverage.get("measured_attempts")
+                unknown = coverage.get("unknown_attempts")
+                invalid = coverage.get("invalid_attempts")
+                if all(type(value) is int and value >= 0 for value in (measured, unknown, invalid)):
+                    meta["frugality_retrospective"] = {
+                        "retry_associated_spend": retry_associated,
+                        "unaccepted_spend": unaccepted,
+                        "coverage": {
+                            "measured_attempts": measured,
+                            "unknown_attempts": unknown,
+                            "invalid_attempts": invalid,
+                        },
+                    }
 
         elif event_type == "workflow.progress.updated":
             if payload.get("completed_count") is not None:

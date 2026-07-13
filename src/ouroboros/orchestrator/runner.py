@@ -893,6 +893,47 @@ class OrchestratorRunner:
                 error=str(exc),
             )
 
+    async def _emit_frugality_retrospective_report(
+        self,
+        execution_id: str,
+        *,
+        terminal_status: str,
+    ) -> None:
+        """Emit the neutral finalization-only frugality evidence summary."""
+        if terminal_status not in {"completed", "failed", "cancelled"}:
+            return
+
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.frugality_retrospective import (
+            EVENT_FRUGALITY_RETROSPECTIVE_REPORTED,
+            summarize_frugality_retrospective,
+        )
+
+        try:
+            events = await self._event_store.query_execution_related_events(
+                execution_id,
+                limit=None,
+            )
+            summary = summarize_frugality_retrospective(events, execution_id=execution_id)
+            await self._event_store.append(
+                BaseEvent(
+                    type=EVENT_FRUGALITY_RETROSPECTIVE_REPORTED,
+                    aggregate_type="execution",
+                    aggregate_id=execution_id,
+                    data={
+                        **summary.to_event_data(),
+                        "terminal_status": terminal_status,
+                    },
+                )
+            )
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.frugality_retrospective.emit_failed",
+                execution_id=execution_id,
+                terminal_status=terminal_status,
+                error=str(exc),
+            )
+
     async def _frugality_proof_cohort(
         self,
         execution_id: str,
@@ -3345,6 +3386,10 @@ class OrchestratorRunner:
                 messages_processed=messages_processed,
             )
         )
+        await self._emit_frugality_retrospective_report(
+            execution_id,
+            terminal_status="cancelled",
+        )
 
         # Display cancellation notice
         self._console.print(
@@ -3985,6 +4030,10 @@ class OrchestratorRunner:
             # Deterministic frugality proof over this execution's per-AC triads.
             # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
             await self._evaluate_frugality_proof(exec_id)
+            await self._emit_frugality_retrospective_report(
+                exec_id,
+                terminal_status=terminal_status,
+            )
 
             log.info(
                 "orchestrator.runner.execute_completed",
@@ -4402,6 +4451,10 @@ class OrchestratorRunner:
         # Deterministic frugality proof over this execution's per-AC triads.
         # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
         await self._evaluate_frugality_proof(exec_id)
+        await self._emit_frugality_retrospective_report(
+            exec_id,
+            terminal_status=terminal_status,
+        )
 
         log.info(
             "orchestrator.runner.parallel_completed",
@@ -4841,6 +4894,10 @@ Note: This is a resumed session. Please continue from where execution was interr
             # Deterministic frugality proof over this execution's per-AC triads.
             # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
             await self._evaluate_frugality_proof(tracker.execution_id)
+            await self._emit_frugality_retrospective_report(
+                tracker.execution_id,
+                terminal_status=terminal_status,
+            )
 
             log.info(
                 "orchestrator.runner.resume_completed",

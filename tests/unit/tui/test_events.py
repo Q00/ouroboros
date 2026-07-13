@@ -13,6 +13,7 @@ from ouroboros.tui.events import (
     DriftUpdated,
     ExecutionUpdated,
     FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     LogMessage,
     PauseRequested,
     PhaseChanged,
@@ -21,6 +22,7 @@ from ouroboros.tui.events import (
     TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
+    format_frugality_retrospective_summary,
     format_frugality_summary,
 )
 
@@ -871,6 +873,52 @@ class TestFrugalityTelemetryEvents:
             aggregate_type="execution",
             aggregate_id="exec_123",
             data={"token_reduction_pct": 18.0},
+        )
+
+        assert create_message_from_event(event) is None
+
+    def test_frugality_retrospective_event(self) -> None:
+        """Neutral retrospective report events convert to evidence messages."""
+        event = BaseEvent(
+            type="execution.frugality_retrospective.reported",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "retry_associated_spend": 1250.0,
+                "unaccepted_spend": 50.0,
+                "coverage": {
+                    "measured_attempts": 2,
+                    "unknown_attempts": 1,
+                    "invalid_attempts": 0,
+                },
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityRetrospectiveReported)
+        assert msg.retry_associated_spend == 1250.0
+        assert msg.unaccepted_spend == 50.0
+        assert msg.measured_attempts == 2
+        assert (
+            format_frugality_retrospective_summary(msg)
+            == "evidence retry 1.2k tok, unaccepted 50 tok, 2 measured/1 unknown/0 invalid"
+        )
+
+    def test_frugality_retrospective_rejects_malformed_payload(self) -> None:
+        event = BaseEvent(
+            type="execution.frugality_retrospective.reported",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "retry_associated_spend": -1.0,
+                "unaccepted_spend": 0.0,
+                "coverage": {
+                    "measured_attempts": 0,
+                    "unknown_attempts": 0,
+                    "invalid_attempts": 0,
+                },
+            },
         )
 
         assert create_message_from_event(event) is None

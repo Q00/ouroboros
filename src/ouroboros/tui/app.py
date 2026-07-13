@@ -27,6 +27,7 @@ from ouroboros.tui.events import (
     DriftUpdated,
     ExecutionUpdated,
     FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     LogMessage,
     PauseRequested,
     PhaseChanged,
@@ -38,6 +39,7 @@ from ouroboros.tui.events import (
     WorkflowProgressUpdated,
     create_message_from_event,
     format_frugality_summary,
+    format_frugality_retrospective_summary,
 )
 from ouroboros.tui.screens import (
     DashboardScreenV3,
@@ -768,6 +770,14 @@ class OuroborosTUI(App[None]):
                 message.status, message.token_reduction_pct
             )
         self._forward_to_dashboard("on_frugality_proof_evaluated", message)
+
+    def on_frugality_retrospective_reported(self, message: FrugalityRetrospectiveReported) -> None:
+        """Fold the run-end neutral frugality evidence summary once."""
+        if self._state.frugality_retrospective_summary is None:
+            self._state.frugality_retrospective_summary = format_frugality_retrospective_summary(
+                message
+            )
+        self._forward_to_dashboard("on_frugality_retrospective_reported", message)
 
     def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
         # Update state with AC tree from workflow progress (smart merge)

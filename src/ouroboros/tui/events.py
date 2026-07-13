@@ -629,6 +629,29 @@ class FrugalityProofEvaluated(Message):
         self.reason = reason
 
 
+class FrugalityRetrospectiveReported(Message):
+    """Run-end neutral frugality evidence summary.
+
+    Emitted from ``execution.frugality_retrospective.reported`` after hard
+    execution finalization. It is evidence-only: no waste claim and no guardrail.
+    """
+
+    def __init__(
+        self,
+        retry_associated_spend: float,
+        unaccepted_spend: float,
+        measured_attempts: int,
+        unknown_attempts: int,
+        invalid_attempts: int,
+    ) -> None:
+        super().__init__()
+        self.retry_associated_spend = retry_associated_spend
+        self.unaccepted_spend = unaccepted_spend
+        self.measured_attempts = measured_attempts
+        self.unknown_attempts = unknown_attempts
+        self.invalid_attempts = invalid_attempts
+
+
 # =============================================================================
 # Event Subscription State
 # =============================================================================
@@ -693,6 +716,7 @@ class TUIState:
     tokens_by_node: dict[str, float] = field(default_factory=dict)
     run_total_tokens: float = 0.0
     frugality_summary: str | None = None
+    frugality_retrospective_summary: str | None = None
 
     # P1: Tool/thinking tracking for dashboard
     active_tools: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -1036,6 +1060,29 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             reason=data.get("reason") if isinstance(data.get("reason"), str) else "",
         )
 
+    elif event_type == "execution.frugality_retrospective.reported":
+        coverage = data.get("coverage")
+        if not isinstance(coverage, dict):
+            return None
+        retry_associated = _coerce_finite_spend(
+            data.get("retry_associated_spend"), reject_negative=True
+        )
+        unaccepted = _coerce_finite_spend(data.get("unaccepted_spend"), reject_negative=True)
+        measured = _coerce_event_int(coverage.get("measured_attempts"))
+        unknown = _coerce_event_int(coverage.get("unknown_attempts"))
+        invalid = _coerce_event_int(coverage.get("invalid_attempts"))
+        if None in (retry_associated, unaccepted, measured, unknown, invalid):
+            return None
+        if measured < 0 or unknown < 0 or invalid < 0:
+            return None
+        return FrugalityRetrospectiveReported(
+            retry_associated_spend=retry_associated,
+            unaccepted_spend=unaccepted,
+            measured_attempts=measured,
+            unknown_attempts=unknown,
+            invalid_attempts=invalid,
+        )
+
     # Return None for unhandled event types
     return None
 
@@ -1069,6 +1116,24 @@ def format_frugality_summary(
     return f"⚖ {label}"
 
 
+def format_frugality_retrospective_summary(message: FrugalityRetrospectiveReported) -> str:
+    """Return a compact evidence-only frugality retrospective line."""
+    return (
+        "evidence "
+        f"retry {_compact_evidence_tokens(message.retry_associated_spend)} tok, "
+        f"unaccepted {_compact_evidence_tokens(message.unaccepted_spend)} tok, "
+        f"{message.measured_attempts} measured/"
+        f"{message.unknown_attempts} unknown/"
+        f"{message.invalid_attempts} invalid"
+    )
+
+
+def _compact_evidence_tokens(value: float) -> str:
+    if value >= 1000:
+        return f"{value / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(int(round(value)))
+
+
 __all__ = [
     "ACModelRouted",
     "ACTokenAttribution",
@@ -1078,6 +1143,7 @@ __all__ = [
     "DriftUpdated",
     "ExecutionUpdated",
     "FrugalityProofEvaluated",
+    "FrugalityRetrospectiveReported",
     "GenerationSelected",
     "LineageSelected",
     "LogMessage",
@@ -1092,5 +1158,6 @@ __all__ = [
     "ToolCallStarted",
     "WorkflowProgressUpdated",
     "create_message_from_event",
+    "format_frugality_retrospective_summary",
     "format_frugality_summary",
 ]
