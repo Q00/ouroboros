@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import ac_text
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 from ouroboros.orchestrator.events import (
     create_heartbeat_event,
     create_progress_event,
@@ -70,6 +71,65 @@ class ExecutionEventEmitter:
                 parts.append(f"{key}: {rendered}")
         preview = ", ".join(parts)
         return preview[:100] if preview else None
+
+    async def emit_decomposition_decision_finalized(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        mode: str,
+        node_identity: ExecutionNodeIdentity,
+        decision: DecompositionDecisionRecord,
+    ) -> None:
+        """Persist one finalized decomposition decision as best-effort audit data."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.decomposition.decision_finalized",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    **node_identity.to_event_metadata(),
+                    **decision.to_dict(),
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "mode": mode,
+                    "child_count": len(decision.children),
+                },
+            )
+        )
+
+    async def emit_bounce_classified(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_identity: ExecutionNodeIdentity,
+        cause: str,
+        rationale: str,
+        failure_class: str | None,
+        retry_admission: str | None,
+        evidence_refs: tuple[str, ...],
+        trace_summary: str,
+    ) -> None:
+        """Persist a bounded cause-matched recovery classification."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.decomposition.bounce_classified",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    **node_identity.to_event_metadata(),
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "cause": cause,
+                    "rationale": rationale,
+                    "failure_class": failure_class,
+                    "retry_admission": retry_admission,
+                    "evidence_refs": list(evidence_refs),
+                    "trace_summary": trace_summary,
+                },
+            )
+        )
 
     @staticmethod
     def coordinator_aggregate_id(execution_id: str, level: int) -> str:

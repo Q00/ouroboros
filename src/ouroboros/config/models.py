@@ -217,6 +217,10 @@ class ExecutionConfig(BaseModel, frozen=True):
         n_version_tournament: Whether an AC that has already exhausted its
             alt-harness redispatch may fan out to multiple runtimes in parallel,
             first-passing-verification wins (PR-X N-version tournament, opt-in).
+        decomposition_mode: Controls where AC decomposition is allowed:
+            ``preflight`` uses the configured preflight decomposition path,
+            ``bounce_only`` only decomposes after an atomic AC bounces, and
+            ``off`` disables decomposition.
         context_pack: Whether to append a deterministic repo context pack
             (stack, verify commands, layout) to run worker system prompts.
     """
@@ -230,6 +234,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = True
     n_version_tournament: bool = False
+    decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight"
     context_pack: bool = True
 
 

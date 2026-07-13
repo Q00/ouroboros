@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ouroboros.orchestrator.decomposition_policy import BounceCause
 from ouroboros.orchestrator.verifier import Attempt, RetryAdmission
 
 
@@ -74,6 +75,20 @@ class RecoveryPolicy:
 
     action: RecoveryAction
     rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class BounceClassification:
+    """Cause-matched recovery classification for one failed execution attempt."""
+
+    cause: BounceCause
+    rationale: str
+    evidence_refs: tuple[str, ...] = ()
+
+    @property
+    def allows_decomposition(self) -> bool:
+        """Whether this classification may enter the decomposition path."""
+        return self.cause is BounceCause.TOO_BIG
 
 
 _POLICY_TABLE: dict[FailureClass, RecoveryPolicy] = {
@@ -242,6 +257,141 @@ def alt_harness_policy(
     return None
 
 
+def classify_bounce(
+    failure: FailureClass | str | None,
+    retry_admission: RetryAdmission | str | None,
+    *,
+    proposed_cause: BounceCause | str | None = None,
+    proposed_reasons: tuple[str, ...] = (),
+    evidence_refs: tuple[str, ...] = (),
+    has_attempt_evidence: bool = False,
+    has_remaining_scope: bool = False,
+    bad_spec_evidence: bool = False,
+) -> BounceClassification:
+    """Classify why a failed unit bounced without conflating recovery taxonomies.
+
+    Existing ``FailureClass`` and ``RetryAdmission`` remain authoritative for
+    deterministic environment/model routes. ``TOO_BIG`` is admitted only when an
+    external classifier proposes it *and* the caller proves both observed attempt
+    evidence and remaining parent scope. Ambiguous scope/stall failures therefore
+    fail closed to ``UNKNOWN`` instead of triggering decomposition by themselves.
+    """
+
+    normalized_failure = _normalize_failure_class(failure)
+    normalized_admission = _normalize_retry_admission(retry_admission)
+    normalized_proposal = _normalize_bounce_cause(proposed_cause)
+    refs = tuple(ref for ref in evidence_refs if isinstance(ref, str) and ref.strip())
+    reasons = tuple(reason for reason in proposed_reasons if isinstance(reason, str) and reason)
+
+    if normalized_admission in {RetryAdmission.BLOCK, RetryAdmission.ESCALATE_HUMAN} or (
+        normalized_failure is FailureClass.BLOCKED
+    ):
+        return BounceClassification(
+            cause=BounceCause.ENVIRONMENT,
+            rationale=(
+                reasons[0] if reasons else "Execution is blocked by an environment precondition."
+            ),
+            evidence_refs=refs,
+        )
+
+    if normalized_admission is RetryAdmission.ESCALATE_MODEL or (
+        normalized_failure is FailureClass.FABRICATION_SUSPECTED
+    ):
+        return BounceClassification(
+            cause=BounceCause.MODEL,
+            rationale=(reasons[0] if reasons else "The failure requires stronger model grounding."),
+            evidence_refs=refs,
+        )
+
+    if bad_spec_evidence or normalized_proposal is BounceCause.BAD_SPEC:
+        if bad_spec_evidence:
+            return BounceClassification(
+                cause=BounceCause.BAD_SPEC,
+                rationale=(
+                    reasons[0] if reasons else "The success contract is invalid or contradictory."
+                ),
+                evidence_refs=refs,
+            )
+        return BounceClassification(
+            cause=BounceCause.UNKNOWN,
+            rationale="BAD_SPEC was proposed without explicit contract evidence.",
+            evidence_refs=refs,
+        )
+
+    if normalized_proposal is BounceCause.TOO_BIG:
+        if has_attempt_evidence and has_remaining_scope:
+            return BounceClassification(
+                cause=BounceCause.TOO_BIG,
+                rationale=(
+                    reasons[0]
+                    if reasons
+                    else "Attempt evidence shows distinct parent scope remains."
+                ),
+                evidence_refs=refs,
+            )
+        return BounceClassification(
+            cause=BounceCause.UNKNOWN,
+            rationale="TOO_BIG requires both observed attempt evidence and remaining scope.",
+            evidence_refs=refs,
+        )
+
+    if normalized_proposal in {BounceCause.ENVIRONMENT, BounceCause.MODEL}:
+        return BounceClassification(
+            cause=normalized_proposal,
+            rationale=(
+                reasons[0]
+                if reasons
+                else "External classifier identified a non-decomposition recovery cause."
+            ),
+            evidence_refs=refs,
+        )
+
+    return BounceClassification(
+        cause=BounceCause.UNKNOWN,
+        rationale=(
+            reasons[0]
+            if reasons
+            else "The failure does not have enough evidence for cause-matched decomposition."
+        ),
+        evidence_refs=refs,
+    )
+
+
+def _normalize_failure_class(value: FailureClass | str | None) -> FailureClass | None:
+    if isinstance(value, FailureClass):
+        return value
+    if isinstance(value, str):
+        try:
+            return FailureClass(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_retry_admission(
+    value: RetryAdmission | str | None,
+) -> RetryAdmission | None:
+    if isinstance(value, RetryAdmission):
+        return value
+    if isinstance(value, str):
+        try:
+            return RetryAdmission(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_bounce_cause(value: BounceCause | str | None) -> BounceCause | None:
+    if isinstance(value, BounceCause):
+        return value
+    if isinstance(value, str):
+        try:
+            return BounceCause(value)
+        except ValueError:
+            return None
+    return None
+
+
 def classify(attempt: Attempt) -> FailureClass | None:
     """Classify a single Attempt from the verifier loop.
 
@@ -280,11 +430,14 @@ def classify(attempt: Attempt) -> FailureClass | None:
 
 
 __all__ = [
+    "BounceClassification",
+    "BounceCause",
     "FailureClass",
     "RecoveryAction",
     "RecoveryPolicy",
     "alt_harness_policy",
     "classify",
+    "classify_bounce",
     "policy_for",
     "policy_for_attempt",
 ]

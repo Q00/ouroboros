@@ -7,6 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+)
 from ouroboros.orchestrator.parallel_executor import (
     MAX_DECOMPOSITION_DEPTH,
     ACExecutionResult,
@@ -45,7 +50,10 @@ async def test_try_decompose_ac_treats_atomic_response_as_terminal() -> None:
         system_prompt="system",
     )
 
-    assert result is None
+    assert result.disposition is DecompositionDisposition.ATOMIC
+    assert result.source is DecompositionSource.PREFLIGHT
+    assert result.children == ()
+    assert result.reasons == ("explicit_atomic",)
 
 
 @pytest.mark.asyncio
@@ -65,7 +73,14 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
         enable_decomposition=True,
     )
     executor._emit_subtask_event = AsyncMock()
-    executor._try_decompose_ac = AsyncMock(return_value=None)
+    executor._try_decompose_ac = AsyncMock(
+        return_value=DecompositionDecisionRecord(
+            node_id=f"exec_atomic_depth_{depth}:ac:{depth + 1}",
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.ATOMIC,
+            reasons=("explicit_atomic",),
+        )
+    )
     executor._execute_atomic_ac = AsyncMock(
         return_value=ACExecutionResult(
             ac_index=depth + 1,
@@ -144,7 +159,10 @@ async def test_try_decompose_ac_uses_profile_axis_when_profile_is_configured() -
         system_prompt="legacy system prompt",
     )
 
-    assert result is None
+    assert result.disposition is DecompositionDisposition.ATOMIC
+    assert result.source is DecompositionSource.PREFLIGHT
+    assert result.children == ()
+    assert result.reasons == ("explicit_atomic",)
     assert runtime.prompt is not None
     assert "Split along the axis: subtopic" in runtime.prompt
     assert "single question answerable from independently cited sources" in runtime.prompt
@@ -194,7 +212,15 @@ suggested_model_tier: medium
         system_prompt="legacy system prompt",
     )
 
-    assert result == ["Sub-AC 1: a", "Sub-AC 2: b", "Sub-AC 3: c"]
+    assert result.disposition is DecompositionDisposition.SPLIT
+    assert result.source is DecompositionSource.PREFLIGHT
+    assert [child.description for child in result.children] == [
+        "Sub-AC 1: a",
+        "Sub-AC 2: b",
+        "Sub-AC 3: c",
+    ]
+    assert result.trustworthy is False
+    assert result.reasons == ("legacy_array_without_attestation",)
     assert runtime.prompt is not None
     assert "2-3 sub-ACs" in runtime.prompt
     assert "2-5 sub-ACs" not in runtime.prompt
@@ -220,33 +246,50 @@ class _FixedResponseRuntime:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("response", "expected"),
+    ("response", "expected_disposition", "expected_children", "expected_reasons"),
     [
         # Explicit atomic verdict the response STARTS WITH → atomic.
-        ("ATOMIC", None),
-        ("ATOMIC — this is one focused task", None),
+        ("ATOMIC", DecompositionDisposition.ATOMIC, [], ("explicit_atomic",)),
+        (
+            "ATOMIC — this is one focused task",
+            DecompositionDisposition.ATOMIC,
+            [],
+            ("explicit_atomic",),
+        ),
         # A real split that happens to contain the word "ATOMIC" in a negation
         # must NOT be mis-read as atomic (the substring-match bug).
         (
             'NOT ATOMIC, decompose into: ["Sub-AC 1: build it", "Sub-AC 2: test it"]',
+            DecompositionDisposition.SPLIT,
             ["Sub-AC 1: build it", "Sub-AC 2: test it"],
+            ("legacy_array_without_attestation",),
         ),
         # A valid array whose elements merely mention "atomic" must still split.
         (
             '["update the atomic counter module", "add a regression test"]',
+            DecompositionDisposition.SPLIT,
             ["update the atomic counter module", "add a regression test"],
+            ("legacy_array_without_attestation",),
         ),
-        # Unparseable / no verdict → fail closed to atomic (the frugal default).
-        ("I think this could go either way, hard to say.", None),
+        # Unparseable / no verdict → fail closed as an explicit UNKNOWN decision.
+        (
+            "I think this could go either way, hard to say.",
+            DecompositionDisposition.UNKNOWN,
+            [],
+            ("unparseable_decomposition_response",),
+        ),
     ],
     ids=["bare_atomic", "atomic_prefix", "not_atomic_split", "array_mentions_atomic", "garbage"],
 )
 async def test_try_decompose_ac_parses_verdict_array_before_atomic_substring(
-    response: str, expected: list[str] | None
+    response: str,
+    expected_disposition: DecompositionDisposition,
+    expected_children: list[str],
+    expected_reasons: tuple[str, ...],
 ) -> None:
     """JSON array is parsed before the ATOMIC verdict, and only a leading ATOMIC
     counts — so negated/atomic-mentioning splits are not mis-classified, and
-    unparseable responses fail closed to atomic."""
+    unparseable responses fail closed to UNKNOWN."""
     executor = ParallelACExecutor(
         adapter=_FixedResponseRuntime(response),
         event_store=AsyncMock(),
@@ -262,4 +305,7 @@ async def test_try_decompose_ac_parses_verdict_array_before_atomic_substring(
         system_prompt="system",
     )
 
-    assert result == expected
+    assert result.disposition is expected_disposition
+    assert result.source is DecompositionSource.PREFLIGHT
+    assert [child.description for child in result.children] == expected_children
+    assert result.reasons == expected_reasons
