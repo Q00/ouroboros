@@ -6,21 +6,7 @@ import json
 import os
 from pathlib import Path
 import tomllib
-from typing import Final, Protocol
-
-_GLOBAL_ROUTING_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        "chatgpt_base_url",
-        "experimental_thread_config_endpoint",
-        "forced_chatgpt_workspace_id",
-        "forced_login_method",
-        "openai_base_url",
-        "oss_provider",
-        "profile",
-        "profiles",
-        "service_tier",
-    }
-)
+from typing import Protocol
 
 
 class _Digest(Protocol):
@@ -84,11 +70,12 @@ def _update_config_digest(
         raise CodexConfigFingerprintError("Cannot read Codex profile configuration") from exc
 
     if global_config:
-        config = {
-            key: value
-            for key, value in config.items()
-            if key.startswith("model") or key in _GLOBAL_ROUTING_KEYS
-        }
+        config.pop("projects", None)
+        hooks = config.get("hooks")
+        if isinstance(hooks, dict):
+            hooks.pop("state", None)
+            if not hooks:
+                config.pop("hooks")
     digest.update(
         json.dumps(
             config,
