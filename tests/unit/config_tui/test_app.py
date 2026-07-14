@@ -19,12 +19,25 @@ from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
     INHERIT_SENTINEL,
     INSTALL_REQUIRED_SUFFIX,
+    PRESET_MODELS,
     SEARCH_SENTINEL,
     ModelSearchScreen,
     SettingsApp,
 )
 from ouroboros.config_tui.fields import STAGE_MODEL_FIELDS
 from ouroboros.orchestrator_stage import Stage
+
+
+@pytest.mark.parametrize(
+    ("tier", "expected"),
+    [
+        ("frugal", "gpt-5.6-luna"),
+        ("balanced", "gpt-5.6-terra"),
+        ("frontier", "gpt-5.6-sol"),
+    ],
+)
+def test_codex_model_presets_use_5_6_family(tier: str, expected: str) -> None:
+    assert PRESET_MODELS[tier]["codex"] == expected
 
 
 @pytest.fixture

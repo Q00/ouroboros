@@ -31,7 +31,7 @@ from ouroboros.backends.capabilities import (
     get_backend_capability,
     runtime_backend_choices,
 )
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+import ouroboros.config._model_defaults as model_defaults
 
 # Backends whose runnable model is the CLI's own configured default rather
 # than a Claude model id. Mirrors the loader's sentinel frozensets
@@ -74,11 +74,11 @@ class BackendModelCatalog:
 
 
 # Hand-curated additions per backend, appended after the loader-mirroring
-# default entry. Keep entries verifiable: the codex ids below were confirmed
-# against a live `opencode models` listing of the OpenAI catalog.
+# default entry. Keep entries verifiable: the Codex ids below were confirmed
+# against live ChatGPT-account Codex CLI calls.
 _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
     "claude": ("claude-haiku-4-5-20251001",),
-    "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    "codex": model_defaults.DEFAULT_CODEX_TIER_MODELS,
     # Grok Build model slugs, after the CLI-owned "default" sentinel. Verified
     # against a live `grok models` listing (grok-build, grok-composer-2.5-fast).
     "grok": ("grok-build", "grok-composer-2.5-fast"),
@@ -145,7 +145,10 @@ def _build_catalogs() -> dict[str, BackendModelCatalog]:
         if name in _SENTINEL_MODEL_BACKENDS:
             models: tuple[str, ...] = (DEFAULT_MODEL_SENTINEL,)
         else:
-            models = (DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL)
+            models = (
+                model_defaults.DEFAULT_OPUS_MODEL,
+                model_defaults.DEFAULT_SONNET_MODEL,
+            )
         models = models + _EXTRA_KNOWN_MODELS.get(name, ())
         catalogs[name] = BackendModelCatalog(
             backend=name,

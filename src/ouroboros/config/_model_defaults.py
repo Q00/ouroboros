@@ -1,4 +1,4 @@
-"""Single source of truth for default Claude model pins.
+"""Single source of truth for default Claude and Codex model pins.
 
 Every config default (Pydantic field defaults in :mod:`ouroboros.config.models`,
 the ``get_*_model`` fallbacks in :mod:`ouroboros.config.loader`, and the setup
@@ -39,6 +39,15 @@ DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 # so decomposed leaves route here while top-level ACs keep the Sonnet default.
 # Anthropic-direct API id. Bump on each new Haiku release.
 DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
+
+DEFAULT_CODEX_LUNA_MODEL = "gpt-5.6-luna"
+DEFAULT_CODEX_TERRA_MODEL = "gpt-5.6-terra"
+DEFAULT_CODEX_SOL_MODEL = "gpt-5.6-sol"
+DEFAULT_CODEX_TIER_MODELS = (
+    DEFAULT_CODEX_LUNA_MODEL,
+    DEFAULT_CODEX_TERRA_MODEL,
+    DEFAULT_CODEX_SOL_MODEL,
+)
 
 # OpenRouter-routed Opus for the multi-provider consensus roster. This is the
 # OpenRouter slug (dotted ``claude-opus-4.8``), which differs from the
@@ -84,16 +93,20 @@ LEGACY_DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
 # Verified against git history of ``ouroboros.config.models`` (the tier defaults
 # have only ever held these ids): openai frugal ``gpt-4o-mini`` -> standard
 # ``gpt-4o`` -> frontier ``o3`` became ``gpt-5.1-codex-mini`` / ``gpt-5-codex`` /
-# ``gpt-5.2``; anthropic frugal ``claude-3-5-haiku``, standard
+# ``gpt-5.2`` and then the current GPT-5.6 Luna/Terra/Sol family; anthropic
+# frugal ``claude-3-5-haiku``, standard
 # ``claude-sonnet-4-20250514``, frontier ``claude-opus-4-5-20251101`` (and the
 # later frontier ``claude-opus-4-6``) became the DEFAULT_*_MODEL pins. The google
 # tier ids (``gemini-2.0-flash`` / ``gemini-2.5-pro``) have never been bumped, so
 # they carry no entry and are preserved as-is.
 LEGACY_TIER_MODELS: dict[str, str] = {
     # openai (Codex CLI) tier ids
-    "gpt-4o-mini": "gpt-5.1-codex-mini",
-    "gpt-4o": "gpt-5-codex",
-    "o3": "gpt-5.2",
+    "gpt-4o-mini": DEFAULT_CODEX_LUNA_MODEL,
+    "gpt-5.1-codex-mini": DEFAULT_CODEX_LUNA_MODEL,
+    "gpt-4o": DEFAULT_CODEX_TERRA_MODEL,
+    "gpt-5-codex": DEFAULT_CODEX_TERRA_MODEL,
+    "o3": DEFAULT_CODEX_SOL_MODEL,
+    "gpt-5.2": DEFAULT_CODEX_SOL_MODEL,
     # anthropic tier ids
     "claude-3-5-haiku": DEFAULT_HAIKU_MODEL,
     "claude-sonnet-4-20250514": DEFAULT_SONNET_MODEL,
@@ -107,8 +120,11 @@ LEGACY_TIER_MODELS: dict[str, str] = {
 # preserved verbatim.
 LEGACY_TIER_MODEL_PROVIDERS: dict[str, str] = {
     "gpt-4o-mini": "openai",
+    "gpt-5.1-codex-mini": "openai",
     "gpt-4o": "openai",
+    "gpt-5-codex": "openai",
     "o3": "openai",
+    "gpt-5.2": "openai",
     "claude-3-5-haiku": "anthropic",
     "claude-sonnet-4-20250514": "anthropic",
     "claude-opus-4-5-20251101": "anthropic",

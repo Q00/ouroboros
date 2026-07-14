@@ -144,16 +144,16 @@ class TestBuildModelRouter:
         assert router is not None
         assert router.runtime_backend == "codex_cli"
         assert router.tier_models == {
-            "frugal": "gpt-5.1-codex-mini",
-            "standard": "gpt-5-codex",
-            "frontier": "gpt-5.2",
+            "frugal": "gpt-5.6-luna",
+            "standard": "gpt-5.6-terra",
+            "frontier": "gpt-5.6-sol",
         }
 
     def test_codex_mcp_backend_resolves_openai_tier_models(self) -> None:
         economics = get_default_config().economics
         router = build_model_router(economics, runtime_backend="codex_mcp")
         assert router is not None
-        assert router.tier_models["standard"] == "gpt-5-codex"
+        assert router.tier_models["standard"] == "gpt-5.6-terra"
 
     def test_gemini_backend_builds_google_router(self) -> None:
         # Gemini has no frontier google model in the default config, so only the
@@ -340,9 +340,36 @@ class TestLegacyTierModelNormalization:
         router = build_model_router(_legacy_persisted_economics(), runtime_backend="codex_cli")
         assert router is not None
         assert router.tier_models == {
-            "frugal": "gpt-5.1-codex-mini",
-            "standard": "gpt-5-codex",
-            "frontier": "gpt-5.2",
+            "frugal": "gpt-5.6-luna",
+            "standard": "gpt-5.6-terra",
+            "frontier": "gpt-5.6-sol",
+        }
+
+    def test_previous_codex_defaults_normalize_to_5_6_family(self) -> None:
+        economics = _economics(
+            tiers={
+                "frugal": TierConfig(
+                    cost_factor=1,
+                    models=[ModelConfig(provider="openai", model="gpt-5.1-codex-mini")],
+                ),
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[ModelConfig(provider="openai", model="gpt-5-codex")],
+                ),
+                "frontier": TierConfig(
+                    cost_factor=30,
+                    models=[ModelConfig(provider="openai", model="gpt-5.2")],
+                ),
+            }
+        )
+
+        router = build_model_router(economics, runtime_backend="codex_cli")
+
+        assert router is not None
+        assert router.tier_models == {
+            "frugal": "gpt-5.6-luna",
+            "standard": "gpt-5.6-terra",
+            "frontier": "gpt-5.6-sol",
         }
 
     def test_legacy_opus_4_6_normalizes_to_current(self) -> None:
@@ -366,13 +393,13 @@ class TestLegacyTierModelNormalization:
             tiers={
                 "standard": TierConfig(
                     cost_factor=10,
-                    models=[ModelConfig(provider="openai", model="gpt-5.6-sol")],
+                    models=[ModelConfig(provider="openai", model="proxy-gpt-custom")],
                 ),
             }
         )
         router = build_model_router(economics, runtime_backend="codex_cli")
         assert router is not None
-        assert router.tier_models == {"standard": "gpt-5.6-sol"}
+        assert router.tier_models == {"standard": "proxy-gpt-custom"}
 
     def test_legacy_looking_id_under_other_provider_is_preserved(self) -> None:
         # This value was historically shipped only for OpenAI. Under Anthropic it

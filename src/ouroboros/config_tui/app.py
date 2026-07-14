@@ -41,7 +41,13 @@ from ouroboros.backends.model_catalog import (
     refresh_models,
     uses_default_model_sentinel,
 )
-from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+from ouroboros.config._model_defaults import (
+    DEFAULT_CODEX_LUNA_MODEL,
+    DEFAULT_CODEX_SOL_MODEL,
+    DEFAULT_CODEX_TERRA_MODEL,
+    DEFAULT_OPUS_MODEL,
+    DEFAULT_SONNET_MODEL,
+)
 from ouroboros.config.models import OuroborosConfig, get_config_dir
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.fields import (
@@ -69,9 +75,12 @@ SEARCH_THRESHOLD = 20
 # One-click model presets: per-backend picks, falling back to the backend's
 # catalog default where no differentiated tier exists (sentinel backends).
 PRESET_MODELS: dict[str, dict[str, str]] = {
-    "frugal": {"claude": "claude-haiku-4-5-20251001", "codex": "gpt-5-mini"},
-    "balanced": {"claude": DEFAULT_SONNET_MODEL, "codex": "gpt-5"},
-    "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": "gpt-5-codex"},
+    "frugal": {
+        "claude": "claude-haiku-4-5-20251001",
+        "codex": DEFAULT_CODEX_LUNA_MODEL,
+    },
+    "balanced": {"claude": DEFAULT_SONNET_MODEL, "codex": DEFAULT_CODEX_TERRA_MODEL},
+    "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": DEFAULT_CODEX_SOL_MODEL},
 }
 
 # One-click multi-LLM stage-routing presets: per-stage runtime backend picks
