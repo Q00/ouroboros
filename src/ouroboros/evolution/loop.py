@@ -35,7 +35,7 @@ from ouroboros.core.lineage import (
     OntologyDelta,
     OntologyLineage,
 )
-from ouroboros.core.seed import Seed, ac_texts
+from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.events.control import create_control_directive_emitted_event
 from ouroboros.events.lineage import (
@@ -90,9 +90,10 @@ def _conductor_preservation_error(
     changed: list[str] = []
     if directive.preserve_goal and approved.goal != successor.goal:
         changed.append("goal")
-    if directive.preserve_acceptance_criteria and ac_texts(
-        approved.acceptance_criteria
-    ) != ac_texts(successor.acceptance_criteria):
+    if (
+        directive.preserve_acceptance_criteria
+        and approved.acceptance_criteria != successor.acceptance_criteria
+    ):
         changed.append("acceptance_criteria")
     if directive.preserve_constraints and approved.constraints != successor.constraints:
         changed.append("constraints")
@@ -1722,6 +1723,22 @@ class EvolutionaryLoop:
                                 "conductor_directive": conductor_directive.to_event_data(),
                             }
                         )
+
+                    preservation_error = _conductor_preservation_error(
+                        current_seed,
+                        new_seed,
+                        conductor_directive,
+                    )
+                    if preservation_error is not None:
+                        await self.event_store.append(
+                            lineage_generation_failed(
+                                lineage.lineage_id,
+                                generation_number,
+                                "conductor_preservation",
+                                preservation_error,
+                            )
+                        )
+                        return Result.err(OuroborosError(preservation_error))
 
                     # Compute ontology delta
                     ontology_delta = OntologyDelta.compute(

@@ -1,7 +1,8 @@
 # Active Conductor Implementation Plan
 
 > Generated: 2026-07-12
-> Status: S0-S4 implementation and final validation complete
+> Status: Stacked implementation plan. Availability is established per slice;
+> the contract foundation lands before the runtime and host layers.
 
 ## Delivery strategy
 
