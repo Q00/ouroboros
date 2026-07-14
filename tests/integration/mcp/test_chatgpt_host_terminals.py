@@ -165,7 +165,9 @@ async def test_complete_tool_rejects_cancellation_receipt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("criterion_results", [(), ({"criterion": "host work closes", "passed": False},)])
+@pytest.mark.parametrize(
+    "criterion_results", [(), ({"criterion": "host work closes", "passed": False},)]
+)
 async def test_completed_receipt_requires_every_order_criterion_to_pass(
     event_store: EventStore,
     tmp_path: Path,

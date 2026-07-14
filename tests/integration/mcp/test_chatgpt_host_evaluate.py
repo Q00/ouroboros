@@ -14,9 +14,7 @@ from ouroboros.mcp.tools.host_bridge import (
 from ouroboros.persistence.event_store import EventStore
 
 
-def _receipt(
-    order: dict[str, object], *, failed_index: int | None = None
-) -> HostCompletionReceipt:
+def _receipt(order: dict[str, object], *, failed_index: int | None = None) -> HostCompletionReceipt:
     criteria = tuple(str(item) for item in order["acceptance_criteria"])
     return HostCompletionReceipt.model_validate(
         {

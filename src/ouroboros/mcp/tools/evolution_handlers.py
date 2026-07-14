@@ -572,8 +572,10 @@ class EvolveStepHandler(BridgeAwareMixin):
         lineage_id = str(arguments["lineage_id"])
         requested_project_dir = arguments.get("project_dir")
         try:
-            project_dir = Path(requested_project_dir or context.workspace_root).expanduser().resolve(
-                strict=True
+            project_dir = (
+                Path(requested_project_dir or context.workspace_root)
+                .expanduser()
+                .resolve(strict=True)
             )
         except OSError as exc:
             return Result.err(MCPToolError(str(exc), tool_name=continuation_tool))

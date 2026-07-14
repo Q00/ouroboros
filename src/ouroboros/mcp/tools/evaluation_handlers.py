@@ -901,9 +901,7 @@ class EvaluateHandler:
                     raise ValueError("host receipt is not available")
                 if receipt.terminal_status is HostTerminalStatus.CANCELLED:
                     raise ValueError("host dispatch cancelled")
-                receipt_criteria = tuple(
-                    result.criterion for result in receipt.criterion_results
-                )
+                receipt_criteria = tuple(result.criterion for result in receipt.criterion_results)
                 if receipt_criteria != order.acceptance_criteria:
                     raise ValueError(
                         "evaluation receipt criteria must match the work order in order"
@@ -916,9 +914,7 @@ class EvaluateHandler:
             body = {
                 "status": "completed",
                 "session_id": session_id,
-                "final_approved": all(
-                    result.passed for result in receipt.criterion_results
-                ),
+                "final_approved": all(result.passed for result in receipt.criterion_results),
                 "criterion_results": criterion_results,
                 "evidence": list(receipt.evidence),
                 "receipt_sha256": receipt.receipt_sha256,

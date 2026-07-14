@@ -62,7 +62,9 @@ def _receipt(order: dict[str, object]) -> HostCompletionReceipt:
     )
 
 
-async def _complete(store: EventStore, context: HostDispatchContext, order: dict[str, object]) -> None:
+async def _complete(
+    store: EventStore, context: HostDispatchContext, order: dict[str, object]
+) -> None:
     bridge = HostStageBridge(store, context)
     await bridge.complete(_receipt(order))
 
@@ -159,9 +161,7 @@ async def test_host_evolve_rejects_project_dir_outside_workspace(tmp_path: Path)
         host_dispatch_context=_context(workspace),
     )
 
-    result = await handler.handle(
-        {"lineage_id": "lineage-outside", "project_dir": str(outside)}
-    )
+    result = await handler.handle({"lineage_id": "lineage-outside", "project_dir": str(outside)})
 
     assert result.is_err
     assert "active ChatGPT workspace" in str(result.error)
