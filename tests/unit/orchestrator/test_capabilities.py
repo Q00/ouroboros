@@ -67,9 +67,11 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_ac_tree_hud": "status",
     "ouroboros_auto": "blocking",
     "ouroboros_brownfield": "blocking",
+    "ouroboros_cancel_host_dispatch": "blocking",
     "ouroboros_cancel_execution": "cancel",
     "ouroboros_cancel_job": "cancel",
     "ouroboros_checklist_verify": "blocking",
+    "ouroboros_complete_host_dispatch": "blocking",
     "ouroboros_evaluate": "blocking",
     "ouroboros_evolve_rewind": "blocking",
     "ouroboros_evolve_step": "blocking",
@@ -121,13 +123,10 @@ _PRIVATE_TOOL_SPEC_COMPATIBILITY_ATTRIBUTES = (
     "_OUROBOROS_UNSUPPORTED_CANCEL_METADATA",
     "_OUROBOROS_SIDE_EFFECT_FREE_METADATA",
     "_OUROBOROS_MUTATION_TARGETS_BY_SIDE_EFFECT",
-    "_OUROBOROS_STATE_MUTATIONS_BY_TOOL",
     "_OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA",
     "_OUROBOROS_EXECUTION_SESSION_CANCEL_METADATA",
     "_OUROBOROS_BACKGROUND_JOB_CANCEL_CONTROL_METADATA",
     "_OUROBOROS_EXECUTION_SESSION_CANCEL_CONTROL_METADATA",
-    "_OUROBOROS_TOOL_CAPABILITY_SPECS",
-    "_OUROBOROS_CANCEL_METADATA",
     "_OUROBOROS_BACKGROUND_BLOCKING_COMPANIONS",
     "_OUROBOROS_BACKGROUND_LIFECYCLE_ROLE_TOOLS",
     "_OUROBOROS_JOB_LIFECYCLE_SIBLING_ORDER",
@@ -158,9 +157,11 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_ac_tree_hud": ("session_id", "cursor"),
     "ouroboros_auto": (),
     "ouroboros_brownfield": ("indices",),
+    "ouroboros_cancel_host_dispatch": ("receipt",),
     "ouroboros_cancel_execution": ("execution_id",),
     "ouroboros_cancel_job": ("job_id",),
     "ouroboros_checklist_verify": ("session_id", "seed_content", "artifact"),
+    "ouroboros_complete_host_dispatch": ("receipt",),
     "ouroboros_evaluate": (
         "session_id",
         "artifact",
@@ -231,6 +232,7 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_generate_seed",
         "ouroboros_pm_interview",
     ),
+    "ouroboros_cancel_host_dispatch": ("ouroboros_complete_host_dispatch",),
     "ouroboros_cancel_execution": (
         "ouroboros_execute_seed",
         "ouroboros_start_execute_seed",
@@ -251,6 +253,7 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
         "ouroboros_measure_drift",
         "ouroboros_qa",
     ),
+    "ouroboros_complete_host_dispatch": ("ouroboros_cancel_host_dispatch",),
     "ouroboros_evaluate": (
         "ouroboros_start_evaluate",
         "ouroboros_job_status",
@@ -446,6 +449,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_ac_tree_hud": (),
     "ouroboros_auto": ("workspace_write", "event_store_write"),
     "ouroboros_brownfield": ("workspace_write", "event_store_write"),
+    "ouroboros_cancel_host_dispatch": ("event_store_write",),
     "ouroboros_cancel_execution": (
         "runtime_control",
         "event_store_write",
@@ -458,6 +462,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
         "session_state_write",
     ),
     "ouroboros_checklist_verify": ("workspace_write", "event_store_write"),
+    "ouroboros_complete_host_dispatch": ("event_store_write",),
     "ouroboros_evaluate": ("session_state_write",),
     "ouroboros_evolve_rewind": ("session_state_write",),
     "ouroboros_evolve_step": ("workspace_write", "event_store_write"),
@@ -763,6 +768,22 @@ _EXPECTED_OUROBOROS_TOOL_STATE_MUTATIONS = dict.fromkeys(
             "context_keys": ("job_id",),
         },
     ),
+    "ouroboros_complete_host_dispatch": (
+        {
+            "target": "event_store",
+            "operation": "append_idempotent_host_terminal_receipt",
+            "side_effect": "event_store_write",
+            "context_keys": ("receipt",),
+        },
+    ),
+    "ouroboros_cancel_host_dispatch": (
+        {
+            "target": "event_store",
+            "operation": "append_idempotent_host_cancellation_receipt",
+            "side_effect": "event_store_write",
+            "context_keys": ("receipt",),
+        },
+    ),
 }
 
 _EXPECTED_OUROBOROS_TOOL_MUTATION_TARGETS = {
@@ -796,9 +817,11 @@ _EXPECTED_OUROBOROS_TOOL_RETRY = {
     "ouroboros_ac_tree_hud": {"supported": True, "mode": "handler_owned"},
     "ouroboros_auto": {"supported": True, "mode": "handler_owned"},
     "ouroboros_brownfield": {"supported": True, "mode": "handler_owned"},
+    "ouroboros_cancel_host_dispatch": {"supported": True, "mode": "handler_owned"},
     "ouroboros_cancel_execution": {"supported": False, "mode": "unsupported"},
     "ouroboros_cancel_job": {"supported": False, "mode": "unsupported"},
     "ouroboros_checklist_verify": {"supported": True, "mode": "handler_owned"},
+    "ouroboros_complete_host_dispatch": {"supported": True, "mode": "handler_owned"},
     "ouroboros_evaluate": {"supported": True, "mode": "handler_owned"},
     "ouroboros_evolve_rewind": {"supported": True, "mode": "handler_owned"},
     "ouroboros_evolve_step": {"supported": True, "mode": "handler_owned"},
@@ -887,9 +910,11 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_ac_tree_hud": _READ_ONLY_INTERRUPT,
     "ouroboros_auto": _blocking_interrupt("ouroboros_start_auto"),
     "ouroboros_brownfield": _blocking_interrupt(),
+    "ouroboros_cancel_host_dispatch": _blocking_interrupt(),
     "ouroboros_cancel_execution": _TERMINAL_CONTROL_INTERRUPTS["ouroboros_cancel_execution"],
     "ouroboros_cancel_job": _TERMINAL_CONTROL_INTERRUPTS["ouroboros_cancel_job"],
     "ouroboros_checklist_verify": _blocking_interrupt(),
+    "ouroboros_complete_host_dispatch": _blocking_interrupt(),
     "ouroboros_evaluate": _blocking_interrupt("ouroboros_start_evaluate"),
     "ouroboros_evolve_rewind": _blocking_interrupt(),
     "ouroboros_evolve_step": _blocking_interrupt("ouroboros_start_evolve_step"),
@@ -958,9 +983,11 @@ _EXPECTED_OUROBOROS_TOOL_CANCEL = {
     "ouroboros_ac_tree_hud": _UNSUPPORTED_CANCEL,
     "ouroboros_auto": _UNSUPPORTED_CANCEL,
     "ouroboros_brownfield": _UNSUPPORTED_CANCEL,
+    "ouroboros_cancel_host_dispatch": _UNSUPPORTED_CANCEL,
     "ouroboros_cancel_execution": _EXECUTION_SESSION_CANCEL_CONTROL,
     "ouroboros_cancel_job": _BACKGROUND_JOB_CANCEL_CONTROL,
     "ouroboros_checklist_verify": _UNSUPPORTED_CANCEL,
+    "ouroboros_complete_host_dispatch": _UNSUPPORTED_CANCEL,
     "ouroboros_evaluate": _UNSUPPORTED_CANCEL,
     "ouroboros_evolve_rewind": _UNSUPPORTED_CANCEL,
     "ouroboros_evolve_step": _UNSUPPORTED_CANCEL,
@@ -2702,6 +2729,7 @@ def test_cancel_tools_represent_runtime_and_persistent_side_effects() -> None:
         name
         for name in definitions
         if any(command in name for command in ("cancel", "publish", "update"))
+        and name != "ouroboros_cancel_host_dispatch"
     }
     expected_cancel_tools = {
         "ouroboros_cancel_execution": {
@@ -2743,6 +2771,9 @@ def test_cancel_tools_represent_runtime_and_persistent_side_effects() -> None:
     assert state_changing_command_names == set(expected_cancel_tools)
     assert "ouroboros_publish" not in definitions
     assert "ouroboros_update" not in definitions
+    host_cancel = ouroboros_tool_capability_registry()["ouroboros_cancel_host_dispatch"]
+    assert host_cancel.execution_mode == "blocking"
+    assert host_cancel.side_effects == ("event_store_write",)
 
     for tool_name, expected in expected_cancel_tools.items():
         descriptor = graph.by_name()[tool_name]
@@ -2989,7 +3020,9 @@ def test_blocking_ouroboros_tools_have_synchronous_interrupt_metadata() -> None:
     assert blocking_tools == {
         "ouroboros_auto",
         "ouroboros_brownfield",
+        "ouroboros_cancel_host_dispatch",
         "ouroboros_checklist_verify",
+        "ouroboros_complete_host_dispatch",
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
@@ -3237,7 +3270,9 @@ def test_non_cancel_ouroboros_owned_tools_explicitly_do_not_expose_cancel_semant
         "ouroboros_ac_tree_hud",
         "ouroboros_auto",
         "ouroboros_brownfield",
+        "ouroboros_cancel_host_dispatch",
         "ouroboros_checklist_verify",
+        "ouroboros_complete_host_dispatch",
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",

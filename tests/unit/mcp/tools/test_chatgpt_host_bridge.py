@@ -80,6 +80,25 @@ def test_work_order_rejects_missing_identifier(tmp_path: Path) -> None:
         HostWorkOrder.model_validate(data)
 
 
+@pytest.mark.parametrize("schema_version", ["", "0.9", "2.0"])
+def test_work_order_rejects_unsupported_schema_version(
+    tmp_path: Path, schema_version: str
+) -> None:
+    data = _order_data(tmp_path)
+    data["schema_version"] = schema_version
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        HostWorkOrder.model_validate(data)
+
+
+def test_work_order_rejects_naive_created_at(tmp_path: Path) -> None:
+    data = _order_data(tmp_path)
+    data["created_at"] = "2026-07-14T05:00:00"
+
+    with pytest.raises(ValidationError, match="created_at"):
+        HostWorkOrder.model_validate(data)
+
+
 def test_work_order_rejects_nonexistent_workspace(tmp_path: Path) -> None:
     data = _order_data(tmp_path / "missing")
 
@@ -100,6 +119,33 @@ def test_receipt_rejects_invalid_hash(tmp_path: Path) -> None:
     data["receipt_sha256"] = "not-a-sha256"
 
     with pytest.raises(ValidationError, match="receipt_sha256"):
+        HostCompletionReceipt.model_validate(data)
+
+
+def test_receipt_rejects_missing_required_identity(tmp_path: Path) -> None:
+    data = _receipt_data(tmp_path)
+    del data["approval_policy"]
+
+    with pytest.raises(ValidationError, match="approval_policy"):
+        HostCompletionReceipt.model_validate(data)
+
+
+@pytest.mark.parametrize("schema_version", ["", "0.9", "2.0"])
+def test_receipt_rejects_unsupported_schema_version(
+    tmp_path: Path, schema_version: str
+) -> None:
+    data = _receipt_data(tmp_path)
+    data["schema_version"] = schema_version
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        HostCompletionReceipt.model_validate(data)
+
+
+def test_receipt_rejects_naive_completed_at(tmp_path: Path) -> None:
+    data = _receipt_data(tmp_path)
+    data["completed_at"] = "2026-07-14T05:01:00"
+
+    with pytest.raises(ValidationError, match="completed_at"):
         HostCompletionReceipt.model_validate(data)
 
 

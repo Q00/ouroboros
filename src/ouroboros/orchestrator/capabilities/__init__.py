@@ -270,11 +270,50 @@ _OUROBOROS_JOB_LIFECYCLE_SIBLING_ORDER = _tool_specs._OUROBOROS_JOB_LIFECYCLE_SI
 _OUROBOROS_MUTATION_TARGETS_BY_SIDE_EFFECT = _tool_specs._OUROBOROS_MUTATION_TARGETS_BY_SIDE_EFFECT
 _OUROBOROS_READ_ONLY_INTERRUPT_METADATA = _tool_specs._OUROBOROS_READ_ONLY_INTERRUPT_METADATA
 _OUROBOROS_SIDE_EFFECT_FREE_METADATA = _tool_specs._OUROBOROS_SIDE_EFFECT_FREE_METADATA
-_OUROBOROS_STATE_MUTATIONS_BY_TOOL = _tool_specs._OUROBOROS_STATE_MUTATIONS_BY_TOOL
+_OUROBOROS_STATE_MUTATIONS_BY_TOOL = {
+    **_tool_specs._OUROBOROS_STATE_MUTATIONS_BY_TOOL,
+    "ouroboros_complete_host_dispatch": (
+        {
+            "target": "event_store",
+            "operation": "append_idempotent_host_terminal_receipt",
+            "side_effect": "event_store_write",
+            "context_keys": ("receipt",),
+        },
+    ),
+    "ouroboros_cancel_host_dispatch": (
+        {
+            "target": "event_store",
+            "operation": "append_idempotent_host_cancellation_receipt",
+            "side_effect": "event_store_write",
+            "context_keys": ("receipt",),
+        },
+    ),
+}
 _OUROBOROS_STATUS_TOOLS = _tool_specs._OUROBOROS_STATUS_TOOLS
 _OUROBOROS_SUBAGENT_TOOLS = _tool_specs._OUROBOROS_SUBAGENT_TOOLS
-_OUROBOROS_TOOL_CAPABILITY_SPECS = _tool_specs._OUROBOROS_TOOL_CAPABILITY_SPECS
+_OUROBOROS_TOOL_CAPABILITY_SPECS = {
+    **_tool_specs._OUROBOROS_TOOL_CAPABILITY_SPECS,
+    "ouroboros_complete_host_dispatch": _OuroborosToolCapabilitySpec(
+        execution_mode="blocking",
+        companions=("ouroboros_cancel_host_dispatch",),
+        side_effects=("event_store_write",),
+        retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
+        interrupt=_OUROBOROS_BLOCKING_INTERRUPT_METADATA,
+    ),
+    "ouroboros_cancel_host_dispatch": _OuroborosToolCapabilitySpec(
+        execution_mode="blocking",
+        companions=("ouroboros_complete_host_dispatch",),
+        side_effects=("event_store_write",),
+        retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
+        interrupt=_OUROBOROS_BLOCKING_INTERRUPT_METADATA,
+    ),
+}
 _OUROBOROS_UNSUPPORTED_CANCEL_METADATA = _tool_specs._OUROBOROS_UNSUPPORTED_CANCEL_METADATA
+_OUROBOROS_CANCEL_METADATA = {
+    **_OUROBOROS_CANCEL_METADATA,
+    "ouroboros_complete_host_dispatch": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
+    "ouroboros_cancel_host_dispatch": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
+}
 _OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA = _tool_specs._OUROBOROS_BACKGROUND_JOB_CANCEL_METADATA
 _OUROBOROS_EXECUTION_SESSION_CANCEL_METADATA = (
     _tool_specs._OUROBOROS_EXECUTION_SESSION_CANCEL_METADATA

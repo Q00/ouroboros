@@ -46,6 +46,11 @@ from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,
     StartExecuteSeedHandler,
 )
+from ouroboros.mcp.tools.host_bridge import (
+    CancelHostDispatchHandler,
+    CompleteHostDispatchHandler,
+    HostBridgeHandler,
+)
 from ouroboros.mcp.tools.job_handlers import (
     CancelExecutionHandler,
     CancelJobHandler,
@@ -62,6 +67,7 @@ from ouroboros.mcp.tools.query_handlers import (
 )
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
 from ouroboros.mcp.tools.subagent import FanoutRegistry
+from ouroboros.persistence.event_store import EventStore
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
@@ -430,7 +436,9 @@ OuroborosToolHandlers = tuple[
     | CancelExecutionHandler
     | BrownfieldHandler
     | PMInterviewHandler
-    | QAHandler,
+    | QAHandler
+    | CompleteHostDispatchHandler
+    | CancelHostDispatchHandler,
     ...,
 ]
 
@@ -444,6 +452,7 @@ def get_ouroboros_tools(
     opencode_mode: str | None = None,
     include_auto: bool = True,
     context: AgentRuntimeContext | None = None,
+    event_store: EventStore | None = None,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
@@ -465,6 +474,7 @@ def get_ouroboros_tools(
     # One shared fan-out registry: interview/lateral producers register pending
     # fan-outs into it, and the submit tool reads them back for synthesis.
     fanout_registry = FanoutRegistry()
+    host_bridge = HostBridgeHandler(event_store or EventStore())
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
@@ -577,6 +587,8 @@ def get_ouroboros_tools(
         LineageStatusHandler(),
         EvolveRewindHandler(),
         CancelExecutionHandler(),
+        CompleteHostDispatchHandler(host_bridge),
+        CancelHostDispatchHandler(host_bridge),
         BrownfieldHandler(),
         PMInterviewHandler(
             llm_backend=llm_backend,

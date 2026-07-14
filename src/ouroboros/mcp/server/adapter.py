@@ -1218,7 +1218,9 @@ def create_ouroboros_server(
         ACTreeHUDHandler,
         AutoHandler,
         CancelExecutionHandler,
+        CancelHostDispatchHandler,
         CancelJobHandler,
+        CompleteHostDispatchHandler,
         EvaluateHandler,
         EvolveRewindHandler,
         EvolveStepHandler,
@@ -1241,6 +1243,7 @@ def create_ouroboros_server(
         StartExecuteSeedHandler,
         StartRalphHandler,
     )
+    from ouroboros.mcp.tools.host_bridge import HostBridgeHandler
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
@@ -1855,6 +1858,7 @@ def create_ouroboros_server(
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    host_bridge = HostBridgeHandler(event_store)
 
     tool_handlers = [
         execute_seed,
@@ -1988,6 +1992,8 @@ def create_ouroboros_server(
         CancelExecutionHandler(
             event_store=event_store,
         ),
+        CompleteHostDispatchHandler(host_bridge),
+        CancelHostDispatchHandler(host_bridge),
     ]
 
     resource_handlers = [

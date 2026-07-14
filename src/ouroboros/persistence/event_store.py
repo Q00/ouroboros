@@ -17,7 +17,7 @@ from urllib.parse import unquote
 from uuid import uuid4
 
 from sqlalchemy import and_, event, func, or_, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
@@ -505,6 +505,76 @@ class EventStore:
                         "event_ids": [e.id for e in events[:5]],
                     },
                 ) from e
+
+    async def append_idempotent(self, event: BaseEvent) -> bool:
+        """Insert *event* once, using its primary-key ID as the idempotency key.
+
+        Returns ``True`` for the transaction that inserts the row and ``False``
+        only when that event ID already exists. Other persistence failures are
+        surfaced unchanged as :class:`PersistenceError`.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_idempotent",
+            )
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(event, operation="append_idempotent")
+        if event.aggregate_type == "workflow_ir":
+            raise PersistenceError(
+                "Workflow IR lifecycle events must be persisted via "
+                "append_workflow_lifecycle_event() to preserve the "
+                "WorkflowLifecycleEvent redaction guard.",
+                operation="append_idempotent",
+                details={
+                    "aggregate_type": event.aggregate_type,
+                    "event_type": event.type,
+                },
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+            return True
+        except IntegrityError:
+            await self.require_event(event.id)
+            return False
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to append idempotent event: {exc}",
+                operation="insert_idempotent",
+                table="events",
+                details={"event_id": event.id, "event_type": event.type},
+            ) from exc
+
+    async def require_event(self, event_id: str) -> BaseEvent:
+        """Return one event by primary key or raise a persistence error."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="require_event",
+            )
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(
+                    select(events_table).where(events_table.c.id == event_id)
+                )
+                row = result.mappings().one_or_none()
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to load required event: {exc}",
+                operation="require_event",
+                table="events",
+                details={"event_id": event_id},
+            ) from exc
+        if row is None:
+            raise PersistenceError(
+                f"Required event does not exist: {event_id}",
+                operation="require_event",
+                table="events",
+                details={"event_id": event_id},
+            )
+        return BaseEvent.from_db_row(dict(row))
 
     async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
         """Replay all events for a specific aggregate.
