@@ -13,6 +13,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
 from ouroboros.mcp import job_manager as job_manager_module
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools import job_handlers as job_handlers_module
 from ouroboros.mcp.tools.job_handlers import (
     JobResultHandler,
     JobStatusHandler,
@@ -1397,6 +1398,82 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_dead_owner_job_reports_linked_execution_failure_before_orphan(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.created",
+                    aggregate_type="job",
+                    aggregate_id="job_default_failed",
+                    data={
+                        "job_type": "execute_seed",
+                        "status": "queued",
+                        "message": "Queued seed execution",
+                        "links": {
+                            "session_id": "orch_default_failed",
+                            "execution_id": "exec_default_failed",
+                            "lineage_id": None,
+                            "preserve_runner_result": True,
+                        },
+                        "owner_pid": 999_999,
+                        "owner_start_time": 1.0,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.updated",
+                    aggregate_type="job",
+                    aggregate_id="job_default_failed",
+                    data={
+                        "status": "running",
+                        "message": "Deliver | Level 1/1: ACs [1] | 0/1 ACs",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.failed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_default_failed_node_1",
+                    data={
+                        "execution_id": "exec_default_failed",
+                        "session_id": "child_failed",
+                        "session_scope_id": "exec_default_failed_node_1",
+                        "success": False,
+                        "error_message": "Verifier rejected unsupported evidence claims",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.ac.outcome_finalized",
+                    aggregate_type="execution",
+                    aggregate_id="exec_default_failed",
+                    data={
+                        "execution_id": "exec_default_failed",
+                        "session_id": "orch_default_failed",
+                        "success": False,
+                        "outcome": "failed",
+                    },
+                )
+            )
+
+            snapshot = await manager.get_snapshot("job_default_failed")
+
+            assert snapshot.status is JobStatus.FAILED
+            assert "Linked execution failed" in (snapshot.error or "")
+            assert "Verifier rejected unsupported evidence claims" in (snapshot.error or "")
+            assert snapshot.result_meta["failed_from_linked_execution_failure"] is True
+        finally:
+            await store.close()
+
     async def test_cancel_requested_wins_over_complete_execution_terminal(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -2298,6 +2375,70 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_job_result_handler_uses_terminal_live_snapshot(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        snapshot = JobSnapshot(
+            job_id="job_result_live_snapshot",
+            job_type="execute_seed",
+            status=JobStatus.COMPLETED,
+            message="Job complete",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=4,
+            links=JobLinks(session_id="orch_live_result", execution_id="exec_live_result"),
+            result_text="live result",
+            result_meta={"verification_status": "executed_unverified"},
+        )
+
+        class CachedJobManager:
+            def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
+                assert job_id == snapshot.job_id
+                return snapshot
+
+            async def get_snapshot(self, job_id: str) -> JobSnapshot:
+                raise AssertionError("terminal live snapshot should bypass persisted lookup")
+
+        try:
+            result = await JobResultHandler(
+                event_store=store,
+                job_manager=CachedJobManager(),
+            ).handle({"job_id": snapshot.job_id})
+
+            assert result.is_ok
+            assert result.value.text_content == "live result"
+            assert result.value.meta["job_id"] == snapshot.job_id
+            assert result.value.meta["verification_status"] == "executed_unverified"
+        finally:
+            await store.close()
+
+    async def test_cleanup_expired_jobs_removes_live_snapshot_cache(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            snapshot = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="Running execute_seed",
+                runner=_ok_runner(),
+                job_id="job_cleanup_live_snapshot",
+            )
+            snapshot = await _wait_for_job_status(
+                manager,
+                snapshot.job_id,
+                JobStatus.COMPLETED,
+            )
+
+            assert manager.get_cached_snapshot(snapshot.job_id) is not None
+
+            cleaned = await manager.cleanup_expired_jobs(ttl=timedelta(seconds=0))
+
+            assert cleaned == 1
+            assert manager.get_cached_snapshot(snapshot.job_id) is None
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_job_result_handler_returns_expired_terminal_result(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         job_id = "job_expired_terminal_result"
@@ -2451,6 +2592,12 @@ class TestJobManager:
 
             snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
             assert snapshot.status == JobStatus.COMPLETED
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while (
+                started.job_id in manager._runner_tasks
+                and asyncio.get_running_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.01)
             assert started.job_id not in manager._runner_tasks
         finally:
             await store.close()
@@ -3662,6 +3809,627 @@ class TestJobManager:
         assert result.is_ok
         assert result.value.meta["changed"] is False
         assert result.value.meta["cursor"] == 5
+        assert result.value.meta["timeout_seconds"] == 0
+        assert result.value.meta["timeout_seconds_requested"] == 0
+        assert result.value.meta["timeout_seconds_capped"] is False
+        assert result.value.meta["execution_scan_timed_out"] is False
+        assert result.value.meta["render_timed_out"] is False
+        assert result.value.meta["relay_events"] == []
+
+    async def test_job_wait_caps_requested_timeout_for_mcp_clients(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_timeout_cap",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 5
+                assert timeout_seconds == 5
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {"job_id": "job_wait_timeout_cap", "cursor": 5, "timeout_seconds": 120}
+        )
+
+        assert result.is_ok
+        assert result.value.meta["timeout_seconds"] == 5
+        assert result.value.meta["timeout_seconds_requested"] == 120
+        assert result.value.meta["timeout_seconds_capped"] is True
+
+    async def test_job_wait_exact_cap_timeout_is_not_marked_capped(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_timeout_exact_cap",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 5
+                assert timeout_seconds == 5
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {"job_id": snapshot.job_id, "cursor": 5, "timeout_seconds": 5}
+        )
+
+        assert result.is_ok
+        assert result.value.meta["timeout_seconds"] == 5
+        assert result.value.meta["timeout_seconds_requested"] == 5
+        assert result.value.meta["timeout_seconds_capped"] is False
+
+    async def test_job_wait_linked_stream_returns_structured_relay_events(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        try:
+            await store.append(
+                BaseEvent(
+                    id="evt_wait_linked_plan",
+                    type="execution.plan.created",
+                    timestamp=datetime(2026, 4, 22, tzinfo=UTC),
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait_relay",
+                    data={
+                        "execution_id": "exec_wait_relay",
+                        "session_id": "sess_wait_relay",
+                        "total_acs": 2,
+                        "total_levels": 1,
+                        "parallelizable": True,
+                        "first_level": 1,
+                        "first_ac_indices": [0, 1],
+                        "levels": [{"ac_summaries": ["API", "CLI"]}],
+                    },
+                )
+            )
+            snapshot = JobSnapshot(
+                job_id="job_wait_relay",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Running execute_seed",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=1,
+                links=JobLinks(
+                    execution_id="exec_wait_relay",
+                    session_id="sess_wait_relay",
+                ),
+            )
+
+            class StaticJobManager:
+                async def wait_for_change(
+                    self,
+                    job_id: str,
+                    *,
+                    cursor: int,
+                    timeout_seconds: int,
+                ) -> tuple[JobSnapshot, bool]:
+                    assert job_id == snapshot.job_id
+                    assert cursor == 0
+                    assert timeout_seconds == 0
+                    return snapshot, False
+
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {"job_id": snapshot.job_id, "stream": "linked", "cursor": 0}
+            )
+
+            assert result.is_ok
+            assert result.value.meta["changed"] is True
+            assert [event["type"] for event in result.value.meta["stream_events"]] == [
+                "execution.plan.created"
+            ]
+            relay_events = result.value.meta["relay_events"]
+            plan_relay = next(
+                relay for relay in relay_events if relay["subtype"] == "execution_plan"
+            )
+            assert plan_relay["kind"] == "progress_advanced"
+            assert plan_relay["scope"]["execution_id"] == "exec_wait_relay"
+            assert plan_relay["evidence"]["first_ac_summaries"] == ["API", "CLI"]
+        finally:
+            await store.close()
+
+    async def test_job_wait_uses_live_snapshot_without_long_polling(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_live_snapshot",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=7,
+            links=JobLinks(execution_id="exec_live_snapshot"),
+        )
+
+        class CachedJobManager:
+            def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
+                assert job_id == snapshot.job_id
+                return snapshot
+
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                raise AssertionError("live snapshot should bypass long polling")
+
+        handler = JobWaitHandler(event_store=store, job_manager=CachedJobManager())
+        result = await handler.handle(
+            {
+                "job_id": snapshot.job_id,
+                "cursor": 5,
+                "timeout_seconds": 5,
+                "view": "compact",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["live_snapshot"] is True
+        assert result.value.meta["changed"] is True
+        assert result.value.meta["cursor"] == 7
+        assert result.value.text_content.startswith("job_wait_live_snapshot | running")
+
+    async def test_live_status_snapshot_uses_durable_rowid_cursor(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        manager = JobManager(store)
+        runner: asyncio.Future[MCPToolResult] = asyncio.Future()
+        try:
+            for index in range(10):
+                await store.append(
+                    BaseEvent(
+                        id=f"evt_prior_{index}",
+                        type="execution.noop",
+                        aggregate_type="execution",
+                        aggregate_id="exec_prior",
+                        timestamp=datetime(2026, 4, 22, tzinfo=UTC) + timedelta(microseconds=index),
+                        data={"index": index},
+                    )
+                )
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                runner=runner,
+                initial_message="Queued execute_seed",
+                links=JobLinks(execution_id="exec_live_cursor"),
+            )
+            snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+            persisted_events, persisted_cursor = await store.get_events_after(
+                "job",
+                started.job_id,
+                last_row_id=0,
+            )
+            assert len(persisted_events) >= 2
+
+            handler = JobStatusHandler(event_store=store, job_manager=manager)
+            result = await handler.handle({"job_id": started.job_id})
+
+            assert result.is_ok
+            assert snapshot.cursor == persisted_cursor
+            assert result.value.meta["cursor"] == persisted_cursor
+            assert result.value.meta["cursor"] > 10
+        finally:
+            if not runner.done():
+                runner.cancel()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_job_wait_terminal_mode_uses_newer_live_snapshot(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_terminal_live_snapshot",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=180656,
+            links=JobLinks(execution_id="exec_terminal_live_snapshot"),
+        )
+
+        class CachedJobManager:
+            def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
+                assert job_id == snapshot.job_id
+                return snapshot
+
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                raise AssertionError("terminal waits should return newer live snapshots")
+
+        handler = JobWaitHandler(event_store=store, job_manager=CachedJobManager())
+        result = await handler.handle(
+            {
+                "job_id": snapshot.job_id,
+                "cursor": 0,
+                "timeout_seconds": 300,
+                "view": "full",
+                "stream": "progress",
+                "wait_for": "terminal",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["live_snapshot"] is True
+        assert result.value.meta["changed"] is True
+        assert result.value.meta["cursor"] == 180656
+        assert result.value.meta["wait_for"] == "terminal"
+        assert result.value.meta["timeout_seconds"] == 5
+        assert result.value.meta["timeout_seconds_capped"] is True
+        assert "poll again with cursor=180656" in result.value.text_content
+
+    async def test_job_wait_stale_live_snapshot_still_long_polls(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        cached_snapshot = JobSnapshot(
+            job_id="job_wait_stale_live_snapshot",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(),
+        )
+        fresh_snapshot = replace(
+            cached_snapshot,
+            status=JobStatus.COMPLETED,
+            message="Job complete",
+            cursor=6,
+            result_text="done",
+        )
+        waited = False
+
+        class CachedJobManager:
+            def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
+                assert job_id == cached_snapshot.job_id
+                return cached_snapshot
+
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                nonlocal waited
+                assert job_id == cached_snapshot.job_id
+                assert cursor == cached_snapshot.cursor
+                assert timeout_seconds == 5
+                waited = True
+                return fresh_snapshot, True
+
+        handler = JobWaitHandler(event_store=store, job_manager=CachedJobManager())
+        result = await handler.handle(
+            {
+                "job_id": cached_snapshot.job_id,
+                "cursor": cached_snapshot.cursor,
+                "timeout_seconds": 5,
+                "view": "compact",
+            }
+        )
+
+        assert result.is_ok
+        assert waited is True
+        assert result.value.meta["changed"] is True
+        assert result.value.meta["cursor"] == fresh_snapshot.cursor
+        assert "live_snapshot" not in result.value.meta
+
+    async def test_job_wait_wall_clock_timeout_returns_pollable_result(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = _build_store(tmp_path)
+        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+
+        class SlowJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == "job_wait_slow"
+                assert cursor == 0
+                assert timeout_seconds == 0
+                await asyncio.sleep(1)
+                raise AssertionError("job_wait should time out before this returns")
+
+        handler = JobWaitHandler(event_store=store, job_manager=SlowJobManager())
+        started = asyncio.get_running_loop().time()
+        result = await handler.handle({"job_id": "job_wait_slow", "timeout_seconds": 0})
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert result.is_ok
+        assert elapsed < 0.5
+        assert result.value.is_error is False
+        assert result.value.meta["job_id"] == "job_wait_slow"
+        assert result.value.meta["wait_timed_out"] is True
+        assert result.value.meta["result_available"] is False
+
+    async def test_job_wait_timeout_does_not_wait_for_cancel_resistant_branch(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = _build_store(tmp_path)
+        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+        released = asyncio.Event()
+
+        class CancelResistantJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == "job_wait_cancel_resistant"
+                assert cursor == 0
+                assert timeout_seconds == 0
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    await released.wait()
+                    raise
+                raise AssertionError("job_wait should time out before this returns")
+
+        handler = JobWaitHandler(event_store=store, job_manager=CancelResistantJobManager())
+        started = asyncio.get_running_loop().time()
+        result = await handler.handle({"job_id": "job_wait_cancel_resistant", "timeout_seconds": 0})
+        elapsed = asyncio.get_running_loop().time() - started
+        released.set()
+        await asyncio.sleep(0)
+
+        assert result.is_ok
+        assert elapsed < 0.5
+        assert result.value.is_error is False
+        assert result.value.meta["job_id"] == "job_wait_cancel_resistant"
+        assert result.value.meta["wait_timed_out"] is True
+        assert result.value.meta["result_available"] is False
+
+    async def test_job_wait_render_timeout_returns_compact_result(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = _build_store(tmp_path)
+        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RENDER_TIMEOUT_SECONDS", 0.01)
+        snapshot = JobSnapshot(
+            job_id="job_wait_slow_render",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                return snapshot, False
+
+        async def _slow_render(*_args, **_kwargs):
+            await asyncio.sleep(1)
+            raise AssertionError("render should time out before this returns")
+
+        monkeypatch.setattr(job_handlers_module, "_render_job_snapshot", _slow_render)
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {"job_id": snapshot.job_id, "cursor": 5, "timeout_seconds": 0}
+        )
+
+        assert result.is_ok
+        assert result.value.meta["render_timed_out"] is True
+        assert result.value.text_content.startswith("job_wait_slow_render | running")
+
+    async def test_job_wait_execution_scan_timeout_returns_pollable_result(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            job_handlers_module,
+            "_JOB_WAIT_EXECUTION_SCAN_TIMEOUT_SECONDS",
+            0.01,
+        )
+        snapshot = JobSnapshot(
+            job_id="job_wait_slow_execution_scan",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(execution_id="exec_wait_slow_scan"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 5
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        class SlowExecutionScanStore:
+            async def get_events_after(self, *_args, **_kwargs):
+                await asyncio.sleep(1)
+                raise AssertionError("execution scan should time out before this returns")
+
+        async def _fast_render(*_args, **_kwargs):
+            return "rendered", dict(job_handlers_module._EMPTY_PROGRESS)
+
+        monkeypatch.setattr(job_handlers_module, "_render_job_snapshot", _fast_render)
+
+        handler = JobWaitHandler(
+            event_store=SlowExecutionScanStore(),
+            job_manager=StaticJobManager(),
+        )
+        started = asyncio.get_running_loop().time()
+        result = await handler.handle(
+            {"job_id": snapshot.job_id, "cursor": 5, "timeout_seconds": 0}
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert result.is_ok
+        assert elapsed < 0.5
+        assert result.value.meta["execution_scan_timed_out"] is True
+        assert result.value.meta["render_timed_out"] is False
+        assert result.value.meta["cursor"] == 5
+
+    async def test_job_wait_execution_progress_reads_are_bounded(self) -> None:
+        snapshot = JobSnapshot(
+            job_id="job_wait_bounded_execution_reads",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=5,
+            links=JobLinks(execution_id="exec_wait_bounded"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 5
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        class BoundedEventStore:
+            async def get_events_after(
+                self,
+                aggregate_type: str,
+                aggregate_id: str,
+                last_row_id: int = 0,
+                *,
+                limit: int | None = None,
+                max_row_id: int | None = None,
+            ) -> tuple[list[BaseEvent], int]:
+                assert aggregate_type == "execution"
+                assert aggregate_id == "exec_wait_bounded"
+                assert last_row_id == 5
+                assert limit is not None
+                assert max_row_id is None
+                return [], 5
+
+            async def query_events(
+                self,
+                aggregate_id: str | None = None,
+                event_type: str | None = None,
+                limit: int = 50,
+                offset: int = 0,
+            ) -> list[BaseEvent]:
+                assert aggregate_id == "exec_wait_bounded"
+                assert limit <= 500
+                assert offset == 0
+                if event_type == "workflow.progress.updated":
+                    return []
+                return [
+                    BaseEvent(
+                        id="evt_bounded_subtask",
+                        type="execution.node.updated",
+                        aggregate_type="execution",
+                        aggregate_id="exec_wait_bounded",
+                        timestamp=datetime(2026, 4, 22, tzinfo=UTC),
+                        data={"sub_task_id": "node_1", "content": "bounded", "status": "running"},
+                    )
+                ]
+
+        handler = JobWaitHandler(event_store=BoundedEventStore(), job_manager=StaticJobManager())
+        result = await handler.handle(
+            {"job_id": "job_wait_bounded_execution_reads", "cursor": 5, "timeout_seconds": 0}
+        )
+
+        assert result.is_ok
+        assert "Sub-AC Progress" in result.value.text_content
+
+    async def test_job_wait_progress_reads_latest_window_for_long_executions(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        try:
+            base_time = datetime(2026, 4, 22, tzinfo=UTC)
+            for index in range(600):
+                await store.append(
+                    BaseEvent(
+                        id=f"evt_many_progress_{index}",
+                        type="workflow.progress.updated",
+                        aggregate_type="execution",
+                        aggregate_id="exec_many_progress",
+                        timestamp=base_time + timedelta(microseconds=index),
+                        data={
+                            "completed_count": index,
+                            "total_count": 600,
+                            "current_phase": f"phase-{index}",
+                            "activity": f"step-{index}",
+                        },
+                    )
+                )
+
+            progress, cursor = await job_handlers_module._query_execution_progress_at_cursor(
+                store,
+                "exec_many_progress",
+            )
+
+            assert progress["ac_completed"] == 599
+            assert progress["ac_total"] == 600
+            assert progress["current_phase"] == "phase-599"
+            assert progress["activity"] == "step-599"
+            assert cursor == 600
+        finally:
+            await store.close()
 
     async def test_job_wait_raw_mode_preserves_any_event_wakeup(self, tmp_path) -> None:
         store = _build_store(tmp_path)

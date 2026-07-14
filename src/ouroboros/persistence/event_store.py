@@ -674,6 +674,65 @@ class EventStore:
                 table="events",
             ) from e
 
+    async def get_recent_aggregate_events(
+        self,
+        aggregate_type: str,
+        aggregate_id: str,
+        *,
+        event_types: set[str] | None = None,
+        max_row_id: int | None = None,
+        limit: int = 500,
+    ) -> tuple[list[BaseEvent], int]:
+        """Return the latest bounded rowid page for one aggregate.
+
+        ``get_events_after(..., limit=...)`` pages forward from an old cursor,
+        which is correct for replay but wrong for status rendering that needs
+        the latest visible progress from a long execution. This helper reads
+        the newest matching rowids first, then returns them in ascending cursor
+        order so callers can summarize a bounded recent window without
+        fabricating cursors.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_recent_aggregate_events",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                rowid_col = text("rowid")
+                query = (
+                    select(events_table, rowid_col)
+                    .where(events_table.c.aggregate_type == aggregate_type)
+                    .where(events_table.c.aggregate_id == aggregate_id)
+                )
+                if event_types:
+                    query = query.where(events_table.c.event_type.in_(sorted(event_types)))
+                if max_row_id is not None:
+                    query = query.where(text("rowid <= :max_id").bindparams(max_id=max_row_id))
+                query = query.order_by(text("rowid DESC")).limit(limit)
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                if not rows:
+                    return [], max_row_id or 0
+                rows = list(reversed(rows))
+                events = [BaseEvent.from_db_row(dict(row)) for row in rows]
+                max_seen = max(row["rowid"] for row in rows)
+                return events, max_seen
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get recent aggregate events: {e}",
+                operation="select",
+                table="events",
+                details={
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": aggregate_id,
+                    "event_types": sorted(event_types) if event_types else None,
+                    "max_row_id": max_row_id,
+                    "limit": limit,
+                },
+            ) from e
+
     async def get_recent_events(
         self, event_type: str | None = None, limit: int = 100
     ) -> list[BaseEvent]:
