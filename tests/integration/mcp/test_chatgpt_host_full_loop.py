@@ -60,6 +60,40 @@ def test_full_composition_uses_one_host_llm_adapter_family(tmp_path: Path) -> No
     assert context.authority_source.value == "fixture"
 
 
+def test_full_composition_forwards_one_host_context_to_every_loop_stage(
+    tmp_path: Path,
+) -> None:
+    """The composition root must not drop host authority between Full stages."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'full-stage-context.db'}")
+    context = HostDispatchContext(
+        workspace_id="fixture-workspace",
+        workspace_root=tmp_path,
+        sandbox_mode="workspace-write",
+        approval_policy="on-request",
+        authority_source="fixture",
+    )
+
+    server = create_ouroboros_server(
+        runtime_backend="codex",
+        event_store=store,
+        host_dispatch_context=context,
+    )
+
+    for tool_name in (
+        "ouroboros_auto",
+        "ouroboros_start_auto",
+        "ouroboros_evaluate",
+        "ouroboros_start_evaluate",
+        "ouroboros_evolve_step",
+        "ouroboros_start_evolve_step",
+        "ouroboros_ralph",
+        "ouroboros_start_ralph",
+    ):
+        handler = server._tool_handlers[tool_name]
+        stage_handler = getattr(handler, "_evaluate_handler", handler)
+        assert stage_handler.host_dispatch_context is context, tool_name
+
+
 @pytest.mark.asyncio
 async def test_execute_seed_pauses_for_host_and_resumes_same_full_lineage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

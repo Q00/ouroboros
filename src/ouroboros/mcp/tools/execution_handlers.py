@@ -702,7 +702,6 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 HostTerminalStatus,
             )
             from ouroboros.mcp.tools.subagent import build_host_work_order
-            from ouroboros.orchestrator.session import SessionRepository
 
             # Host authority is a composition-root decision. A stale user runtime
             # setting must never make the ChatGPT profile fall through to a CLI.

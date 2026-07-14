@@ -1832,6 +1832,7 @@ def create_ouroboros_server(
         event_store=event_store,
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
+        host_dispatch_context=host_dispatch_context,
     )
     auto_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
     auto_mcp_prefix = (
@@ -1857,6 +1858,7 @@ def create_ouroboros_server(
             job_manager=job_manager,
             agent_runtime_backend=runtime_backend,
             opencode_mode=ralph_opencode_mode,
+            host_dispatch_context=host_dispatch_context,
         )
 
     ralph_handler = build_ralph_handler(execute_runtime_backend, opencode_mode)
@@ -1866,6 +1868,7 @@ def create_ouroboros_server(
         job_manager=job_manager,
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
+        host_dispatch_context=host_dispatch_context,
     )
     interview = InterviewHandler(
         interview_engine=interview_engine,
@@ -1892,6 +1895,7 @@ def create_ouroboros_server(
         llm_backend=evaluate_llm_backend,
         agent_runtime_backend=evaluate_runtime_backend,
         opencode_mode=opencode_mode,
+        host_dispatch_context=host_dispatch_context,
     )
 
     tool_handlers = [
@@ -1907,6 +1911,7 @@ def create_ouroboros_server(
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
             event_store=event_store,
+            host_dispatch_context=host_dispatch_context,
             ralph_handler_factory=build_ralph_handler,
         ),
         StartAutoHandler(
@@ -1920,6 +1925,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             mcp_manager=auto_mcp_manager,
             mcp_tool_prefix=auto_mcp_prefix,
+            host_dispatch_context=host_dispatch_context,
             ralph_handler_factory=build_ralph_handler,
         ),
         SessionStatusHandler(
@@ -1989,6 +1995,7 @@ def create_ouroboros_server(
             job_manager=job_manager,
             agent_runtime_backend=execute_runtime_backend,
             opencode_mode=opencode_mode,
+            host_dispatch_context=host_dispatch_context,
         ),
         ralph_handler,
         start_ralph_handler,
