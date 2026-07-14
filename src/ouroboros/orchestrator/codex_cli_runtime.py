@@ -43,6 +43,7 @@ from ouroboros.orchestrator.adapter import (
     SubagentOrchestration,
     TaskResult,
 )
+from ouroboros.orchestrator.codex_config_fingerprint import fingerprint_codex_config_files
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -389,51 +390,7 @@ class CodexCliRuntime:
         return Path(configured).expanduser() if configured else Path.home() / ".codex"
 
     def _fingerprint_codex_config_files(self) -> str:
-        """Hash global Codex config and every profile-v2 TOML by name/content."""
-        codex_home = self._codex_home()
-        candidates: dict[str, Path] = {"config.toml": codex_home / "config.toml"}
-        try:
-            for path in codex_home.glob("*.config.toml"):
-                candidates[path.name] = path
-        except OSError as exc:
-            raise RuntimeError("Cannot inspect Codex profile configuration") from exc
-
-        digest = hashlib.sha256()
-        digest.update(b"ouroboros-codex-config-v1\0")
-        # CODEX_HOME also owns the session database used by ``codex exec
-        # resume``. Identical profile files under a different home must not
-        # authorize reconnecting a persisted thread id in another store.
-        digest.update(str(codex_home.resolve(strict=False)).encode("utf-8"))
-        digest.update(b"\0")
-        for name, path in sorted(candidates.items()):
-            digest.update(name.encode("utf-8", errors="surrogateescape"))
-            digest.update(b"\0")
-            try:
-                stat_result = path.lstat()
-            except FileNotFoundError:
-                digest.update(b"missing\0")
-                continue
-            except OSError as exc:
-                raise RuntimeError("Cannot inspect Codex profile configuration") from exc
-
-            if path.is_symlink():
-                try:
-                    digest.update(b"symlink\0")
-                    digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
-                    digest.update(b"\0")
-                except OSError as exc:
-                    raise RuntimeError("Cannot inspect Codex profile configuration") from exc
-            if not path.is_file():
-                digest.update(f"non-file:{stat_result.st_mode}\0".encode("ascii"))
-                continue
-            try:
-                with path.open("rb") as config_file:
-                    while chunk := config_file.read(64 * 1024):
-                        digest.update(chunk)
-            except OSError as exc:
-                raise RuntimeError("Cannot read Codex profile configuration") from exc
-            digest.update(b"\0")
-        return digest.hexdigest()
+        return fingerprint_codex_config_files(self._codex_home())
 
     def _assert_codex_config_files_unchanged(self) -> None:
         if self._runtime_backend != "codex":

@@ -288,6 +288,52 @@ class TestCodexCliRuntime:
         assert command.index("-C") < resume_index
         assert command[command.index("-C") + 1] == _EXPECTED_PROJECT_CWD
 
+    def test_build_command_allows_codex_managed_state_updates(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        config_path = codex_home / "config.toml"
+        config_path.write_text(
+            'model = "gpt-5.6-sol"\n\n[projects."/tmp/existing"]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        config_path.write_text(
+            'model = "gpt-5.6-sol"\n'
+            '\n[projects."/tmp/existing"]\n'
+            'trust_level = "trusted"\n'
+            '\n[projects."/tmp/codex-relay-live-workspace-new"]\n'
+            'trust_level = "trusted"\n'
+            '\n[hooks.state."plugin:session_start:0"]\n'
+            'trusted_hash = "desktop-managed-state"\n',
+            encoding="utf-8",
+        )
+
+        command = runtime._build_command(output_last_message_path="/tmp/out.txt")
+
+        assert command[:2] == ["codex", "exec"]
+
+    def test_build_command_rejects_model_routing_config_updates(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        config_path = codex_home / "config.toml"
+        config_path.write_text('model = "gpt-5.6-sol"\n', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        config_path.write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="Codex configuration changed"):
+            runtime._build_command(output_last_message_path="/tmp/out.txt")
+
     def test_build_command_uses_profile_for_runtime_session_role(self) -> None:
         """Agent runtime sessions should resolve Codex profiles from session_role."""
         runtime_handle = RuntimeHandle(
