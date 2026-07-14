@@ -506,7 +506,7 @@ class Seed(BaseModel, frozen=True):
         self,
         value: tuple[AcceptanceCriterionInput, ...],
     ) -> tuple[str | dict[str, Any], ...]:
-        """Persist description-only ACs in the legacy bare-string form."""
+        """Persist materialized AC contracts, retaining legacy fallback handling."""
         return tuple(
             criterion.to_seed_value()
             if isinstance(criterion, AcceptanceCriterionSpec)

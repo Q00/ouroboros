@@ -2,6 +2,9 @@
 
 > Generated: 2026-07-12
 > Approach: staged, event-authoritative successor recovery
+> Availability: this document describes the complete stacked target. The first
+> contract layer provides only core/event contracts; MCP registration, runtime
+> capability opt-ins, and delivery acknowledgement arrive in later layers.
 
 ## Overview
 
@@ -94,7 +97,9 @@ configuration, plan, phase/discovery, level, model, and harness events are reduc
 into sparse `phase_changed`/`progress_advanced` relay envelopes. Only
 `attention_required` enters VERIFY/DECIDE.
 
-Updated user intent follows a reverse, cursor-independent command path:
+In the complete stack, updated user intent follows a reverse,
+cursor-independent command path. These commands are not public or callable from
+the contract layer alone:
 
 1. The main conductor calls `ouroboros_session_signal_targets` for the observed
    execution and maps the human's wording to the most relevant live AC content.
@@ -155,8 +160,9 @@ state remains authoritative across process boundaries and restarts.
   unsupported transports advertise false and use explicit follow-up/rejection.
 - Preserve current resume handles. Checkpoint redirect is an optional capability, not a
   reinterpretation of `targeted_resume`.
-- `ouroboros_session_signal` is registered because leader-driven resumable
-  runtimes now implement tested `after_turn` delivery and application
+- The contract layer leaves `ouroboros_session_signal` unregistered and every
+  runtime capability false. A later host layer registers it only after the
+  runtime layer supplies tested `after_turn` delivery and application
   acknowledgement. Other modes remain capability-gated.
 
 ## Testing strategy
