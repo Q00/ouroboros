@@ -2341,16 +2341,11 @@ class InterviewHandler:
         suggested_interview_id: str | None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Persist one Full interview turn and delegate only question generation."""
-        from dataclasses import replace
-        from datetime import UTC, datetime
-        import hashlib
-        import json
-        from uuid import NAMESPACE_URL, uuid4, uuid5
+        from uuid import uuid4
 
         from ouroboros.bigbang.interview import InterviewRound
         from ouroboros.core.security import InputValidator
-        from ouroboros.mcp.tools.host_bridge import HostBridgeHandler
-        from ouroboros.mcp.tools.subagent import build_host_work_order
+        from ouroboros.mcp.tools.host_bridge import HostStageBridge
 
         state_dir = self.resolved_state_dir()
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -2452,94 +2447,41 @@ class InterviewHandler:
             cwd=str(requested_cwd),
             transcript=transcript,
         )
-        fingerprint = hashlib.sha256(
-            json.dumps(payload.to_dict(), sort_keys=True, ensure_ascii=True).encode()
-        ).hexdigest()
-        dispatch_id = str(
-            uuid5(NAMESPACE_URL, f"ouroboros-host-interview:{real_session_id}:{fingerprint}")
-        )
-        payload = replace(
-            payload,
-            context={
-                **payload.context,
-                "dispatch_mode": "host_driven",
-                "continuation": {
-                    "tool_name": "ouroboros_interview",
-                    "arguments": {
-                        "session_id": real_session_id,
-                        "_host_dispatch_id": dispatch_id,
-                    },
-                },
-            },
-        )
         criterion = "Return exactly one next Socratic interview question"
-        order = build_host_work_order(
-            payload,
-            dispatch_id=dispatch_id,
+        await self._ensure_initialized()
+        bridge = HostStageBridge(self._event_store, context)
+        pending = await bridge.dispatch_pending(
+            stage="interview",
             session_id=real_session_id,
             lineage_id=real_session_id,
-            workspace_id=context.workspace_id,
-            workspace_root=context.workspace_root,
-            sandbox_mode=context.sandbox_mode,
-            approval_policy=context.approval_policy,
+            payload=payload.to_dict(),
+            continuation_tool="ouroboros_interview",
+            continuation_arguments={"session_id": real_session_id},
             acceptance_criteria=(criterion,),
             evidence_requirements=("interview_question evidence with the exact question",),
-            created_at=datetime.now(UTC),
+            pending_text=(
+                "Complete this interview work order in the active ChatGPT IDE, "
+                "submit its receipt, then invoke the continuation."
+            ),
         )
-        await self._ensure_initialized()
-        bridge = HostBridgeHandler(self._event_store)
-        order = await bridge.dispatch(order)
-        await bridge.accept(order)
-        body = order.model_dump(mode="json")
-        return Result.ok(
-            MCPToolResult(
-                content=(
-                    MCPContentItem(
-                        type=ContentType.TEXT,
-                        text="Complete this interview work order in the active ChatGPT IDE, submit its receipt, then invoke the continuation.",
-                    ),
-                ),
-                meta={
-                    "status": "host_work_pending",
-                    "dispatch_mode": "host_driven",
-                    "session_id": real_session_id,
-                    "lineage_id": real_session_id,
-                    "work_order": body,
-                },
-                structured_content={"status": "host_work_pending", "work_order": body},
-            )
-        )
+        return Result.ok(pending)
 
     async def _complete_host_dispatch_turn(
         self, session_id: str, dispatch_id: str
     ) -> Result[MCPToolResult, MCPServerError]:
         """Project a persisted host question into the same Full interview state."""
         from ouroboros.bigbang.interview import InterviewRound
-        from ouroboros.mcp.tools.host_bridge import HostBridgeHandler, HostTerminalStatus
+        from ouroboros.mcp.tools.host_bridge import HostStageBridge
 
         await self._ensure_initialized()
-        bridge = HostBridgeHandler(self._event_store)
+        bridge = HostStageBridge(self._event_store, self.host_dispatch_context)
         try:
-            order = await bridge.require_order(dispatch_id)
-            if order.session_id != session_id:
-                raise ValueError("host interview continuation session mismatch")
-            receipt = await bridge.receipt(order)
+            receipt = await bridge.require_completed_receipt(
+                dispatch_id=dispatch_id,
+                session_id=session_id,
+            )
         except Exception as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
-        if receipt is None:
-            return Result.err(
-                MCPToolError(
-                    "Host interview receipt is not available",
-                    tool_name="ouroboros_interview",
-                )
-            )
-        if receipt.terminal_status is not HostTerminalStatus.COMPLETED:
-            return Result.err(
-                MCPToolError(
-                    f"Host interview {receipt.terminal_status.value}",
-                    tool_name="ouroboros_interview",
-                )
-            )
         questions = [
             item.get("value", "").strip()
             for item in receipt.evidence

@@ -6,8 +6,10 @@ agent process, or alternate workflow engine.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -364,6 +366,98 @@ class HostBridgeHandler:
             stored_receipt = HostCompletionReceipt.model_validate(stored.data["receipt"])
             if stored_receipt != receipt:
                 raise HostReceiptConflict(receipt.dispatch_id)
+        return receipt
+
+
+def deterministic_host_dispatch_id(
+    stage: str,
+    session_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return one stable dispatch identity for the same Full stage input."""
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str)
+    fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
+    return str(uuid5(NAMESPACE_URL, f"ouroboros-host-{stage}:{session_id}:{fingerprint}"))
+
+
+class HostStageBridge(HostBridgeHandler):
+    """Reusable Full-stage adapter for typed host work and continuations."""
+
+    def __init__(self, event_store: EventStore, context: HostDispatchContext) -> None:
+        super().__init__(event_store)
+        self._context = context
+
+    async def dispatch_pending(
+        self,
+        *,
+        stage: str,
+        session_id: str,
+        lineage_id: str,
+        payload: Mapping[str, Any],
+        continuation_tool: str,
+        continuation_arguments: Mapping[str, Any],
+        acceptance_criteria: tuple[str, ...],
+        evidence_requirements: tuple[str, ...],
+        pending_text: str,
+    ) -> MCPToolResult:
+        """Persist deterministic host work and render its shared pending result."""
+        dispatch_id = deterministic_host_dispatch_id(stage, session_id, payload)
+        continuation = {
+            "tool_name": continuation_tool,
+            "arguments": {
+                **continuation_arguments,
+                "_host_dispatch_id": dispatch_id,
+            },
+        }
+        payload_context = payload.get("context")
+        order = HostWorkOrder(
+            dispatch_id=dispatch_id,
+            session_id=session_id,
+            lineage_id=lineage_id,
+            workspace_id=self._context.workspace_id,
+            workspace_root=self._context.workspace_root,
+            sandbox_mode=self._context.sandbox_mode,
+            approval_policy=self._context.approval_policy,
+            prompt=str(payload.get("prompt") or ""),
+            context={
+                **(dict(payload_context) if isinstance(payload_context, Mapping) else {}),
+                "dispatch_mode": "host_driven",
+                "continuation": continuation,
+            },
+            acceptance_criteria=acceptance_criteria,
+            evidence_requirements=evidence_requirements,
+            created_at=datetime.now(UTC),
+        )
+        order = await self.dispatch(order)
+        await self.accept(order)
+        body = order.model_dump(mode="json")
+        return MCPToolResult(
+            content=(MCPContentItem(type=ContentType.TEXT, text=pending_text),),
+            meta={
+                "status": "host_work_pending",
+                "dispatch_mode": "host_driven",
+                "session_id": session_id,
+                "lineage_id": lineage_id,
+                "work_order": body,
+            },
+            structured_content={"status": "host_work_pending", "work_order": body},
+        )
+
+    async def require_completed_receipt(
+        self,
+        *,
+        dispatch_id: str,
+        session_id: str,
+    ) -> HostCompletionReceipt:
+        """Return the completed receipt bound to the requested Full session."""
+        order = await self.require_order(dispatch_id)
+        if order.session_id != session_id:
+            raise HostDispatchIdentityError("host continuation session mismatch")
+        receipt = await self.receipt(order)
+        if receipt is None:
+            raise HostBridgeError("host receipt is not available")
+        if receipt.terminal_status is not HostTerminalStatus.COMPLETED:
+            raise HostBridgeError(f"host dispatch {receipt.terminal_status.value}")
         return receipt
 
 
