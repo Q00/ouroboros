@@ -598,18 +598,14 @@ else
   _info "No backend selected; skipping runtime setup."
 fi
 
-# Refresh Codex rules/skills whenever this machine appears to use Codex, even
-# if the preserved primary runtime is another backend. Setup already does this
-# for `--runtime codex`, but upgrades and `all` installs should not leave stale
-# ~/.codex artifacts behind.
-if [ -n "$OUROBOROS_SETUP_CMD" ] && {
-  [ "$RUNTIME" = "codex" ] ||
-    [ "$EXTRAS" = "[all]" ] ||
-    [ "$HAS_CODEX" = true ] ||
-    [ -d "$HOME/.codex" ]
-}; then
-  _info "Refreshing Codex rules and skills"
-  "$OUROBOROS_SETUP_CMD" codex refresh || _warn "Codex artifact refresh skipped; run: ouroboros codex refresh"
+# Refresh already-installed artifacts for every detected runtime, even those
+# that are not the preserved primary backend. Setup only wires the selected
+# runtime, so upgrades must not leave other runtimes' rules/skills/bridges
+# stale. `setup refresh` is presence-gated per artifact and never touches MCP
+# registrations or config.
+if [ -n "$OUROBOROS_SETUP_CMD" ]; then
+  _info "Refreshing runtime artifacts for detected runtimes"
+  "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
 
 # 5. Claude Code integration (MCP + skills)
@@ -699,6 +695,8 @@ if command -v claude &>/dev/null; then
   claude plugin marketplace add Q00/ouroboros 2>/dev/null || true
   claude plugin marketplace update ouroboros 2>/dev/null || true
   if claude plugin install ouroboros@ouroboros 2>/dev/null; then
+    # `install` is a no-op for an already-installed plugin — `update` moves it to the latest version
+    claude plugin update ouroboros@ouroboros >/dev/null 2>&1 || true
     _ok "Skills installed"
   else
     _warn "Skills skipped. Manual install: claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros"
