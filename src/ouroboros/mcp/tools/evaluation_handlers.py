@@ -412,6 +412,7 @@ class EvaluateHandler:
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    host_dispatch_context: Any | None = field(default=None, repr=False)
     TIMEOUT_SECONDS: int = 0  # No server-side timeout; client/runtime decides.
 
     @property
@@ -586,6 +587,15 @@ class EvaluateHandler:
         )
 
         working_dir = await _resolve_evaluate_working_dir(arguments.get("working_dir"), seed)
+        if self.host_dispatch_context is not None and not working_dir.is_relative_to(
+            self.host_dispatch_context.workspace_root
+        ):
+            return Result.err(
+                MCPToolError(
+                    "Evaluation working_dir must remain inside the active ChatGPT workspace",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if len(acceptance_criteria) > 1:
@@ -605,6 +615,14 @@ class EvaluateHandler:
             working_dir=str(working_dir),
             trigger_consensus=trigger_consensus,
         )
+        if self.host_dispatch_context is not None:
+            return await self._handle_host_dispatch(
+                arguments,
+                session_id=str(session_id),
+                payload=payload.to_dict(),
+                acceptance_criteria=acceptance_criteria
+                or ("Verify execution output meets requirements",),
+            )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             # Preserve public response shape (#442): session_id + status are
             # part of the documented contract for ouroboros_evaluate.
@@ -854,6 +872,91 @@ class EvaluateHandler:
         finally:
             if owns_event_store and store is not None:
                 await store.close()
+
+    async def _handle_host_dispatch(
+        self,
+        arguments: dict[str, Any],
+        *,
+        session_id: str,
+        payload: dict[str, Any],
+        acceptance_criteria: tuple[str, ...],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Dispatch or resume Evaluate work in the active Full host session."""
+        from ouroboros.mcp.tools.host_bridge import HostStageBridge, HostTerminalStatus
+
+        store = self.event_store
+        if store is None:
+            store = EventStore()
+            self.event_store = store
+        await store.initialize()
+        bridge = HostStageBridge(store, self.host_dispatch_context)
+        dispatch_id = arguments.get("_host_dispatch_id")
+        if dispatch_id:
+            try:
+                order = await bridge.require_order(str(dispatch_id))
+                if order.session_id != session_id:
+                    raise ValueError("host continuation session mismatch")
+                receipt = await bridge.receipt(order)
+                if receipt is None:
+                    raise ValueError("host receipt is not available")
+                if receipt.terminal_status is HostTerminalStatus.CANCELLED:
+                    raise ValueError("host dispatch cancelled")
+                receipt_criteria = tuple(
+                    result.criterion for result in receipt.criterion_results
+                )
+                if receipt_criteria != order.acceptance_criteria:
+                    raise ValueError(
+                        "evaluation receipt criteria must match the work order in order"
+                    )
+            except Exception as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_evaluate"))
+            criterion_results = [
+                result.model_dump(mode="json") for result in receipt.criterion_results
+            ]
+            body = {
+                "status": "completed",
+                "session_id": session_id,
+                "final_approved": all(
+                    result.passed for result in receipt.criterion_results
+                ),
+                "criterion_results": criterion_results,
+                "evidence": list(receipt.evidence),
+                "receipt_sha256": receipt.receipt_sha256,
+            }
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=json.dumps(body, sort_keys=True, separators=(",", ":")),
+                        ),
+                    ),
+                    meta=body,
+                    structured_content=body,
+                )
+            )
+
+        continuation_arguments = {
+            key: value for key, value in arguments.items() if key != "_host_dispatch_id"
+        }
+        pending = await bridge.dispatch_pending(
+            stage="evaluate",
+            session_id=session_id,
+            lineage_id=session_id,
+            payload=payload,
+            continuation_tool="ouroboros_evaluate",
+            continuation_arguments=continuation_arguments,
+            acceptance_criteria=acceptance_criteria,
+            evidence_requirements=(
+                "criterion_results for every acceptance criterion in the original order",
+                "evaluation evidence supporting every passing criterion",
+            ),
+            pending_text=(
+                "Complete this evaluation work order in the active ChatGPT IDE, "
+                "submit its receipt, then invoke the continuation."
+            ),
+        )
+        return Result.ok(pending)
 
     async def _handle_multi_ac(
         self,
@@ -2108,6 +2211,17 @@ class StartEvaluateHandler:
                     tool_name="ouroboros_start_evaluate",
                 )
             )
+
+        # A ChatGPT host already owns the long-running model turn.  Return its
+        # Full work order immediately instead of creating a second background
+        # execution channel that the host cannot observe or resume.
+        from ouroboros.mcp.tools.host_bridge import HostDispatchContext
+
+        if isinstance(
+            getattr(self._evaluate_handler, "host_dispatch_context", None),
+            HostDispatchContext,
+        ):
+            return await self._evaluate_handler.handle(arguments)
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # Plugin mode is terminal — return the delegation envelope without
