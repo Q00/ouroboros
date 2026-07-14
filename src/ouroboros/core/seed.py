@@ -17,6 +17,8 @@ This module defines:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
+import json
 import math
 import re
 from typing import Any
@@ -31,6 +33,8 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
+
+from ouroboros.core.conductor import ConductorDirective
 
 _OUTPUT_ASSERTION_CONDITION_RE = re.compile(
     r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
@@ -218,6 +222,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     """Structured success contract for one acceptance criterion."""
 
     description: str
+    semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
     expected_artifacts: tuple[str, ...] = Field(default_factory=tuple)
     output_assertion: str | None = Field(default=None)
@@ -269,11 +274,19 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         """Return True when explicit evidence fields are populated."""
         return bool(self.verify_command or self.expected_artifacts or self.output_assertion)
 
+    def with_materialized_semantic_key(self) -> AcceptanceCriterionSpec:
+        """Return this criterion with a deterministic legacy semantic identity."""
+        if self.semantic_ac_key is not None:
+            return self
+        return self.model_copy(update={"semantic_ac_key": derive_semantic_ac_key(self)})
+
     def to_seed_value(self) -> str | dict[str, Any]:
         """Return the stable persisted representation for this AC."""
-        if not self.has_success_contract:
+        if not self.has_success_contract and self.semantic_ac_key is None:
             return self.description
         data: dict[str, Any] = {"description": self.description}
+        if self.semantic_ac_key:
+            data["semantic_ac_key"] = self.semantic_ac_key
         if self.verify_command:
             data["verify_command"] = self.verify_command
         if self.expected_artifacts:
@@ -287,6 +300,32 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
 
 
 AcceptanceCriterionInput = str | AcceptanceCriterionSpec
+
+
+def derive_semantic_ac_key(criterion: AcceptanceCriterionInput) -> str:
+    """Derive a stable semantic identity for a legacy or newly created AC.
+
+    The digest intentionally excludes list position, runtime/session identity,
+    and volatile Seed metadata. Preserved structured criteria keep their
+    explicit key across retries and successors; a semantically replaced
+    criterion gets a new key when materialized from its changed contract.
+    """
+    if isinstance(criterion, AcceptanceCriterionSpec):
+        payload = {
+            "description": criterion.description,
+            "verify_command": criterion.verify_command,
+            "expected_artifacts": list(criterion.expected_artifacts),
+            "output_assertion": criterion.output_assertion,
+        }
+    else:
+        payload = {"description": str(criterion).strip()}
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return f"ac_{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
 def ac_text(criterion: AcceptanceCriterionInput) -> str:
@@ -478,10 +517,24 @@ class Seed(BaseModel, frozen=True):
     @model_validator(mode="after")
     def _validate_plugin_extra_fields(self) -> Seed:
         """Keep plugin-owned extra fields safe for Seed persistence paths."""
+        materialized_criteria = tuple(
+            criterion.with_materialized_semantic_key()
+            if isinstance(criterion, AcceptanceCriterionSpec)
+            else AcceptanceCriterionSpec(
+                description=ac_text(criterion),
+                semantic_ac_key=derive_semantic_ac_key(criterion),
+            )
+            for criterion in self.acceptance_criteria
+        )
+        object.__setattr__(self, "acceptance_criteria", materialized_criteria)
         frozen_extra: dict[str, Any] = {}
         for key, value in (self.model_extra or {}).items():
             if not isinstance(key, str):
                 raise ValueError("Seed extra field keys must be strings")
+            if key == "conductor_directive":
+                if not isinstance(value, dict):
+                    raise ValueError("Seed conductor_directive must be a structured object")
+                value = ConductorDirective.from_mapping(value).to_event_data()
             frozen_extra[key] = _freeze_seed_extra_value(value, path=key)
         object.__setattr__(self, "__pydantic_extra__", _FrozenDict(frozen_extra))
         return self

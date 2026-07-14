@@ -450,8 +450,8 @@ class TestSeed:
         assert ok.output_assertion == "OK"
         assert pytest_literal.output_assertion == "5 passed"
 
-    def test_seed_acceptance_criteria_serialize_legacy_strings_stably(self) -> None:
-        """Description-only ACs dump back to bare strings."""
+    def test_seed_acceptance_criteria_materialize_semantic_keys(self) -> None:
+        """Legacy description-only ACs gain deterministic persisted identities."""
         seed = Seed(
             goal="Build a CLI task manager",
             acceptance_criteria=(
@@ -465,10 +465,13 @@ class TestSeed:
             metadata=SeedMetadata(ambiguity_score=0.15),
         )
 
-        assert seed.to_dict()["acceptance_criteria"] == [
+        serialized = seed.to_dict()["acceptance_criteria"]
+        assert [item["description"] for item in serialized] == [
             "Tasks can be created",
             "Tasks can be listed",
         ]
+        assert all(item["semantic_ac_key"].startswith("ac_") for item in serialized)
+        assert Seed.from_dict(seed.to_dict()).to_dict() == seed.to_dict()
 
     def test_seed_acceptance_criteria_serialize_structured_contract(self) -> None:
         """Contract-bearing ACs dump only populated fields."""
@@ -492,19 +495,25 @@ class TestSeed:
             {
                 "description": "Task list command exits 0",
                 "expected_artifacts": ["tasks.json"],
+                "semantic_ac_key": seed.acceptance_criteria[0].semantic_ac_key,
                 "verify_command": "uv run task list",
             }
         ]
 
-    def test_legacy_seed_json_round_trips_byte_identically(self) -> None:
-        """An old bare-string seed fixture keeps identical JSON bytes after dump."""
+    def test_legacy_seed_json_materializes_semantic_keys_once(self) -> None:
+        """An old bare-string fixture upgrades once and is then stable."""
         fixture = Path(__file__).parents[2] / "fixtures" / "seeds" / "legacy-seed-minimal.json"
         original = fixture.read_text()
         seed = Seed.from_dict(json.loads(original))
 
         round_tripped = json.dumps(seed.to_dict(), indent=2, sort_keys=True) + "\n"
 
-        assert round_tripped == original
+        assert round_tripped != original
+        assert all(
+            item["semantic_ac_key"].startswith("ac_")
+            for item in seed.to_dict()["acceptance_criteria"]
+        )
+        assert Seed.from_dict(json.loads(round_tripped)).to_dict() == seed.to_dict()
 
     def test_seed_coerces_string_evaluation_principles(self) -> None:
         """Hand-written seed principle string lists are lifted into objects."""
@@ -583,7 +592,17 @@ class TestSeed:
         assert isinstance(seed_dict, dict)
         assert seed_dict["goal"] == full_seed.goal
         assert seed_dict["constraints"] == list(full_seed.constraints)
-        assert seed_dict["acceptance_criteria"] == list(ac_texts(full_seed.acceptance_criteria))
+        assert [item["description"] for item in seed_dict["acceptance_criteria"]] == list(
+            ac_texts(full_seed.acceptance_criteria)
+        )
+        assert all(
+            item["semantic_ac_key"] == criterion.semantic_ac_key
+            for item, criterion in zip(
+                seed_dict["acceptance_criteria"],
+                full_seed.acceptance_criteria,
+                strict=True,
+            )
+        )
         assert seed_dict["ontology_schema"]["name"] == full_seed.ontology_schema.name
         assert seed_dict["metadata"]["ambiguity_score"] == full_seed.metadata.ambiguity_score
 
