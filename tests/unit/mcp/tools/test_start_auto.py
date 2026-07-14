@@ -29,6 +29,7 @@ from ouroboros.auto.state import (
     AutoWorktreePolicy,
 )
 from ouroboros.core.types import Result
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.auto_handler import (
     _START_AUTO_PENDING_LEASE_SECONDS,
@@ -1656,6 +1657,52 @@ class TestBackgroundJobPath:
         assert result.error.details["auto_session_id"] == auto_session_id
         assert "resume" in result.error.message
         fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_acceptance_pending_preserves_structured_job_receipt(
+        self,
+        event_store,
+        tmp_path,
+        fake_inner_auto,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        expected = MCPToolError(
+            "Detached worker acceptance is still pending",
+            tool_name="ouroboros_start_auto",
+            error_code="detached_job_acceptance_pending",
+            details={
+                "status": "acceptance_pending",
+                "job_id": "job_pending",
+                "status_check": {
+                    "tool": "ouroboros_job_status",
+                    "arguments": {"job_id": "job_pending"},
+                },
+            },
+        )
+
+        async def fail_with_receipt(**_kwargs):  # type: ignore[no-untyped-def]
+            raise expected
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.auto_handler.start_background_tool_job",
+            fail_with_receipt,
+        )
+        handler = StartAutoHandler(
+            event_store=event_store,
+            job_manager=JobManager(event_store),
+            store=AutoStore(tmp_path),
+        )
+        handler._inner_auto = fake_inner_auto
+
+        result = await handler.handle({"goal": "build a CLI"})
+
+        assert result.is_err
+        assert result.error is expected
+        assert result.error.details["job_id"] == "job_pending"
+        assert result.error.details["status_check"] == {
+            "tool": "ouroboros_job_status",
+            "arguments": {"job_id": "job_pending"},
+        }
 
     @pytest.mark.asyncio
     async def test_plugin_dispatch_failure_returns_persisted_auto_session_id(

@@ -40,7 +40,12 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ouroboros.mcp.detached_jobs import DetachedJobRequest, launch_detached_job
+from ouroboros.mcp.detached_jobs import (
+    DetachedJobAcceptanceTimeout,
+    DetachedJobRequest,
+    launch_detached_job,
+)
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 
@@ -164,6 +169,23 @@ async def start_background_tool_job(
                     opencode_mode=opencode_mode,
                 ),
             )
+        except DetachedJobAcceptanceTimeout as exc:
+            if on_enqueue_failure is not None:
+                try:
+                    await on_enqueue_failure(exc)
+                except Exception:
+                    logger.warning(
+                        "mcp.background_job.detached_enqueue_failure_hook_failed",
+                        extra={"job_type": job_type},
+                        exc_info=True,
+                    )
+            raise MCPToolError(
+                "Detached worker acceptance is still pending. Do not start a duplicate; "
+                "use the structured status_check receipt.",
+                tool_name=detached_tool_name,
+                error_code="detached_job_acceptance_pending",
+                details=exc.receipt,
+            ) from exc
         except BaseException as exc:
             if on_enqueue_failure is not None:
                 try:

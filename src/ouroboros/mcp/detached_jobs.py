@@ -76,6 +76,31 @@ class DetachedJobRequest:
         )
 
 
+class DetachedJobAcceptanceTimeout(TimeoutError):
+    """A live worker did not persist acceptance before the client deadline."""
+
+    def __init__(self, *, job_id: str, worker_pid: int, timeout_seconds: float) -> None:
+        self.job_id = job_id
+        self.worker_pid = worker_pid
+        self.timeout_seconds = timeout_seconds
+        self.receipt: dict[str, Any] = {
+            "status": "acceptance_pending",
+            "job_id": job_id,
+            "worker_pid": worker_pid,
+            "startup_timeout_seconds": timeout_seconds,
+            "worker_continues": True,
+            "retry_start_allowed": False,
+            "status_check": {
+                "tool": "ouroboros_job_status",
+                "arguments": {"job_id": job_id},
+            },
+        }
+        super().__init__(
+            "Detached worker did not persist job acceptance within "
+            f"{timeout_seconds:g}s (job_id={job_id}, pid={worker_pid})"
+        )
+
+
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -221,9 +246,10 @@ async def launch_detached_job(
             # into exactly the interrupted state this boundary exists to avoid.
             # Surface the stable job id so a caller can retry/status-check; the
             # request remains owned by the live process.
-            raise TimeoutError(
-                "Detached worker did not persist job acceptance within "
-                f"{startup_timeout_seconds:g}s (job_id={request.job_id}, pid={process.pid})"
+            raise DetachedJobAcceptanceTimeout(
+                job_id=request.job_id,
+                worker_pid=process.pid,
+                timeout_seconds=startup_timeout_seconds,
             )
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
@@ -238,6 +264,7 @@ def cleanup_worker_artifacts(request_path: Path) -> None:
 
 
 __all__ = [
+    "DetachedJobAcceptanceTimeout",
     "DetachedJobRequest",
     "cleanup_worker_artifacts",
     "launch_detached_job",

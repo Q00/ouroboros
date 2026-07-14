@@ -951,6 +951,8 @@ class StartAutoHandler:
                 on_started=_on_started,
                 on_enqueue_failure=_on_enqueue_failure,
             )
+        except MCPToolError as exc:
+            return Result.err(exc)
         except Exception as exc:
             return Result.err(
                 MCPToolError(

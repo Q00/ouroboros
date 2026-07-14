@@ -772,6 +772,8 @@ class MCPServerAdapter:
             else:
                 result = await invoke_handler()
             return result
+        except MCPServerError as exc:
+            return Result.err(exc)
         except TimeoutError:
             log.error("mcp.server.tool_timeout", tool=name)
             return Result.err(
@@ -1834,6 +1836,7 @@ def create_ouroboros_server(
         SessionSignalMailbox(
             event_store=event_store,
             target_resolver=session_signal_target_resolver,
+            delivery_queue=session_signal_hub,
         )
     )
     evolve_step = EvolveStepHandler(
