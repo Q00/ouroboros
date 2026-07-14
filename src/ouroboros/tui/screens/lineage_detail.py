@@ -6,6 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ouroboros.evolution.rewind import RewindCommitter
     from ouroboros.persistence.event_store import EventStore
 
 from textual.app import ComposeResult
@@ -21,7 +22,6 @@ from ouroboros.core.lineage import (
     OntologyLineage,
     RewindRecord,
 )
-from ouroboros.events.lineage import lineage_rewound
 from ouroboros.tui.screens.confirm_rewind import ConfirmRewindScreen
 from ouroboros.tui.widgets.lineage_tree import GenerationNodeSelected, LineageTreeWidget
 
@@ -356,6 +356,7 @@ class LineageDetailScreen(Screen[None]):
         lineage: OntologyLineage,
         *,
         event_store: EventStore | None = None,
+        rewind_committer: RewindCommitter | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -363,6 +364,11 @@ class LineageDetailScreen(Screen[None]):
         super().__init__(name=name, id=id, classes=classes)
         self._lineage = lineage
         self._event_store = event_store
+        if rewind_committer is None and event_store is not None:
+            from ouroboros.evolution.loop import EvolutionaryLoop
+
+            rewind_committer = EvolutionaryLoop(event_store)
+        self._rewind_committer = rewind_committer
         self._tree_widget: LineageTreeWidget | None = None
         self._detail_panel: GenerationDetailPanel | None = None
         self._selected_gen_num: int | None = None
@@ -466,8 +472,8 @@ class LineageDetailScreen(Screen[None]):
             self.notify("Select a generation first", severity="warning")
             return
 
-        if self._event_store is None:
-            self.notify("No event store available for rewind", severity="error")
+        if self._rewind_committer is None:
+            self.notify("No rewind committer available", severity="error")
             return
 
         if self._selected_gen_num >= self._lineage.current_generation:
@@ -494,22 +500,36 @@ class LineageDetailScreen(Screen[None]):
     async def _perform_rewind(self, to_generation: int) -> None:
         """Execute the rewind operation.
 
-        1. Emit lineage_rewound event
+        1. Commit through the canonical evolutionary-loop boundary
         2. Check git dirty state
         3. Check git tag exists
         4. Git checkout the target tag
         5. Notify and pop screen
         """
         lineage_id = self._lineage.lineage_id
-        from_gen = self._lineage.current_generation
 
-        # 1. Emit rewind event
+        # 1. Commit the lineage rewind. Observer dispatch, if configured, is
+        # post-commit and cannot change this result.
         try:
-            assert self._event_store is not None
-            await self._event_store.append(lineage_rewound(lineage_id, from_gen, to_generation))
+            assert self._rewind_committer is not None
+            rewind_result = await self._rewind_committer.rewind_to(
+                self._lineage,
+                to_generation,
+            )
         except Exception as e:
-            self.notify(f"Failed to emit rewind event: {e}", severity="error", markup=False)
+            self.notify(f"Failed to commit rewind: {e}", severity="error", markup=False)
             return
+        if rewind_result.is_err:
+            self.notify(
+                f"Failed to commit rewind: {rewind_result.error}",
+                severity="error",
+                markup=False,
+            )
+            return
+        committed = rewind_result.value
+        self._lineage = committed.lineage
+        lineage_id = committed.lineage_id
+        to_generation = committed.to_generation
 
         # 2. Check git dirty state
         tag_name = f"ooo/{lineage_id}/gen_{to_generation}"

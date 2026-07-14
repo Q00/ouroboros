@@ -60,6 +60,11 @@ from ouroboros.evolution.directive_mapping import (
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
+from ouroboros.evolution.rewind import (
+    CommittedRewindResult,
+    NoOpRewindObserver,
+    RewindObserver,
+)
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
@@ -237,6 +242,7 @@ class EvolutionaryLoop:
         evaluator: Any | None = None,
         validator: Any | None = None,
         agent_process: AgentProcess | None = None,
+        rewind_observer: RewindObserver | None = None,
     ) -> None:
         self.event_store = event_store
         self.config = config or EvolutionaryLoopConfig()
@@ -246,6 +252,9 @@ class EvolutionaryLoop:
         self.executor = executor
         self.evaluator = evaluator
         self.validator = validator
+        self._rewind_observer = (
+            rewind_observer if rewind_observer is not None else NoOpRewindObserver()
+        )
         self._agent_process = agent_process or AgentProcess(event_store=event_store)
         self._project_dir_context: ContextVar[str | None] = ContextVar(
             "evolutionary_loop_project_dir",
@@ -2009,42 +2018,71 @@ class EvolutionaryLoop:
         self,
         lineage: OntologyLineage,
         generation_number: int,
-    ) -> Result[OntologyLineage, OuroborosError]:
+    ) -> Result[CommittedRewindResult, OuroborosError]:
         """Rewind lineage to a specific generation for re-evolution.
 
-        Emits a lineage.rewound event and returns truncated lineage.
+        The lineage event is committed before the optional observer runs. The
+        captured commit result is returned unchanged if observer dispatch fails.
 
         Args:
             lineage: Current lineage.
             generation_number: Generation to rewind to (inclusive).
 
         Returns:
-            Result containing truncated OntologyLineage.
+            Result containing the committed rewind identity and lineage.
         """
         try:
             from_gen = lineage.current_generation
+            if generation_number == from_gen:
+                return Result.err(
+                    OuroborosError(f"Already at generation {generation_number}, nothing to rewind")
+                )
             rewound = lineage.rewind_to(generation_number)
 
             from ouroboros.events.lineage import lineage_rewound
 
-            await self.event_store.append(
-                lineage_rewound(
-                    lineage.lineage_id,
-                    from_gen,
-                    generation_number,
-                )
+            rewind_event = lineage_rewound(
+                lineage.lineage_id,
+                from_gen,
+                generation_number,
             )
+        except ValueError as e:
+            return Result.err(OuroborosError(str(e)))
 
-            logger.info(
-                "evolution.rewound",
+        try:
+            await self.event_store.append(rewind_event)
+        except Exception as e:
+            return Result.err(OuroborosError(f"Failed to append rewind event: {e}"))
+
+        committed = CommittedRewindResult(
+            lineage=rewound,
+            lineage_id=lineage.lineage_id,
+            from_generation=from_gen,
+            to_generation=generation_number,
+            rewind_event_id=rewind_event.id,
+            rewind_occurred_at=rewind_event.timestamp,
+        )
+
+        logger.info(
+            "evolution.rewound",
+            extra={
+                "lineage_id": lineage.lineage_id,
+                "from": from_gen,
+                "to": generation_number,
+                "rewind_event_id": rewind_event.id,
+            },
+        )
+
+        try:
+            await self._rewind_observer.observe(committed.observation_snapshot())
+        except Exception as e:
+            logger.warning(
+                "evolution.rewind_observer_failed",
                 extra={
                     "lineage_id": lineage.lineage_id,
-                    "from": from_gen,
-                    "to": generation_number,
+                    "rewind_event_id": rewind_event.id,
+                    "error": str(e),
                 },
             )
 
-            return Result.ok(rewound)
-
-        except ValueError as e:
-            return Result.err(OuroborosError(str(e)))
+        return Result.ok(committed)

@@ -1067,7 +1067,21 @@ class OuroborosTUI(App[None]):
         self, message: LineageSelectorScreen.LineageSelected
     ) -> None:
         """Handle lineage selection and push the detail screen."""
-        self.push_screen(LineageDetailScreen(message.lineage, event_store=self._event_store))
+        assert self._event_store is not None
+        from ouroboros.evolution.loop import EvolutionaryLoop
+        from ouroboros.plugin.rewind import build_lockfile_rewind_observer
+
+        rewind_committer = EvolutionaryLoop(
+            self._event_store,
+            rewind_observer=build_lockfile_rewind_observer(self._event_store),
+        )
+        self.push_screen(
+            LineageDetailScreen(
+                message.lineage,
+                event_store=self._event_store,
+                rewind_committer=rewind_committer,
+            )
+        )
 
     def set_pause_callback(self, callback: Any) -> None:
         self._pause_callback = callback

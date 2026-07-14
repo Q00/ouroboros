@@ -839,7 +839,8 @@ class EvolveRewindHandler:
                 )
             )
 
-        rewound_lineage = result.value
+        committed = result.value
+        rewound_lineage = committed.lineage
 
         # Get seed_json from the target generation if available
         target_gen = None
@@ -855,8 +856,8 @@ class EvolveRewindHandler:
         text = (
             f"## Rewind Complete\n\n"
             f"**Lineage**: {lineage_id}\n"
-            f"**From generation**: {from_gen}\n"
-            f"**To generation**: {to_generation}\n"
+            f"**From generation**: {committed.from_generation}\n"
+            f"**To generation**: {committed.to_generation}\n"
             f"**Status**: {rewound_lineage.status.value}\n"
             f"**Git tag**: `ooo/{lineage_id}/gen_{to_generation}`\n\n"
             f"Generations {to_generation + 1}–{from_gen} have been truncated.\n"
@@ -870,8 +871,12 @@ class EvolveRewindHandler:
                 is_error=False,
                 meta={
                     "lineage_id": lineage_id,
-                    "from_generation": from_gen,
-                    "to_generation": to_generation,
+                    "from_generation": committed.from_generation,
+                    "to_generation": committed.to_generation,
+                    "rewind_event_id": committed.rewind_event_id,
+                    "rewind_occurred_at": committed.rewind_occurred_at.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
                 },
             )
         )
