@@ -35,11 +35,12 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from jsonschema import Draft202012Validator
@@ -59,6 +60,9 @@ from ouroboros.mcp.types import (
 )
 
 log = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from ouroboros.mcp.tools.host_bridge import HostWorkOrder
 
 _LATERAL_INLINE_DISPATCH_OPEN = "<!-- ouroboros-lateral-inline-dispatch-v1 base64\n"
 _LATERAL_INLINE_DISPATCH_CLOSE = "\n-->"
@@ -676,6 +680,43 @@ def build_subagent_payload(
         model=model,
         context=context or {},
         timeout=timeout,
+    )
+
+
+def build_host_work_order(
+    payload: SubagentPayload,
+    *,
+    dispatch_id: str,
+    session_id: str,
+    lineage_id: str,
+    workspace_id: str,
+    workspace_root: Path,
+    sandbox_mode: str,
+    approval_policy: str,
+    acceptance_criteria: tuple[str, ...],
+    evidence_requirements: tuple[str, ...],
+    created_at: datetime,
+) -> HostWorkOrder:
+    """Convert an existing Full subagent dispatch into typed host work.
+
+    The conversion preserves the dispatch prompt and context without invoking
+    a model or an agent CLI.  Execution remains owned by the active host task.
+    """
+    from ouroboros.mcp.tools.host_bridge import HostWorkOrder
+
+    return HostWorkOrder(
+        dispatch_id=dispatch_id,
+        session_id=session_id,
+        lineage_id=lineage_id,
+        workspace_id=workspace_id,
+        workspace_root=workspace_root,
+        sandbox_mode=sandbox_mode,
+        approval_policy=approval_policy,
+        prompt=payload.prompt,
+        context=dict(payload.context),
+        acceptance_criteria=acceptance_criteria,
+        evidence_requirements=evidence_requirements,
+        created_at=created_at,
     )
 
 
