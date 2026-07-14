@@ -37,8 +37,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 import inspect
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ouroboros.mcp.detached_jobs import DetachedJobRequest, launch_detached_job
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import run_with_agent_process
 
@@ -82,6 +84,12 @@ async def start_background_tool_job(
     links: JobLinks,
     work_fn: WorkFn,
     cancelled_text: str,
+    detached_tool_name: str | None = None,
+    detached_arguments: dict[str, object] | None = None,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
+    opencode_mode: str | None = None,
+    on_detaching: Callable[[], Awaitable[None]] | None = None,
     on_started: Callable[[JobSnapshot], Awaitable[None]] | None = None,
     on_enqueue_failure: Callable[[BaseException], Awaitable[None]] | None = None,
 ) -> JobSnapshot:
@@ -101,6 +109,15 @@ async def start_background_tool_job(
             helper wraps it with the standard ``should_cancel()`` pre-work
             guard so callers must not re-implement that check.
         cancelled_text: Text for the cancelled-before-work result.
+        detached_tool_name: Public Start* tool to re-enter in the detached
+            owner process when durable jobs are enabled.
+        detached_arguments: JSON-safe arguments for ``detached_tool_name``.
+        runtime_backend: Runtime override reproduced in the worker composition.
+        llm_backend: LLM override reproduced in the worker composition.
+        opencode_mode: OpenCode integration mode reproduced in the worker.
+        on_detaching: Optional hook invoked only in the accepting process just
+            before ownership is transferred. Auto uses it to release its
+            parent-owned pending lease so the worker can reserve/claim one.
         on_started: Optional async hook invoked with the snapshot *after* a
             successful ``start_job`` and *before* this function returns — used
             by auto to update its start lease while still owning the snapshot.
@@ -117,6 +134,50 @@ async def start_background_tool_job(
         ``on_enqueue_failure`` and closing the runner coroutine.
     """
     job_id = await job_manager.allocate_job_id()
+    claim_inline = getattr(job_manager, "claim_forced_inline_allocation", None)
+    forced_inline = bool(claim_inline(job_id)) if callable(claim_inline) else False
+    durable_jobs_enabled = (
+        getattr(job_manager, "durable_jobs_enabled", False) is True
+        and getattr(event_store, "supports_cross_process_workers", False) is True
+    )
+
+    if durable_jobs_enabled and not forced_inline:
+        if detached_tool_name is None or detached_arguments is None:
+            job_manager.abandon_reserved_job_id(job_id)
+            raise RuntimeError(
+                f"Durable background job {job_type!r} is missing its detached invocation"
+            )
+        try:
+            if on_detaching is not None:
+                await on_detaching()
+            snapshot = await launch_detached_job(
+                job_manager=job_manager,
+                event_store=event_store,
+                request=DetachedJobRequest(
+                    job_id=job_id,
+                    tool_name=detached_tool_name,
+                    arguments=dict(detached_arguments),
+                    database_url=event_store.database_url,
+                    cwd=str(Path.cwd()),
+                    runtime_backend=runtime_backend,
+                    llm_backend=llm_backend,
+                    opencode_mode=opencode_mode,
+                ),
+            )
+        except BaseException as exc:
+            if on_enqueue_failure is not None:
+                try:
+                    await on_enqueue_failure(exc)
+                except Exception:
+                    logger.warning(
+                        "mcp.background_job.detached_enqueue_failure_hook_failed",
+                        extra={"job_type": job_type},
+                        exc_info=True,
+                    )
+            raise
+        if on_started is not None:
+            await on_started(snapshot)
+        return snapshot
 
     async def _guarded_runner(handle: AgentProcessHandle) -> MCPToolResult:
         # Uniform pre-work cancel guard: a job cancelled while still queued

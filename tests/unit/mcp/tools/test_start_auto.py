@@ -127,7 +127,13 @@ def _assert_detached_start_text_has_guidance_with_handles(
         "Started background auto session.\n\n"
         "Status: queued\n"
         f"job_id: {job_id}\n"
-        f"auto_session_id: {auto_session_id}\n\n"
+        f"auto_session_id: {auto_session_id}\n"
+        f"Runtime Backend: {result.meta['runtime_backend']}\n"
+        f"LLM Backend: {result.meta['llm_backend']}\n"
+        f"Efficiency Mode: {result.meta['efficiency_mode']}\n"
+        f"Frugality Assurance: {result.meta['frugality_assurance']}\n\n"
+        "The exact active model and first parallel level will be reported "
+        "from run configuration and execution plan events.\n"
         "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
         "then fetch ouroboros_job_result."
     )
@@ -293,6 +299,52 @@ class TestRequiredArguments:
         inner.handle.assert_awaited_once()
         assert inner.handle.await_args.args[0]["resume"] == state.auto_session_id
 
+    @pytest.mark.asyncio
+    async def test_resume_ignores_blank_frontmatter_preference_placeholders(
+        self, event_store, tmp_path
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        state.efficiency_mode = "quality_first"
+        state.frugality_assurance = "off"
+        store.save(state)
+        snapshot = MagicMock(job_id="job_auto_resume_blank")
+        captured: dict[str, object] = {}
+
+        async def _start_job(*, runner, **_):
+            captured["runner"] = runner
+            return snapshot
+
+        job_manager = MagicMock()
+        job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
+        job_manager.start_job = AsyncMock(side_effect=_start_job)
+        handler = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+        )
+        inner = MagicMock(spec=AutoHandler)
+        inner.handle = AsyncMock(
+            return_value=Result.ok(MCPToolResult(meta={"auto_session_id": state.auto_session_id}))
+        )
+        handler._inner_auto = inner
+
+        result = await handler.handle(
+            {
+                "resume": state.auto_session_id,
+                "efficiency_mode": "",
+                "frugality_assurance": "",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
+        await captured["runner"]
+        forwarded = inner.handle.await_args.args[0]
+        assert "efficiency_mode" not in forwarded
+        assert "frugality_assurance" not in forwarded
+
 
 class TestBackgroundJobPath:
     @pytest.mark.asyncio
@@ -331,6 +383,10 @@ class TestBackgroundJobPath:
         assert result.value.meta["job_id"] == "job_auto_001"
         assert result.value.meta["session_id"] == auto_session_id
         assert result.value.meta["dispatch_mode"] == "job"
+        assert result.value.meta["runtime_backend"]
+        assert result.value.meta["llm_backend"]
+        assert result.value.meta["efficiency_mode"] == "adaptive"
+        assert result.value.meta["frugality_assurance"] == "observe"
         assert result.value.meta["status_tool"] == "ouroboros_job_status"
         assert result.value.meta["wait_tool"] == "ouroboros_job_wait"
         assert result.value.meta["result_tool"] == "ouroboros_job_result"
@@ -511,6 +567,10 @@ class TestBackgroundJobPath:
                 "session_id": auto_session_id,
                 "status": "queued",
                 "dispatch_mode": "job",
+                "runtime_backend": "claude",
+                "llm_backend": "claude_code",
+                "efficiency_mode": "adaptive",
+                "frugality_assurance": "observe",
                 "status_tool": "ouroboros_job_status",
                 "wait_tool": "ouroboros_job_wait",
                 "result_tool": "ouroboros_job_result",
@@ -1353,6 +1413,10 @@ class TestBackgroundJobPath:
         assert meta["job_id"] is None
         assert meta["status"] == "delegated_to_plugin"
         assert meta["dispatch_mode"] == "plugin"
+        assert meta["runtime_backend"] == "opencode"
+        assert meta["llm_backend"]
+        assert meta["efficiency_mode"] == "adaptive"
+        assert meta["frugality_assurance"] == "observe"
         assert isinstance(meta["auto_session_id"], str)
         assert store.path_for(meta["auto_session_id"]).exists()
         assert meta["_subagent"]["tool_name"] == "ouroboros_start_auto"
@@ -1360,6 +1424,10 @@ class TestBackgroundJobPath:
         assert isinstance(meta["_subagent"]["context"]["arguments"]["_start_auto_lease_token"], str)
         body = json.loads(result.value.content[0].text)
         assert body["auto_session_id"] == meta["auto_session_id"]
+        assert body["runtime_backend"] == "opencode"
+        assert body["llm_backend"] == meta["llm_backend"]
+        assert body["efficiency_mode"] == "adaptive"
+        assert body["frugality_assurance"] == "observe"
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
 
@@ -1505,6 +1573,8 @@ class TestBackgroundJobPath:
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
         state.runtime_backend = "opencode"
         state.opencode_mode = "plugin"
+        state.efficiency_mode = "quality_first"
+        state.frugality_assurance = "off"
         store.save(state)
         job_manager = MagicMock()
         job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
@@ -1517,6 +1587,9 @@ class TestBackgroundJobPath:
         assert result.is_ok
         assert result.value.meta["dispatch_mode"] == "plugin"
         assert result.value.meta["job_id"] is None
+        assert result.value.meta["runtime_backend"] == "opencode"
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
         job_manager.start_job.assert_not_called()
         fake_inner_auto.handle.assert_not_called()
 
@@ -1528,6 +1601,8 @@ class TestBackgroundJobPath:
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
         state.runtime_backend = "opencode"
         state.opencode_mode = "subprocess"
+        state.efficiency_mode = "quality_first"
+        state.frugality_assurance = "off"
         store.save(state)
         snapshot = MagicMock()
         snapshot.job_id = "job_subprocess_resume"
@@ -1554,6 +1629,9 @@ class TestBackgroundJobPath:
         assert result.is_ok
         assert result.value.meta["dispatch_mode"] == "job"
         assert result.value.meta["job_id"] == "job_subprocess_resume"
+        assert result.value.meta["runtime_backend"] == "opencode"
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
         job_manager.start_job.assert_awaited_once()
         fake_inner_auto.handle.assert_not_called()
 

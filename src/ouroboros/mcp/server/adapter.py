@@ -86,6 +86,7 @@ def _to_fastmcp_tool_result(tool_result: MCPToolResult) -> Any:
         content=[TextContent(type="text", text=tool_result.text_content)],
         isError=tool_result.is_error,
         _meta=tool_result.meta or None,
+        structuredContent=tool_result.structured_content,
     )
 
 
@@ -1149,6 +1150,8 @@ def create_ouroboros_server(
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
     mcp_bridge: Any | None = None,
+    durable_jobs: bool = True,
+    forced_inline_job_id: str | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -1181,6 +1184,11 @@ def create_ouroboros_server(
             ``orchestrator.opencode_mode`` in the config file. Controls
             whether ``_subagent`` envelopes are emitted (plugin) or handlers
             run in-process (subprocess / non-opencode runtimes).
+        durable_jobs: When true, Start* background work is owned by detached
+            worker processes so it survives MCP/client turn shutdown.
+        forced_inline_job_id: Internal one-shot recursion boundary used by a
+            detached worker. Its top-level Start* call runs inline under this
+            accepted job id; nested background work remains durable.
 
     Returns:
         Configured MCPServerAdapter with all tools registered.
@@ -1213,6 +1221,7 @@ def create_ouroboros_server(
         SessionsResourceHandler,
     )
     from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
+    from ouroboros.mcp.tools.conductor_handler import RecordConductorDecisionHandler
     from ouroboros.mcp.tools.definitions import (
         ACDashboardHandler,
         ACTreeHUDHandler,
@@ -1244,9 +1253,15 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
+    from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
+    )
+    from ouroboros.orchestrator.synapse import (
+        EventStoreSessionSignalTargetResolver,
+        SessionSignalHub,
+        SessionSignalMailbox,
     )
     from ouroboros.orchestrator_stage import (
         Stage,
@@ -1321,7 +1336,7 @@ def create_ouroboros_server(
     # Materialize the default runtime once at server creation so backend wiring
     # is validated up front and composition-root tests can assert the selected
     # runtime backend without waiting for a tool invocation.
-    create_agent_runtime(
+    default_execute_runtime = create_agent_runtime(
         backend=execute_runtime_backend,
         model=None,
         cwd=effective_cwd,
@@ -1787,7 +1802,21 @@ def create_ouroboros_server(
         evaluator=_evolution_evaluator,
         validator=_evolution_validator,
     )
-    job_manager = JobManager(event_store)
+    job_manager = JobManager(
+        event_store,
+        durable_jobs=durable_jobs,
+        forced_inline_job_id=forced_inline_job_id,
+    )
+    session_signal_hub = SessionSignalHub(event_store=event_store)
+    session_signal_target_resolver = EventStoreSessionSignalTargetResolver(
+        event_store=event_store,
+        capabilities_by_backend={
+            default_execute_runtime.runtime_backend: (
+                default_execute_runtime.capabilities.session_signals
+            ),
+            execute_runtime_backend: default_execute_runtime.capabilities.session_signals,
+        },
+    )
 
     # Create tool registry for dependency injection
     registry = ToolRegistry()
@@ -1799,6 +1828,13 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
         llm_backend=evaluate_llm_backend,
+        session_signal_hub=session_signal_hub,
+    )
+    synapse_signal = SynapseSignalHandler(
+        SessionSignalMailbox(
+            event_store=event_store,
+            target_resolver=session_signal_target_resolver,
+        )
     )
     evolve_step = EvolveStepHandler(
         evolutionary_loop=evolutionary_loop,
@@ -1855,6 +1891,13 @@ def create_ouroboros_server(
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    conductor_action_tools = frozenset(
+        {
+            "ouroboros_record_conductor_decision",
+            "ouroboros_start_execute_seed",
+            "ouroboros_start_ralph",
+        }
+    )
 
     tool_handlers = [
         execute_seed,
@@ -1887,6 +1930,9 @@ def create_ouroboros_server(
         SessionStatusHandler(
             event_store=event_store,
         ),
+        RecordConductorDecisionHandler(event_store=event_store),
+        SynapseTargetsHandler(session_signal_target_resolver),
+        synapse_signal,
         JobStatusHandler(
             event_store=event_store,
             job_manager=job_manager,
@@ -1894,10 +1940,12 @@ def create_ouroboros_server(
         JobWaitHandler(
             event_store=event_store,
             job_manager=job_manager,
+            available_conductor_tools=conductor_action_tools,
         ),
         JobResultHandler(
             event_store=event_store,
             job_manager=job_manager,
+            available_conductor_tools=conductor_action_tools,
         ),
         CancelJobHandler(
             event_store=event_store,
@@ -2021,6 +2069,7 @@ def create_ouroboros_server(
         llm_backend=llm_backend,
         mcp_bridge=mcp_bridge,
         control=control_bus,
+        synapse=session_signal_hub,
     )
     server.set_runtime_context(agent_runtime_context)
     server.set_job_manager(job_manager)

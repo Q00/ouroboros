@@ -282,10 +282,10 @@ def _ensure_shell_env(*, timeout: float = 10.0) -> None:
     Uses JSON serialization to avoid multiline env value parsing issues.
     Avoids the ``-i`` (interactive) flag which hangs on oh-my-zsh/p10k.
     """
-    # Fast path: if key indicators are already present, skip
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return
-
+    # Always merge the cached/login-shell whitelist. A single provider key is
+    # not proof that every configured backend is ready: an MCP server can use
+    # Anthropic for one stage and Codex/OpenAI for another, and detached workers
+    # inherit only this merged environment. The cache keeps this path cheap.
     env = _load_cached_shell_env()
     if env is None:
         shell = os.environ.get("SHELL", "/bin/zsh" if sys.platform == "darwin" else "/bin/bash")
