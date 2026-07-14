@@ -110,9 +110,7 @@ def test_litellm_test_dependency_group_uses_exact_pinned_public_extra():
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
 
     assert litellm_test_deps == ["ouroboros-ai[litellm]"]
-    assert optional_deps["litellm"] == [
-        "litellm==1.91.0; python_version < '3.14'"
-    ]
+    assert optional_deps["litellm"] == ["litellm==1.91.0; python_version < '3.14'"]
 
 
 def test_litellm_test_dependency_group_excludes_python_314():
@@ -138,9 +136,7 @@ def test_litellm_public_extra_excludes_unsupported_python():
 
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
 
-    assert optional_deps["litellm"] == [
-        "litellm==1.91.0; python_version < '3.14'"
-    ]
+    assert optional_deps["litellm"] == ["litellm==1.91.0; python_version < '3.14'"]
     assert any("litellm" in dep for dep in optional_deps["all"])
     assert all("python_version < '3.14'" in dep for dep in optional_deps["litellm"])
 
