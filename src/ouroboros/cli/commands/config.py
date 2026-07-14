@@ -389,9 +389,7 @@ def show(
 def backend(
     new_backend: Annotated[
         str | None,
-        typer.Argument(
-            help="Backend to switch to (claude, codex, hermes, gemini, gjc, goose, pi)."
-        ),
+        typer.Argument(help=f"Backend to switch to ({', '.join(_SWITCHABLE_BACKENDS)})."),
     ] = None,
 ) -> None:
     """Show or switch the runtime backend.
@@ -410,6 +408,7 @@ def backend(
     [dim]    ouroboros config backend gjc       # switch to GJC[/dim]
     [dim]    ouroboros config backend goose     # switch to Goose[/dim]
     [dim]    ouroboros config backend pi        # switch to Pi CLI[/dim]
+    [dim]    ouroboros config backend zcode     # switch to Zcode[/dim]
     """
     data, config_path = _load_config()
     current = data.get("orchestrator", {}).get("runtime_backend", "unknown")

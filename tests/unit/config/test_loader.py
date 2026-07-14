@@ -666,6 +666,37 @@ class TestRuntimeHelperLookups:
 
         assert get_zcode_cli_path() == str(fake)
 
+    def test_get_zcode_cli_path_returns_executable_env_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(fake))
+
+        assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_returns_relative_executable_env_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", "zcode")
+
+        assert get_zcode_cli_path() == "zcode"
+
+    def test_get_zcode_cli_path_rejects_non_executable_env_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(fake))
+
+        with patch("ouroboros.config.loader.load_config", side_effect=ConfigError("missing")):
+            assert get_zcode_cli_path() is None
+
     def test_get_zcode_cli_path_rejects_stale_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -688,6 +719,17 @@ class TestRuntimeHelperLookups:
         config = OuroborosConfig(
             orchestrator=OrchestratorConfig(zcode_cli_path=str(tmp_path / "missing.cjs"))
         )
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() is None
+
+    def test_get_zcode_cli_path_rejects_non_executable_config_wrapper(self, tmp_path: Path) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(zcode_cli_path=str(fake)))
 
         with (
             patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),

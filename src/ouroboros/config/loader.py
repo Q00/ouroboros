@@ -91,6 +91,7 @@ _GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
 # configured default model, so generic Claude default ids map to the CLI's
 # own ``"default"`` sentinel, exactly like antigravity and grok above.
 _ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
+_ZCODE_SCRIPT_SUFFIXES = frozenset({".cjs", ".js", ".mjs"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
@@ -1558,6 +1559,16 @@ def get_grok_cli_path() -> str | None:
     return None
 
 
+def _is_runnable_zcode_cli_path(path: str | Path) -> bool:
+    """Whether *path* matches one of the supported Zcode launch shapes."""
+    candidate = Path(path)
+    if not candidate.is_file():
+        return False
+    if candidate.suffix.lower() in _ZCODE_SCRIPT_SUFFIXES:
+        return os.access(candidate, os.R_OK)
+    return shutil.which(str(candidate.resolve())) is not None
+
+
 def get_zcode_cli_path() -> str | None:
     """Get the zcode CLI path (Z.ai GLM-5 agent) from environment or config.
 
@@ -1572,9 +1583,10 @@ def get_zcode_cli_path() -> str | None:
     ``electron-node`` runtime in sibling metadata; the runtime wrapper then
     uses ZCode's bundled Electron/Node executable instead of the system Node.
 
-    Stale env var / config values that don't point to an executable file are
-    treated as missing so callers can fall back to PATH discovery instead of
-    persisting an unusable path.
+    Stale env var / config values that don't point to a readable JavaScript
+    entry script or a directly executable wrapper are treated as missing, so
+    callers can fall back to PATH discovery instead of persisting an unusable
+    path.
 
     Returns:
         Path to the zcode CLI script or None.
@@ -1582,7 +1594,7 @@ def get_zcode_cli_path() -> str | None:
     env_path = os.environ.get("OUROBOROS_ZCODE_CLI_PATH", "").strip()
     if env_path:
         resolved = str(Path(env_path).expanduser())
-        if Path(resolved).is_file():
+        if _is_runnable_zcode_cli_path(resolved):
             return resolved
 
     try:
@@ -1590,14 +1602,14 @@ def get_zcode_cli_path() -> str | None:
         zcode_path = getattr(config.orchestrator, "zcode_cli_path", None)
         if zcode_path:
             resolved = str(Path(zcode_path).expanduser())
-            if Path(resolved).is_file():
+            if _is_runnable_zcode_cli_path(resolved):
                 return resolved
     except ConfigError:
         pass
 
     # macOS app-bundle default
     macos_bundle_path = Path("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
-    if macos_bundle_path.is_file():
+    if _is_runnable_zcode_cli_path(macos_bundle_path):
         return str(macos_bundle_path)
 
     return None

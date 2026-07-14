@@ -380,6 +380,55 @@ async def test_execute_task_accepts_ignored_per_call_model(tmp_path: Path) -> No
     assert not any("unexpected keyword argument 'model'" in message.content for message in messages)
 
 
+@pytest.mark.asyncio
+async def test_execute_task_reuses_captured_session_id_for_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public execute path must carry a returned session into --resume.
+
+    Helper tests cover session-id extraction and command construction separately;
+    this integration test locks the handoff between them so a future base-runtime
+    change cannot silently drop Zcode's reconnect handle.
+    """
+    args_log = tmp_path / "zcode-args.log"
+    fake_zcode = tmp_path / "zcode"
+    fake_zcode.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$@" >> "$ZCODE_ARGS_LOG"\n'
+        'printf \'%s\\n\' "--invocation-end--" >> "$ZCODE_ARGS_LOG"\n'
+        'printf \'%s\\n\' \'{"sessionId":"sess_fake","response":"OK"}\'\n',
+        encoding="utf-8",
+    )
+    fake_zcode.chmod(0o755)
+    monkeypatch.setenv("ZCODE_ARGS_LOG", str(args_log))
+    runtime = ZcodeCLIRuntime(cli_path=fake_zcode)
+
+    first_messages = [message async for message in runtime.execute_task("first")]
+    resume_handle = next(
+        message.resume_handle for message in first_messages if message.resume_handle is not None
+    )
+    assert resume_handle.backend == "zcode_cli"
+    assert resume_handle.native_session_id == "sess_fake"
+
+    _ = [
+        message
+        async for message in runtime.execute_task(
+            "second",
+            resume_handle=resume_handle,
+        )
+    ]
+
+    recorded = args_log.read_text(encoding="utf-8").splitlines()
+    separators = [index for index, value in enumerate(recorded) if value == "--invocation-end--"]
+    assert len(separators) == 2
+    first_args = recorded[: separators[0]]
+    second_args = recorded[separators[0] + 1 : separators[1]]
+    assert "--resume" not in first_args
+    resume_index = second_args.index("--resume")
+    assert second_args[resume_index : resume_index + 2] == ["--resume", "sess_fake"]
+
+
 # -- startup timeout: disabled by default for zcode's buffered output ---------
 # zcode ``--prompt --json`` stays silent until its whole summary lands, so the
 # inherited 60s "first chunk" watchdog would cap the ENTIRE task at 60s on any

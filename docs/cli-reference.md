@@ -623,7 +623,7 @@ ouroboros config show orchestrator
 
 ### `config backend`
 
-Show or switch the runtime backend. This sets both `orchestrator.runtime_backend` and `llm.backend` together — they are always kept in sync for simplicity. Advanced users can decouple them with `config set`.
+Show or switch the runtime backend by delegating to that backend's setup flow. The setup policy decides whether `llm.backend` also changes. Runtime-only backends such as Antigravity, Grok, and Zcode always update only the orchestrator runtime and preserve the existing completion backend.
 
 ```bash
 ouroboros config backend [BACKEND]
@@ -633,7 +633,7 @@ ouroboros config backend [BACKEND]
 
 | Argument | Description |
 |----------|-------------|
-| `BACKEND` | Backend to switch to: `claude`, `codex`, `gemini`, `hermes`, or `goose`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
+| `BACKEND` | Backend to switch to: `claude`, `codex`, `gemini`, `zcode`, `hermes`, `goose`, `pi`, `gjc`, `antigravity`, or `grok`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
 
 **Examples:**
 
@@ -649,6 +649,9 @@ ouroboros config backend claude
 
 # Switch to Hermes
 ouroboros config backend hermes
+
+# Switch to the runtime-only Zcode backend without changing llm.backend
+ouroboros config backend zcode
 ```
 
 ### `config init`

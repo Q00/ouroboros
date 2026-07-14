@@ -110,6 +110,13 @@ class TestConfigShow:
 class TestConfigBackend:
     """Tests for config backend command."""
 
+    def test_help_lists_all_switchable_backends(self) -> None:
+        result = runner.invoke(app, ["backend", "--help"])
+
+        assert result.exit_code == 0
+        for backend in ("antigravity", "grok", "zcode"):
+            assert backend in result.output
+
     def test_show_current_backend(self, config_dir: Path) -> None:
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
             result = runner.invoke(app, ["backend"])
