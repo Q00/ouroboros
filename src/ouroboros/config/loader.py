@@ -1569,6 +1569,14 @@ def _is_runnable_zcode_cli_path(path: str | Path) -> bool:
     return shutil.which(str(candidate.resolve())) is not None
 
 
+def _canonical_zcode_cli_path(path: str | Path) -> str:
+    """Return a stable path that remains valid after the caller changes cwd."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = candidate.resolve()
+    return str(candidate)
+
+
 def get_zcode_cli_path() -> str | None:
     """Get the zcode CLI path (Z.ai GLM-5 agent) from environment or config.
 
@@ -1593,7 +1601,7 @@ def get_zcode_cli_path() -> str | None:
     """
     env_path = os.environ.get("OUROBOROS_ZCODE_CLI_PATH", "").strip()
     if env_path:
-        resolved = str(Path(env_path).expanduser())
+        resolved = _canonical_zcode_cli_path(env_path)
         if _is_runnable_zcode_cli_path(resolved):
             return resolved
 
@@ -1601,7 +1609,7 @@ def get_zcode_cli_path() -> str | None:
         config = load_config()
         zcode_path = getattr(config.orchestrator, "zcode_cli_path", None)
         if zcode_path:
-            resolved = str(Path(zcode_path).expanduser())
+            resolved = _canonical_zcode_cli_path(zcode_path)
             if _is_runnable_zcode_cli_path(resolved):
                 return resolved
     except ConfigError:

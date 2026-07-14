@@ -685,7 +685,7 @@ class TestRuntimeHelperLookups:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", "zcode")
 
-        assert get_zcode_cli_path() == "zcode"
+        assert get_zcode_cli_path() == str(fake.resolve())
 
     def test_get_zcode_cli_path_rejects_non_executable_env_wrapper(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -714,6 +714,21 @@ class TestRuntimeHelperLookups:
             patch("ouroboros.config.loader.load_config", return_value=config),
         ):
             assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_returns_relative_executable_config_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.chdir(tmp_path)
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(zcode_cli_path="zcode"))
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() == str(fake.resolve())
 
     def test_get_zcode_cli_path_rejects_stale_config(self, tmp_path: Path) -> None:
         config = OuroborosConfig(
