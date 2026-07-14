@@ -80,6 +80,12 @@ from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, Intervie
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
+from ouroboros.mcp.tools.host_bridge import (
+    HostCompletionReceipt,
+    HostDispatchContext,
+    HostStageBridge,
+    HostWorkOrder,
+)
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
@@ -121,6 +127,7 @@ class AutoHandler:
     mcp_manager: object | None = field(default=None, repr=False)
     mcp_tool_prefix: str = ""
     event_store: EventStore | None = field(default=None, repr=False)
+    host_dispatch_context: HostDispatchContext | None = field(default=None, repr=False)
     ralph_handler_factory: Callable[[str | None, str | None], RalphHandler] | None = field(
         default=None, repr=False
     )
@@ -259,6 +266,9 @@ class AutoHandler:
         )
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
+        host_context = self._host_context()
+        if host_context is not None:
+            return await self._handle_host_dispatch(arguments, host_context)
         auto_session_id = _auto_session_id_from_arguments(arguments)
         start_lease_token = _start_auto_lease_token_from_arguments(arguments)
         release_start_lease = False
@@ -327,6 +337,109 @@ class AutoHandler:
                 meta=meta,
             )
         )
+
+    def _host_context(self) -> HostDispatchContext | None:
+        """Resolve host authority explicitly or from the shared Interview handler."""
+        if self.host_dispatch_context is not None:
+            return self.host_dispatch_context
+        candidate = getattr(self.interview_handler, "host_dispatch_context", None)
+        return candidate if isinstance(candidate, HostDispatchContext) else None
+
+    async def _handle_host_dispatch(
+        self,
+        arguments: dict[str, Any],
+        context: HostDispatchContext,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Persist or resume one Auto session and delegate it to the active host."""
+        store = self.store or AutoStore()
+        resume = _auto_session_id_from_arguments(arguments)
+        dispatch_id = arguments.get("_host_dispatch_id")
+        event_store = self.event_store or EventStore()
+        owns_event_store = self.event_store is None
+        try:
+            await event_store.initialize()
+            bridge = HostStageBridge(event_store, context)
+            if dispatch_id:
+                if resume is None:
+                    raise ValueError("Host Auto continuation requires resume")
+                receipt = await bridge.require_completed_receipt(
+                    dispatch_id=str(dispatch_id),
+                    session_id=resume,
+                )
+                _materialize_host_auto_completion(store, resume)
+                return Result.ok(_host_auto_completed_result(resume, str(dispatch_id), receipt))
+
+            if resume is not None:
+                state = store.load(resume)
+                if arguments.get("cwd") not in {None, ""}:
+                    requested_cwd = _resolve_cwd(arguments.get("cwd"))
+                    if requested_cwd != Path(state.cwd).resolve():
+                        raise ValueError("Host Auto resume cannot change cwd")
+            else:
+                goal = arguments.get("goal")
+                if not isinstance(goal, str) or not goal.strip():
+                    raise ValueError("goal is required when not resuming")
+                state = _preallocate_auto_state(
+                    store=store,
+                    arguments=arguments,
+                    goal=goal.strip(),
+                    pipeline_timeout_seconds=_optional_pipeline_timeout(arguments),
+                    agent_runtime_backend=self.agent_runtime_backend,
+                    opencode_mode=self.opencode_mode,
+                    host_driven=True,
+                )
+
+            cwd = Path(state.cwd).expanduser().resolve(strict=True)
+            if not cwd.is_relative_to(context.workspace_root):
+                raise ValueError("Auto cwd must remain inside the active ChatGPT workspace")
+            payload = _build_host_auto_subagent(state)
+            criterion = "Complete the Full Auto pipeline for the persisted auto session"
+            pending = await bridge.dispatch_pending(
+                stage="auto",
+                session_id=state.auto_session_id,
+                lineage_id=state.auto_session_id,
+                payload=payload.to_dict(),
+                continuation_tool="ouroboros_auto",
+                continuation_arguments={"resume": state.auto_session_id},
+                acceptance_criteria=(criterion,),
+                evidence_requirements=(
+                    "auto_result evidence with final Full Auto status and verification",
+                ),
+                pending_text=(
+                    "Complete this Full Auto work order in the active ChatGPT IDE, "
+                    "submit its receipt, then invoke the continuation."
+                ),
+            )
+            order = HostWorkOrder.model_validate(pending.meta["work_order"])
+            receipt = await bridge.receipt(order)
+            if receipt is not None:
+                completed = await bridge.require_completed_receipt(
+                    dispatch_id=order.dispatch_id,
+                    session_id=state.auto_session_id,
+                )
+                _materialize_host_auto_completion(store, state.auto_session_id)
+                return Result.ok(
+                    _host_auto_completed_result(
+                        state.auto_session_id,
+                        order.dispatch_id,
+                        completed,
+                    )
+                )
+            return Result.ok(
+                replace(
+                    pending,
+                    meta={**pending.meta, "auto_session_id": state.auto_session_id},
+                    structured_content={
+                        **(pending.structured_content or {}),
+                        "auto_session_id": state.auto_session_id,
+                    },
+                )
+            )
+        except Exception as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_auto"))
+        finally:
+            if owns_event_store:
+                await event_store.close()
 
     async def _run(self, arguments: dict[str, Any]) -> AutoPipelineResult:
         store = self.store or AutoStore()
@@ -644,6 +757,7 @@ class StartAutoHandler:
     mcp_tool_prefix: str = ""
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    host_dispatch_context: HostDispatchContext | None = field(default=None, repr=False)
     ralph_handler_factory: Callable[[str | None, str | None], RalphHandler] | None = field(
         default=None, repr=False
     )
@@ -652,6 +766,10 @@ class StartAutoHandler:
         self._event_store = self.event_store or EventStore()
         self._job_manager = self.job_manager or JobManager(self._event_store)
         self._store = self.store or AutoStore()
+        if self.host_dispatch_context is None:
+            candidate = getattr(self.interview_handler, "host_dispatch_context", None)
+            if isinstance(candidate, HostDispatchContext):
+                self.host_dispatch_context = candidate
         self._inner_auto = AutoHandler(
             interview_handler=self.interview_handler,
             generate_seed_handler=self.generate_seed_handler,
@@ -663,6 +781,7 @@ class StartAutoHandler:
             mcp_manager=self.mcp_manager,
             mcp_tool_prefix=self.mcp_tool_prefix,
             event_store=self._event_store,
+            host_dispatch_context=self.host_dispatch_context,
             ralph_handler_factory=self.ralph_handler_factory,
         )
 
@@ -762,6 +881,9 @@ class StartAutoHandler:
             # which would drop goal-derived sections and make start_auto
             # diverge from the synchronous auto path.
             runner_arguments.pop("user_preferences", None)
+
+        if self.host_dispatch_context is not None:
+            return await self._inner_auto.handle({"resume": auto_session_id})
 
         already_running = await self._active_session_error(auto_session_id)
         if already_running is not None:
@@ -933,30 +1055,15 @@ class StartAutoHandler:
         pipeline_timeout_seconds: float | None,
     ) -> AutoPipelineState:
         """Persist a new auto session before the background job starts."""
-        cwd = str(_resolve_cwd(arguments.get("cwd")))
-        state = AutoPipelineState(goal=goal, cwd=cwd)
-        _apply_requested_domain_and_policies(state, arguments)
-        state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
-        state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
-        state.skip_run = bool(arguments.get("skip_run", False))
-        state.complete_product = bool(arguments.get("complete_product", False))
-        supplied_user_preferences: dict[str, str | None] = {}
-        if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
-            supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
-        state.user_preferences = _merge_goal_user_preferences(goal, supplied_user_preferences)
-        state.ledger = _seed_initial_ledger_from_user_preferences(
-            goal, state.user_preferences
-        ).to_dict()
-        if pipeline_timeout_seconds is not None:
-            state.pipeline_timeout_seconds = pipeline_timeout_seconds
-        runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
-        opencode_mode = _resolved_opencode_mode(runtime_backend, self.opencode_mode)
-        state.runtime_backend = runtime_backend
-        state.opencode_mode = opencode_mode
-        if opencode_mode is not None:
-            state.ralph_opencode_mode = opencode_mode
-        self._store.save(state)
-        return state
+        return _preallocate_auto_state(
+            store=self._store,
+            arguments=arguments,
+            goal=goal,
+            pipeline_timeout_seconds=pipeline_timeout_seconds,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            host_driven=self.host_dispatch_context is not None,
+        )
 
     async def _active_session_error(self, auto_session_id: str) -> MCPToolError | None:
         """Return an error when another start_auto already owns this session."""
@@ -1129,6 +1236,119 @@ def _build_auto_subagent(
             "arguments": arguments,
         },
     )
+
+
+def _build_host_auto_subagent(state: AutoPipelineState):
+    """Build host-owned Auto work without recursively invoking Auto itself."""
+    prompt = (
+        "Complete the existing Ouroboros Full Auto workflow for the persisted "
+        "session below using the active ChatGPT IDE task. Do not invoke "
+        "ouroboros_auto or ouroboros_start_auto recursively. Keep every stage "
+        "inside the listed workspace, preserve the same Auto session and Full "
+        "event lineage, and submit a typed completion receipt with verification.\n\n"
+        f"Auto session ID: {state.auto_session_id}\n"
+        f"Goal: {state.goal}\n"
+        f"Workspace: {state.cwd}\n"
+        f"Current phase: {state.phase.value}\n"
+        f"Skip run: {state.skip_run}\n"
+        f"Complete product: {state.complete_product}"
+    )
+    return build_subagent_payload(
+        tool_name="ouroboros_auto",
+        title=f"Full Auto: {state.auto_session_id}",
+        prompt=prompt,
+        context={
+            "auto_session_id": state.auto_session_id,
+            "goal": state.goal,
+            "cwd": state.cwd,
+            "phase": state.phase.value,
+            "skip_run": state.skip_run,
+            "complete_product": state.complete_product,
+        },
+    )
+
+
+def _host_auto_completed_result(
+    auto_session_id: str,
+    dispatch_id: str,
+    receipt: HostCompletionReceipt,
+) -> MCPToolResult:
+    """Render a completed host Auto receipt without launching another workflow."""
+    body = receipt.model_dump(mode="json")
+    return MCPToolResult(
+        content=(
+            MCPContentItem(
+                type=ContentType.TEXT,
+                text=f"Full Auto session {auto_session_id} completed in ChatGPT host.",
+            ),
+        ),
+        meta={
+            "status": "completed",
+            "dispatch_mode": "host_driven",
+            "auto_session_id": auto_session_id,
+            "session_id": auto_session_id,
+            "lineage_id": auto_session_id,
+            "dispatch_id": dispatch_id,
+            "receipt_sha256": receipt.receipt_sha256,
+        },
+        structured_content={"status": "completed", "receipt": body},
+    )
+
+
+def _materialize_host_auto_completion(store: AutoStore, auto_session_id: str) -> None:
+    """Project an accepted host receipt into the existing durable Auto state."""
+    state = store.load(auto_session_id)
+    now = datetime.now(UTC).isoformat()
+    state.phase = AutoPhase.COMPLETE
+    state.phase_started_at = now
+    state.last_progress_at = now
+    state.updated_at = now
+    state.last_progress_message = "completed by ChatGPT host"
+    state.last_tool_name = "host.dispatch"
+    state.last_error = None
+    state.last_error_code = None
+    store.save(state)
+
+
+def _preallocate_auto_state(
+    *,
+    store: AutoStore,
+    arguments: dict[str, Any],
+    goal: str,
+    pipeline_timeout_seconds: float | None,
+    agent_runtime_backend: str | None,
+    opencode_mode: str | None,
+    host_driven: bool,
+) -> AutoPipelineState:
+    """Persist one canonical Auto state before local, plugin, or host dispatch."""
+    cwd = str(_resolve_cwd(arguments.get("cwd")))
+    state = AutoPipelineState(goal=goal, cwd=cwd)
+    _apply_requested_domain_and_policies(state, arguments)
+    state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
+    state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
+    state.skip_run = bool(arguments.get("skip_run", False))
+    state.complete_product = bool(arguments.get("complete_product", False))
+    supplied_user_preferences: dict[str, str | None] = {}
+    if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
+        supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
+    state.user_preferences = _merge_goal_user_preferences(goal, supplied_user_preferences)
+    state.ledger = _seed_initial_ledger_from_user_preferences(
+        goal, state.user_preferences
+    ).to_dict()
+    if pipeline_timeout_seconds is not None:
+        state.pipeline_timeout_seconds = pipeline_timeout_seconds
+    if host_driven:
+        state.runtime_backend = "chatgpt_host"
+        state.opencode_mode = None
+    else:
+        runtime_backend = resolve_agent_runtime_backend(agent_runtime_backend)
+        resolved_mode = _resolved_opencode_mode(runtime_backend, opencode_mode)
+        state.runtime_backend = runtime_backend
+        state.opencode_mode = resolved_mode
+        if resolved_mode is not None:
+            state.ralph_opencode_mode = resolved_mode
+    store.save(state)
+    return state
 
 
 def _auto_session_id_from_arguments(arguments: dict[str, Any]) -> str | None:
