@@ -216,14 +216,25 @@ def check_litellm_import() -> CheckResult:
             message=f"litellm {version}",
         )
     except ImportError:
+        if sys.version_info >= (3, 14):
+            from ouroboros.providers.factory import litellm_missing_dependency_message
+
+            remediation = (
+                litellm_missing_dependency_message("LiteLLM is optional but not installed.")
+                + " For uv tool: uv tool install --python 3.13 --force "
+                "'ouroboros-ai[mcp,claude,litellm]'."
+            )
+        else:
+            remediation = (
+                "pip install 'ouroboros-ai[litellm]'  or  "
+                "uv tool install 'ouroboros-ai[mcp,claude,litellm]'"
+            )
+
         return CheckResult(
             name="litellm_import",
             status="warn",
             message="litellm not installed (optional)",
-            remediation=(
-                "pip install 'ouroboros-ai[litellm]'  or  "
-                "uv tool install 'ouroboros-ai[mcp,claude,litellm]'"
-            ),
+            remediation=remediation,
         )
 
 

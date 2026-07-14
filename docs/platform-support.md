@@ -6,7 +6,7 @@ For installation instructions, see [Getting Started](getting-started.md).
 
 ## Requirements
 
-- **Python**: >= 3.12
+- **Python**: >= 3.12 for core and non-LiteLLM profiles
 - **Package manager**: [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 ## Operating System Support Matrix
@@ -59,8 +59,20 @@ If you encounter Windows-specific issues, please [open an issue](https://github.
 |----------------|---------------|
 | 3.12           | Supported     |
 | 3.13           | Supported     |
-| 3.14           | Supported     |
+| 3.14           | Supported for core and non-LiteLLM profiles |
 | 3.14 beta/RC   | Best effort   |
 | < 3.12         | Not supported |
 
-The minimum required version is **Python >= 3.12** as specified in `pyproject.toml`. Source checkouts default to **stable Python 3.14** through `.python-version`; that default does not narrow the supported runtime range to 3.14-only. If a local 3.14 prerelease or dependency combination fails during contributor setup, recreate the environment with an explicit supported stable interpreter while preserving the selected dependency profile, such as `uv sync --python 3.12` or `uv sync --python 3.12 --all-extras`, then run contributor commands with the same interpreter via `uv run --python 3.12 ...`.
+The minimum required version is **Python >= 3.12** as specified in `pyproject.toml`. Source checkouts default to **stable Python 3.14** through `.python-version`; that default does not narrow the supported runtime range to 3.14-only.
+
+## Python Profile Matrix
+
+| Profile | Supported Python | Python 3.14 behavior |
+|---------|------------------|----------------------|
+| Base package | 3.12-3.14 | Install and run |
+| `claude`, `mcp`, `tui`, and non-LiteLLM combinations | 3.12-3.14 | Install and run |
+| `litellm` | 3.12-3.13 | Package installs, but the LiteLLM dependency is omitted by its Python marker |
+| `all` | 3.12-3.13 for LiteLLM; 3.12-3.14 for remaining extras | Installer selects Python 3.13 when available; direct 3.14 installs omit LiteLLM |
+| Source checkout with `--all-extras` | 3.12-3.13 for LiteLLM; 3.14 for remaining extras | Select Python 3.13 for the full profile; Python 3.14 omits LiteLLM |
+
+LiteLLM currently publishes a `<3.14` Python bound. Use Python 3.13 for current LiteLLM examples, or Python 3.12 when validating the lower supported bound. On Python 3.14, the public extras remain installable but omit LiteLLM; requesting the LiteLLM backend then returns remediation for creating a Python 3.13 environment.

@@ -41,6 +41,12 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install dependencies
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          uv sync --dev
+          uv pip check
+
       - name: Sync plugin version
         if: steps.check.outputs.skip == 'false'
         run: python scripts/sync-plugin-version.py --write

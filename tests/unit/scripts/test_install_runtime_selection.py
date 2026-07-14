@@ -102,7 +102,7 @@ def _expected_pins_for_extras(*extra_names: str) -> list[str]:
         for dep in extras.get(extra_name, []):
             stripped = dep.strip()
             if stripped:
-                expected_pins.append(stripped)
+                expected_pins.append(stripped.partition(";")[0].strip())
     return expected_pins
 
 
@@ -300,6 +300,178 @@ def test_pipx_install_setup_prefers_existing_path_command_over_stale_home_local_
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "ouroboros setup --runtime pi --non-interactive" in calls
     assert not any(call.startswith("stale-home-ouroboros setup") for call in calls)
+
+
+def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
+    assert "--with litellm==1.91.0" in calls
+
+    mcp_config = json.loads(
+        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
+    )
+    assert mcp_config["mcpServers"]["ouroboros"]["args"][:2] == [
+        "--python",
+        ">=3.12,<3.14",
+    ]
+
+
+def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "codex"},
+        fake_commands={"codex": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "uv tool install --upgrade --python >=3.12 ." in calls
+    assert ">=3.12,<3.14" not in calls
+
+
+def test_all_runtime_pipx_selects_python_313_when_314_is_available(tmp_path: Path) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    python_313 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\necho \'Python 3.13.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.14": python_314,
+            "python3.13": python_313,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert f"pipx install --force --python {tmp_path}/bin/python3.13 .[all]" in calls
+    assert f"--python {tmp_path}/bin/python3.14" not in calls
+
+
+def test_all_runtime_pipx_fails_before_install_when_only_python_314_exists(
+    tmp_path: Path,
+) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.14": python_314,
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Python >=3.12,<3.14" in result.stdout
+    assert "Python 3.13" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "pipx install" not in calls_path.read_text(encoding="utf-8")
+
+
+def test_all_runtime_pipx_rejects_python_315_for_litellm_range(tmp_path: Path) -> None:
+    python_315 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.15; exit 0; fi\necho \'Python 3.15.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.15": python_315,
+            "python3": python_315,
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Python >=3.12,<3.14" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "pipx install" not in calls_path.read_text(encoding="utf-8")
+
+
+def test_all_runtime_pip_fallback_fails_before_install_when_only_python_314_exists(
+    tmp_path: Path,
+) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={"python3": python_314},
+    )
+
+    assert result.returncode == 1
+    assert "Python >=3.12,<3.14" in result.stdout
+    assert "Python 3.13" in result.stdout
+
+
+def test_all_runtime_pip_fallback_selects_313_when_generic_python3_is_314(
+    tmp_path: Path,
+) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    python_313 = (
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then printf \'pip313 %s\\n\' "$*" >> __CALLS__; exit 0; fi\n'
+        "echo 'Python 3.13.0'\n"
+    ).replace("__CALLS__", str(tmp_path / "calls.log"))
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "python3": python_314,
+            "python3.13": python_313,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "pip313 -m pip install --user --upgrade .[all] click>=8.1.0,<9.0.0" in calls
+
+
+def test_all_runtime_pip_fallback_uses_compatible_python(tmp_path: Path) -> None:
+    python_313 = (
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then printf \'pip %s\\n\' "$*" >> __CALLS__; exit 0; fi\n'
+        "echo 'Python 3.13.0'\n"
+    ).replace("__CALLS__", str(tmp_path / "calls.log"))
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={"python3": python_313},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "pip -m pip install --user --upgrade .[all] click>=8.1.0,<9.0.0" in calls
 
 
 def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
