@@ -182,10 +182,11 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             stdout_idle_timeout_seconds: Override the inter-chunk idle
                 watchdog. Same forwarding / disable contract as above.
         """
+        self._requested_model = model
         super().__init__(
             cli_path=cli_path,
             permission_mode=permission_mode,
-            model=model,
+            model=None,
             cwd=cwd,
             skills_dir=skills_dir,
             skill_dispatcher=skill_dispatcher,
@@ -199,11 +200,11 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         # dropping it — the caller believes a specific model was selected
         # when zcode will in fact use whatever ~/.zcode/cli/config.json
         # declares. Only an explicit, non-default id triggers this.
-        requested_model = self._normalize_model(self._model)
+        requested_model = self._normalize_model(self._requested_model)
         if requested_model:
             log.warning(
                 "zcode_cli_runtime.model_not_forwarded",
-                requested_model=self._model,
+                requested_model=self._requested_model,
                 reason=(
                     "zcode has no --model CLI flag; set model.main in "
                     "~/.zcode/cli/config.json to select the model."
@@ -463,6 +464,29 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             command.extend(["--resume", resume_session_id])
         return command
 
+    def execution_identity_contract(self) -> dict[str, Any]:
+        """Return Zcode execution identity without pretending to observe a model.
+
+        Zcode has no ``--model`` flag, and the selected model is owned by
+        Zcode's mutable config. A constructor ``model`` value is therefore only
+        a rejected request, not an observed effective model. Keep the requested
+        value visible for audit, but never let it satisfy the runner's
+        ``effective_model_observed`` guard.
+        """
+        requested_model = self._normalize_model(self._requested_model)
+        normalized_llm_backend = (
+            self._llm_backend.strip()
+            if isinstance(self._llm_backend, str) and self._llm_backend.strip()
+            else None
+        )
+        return {
+            "kind": "zcode_cli_v1",
+            "requested_model": requested_model,
+            "effective_model_observed": False,
+            "llm_backend": normalized_llm_backend,
+            "resume_handle_selector": self.resume_handle_execution_identity_contract(None),
+        }
+
     def _feeds_prompt_via_stdin(self) -> bool:
         """Return False — Zcode CLI accepts the prompt via the --prompt flag."""
         return False
@@ -570,8 +594,28 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         zcode build adds streamed events, handle them here.
         """
         response = event.get("response")
-        if not isinstance(response, str) or not response:
-            return []
+        if not isinstance(response, str) or not response.strip():
+            return [
+                AgentMessage(
+                    type="result",
+                    content=(
+                        "Zcode CLI protocol error: JSON summary did not include "
+                        "a non-empty response."
+                    ),
+                    data={
+                        "subtype": "error",
+                        "error_type": self._runtime_error_type,
+                        "protocol_error": "missing_response",
+                        "terminal": True,
+                        "traceId": event.get("traceId"),
+                        "turnId": event.get("turnId"),
+                        "usage": event.get("usage"),
+                        "projection": event.get("projection"),
+                        "eventCount": event.get("eventCount"),
+                    },
+                    resume_handle=current_handle,
+                )
+            ]
 
         is_valid, _ = InputValidator.validate_llm_response(response)
         if not is_valid:

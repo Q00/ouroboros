@@ -116,10 +116,46 @@ def test_convert_event_tool_summary_to_assistant(runtime: ZcodeCLIRuntime) -> No
     assert msgs[0].data.get("usage", {}).get("modelRequestCount") == 2
 
 
-def test_convert_event_empty_response_returns_nothing(runtime: ZcodeCLIRuntime) -> None:
-    assert runtime._convert_event({"sessionId": "sess_x"}, None) == []
-    assert runtime._convert_event({"response": ""}, None) == []
-    assert runtime._convert_event({"response": None}, None) == []
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"sessionId": "sess_x"},
+        {"response": ""},
+        {"response": "   "},
+        {"response": None},
+    ],
+)
+def test_convert_event_empty_response_is_protocol_error(
+    runtime: ZcodeCLIRuntime,
+    event: dict[str, Any],
+) -> None:
+    msgs = runtime._convert_event(event, None)
+    assert len(msgs) == 1
+    assert msgs[0].type == "result"
+    assert msgs[0].is_error
+    assert "non-empty response" in msgs[0].content
+    assert msgs[0].data["protocol_error"] == "missing_response"
+
+
+@pytest.mark.asyncio
+async def test_execute_task_empty_response_fails_closed_without_generic_success(
+    tmp_path: Path,
+) -> None:
+    fake_zcode = tmp_path / "zcode"
+    fake_zcode.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"sessionId":"sess_empty","response":""}\'\n',
+        encoding="utf-8",
+    )
+    fake_zcode.chmod(0o755)
+    runtime = ZcodeCLIRuntime(cli_path=fake_zcode)
+
+    messages = [message async for message in runtime.execute_task("hi")]
+
+    final_messages = [message for message in messages if message.is_final]
+    assert len(final_messages) == 1
+    assert final_messages[0].is_error
+    assert final_messages[0].data["protocol_error"] == "missing_response"
+    assert "Zcode CLI task completed" not in final_messages[0].content
 
 
 def test_convert_event_truncates_oversized_response(runtime: ZcodeCLIRuntime) -> None:
@@ -347,6 +383,16 @@ def test_build_command_never_emits_model_flag_even_when_explicit_non_default(
     assert "--model" not in cmd
     # And the model id must not leak in as a bare positional either.
     assert "glm-4.6" not in cmd
+
+
+def test_constructor_model_is_not_promoted_to_effective_identity() -> None:
+    runtime = ZcodeCLIRuntime(cli_path="/tmp/zcode.cjs", model="glm-4.6")
+
+    identity = runtime.execution_identity_contract()
+
+    assert runtime._model is None
+    assert identity["requested_model"] == "glm-4.6"
+    assert identity["effective_model_observed"] is False
 
 
 def test_build_command_ignores_per_call_model_override(runtime: ZcodeCLIRuntime) -> None:
