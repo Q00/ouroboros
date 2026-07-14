@@ -153,6 +153,32 @@ class TestBuildSystemPrompt:
         assert "spinning" in prompt
         assert "no acceptance-criterion progress" in prompt
 
+    def test_renders_bounded_successor_directive_after_seed_contract(
+        self,
+        sample_seed: Seed,
+    ) -> None:
+        seed = Seed.from_dict(
+            {
+                **sample_seed.to_dict(),
+                "conductor_directive": {
+                    "source_attention_event_id": "attention_1",
+                    "instruction": "Add repository evidence for the rejected claim.",
+                    "rejected_reasons": ["The cited file was not observed."],
+                    "deterministic": True,
+                },
+            }
+        )
+
+        prompt = build_system_prompt(seed)
+
+        assert prompt.index("## Seed Contract") < prompt.index(
+            "## Active Conductor Successor Directive"
+        )
+        assert "The Seed above remains" in prompt
+        assert "the source of truth" in prompt
+        assert "Add repository evidence for the rejected claim." in prompt
+        assert "- acceptance criteria: true" in prompt
+
     def test_handles_empty_constraints(self) -> None:
         """Test handling seed with no constraints."""
         seed = Seed(

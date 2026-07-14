@@ -19,9 +19,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import os
 from typing import Any, Protocol
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
@@ -126,7 +128,7 @@ class LeaderDrivenWorkerRuntime:
         transport: LeaderDrivenWorkerTransport,
         runtime_backend: str,
         llm_backend: str,
-        cwd: str | None = None,
+        cwd: str | os.PathLike[str] | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
         reasoning_effort_support: ParamSupport = ParamSupport.IGNORED,
@@ -137,7 +139,7 @@ class LeaderDrivenWorkerRuntime:
         self._transport = transport
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
-        self._cwd = cwd
+        self._cwd = os.fspath(cwd) if cwd is not None else None
         self._permission_mode = permission_mode
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support
@@ -181,6 +183,11 @@ class LeaderDrivenWorkerRuntime:
             enforceable_reasoning_efforts=self._enforceable_reasoning_efforts,
             model_override_support=self._model_override_support,
             subagent_orchestration=SubagentOrchestration.EXTERNAL_LEADER_DRIVEN,
+            session_signals=SessionSignalCapabilities(
+                inform_delivery=self._targeted_resume,
+                background_reply=self._targeted_resume,
+                after_turn_delivery=self._targeted_resume,
+            ),
         )
 
     # -- Execution --------------------------------------------------------

@@ -372,3 +372,17 @@ Using OpenCode as the runtime backend incurs API charges from your configured pr
 - Number of tool calls and iterations
 
 Refer to your provider's pricing page for current rates.
+
+## Active Conductor and Synapse
+
+OpenCode CLI subprocess sessions are proven Synapse `inform`/`after_turn`
+transports using the same OpenCode session ID. This does not claim live
+checkpoint `redirect` or hard `replace`. OpenCode plugin Task dispatch remains a
+separate host-owned lifecycle and is not reinterpreted as runtime interruption.
+
+For pollable runs, one read-only observer relays current model/harness,
+efficiency assurance, bounded Discover targets, dependency/parallel levels,
+first scheduled ACs, attention, and terminal assurance while the main session
+remains available. The main host selects the affected AC by meaning, never by a
+user-supplied internal ID, and speaks naturally in the user's conversation
+language from canonical English guidance.

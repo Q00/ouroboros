@@ -92,3 +92,16 @@ This runtime depends on the Goose CLI `run` command and `--output-format stream-
 `llm.backend: goose` uses `goose run --output-format stream-json --no-session -i -` for completion-style calls. It shares the same `goose_cli_path`/`OUROBOROS_GOOSE_CLI_PATH` resolution as the runtime backend.
 
 Structured `response_format` requests are enforced cooperatively: Ouroboros injects a strict JSON/schema instruction and extracts valid JSON from Goose output. Goose CLI currently has no Codex-style `--output-schema` hard-enforcement flag, so malformed structured responses may be retried and then surfaced as provider errors.
+
+## Active Conductor and Synapse
+
+Goose CLI is a proven Synapse `inform`/`after_turn` backend using one stable
+Ouroboros-generated session name and explicit resume. It does not advertise live
+checkpoint `redirect` or hard `replace`.
+
+One exclusive read-only observer reports current runtime/model, efficiency and
+frugality assurance, bounded Discover targets, dependency/parallel levels, first
+scheduled ACs, material route changes, attention, and terminal assurance. The
+main session remains conversational and maps user intent to the relevant AC
+without exposing IDs. Canonical guidance is English; user-facing wording follows
+the active conversation language.
