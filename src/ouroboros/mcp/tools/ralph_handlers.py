@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import logging
 import math
+from pathlib import Path
 from typing import Any
 
 from ouroboros.core.types import Result
@@ -16,6 +17,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
+from ouroboros.mcp.tools.host_bridge import HostDispatchContext, HostStageBridge
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
@@ -64,6 +66,7 @@ class RalphHandler:
     job_manager: JobManager | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    host_dispatch_context: HostDispatchContext | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -413,6 +416,9 @@ class RalphHandler:
             ),
         )
 
+        if self.host_dispatch_context is not None:
+            return await self._handle_host_dispatch(arguments, config)
+
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             # Plugin mode: per_iteration_timeout_seconds and max_total_seconds
             # are forwarded to the child session as instructions. The MCP
@@ -495,6 +501,117 @@ class RalphHandler:
                 },
             )
         )
+
+    async def _handle_host_dispatch(
+        self,
+        arguments: dict[str, Any],
+        config: RalphLoopConfig,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Dispatch or complete Ralph work in the active ChatGPT Full host."""
+        context = self.host_dispatch_context
+        if context is None:  # pragma: no cover - guarded by the caller
+            return Result.err(
+                MCPToolError("host dispatch context is required", tool_name=self.definition.name)
+            )
+
+        try:
+            project_dir = (
+                Path(config.project_dir or context.workspace_root).expanduser().resolve(strict=True)
+            )
+        except OSError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name=self.definition.name))
+        if not project_dir.is_dir() or not project_dir.is_relative_to(context.workspace_root):
+            return Result.err(
+                MCPToolError(
+                    "Ralph project_dir must remain inside the active ChatGPT workspace",
+                    tool_name=self.definition.name,
+                )
+            )
+
+        await self._event_store.initialize()
+        bridge = HostStageBridge(self._event_store, context)
+        dispatch_id = arguments.get("_host_dispatch_id")
+        if dispatch_id:
+            try:
+                receipt = await bridge.require_completed_receipt(
+                    dispatch_id=str(dispatch_id),
+                    session_id=config.lineage_id,
+                )
+            except Exception as exc:
+                return Result.err(MCPToolError(str(exc), tool_name=self.definition.name))
+            body = receipt.model_dump(mode="json")
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=f"Host completed the Ralph loop for {config.lineage_id}.",
+                        ),
+                    ),
+                    meta={
+                        "status": "completed",
+                        "dispatch_mode": "host_driven",
+                        "dispatch_id": receipt.dispatch_id,
+                        "session_id": config.lineage_id,
+                        "lineage_id": config.lineage_id,
+                        "receipt": body,
+                    },
+                    structured_content={"status": "completed", "receipt": body},
+                )
+            )
+
+        prompt = (
+            f"Run the Ouroboros Full Ralph loop for lineage {config.lineage_id} in the "
+            "active ChatGPT IDE workspace. Repeatedly perform the existing Full Evolve and "
+            "QA stages until QA passes or the configured stop condition is reached. "
+            "Do not invoke ouroboros_ralph or ouroboros_start_ralph recursively, start a "
+            "background MCP job, launch another agent runtime, or use an API key."
+        )
+        payload = {
+            "prompt": prompt,
+            "context": {
+                "lineage_id": config.lineage_id,
+                "seed_content": config.seed_content,
+                "execute": config.execute,
+                "parallel": config.parallel,
+                "skip_qa": config.skip_qa,
+                "project_dir": str(project_dir),
+                "max_generations": config.max_generations,
+                "per_iteration_timeout_seconds": config.per_iteration_timeout_seconds,
+                "max_total_seconds": config.max_total_seconds,
+                "oscillation_window": config.oscillation_window,
+                "grade_regression_window": config.grade_regression_window,
+                "commit_policy": config.commit_policy,
+                "auto_session_id": config.auto_session_id,
+                "execution_id": config.execution_id,
+                "checkpoint_commits": config.checkpoint_commits,
+                "checkpoint_attempted_ac_ids": config.checkpoint_attempted_ac_ids,
+            },
+        }
+        continuation_arguments = {
+            key: value for key, value in arguments.items() if key != "_host_dispatch_id"
+        }
+        continuation_arguments["lineage_id"] = config.lineage_id
+        continuation_arguments["project_dir"] = str(project_dir)
+        criterion = f"Complete the Full Ralph loop for lineage {config.lineage_id}"
+        pending = await bridge.dispatch_pending(
+            stage="ralph",
+            session_id=config.lineage_id,
+            lineage_id=config.lineage_id,
+            payload=payload,
+            continuation_tool=self.definition.name,
+            continuation_arguments=continuation_arguments,
+            acceptance_criteria=(criterion,),
+            evidence_requirements=(
+                "Ralph generation history with Evolve and QA outcomes",
+                "terminal stop reason and evidence for the final result",
+            ),
+            pending_text=(
+                "Complete this Ralph work order in the active ChatGPT IDE, "
+                "submit its receipt, then invoke the continuation."
+            ),
+        )
+        return Result.ok(pending)
 
 
 @dataclass
