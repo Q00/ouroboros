@@ -1620,6 +1620,7 @@ class InterviewHandler:
     data_dir: Path | None = field(default=None, repr=False)
     fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
     suppress_tool_use_prompt_cues: bool = False
+    host_dispatch_context: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -2042,6 +2043,17 @@ class InterviewHandler:
         )
         last_question = arguments.get("last_question")
 
+        host_dispatch_id = arguments.get("_host_dispatch_id")
+        if self.host_dispatch_context is not None and host_dispatch_id:
+            if not session_id:
+                return Result.err(
+                    MCPToolError(
+                        "Host interview continuation requires session_id",
+                        tool_name="ouroboros_interview",
+                    )
+                )
+            return await self._complete_host_dispatch_turn(str(session_id), str(host_dispatch_id))
+
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
         if initial_context:
@@ -2089,6 +2101,17 @@ class InterviewHandler:
                         tool_name="ouroboros_interview",
                     )
                 )
+
+        if self.host_dispatch_context is not None:
+            return await self._handle_host_dispatch(
+                arguments,
+                action=action,
+                session_id=session_id,
+                initial_context=initial_context,
+                answer=answer,
+                last_question=last_question,
+                suggested_interview_id=suggested_interview_id,
+            )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -2304,6 +2327,267 @@ class InterviewHandler:
                     else {}
                 ),
             },
+        )
+
+    async def _handle_host_dispatch(
+        self,
+        arguments: dict[str, Any],
+        *,
+        action: str,
+        session_id: Any,
+        initial_context: Any,
+        answer: Any,
+        last_question: Any,
+        suggested_interview_id: str | None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Persist one Full interview turn and delegate only question generation."""
+        from dataclasses import replace
+        from datetime import UTC, datetime
+        import hashlib
+        import json
+        from uuid import NAMESPACE_URL, uuid4, uuid5
+
+        from ouroboros.bigbang.interview import InterviewRound
+        from ouroboros.core.security import InputValidator
+        from ouroboros.mcp.tools.host_bridge import HostBridgeHandler
+        from ouroboros.mcp.tools.subagent import build_host_work_order
+
+        state_dir = self.resolved_state_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        context = self.host_dispatch_context
+        try:
+            requested_cwd = (
+                Path(arguments.get("cwd") or context.workspace_root)
+                .expanduser()
+                .resolve(strict=True)
+            )
+        except OSError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
+        if not requested_cwd.is_relative_to(context.workspace_root):
+            return Result.err(
+                MCPToolError(
+                    "Interview cwd must remain inside the active ChatGPT workspace",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        transcript = ""
+        state: InterviewState
+        if action == "start":
+            resolved_context = resolve_initial_context_input(
+                initial_context, cwd=str(requested_cwd)
+            )
+            if resolved_context.is_err:
+                return Result.err(
+                    MCPToolError(str(resolved_context.error), tool_name="ouroboros_interview")
+                )
+            is_valid, error_msg = InputValidator.validate_initial_context(resolved_context.value)
+            if not is_valid:
+                return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
+            real_session_id = suggested_interview_id or f"interview_{uuid4().hex[:16]}"
+            state = InterviewState(
+                interview_id=real_session_id,
+                initial_context=resolved_context.value,
+            )
+            save_result = await _plugin_save_state(state_dir, state)
+            if save_result.is_err:
+                return Result.err(
+                    MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
+                )
+        else:
+            real_session_id = str(session_id)
+            load_result = await _plugin_load_state(state_dir, real_session_id)
+            if load_result.is_err:
+                return Result.err(
+                    MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
+                )
+            state = load_result.value
+            if action == "answer":
+                question = str(
+                    last_question
+                    or (
+                        state.rounds[-1].question
+                        if state.rounds and state.rounds[-1].user_response is None
+                        else ""
+                    )
+                )
+                if not question:
+                    return Result.err(
+                        MCPToolError(
+                            "Host interview answer requires last_question",
+                            tool_name="ouroboros_interview",
+                        )
+                    )
+                guard = _guard_interview_answer(state=state, question=question, answer=str(answer))
+                if guard.status is IntentGuardStatus.FAIL:
+                    return Result.err(
+                        MCPToolError(
+                            _format_intent_guard_blocker(guard), tool_name="ouroboros_interview"
+                        )
+                    )
+                if state.rounds and state.rounds[-1].user_response is None:
+                    state.rounds[-1].question = question
+                    state.rounds[-1].user_response = str(answer)
+                else:
+                    state.rounds.append(
+                        InterviewRound(
+                            round_number=len(state.rounds) + 1,
+                            question=question,
+                            user_response=str(answer),
+                        )
+                    )
+                state.mark_updated()
+                save_result = await _plugin_save_state(state_dir, state)
+                if save_result.is_err:
+                    return Result.err(
+                        MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
+                    )
+            transcript = _format_interview_transcript(state)
+
+        payload = build_interview_subagent(
+            session_id=real_session_id,
+            action=action,
+            initial_context=initial_context,
+            answer=answer,
+            cwd=str(requested_cwd),
+            transcript=transcript,
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(payload.to_dict(), sort_keys=True, ensure_ascii=True).encode()
+        ).hexdigest()
+        dispatch_id = str(
+            uuid5(NAMESPACE_URL, f"ouroboros-host-interview:{real_session_id}:{fingerprint}")
+        )
+        payload = replace(
+            payload,
+            context={
+                **payload.context,
+                "dispatch_mode": "host_driven",
+                "continuation": {
+                    "tool_name": "ouroboros_interview",
+                    "arguments": {
+                        "session_id": real_session_id,
+                        "_host_dispatch_id": dispatch_id,
+                    },
+                },
+            },
+        )
+        criterion = "Return exactly one next Socratic interview question"
+        order = build_host_work_order(
+            payload,
+            dispatch_id=dispatch_id,
+            session_id=real_session_id,
+            lineage_id=real_session_id,
+            workspace_id=context.workspace_id,
+            workspace_root=context.workspace_root,
+            sandbox_mode=context.sandbox_mode,
+            approval_policy=context.approval_policy,
+            acceptance_criteria=(criterion,),
+            evidence_requirements=("interview_question evidence with the exact question",),
+            created_at=datetime.now(UTC),
+        )
+        await self._ensure_initialized()
+        bridge = HostBridgeHandler(self._event_store)
+        order = await bridge.dispatch(order)
+        await bridge.accept(order)
+        body = order.model_dump(mode="json")
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="Complete this interview work order in the active ChatGPT IDE, submit its receipt, then invoke the continuation.",
+                    ),
+                ),
+                meta={
+                    "status": "host_work_pending",
+                    "dispatch_mode": "host_driven",
+                    "session_id": real_session_id,
+                    "lineage_id": real_session_id,
+                    "work_order": body,
+                },
+                structured_content={"status": "host_work_pending", "work_order": body},
+            )
+        )
+
+    async def _complete_host_dispatch_turn(
+        self, session_id: str, dispatch_id: str
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Project a persisted host question into the same Full interview state."""
+        from ouroboros.bigbang.interview import InterviewRound
+        from ouroboros.mcp.tools.host_bridge import HostBridgeHandler, HostTerminalStatus
+
+        await self._ensure_initialized()
+        bridge = HostBridgeHandler(self._event_store)
+        try:
+            order = await bridge.require_order(dispatch_id)
+            if order.session_id != session_id:
+                raise ValueError("host interview continuation session mismatch")
+            receipt = await bridge.receipt(order)
+        except Exception as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_interview"))
+        if receipt is None:
+            return Result.err(
+                MCPToolError(
+                    "Host interview receipt is not available",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        if receipt.terminal_status is not HostTerminalStatus.COMPLETED:
+            return Result.err(
+                MCPToolError(
+                    f"Host interview {receipt.terminal_status.value}",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        questions = [
+            item.get("value", "").strip()
+            for item in receipt.evidence
+            if item.get("kind") == "interview_question" and item.get("value", "").strip()
+        ]
+        if len(questions) != 1:
+            return Result.err(
+                MCPToolError(
+                    "Host interview receipt must contain exactly one interview_question",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        load_result = await _plugin_load_state(self.resolved_state_dir(), session_id)
+        if load_result.is_err:
+            return Result.err(MCPToolError(str(load_result.error), tool_name="ouroboros_interview"))
+        state = load_result.value
+        question = questions[0]
+        if state.rounds and state.rounds[-1].user_response is None:
+            state.rounds[-1].question = question
+        else:
+            state.rounds.append(
+                InterviewRound(
+                    round_number=len(state.rounds) + 1,
+                    question=question,
+                    user_response=None,
+                )
+            )
+        state.mark_updated()
+        saved = await _plugin_save_state(self.resolved_state_dir(), state)
+        if saved.is_err:
+            return Result.err(MCPToolError(str(saved.error), tool_name="ouroboros_interview"))
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=f"Session {session_id}\n\n{question}",
+                    ),
+                ),
+                meta={
+                    "status": "host_turn_completed",
+                    "dispatch_mode": "host_driven",
+                    "session_id": session_id,
+                    "lineage_id": session_id,
+                    "dispatch_id": dispatch_id,
+                    "question": question,
+                },
+            )
         )
 
     def _create_interview_engine(self) -> tuple[Any, Any]:

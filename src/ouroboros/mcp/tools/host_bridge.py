@@ -350,6 +350,10 @@ class HostBridgeHandler:
             raise HostDispatchNotFound(dispatch_id) from exc
         return HostWorkOrder.model_validate(stored.data["order"])
 
+    async def require_order(self, dispatch_id: str) -> HostWorkOrder:
+        """Return the persisted immutable work order for a continuation."""
+        return await self._require_order(dispatch_id)
+
     async def complete(self, receipt: HostCompletionReceipt) -> HostCompletionReceipt:
         order = await self._require_order(receipt.dispatch_id)
         validate_receipt_identity(order, receipt)

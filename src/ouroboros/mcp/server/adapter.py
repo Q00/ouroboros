@@ -1868,12 +1868,14 @@ def create_ouroboros_server(
         opencode_mode=opencode_mode,
     )
     interview = InterviewHandler(
+        interview_engine=interview_engine,
         event_store=event_store,
         llm_adapter=llm_adapter,
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
         suppress_tool_use_prompt_cues=interview_envelope_sealed,
+        host_dispatch_context=host_dispatch_context,
     )
     generate_seed = GenerateSeedHandler(
         event_store=event_store,
@@ -1957,15 +1959,7 @@ def create_ouroboros_server(
         MeasureDriftHandler(
             event_store=event_store,
         ),
-        InterviewHandler(
-            interview_engine=interview_engine,
-            event_store=event_store,
-            llm_adapter=llm_adapter,
-            llm_backend=interview_llm_backend,
-            agent_runtime_backend=interview_runtime_backend,
-            opencode_mode=opencode_mode,
-            suppress_tool_use_prompt_cues=interview_envelope_sealed,
-        ),
+        interview,
         PMInterviewHandler(
             data_dir=state_dir_path,
             llm_adapter=llm_adapter,
