@@ -86,7 +86,10 @@ uv run pytest tests/canonical/test_issue_1450_quality.py -v
 ```
 
 The product comparison is costly and requires an explicit opt-in plus
-an evidence directory that will survive pytest cleanup:
+an evidence directory that will survive pytest cleanup. Run it from a
+Git checkout (not a source archive or unpacked package), because the
+preflight uses Git object and worktree checks to verify the frozen
+fixture and source hashes:
 
 ```sh
 PATH="$PWD/.venv/bin:$PATH" \
