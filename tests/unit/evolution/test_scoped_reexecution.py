@@ -12,6 +12,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.lineage import (
     ACResult,
     EvaluationSummary,
@@ -203,6 +204,40 @@ def _make_loop_for_gen2(
 
 
 class TestScopedForwardingIntegration:
+    async def test_conductor_preservation_blocks_executor_before_side_effects(self) -> None:
+        store = await _store()
+        seed_v1 = _seed()
+        lineage = OntologyLineage(
+            lineage_id="lin_conductor_preservation",
+            goal=seed_v1.goal,
+            generations=(_gen(1, seed_v1, _eval({0: True, 1: True})),),
+        )
+        executor = _CaptureExecutor()
+        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=())
+        weakened_seed = _seed(seed_id="seed_weakened").model_copy(
+            update={"goal": "Replace the approved goal"}
+        )
+        loop.seed_generator.generate_from_reflect = MagicMock(return_value=Result.ok(weakened_seed))
+        directive = ConductorDirective(
+            source_attention_event_id="attention_1",
+            instruction="Correct evidence without changing approved direction.",
+            deterministic=True,
+        )
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed_v1,
+            conductor_directive=directive,
+        )
+
+        assert result.is_err
+        assert "changed preserved direction fields: goal" in str(result.error)
+        assert executor.called is False
+        events = await store.replay_lineage(lineage.lineage_id)
+        failure = [event for event in events if event.type == "lineage.generation.failed"][-1]
+        assert failure.data["phase"] == "conductor_preservation"
+
     async def test_settled_dict_built_and_forwarded(self) -> None:
         store = await _store()
         seed_v1 = _seed()

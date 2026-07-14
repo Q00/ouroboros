@@ -25,6 +25,7 @@ import signal
 from typing import Any
 
 from ouroboros.config.models import RuntimeControlsConfig
+from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.lineage import (
     EvaluationSummary,
@@ -76,6 +77,33 @@ def _default_runtime_controls() -> RuntimeControlsConfig:
     from ouroboros.config.loader import get_runtime_controls_config
 
     return get_runtime_controls_config()
+
+
+def _conductor_preservation_error(
+    approved: Seed,
+    successor: Seed,
+    directive: ConductorDirective | None,
+) -> str | None:
+    """Return a fail-closed invariant error for an unauthorized direction change."""
+    if directive is None:
+        return None
+    changed: list[str] = []
+    if directive.preserve_goal and approved.goal != successor.goal:
+        changed.append("goal")
+    if (
+        directive.preserve_acceptance_criteria
+        and approved.acceptance_criteria != successor.acceptance_criteria
+    ):
+        changed.append("acceptance_criteria")
+    if directive.preserve_constraints and approved.constraints != successor.constraints:
+        changed.append("constraints")
+    if directive.preserve_non_goals and approved.to_dict().get(
+        "non_goals"
+    ) != successor.to_dict().get("non_goals"):
+        changed.append("non_goals")
+    if not changed:
+        return None
+    return "Conductor successor changed preserved direction fields: " + ", ".join(changed)
 
 
 @dataclass
@@ -656,6 +684,7 @@ class EvolutionaryLoop:
         initial_seed: Seed | None = None,
         execute: bool = True,
         parallel: bool = True,
+        conductor_directive: ConductorDirective | None = None,
     ) -> Result[StepResult, OuroborosError]:
         """Run exactly one generation of the evolutionary loop.
 
@@ -807,6 +836,15 @@ class EvolutionaryLoop:
             else:
                 return Result.err(OuroborosError("Events exist but no completed generations found"))
 
+        approved_seed = current_seed
+        if conductor_directive is not None:
+            current_seed = Seed.from_dict(
+                {
+                    **current_seed.to_dict(),
+                    "conductor_directive": conductor_directive.to_event_data(),
+                }
+            )
+
         # Step 2: Run one generation wrapped in AgentProcess for pause/cancel/replay
         # primitives. State reconstruction above is outside the process boundary
         # so that replays start with a clean slate.
@@ -865,6 +903,7 @@ class EvolutionaryLoop:
                     parallel=parallel,
                     resume_after_phase=resume_after_phase,
                     agent_process_handle=handle,
+                    conductor_directive=conductor_directive,
                 )
             finally:
                 self._uninstall_sigint_handler()
@@ -944,6 +983,23 @@ class EvolutionaryLoop:
                 return
 
             result = gen_result.value
+
+            preservation_error = _conductor_preservation_error(
+                approved_seed,
+                result.seed,
+                conductor_directive,
+            )
+            if preservation_error is not None:
+                await self.event_store.append(
+                    lineage_generation_failed(
+                        lineage.lineage_id,
+                        generation_number,
+                        "conductor_preservation",
+                        preservation_error,
+                    )
+                )
+                container.result = Result.err(OuroborosError(preservation_error))
+                return
 
             # After generation work has returned a completed result, finish
             # durable lineage/post-processing writes without another
@@ -1131,6 +1187,7 @@ class EvolutionaryLoop:
         resume_after_phase: str | None = None,
         execution_id: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
+        conductor_directive: ConductorDirective | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -1151,6 +1208,7 @@ class EvolutionaryLoop:
                 resume_after_phase=resume_after_phase,
                 execution_id=execution_id,
                 agent_process_handle=agent_process_handle,
+                conductor_directive=conductor_directive,
             )
         except asyncio.CancelledError:
             # MCP transport disconnect, timeout, or external task cancellation.
@@ -1185,6 +1243,7 @@ class EvolutionaryLoop:
         parallel: bool = True,
         resume_after_phase: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
+        conductor_directive: ConductorDirective | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run one generation under progress-aware liveness controls."""
         execution_id = self._generation_execution_id(lineage.lineage_id, generation_number)
@@ -1206,6 +1265,7 @@ class EvolutionaryLoop:
                     resume_after_phase=resume_after_phase,
                     execution_id=execution_id,
                     agent_process_handle=agent_process_handle,
+                    conductor_directive=conductor_directive,
                 )
             )
         except GenerationWatchdogTimeout as exc:
@@ -1366,6 +1426,7 @@ class EvolutionaryLoop:
         resume_after_phase: str | None = None,
         execution_id: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
+        conductor_directive: ConductorDirective | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Inner implementation of _run_generation with all phase logic.
 
@@ -1551,6 +1612,7 @@ class EvolutionaryLoop:
                         wonder_output=wonder_output,
                         lineage=lineage,
                         regression_report=regression_report,
+                        conductor_directive=conductor_directive,
                     )
 
                     if reflect_result.is_ok:
@@ -1654,6 +1716,29 @@ class EvolutionaryLoop:
                             OuroborosError(f"Seed generation failed: {seed_result.error}")
                         )
                     new_seed = seed_result.value
+                    if conductor_directive is not None:
+                        new_seed = Seed.from_dict(
+                            {
+                                **new_seed.to_dict(),
+                                "conductor_directive": conductor_directive.to_event_data(),
+                            }
+                        )
+
+                    preservation_error = _conductor_preservation_error(
+                        current_seed,
+                        new_seed,
+                        conductor_directive,
+                    )
+                    if preservation_error is not None:
+                        await self.event_store.append(
+                            lineage_generation_failed(
+                                lineage.lineage_id,
+                                generation_number,
+                                "conductor_preservation",
+                                preservation_error,
+                            )
+                        )
+                        return Result.err(OuroborosError(preservation_error))
 
                     # Compute ontology delta
                     ontology_delta = OntologyDelta.compute(
