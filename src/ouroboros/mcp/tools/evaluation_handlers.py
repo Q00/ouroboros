@@ -408,6 +408,7 @@ class EvaluateHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
+    llm_adapter: Any | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
@@ -667,7 +668,7 @@ class EvaluateHandler:
                 "semantic_evaluation",
                 explicit_backend=self.llm_backend,
             )
-            llm_adapter = create_llm_adapter(
+            llm_adapter = self.llm_adapter or create_llm_adapter(
                 backend=backend,
                 allowed_tools=_evaluation_allowed_tools(backend),
                 max_turns=20,
@@ -791,6 +792,8 @@ class EvaluateHandler:
                 )
 
             eval_result = result.value
+            if eval_result.events:
+                await store.append_batch(eval_result.events)
 
             # Detect code changes when Stage 1 fails (presentation concern)
             code_changes: bool | None = None

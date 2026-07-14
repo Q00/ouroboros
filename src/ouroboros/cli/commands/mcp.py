@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from enum import Enum
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -447,6 +448,32 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+
+def _host_dispatch_context_from_env():
+    """Capture the ChatGPT IDE-owned workspace without launching a nested agent."""
+    if os.environ.get("OUROBOROS_HOST_PROFILE", "").strip().lower() != "chatgpt":
+        return None
+
+    from ouroboros.mcp.tools.host_bridge import (
+        HostAuthoritySource,
+        HostDispatchContext,
+    )
+
+    workspace_root = (
+        Path(os.environ.get("OUROBOROS_HOST_WORKSPACE_ROOT") or Path.cwd())
+        .expanduser()
+        .resolve(strict=True)
+    )
+    workspace_digest = hashlib.sha256(str(workspace_root).encode()).hexdigest()[:16]
+    return HostDispatchContext(
+        workspace_id=os.environ.get("OUROBOROS_HOST_WORKSPACE_ID") or f"chatgpt-{workspace_digest}",
+        workspace_root=workspace_root,
+        sandbox_mode=os.environ.get("OUROBOROS_HOST_SANDBOX_MODE") or "host-enforced",
+        approval_policy=os.environ.get("OUROBOROS_HOST_APPROVAL_POLICY") or "host-enforced",
+        authority_source=HostAuthoritySource.CHATGPT,
+    )
+
+
 register_doctor_command(app)
 
 
@@ -566,6 +593,7 @@ async def _run_mcp_server(
             runtime_backend=runtime_backend,
             llm_backend=llm_backend,
             mcp_bridge=mcp_bridge,
+            host_dispatch_context=_host_dispatch_context_from_env(),
         )
 
         tool_count = len(server.info.tools)

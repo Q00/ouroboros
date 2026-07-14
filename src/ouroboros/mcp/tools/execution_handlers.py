@@ -506,6 +506,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    host_dispatch_context: Any | None = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -678,6 +679,245 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             )
             if mode_result.is_err:
                 return mode_result
+
+        if self.host_dispatch_context is not None:
+            workspace_root = self.host_dispatch_context.workspace_root
+            if not resolved_cwd.is_relative_to(workspace_root):
+                return Result.err(
+                    MCPToolError(
+                        "Execution cwd must remain inside the active ChatGPT workspace",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
+
+            from dataclasses import replace
+            from datetime import UTC, datetime, timedelta
+            import hashlib
+            from uuid import NAMESPACE_URL, uuid5
+
+            from ouroboros.backends import SubagentDispatchMode
+            from ouroboros.events.base import BaseEvent
+            from ouroboros.mcp.tools.host_bridge import (
+                HostBridgeHandler,
+                HostTerminalStatus,
+            )
+            from ouroboros.mcp.tools.subagent import build_host_work_order
+            from ouroboros.orchestrator.session import SessionRepository
+
+            # Host authority is a composition-root decision. A stale user runtime
+            # setting must never make the ChatGPT profile fall through to a CLI.
+            dispatch_mode = SubagentDispatchMode.HOST_DRIVEN
+            if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN:
+                auto_evaluate = resolve_auto_evaluate(
+                    get_auto_evaluate_enabled(), arguments.get("auto_evaluate")
+                )
+                payload = build_execute_subagent(
+                    seed_content=seed_content,
+                    session_id=session_id,
+                    seed_path=arguments.get("seed_path"),
+                    cwd=str(resolved_cwd),
+                    max_iterations=max_iterations,
+                    skip_qa=arguments.get("skip_qa", False),
+                    auto_evaluate=auto_evaluate,
+                    model_tier=delegated_model_tier,
+                    max_parallel_workers=max_parallel_workers,
+                )
+                continuation = {
+                    **arguments,
+                    "session_id": session_id,
+                    "cwd": str(resolved_cwd),
+                    "model_tier": model_tier,
+                }
+                fingerprint = hashlib.sha256(f"{session_id}\0{seed_content}".encode()).hexdigest()
+                payload = replace(
+                    payload,
+                    context={
+                        **payload.context,
+                        "dispatch_mode": "host_driven",
+                        "continuation": {
+                            "tool_name": "ouroboros_execute_seed",
+                            "arguments": continuation,
+                        },
+                    },
+                )
+                order = build_host_work_order(
+                    payload,
+                    dispatch_id=str(uuid5(NAMESPACE_URL, f"ouroboros-host-execute:{fingerprint}")),
+                    session_id=str(session_id),
+                    lineage_id=str(session_id),
+                    workspace_id=self.host_dispatch_context.workspace_id,
+                    workspace_root=self.host_dispatch_context.workspace_root,
+                    sandbox_mode=self.host_dispatch_context.sandbox_mode,
+                    approval_policy=self.host_dispatch_context.approval_policy,
+                    acceptance_criteria=tuple(
+                        ac_texts(Seed.from_dict(seed_dict).acceptance_criteria)
+                    ),
+                    evidence_requirements=(
+                        "Changed paths inside the active workspace",
+                        "Commands and actual verification output",
+                    ),
+                    created_at=datetime.now(UTC),
+                )
+                store = self.event_store or EventStore()
+                owns_store = self.event_store is None
+                try:
+                    await store.initialize()
+                    bridge = HostBridgeHandler(store)
+                    session_repo = SessionRepository(store)
+                    if not is_resume:
+                        metadata = seed_dict.get("metadata")
+                        seed_id = (
+                            str(metadata.get("seed_id"))
+                            if isinstance(metadata, dict) and metadata.get("seed_id")
+                            else str(session_id)
+                        )
+                        created = await session_repo.create_session(
+                            execution_id=execution_id or str(session_id),
+                            seed_id=seed_id,
+                            session_id=str(session_id),
+                            seed_goal=str(seed_dict.get("goal") or ""),
+                            runtime_backend="chatgpt_host",
+                            llm_backend="chatgpt_host",
+                        )
+                        if created.is_err:
+                            return Result.err(
+                                MCPToolError(
+                                    created.error.message,
+                                    tool_name="ouroboros_execute_seed",
+                                )
+                            )
+                    order = await bridge.dispatch(order)
+                    await bridge.accept(order)
+                    for offset, event_type, data in (
+                        (2, "execution.started", {"dispatch_id": order.dispatch_id}),
+                        (
+                            3,
+                            "status.projected",
+                            {"dispatch_id": order.dispatch_id, "status": "host_work_pending"},
+                        ),
+                    ):
+                        await store.append_idempotent(
+                            BaseEvent(
+                                id=str(
+                                    uuid5(
+                                        NAMESPACE_URL,
+                                        f"ouroboros-host-phase:{order.dispatch_id}:{event_type}",
+                                    )
+                                ),
+                                type=event_type,
+                                timestamp=order.created_at + timedelta(microseconds=offset),
+                                aggregate_type="host_dispatch",
+                                aggregate_id=order.lineage_id,
+                                data=data,
+                            )
+                        )
+                    receipt = await bridge.receipt(order)
+                    if receipt is None:
+                        if not is_resume:
+                            paused = await session_repo.mark_paused(
+                                str(session_id),
+                                "Waiting for the active ChatGPT IDE host receipt",
+                                resume_hint="Submit the receipt and invoke the work-order continuation",
+                                pause_kind="host_work_pending",
+                            )
+                            if paused.is_err:
+                                return Result.err(
+                                    MCPToolError(
+                                        paused.error.message,
+                                        tool_name="ouroboros_execute_seed",
+                                    )
+                                )
+                        body = order.model_dump(mode="json")
+                        return Result.ok(
+                            MCPToolResult(
+                                content=(
+                                    MCPContentItem(
+                                        type=ContentType.TEXT,
+                                        text=(
+                                            "Execute this work order in the active ChatGPT IDE, "
+                                            "submit its receipt, then invoke the continuation."
+                                        ),
+                                    ),
+                                ),
+                                meta={
+                                    "status": "host_work_pending",
+                                    "dispatch_mode": "host_driven",
+                                    "session_id": session_id,
+                                    "lineage_id": session_id,
+                                    "work_order": body,
+                                },
+                                structured_content={
+                                    "status": "host_work_pending",
+                                    "work_order": body,
+                                },
+                            )
+                        )
+                    if receipt.terminal_status is not HostTerminalStatus.COMPLETED:
+                        return Result.err(
+                            MCPToolError(
+                                f"Host execution {receipt.terminal_status.value}: "
+                                f"{receipt.failure or {}}",
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
+                    await store.append_idempotent(
+                        BaseEvent(
+                            id=str(
+                                uuid5(
+                                    NAMESPACE_URL,
+                                    f"ouroboros-host-phase:{order.dispatch_id}:evidence.recorded",
+                                )
+                            ),
+                            type="evidence.recorded",
+                            timestamp=receipt.completed_at - timedelta(microseconds=1),
+                            aggregate_type="host_dispatch",
+                            aggregate_id=order.lineage_id,
+                            data={
+                                "dispatch_id": order.dispatch_id,
+                                "criterion_results": [
+                                    item.model_dump(mode="json")
+                                    for item in receipt.criterion_results
+                                ],
+                                "evidence": list(receipt.evidence),
+                            },
+                        )
+                    )
+                    completed = await session_repo.mark_completed(
+                        str(session_id),
+                        summary={
+                            "dispatch_id": order.dispatch_id,
+                            "receipt_sha256": receipt.receipt_sha256,
+                            "runtime_backend": "chatgpt_host",
+                        },
+                    )
+                    if completed.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                completed.error.message,
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(
+                                MCPContentItem(
+                                    type=ContentType.TEXT,
+                                    text="Seed execution completed by the active ChatGPT IDE host.",
+                                ),
+                            ),
+                            meta={
+                                "status": "completed",
+                                "success": True,
+                                "session_id": session_id,
+                                "lineage_id": session_id,
+                                "dispatch_id": order.dispatch_id,
+                                "receipt_sha256": receipt.receipt_sha256,
+                            },
+                        )
+                    )
+                finally:
+                    if owns_store:
+                        await store.close()
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             if is_resume:

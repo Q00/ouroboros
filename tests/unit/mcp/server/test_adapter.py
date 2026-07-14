@@ -1,6 +1,7 @@
 """Tests for MCP server adapter."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -1761,6 +1762,35 @@ def test_create_ouroboros_server_retains_runtime_context() -> None:
     assert server.runtime_context.runtime_backend == "codex"
     assert server.runtime_context.llm_backend == "claude_code"
     assert server.runtime_context.control is not None
+
+
+def test_host_composition_does_not_construct_external_runtime_or_llm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture authority wires adapters without launching CLI/model clients."""
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.mcp.tools.host_bridge import HostDispatchContext
+    from ouroboros.persistence.event_store import EventStore
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("external runtime/model factory was constructed")
+
+    monkeypatch.setattr("ouroboros.orchestrator.create_agent_runtime", forbidden)
+    monkeypatch.setattr("ouroboros.providers.create_llm_adapter", forbidden)
+    context = HostDispatchContext(
+        workspace_id="fixture-workspace",
+        workspace_root=tmp_path,
+        sandbox_mode="workspace-write",
+        approval_policy="on-request",
+        authority_source="fixture",
+    )
+
+    server = create_ouroboros_server(
+        runtime_backend="codex",
+        event_store=EventStore(f"sqlite+aiosqlite:///{tmp_path / 'server.db'}"),
+        host_dispatch_context=context,
+    )
+    assert server._tool_handlers["ouroboros_auto"] is not None
 
 
 @pytest.mark.asyncio

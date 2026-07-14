@@ -86,6 +86,7 @@ def _to_fastmcp_tool_result(tool_result: MCPToolResult) -> Any:
         content=[TextContent(type="text", text=tool_result.text_content)],
         isError=tool_result.is_error,
         _meta=tool_result.meta or None,
+        structuredContent=tool_result.structured_content,
     )
 
 
@@ -1149,6 +1150,7 @@ def create_ouroboros_server(
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
     mcp_bridge: Any | None = None,
+    host_dispatch_context: Any | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -1321,15 +1323,22 @@ def create_ouroboros_server(
     # project root, so _safe_cwd() falls back to $HOME.
     effective_cwd = _safe_cwd()
 
+    # Host adapters and every Full stage share the same canonical EventStore.
+    if event_store is None:
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore()
+
     # Materialize the default runtime once at server creation so backend wiring
     # is validated up front and composition-root tests can assert the selected
     # runtime backend without waiting for a tool invocation.
-    create_agent_runtime(
-        backend=execute_runtime_backend,
-        model=None,
-        cwd=effective_cwd,
-        llm_backend=evaluate_llm_backend,
-    )
+    if host_dispatch_context is None:
+        create_agent_runtime(
+            backend=execute_runtime_backend,
+            model=None,
+            cwd=effective_cwd,
+            llm_backend=evaluate_llm_backend,
+        )
 
     # Create shared LLM adapter for interview/seed paths.
     # Evaluation constructs its own adapter with higher max_turns — see
@@ -1343,7 +1352,15 @@ def create_ouroboros_server(
 
     llm_adapters: dict[str, Any] = {}
 
+    class _HostDispatchOnlyLLM:
+        async def complete(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError(
+                "This Full stage must route through its HOST_DRIVEN work-order terminal"
+            )
+
     def create_stage_llm_adapter(backend: str) -> Any:
+        if host_dispatch_context is not None:
+            return _HostDispatchOnlyLLM()
         return create_llm_adapter(
             backend=backend,
             max_turns=stage_max_turns,
@@ -1372,12 +1389,6 @@ def create_ouroboros_server(
     interview_envelope_sealed = backend_supports_tool_envelope(
         resolve_llm_backend(interview_llm_backend)
     )
-
-    # Create or use provided EventStore
-    if event_store is None:
-        from ouroboros.persistence.event_store import EventStore
-
-        event_store = EventStore()
 
     # Create state directory for interviews
     state_dir_path = (
@@ -1409,6 +1420,8 @@ def create_ouroboros_server(
 
     def fresh_llm_adapter(role: str = "reflect"):
         backend = role_llm_backend(role)
+        if host_dispatch_context is not None:
+            return _HostDispatchOnlyLLM()
         return create_llm_adapter(
             backend=backend,
             max_turns=stage_max_turns,
@@ -1481,13 +1494,18 @@ def create_ouroboros_server(
     ) -> Any:
         await _ensure_evolution_store_initialized()
         task_cwd = evolutionary_loop.get_project_dir()
-        runner_adapter = create_agent_runtime(
-            backend=execute_runtime_backend,
-            model=execution_model,
-            cwd=task_cwd or effective_cwd,
-            # Executor's internal LLM follows its own EXECUTE stage, not EVALUATE.
-            llm_backend=execute_runtime_backend,
-        )
+        if host_dispatch_context is not None:
+            raise RuntimeError(
+                "Evolution execute must route through its HOST_DRIVEN work-order terminal"
+            )
+        else:
+            runner_adapter = create_agent_runtime(
+                backend=execute_runtime_backend,
+                model=execution_model,
+                cwd=task_cwd or effective_cwd,
+                # Executor's internal LLM follows its own EXECUTE stage, not EVALUATE.
+                llm_backend=execute_runtime_backend,
+            )
         _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
         _evo_mcp_prefix = (
             mcp_bridge.tool_prefix
@@ -1707,14 +1725,19 @@ def create_ouroboros_server(
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL")
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
-        validation_adapter = create_agent_runtime(
-            backend=execute_runtime_backend,
-            model=validation_model,
-            cwd=project_dir,
-            permission_mode="bypassPermissions",
-            # Validation runs on the EXECUTE stage; align its internal LLM too.
-            llm_backend=execute_runtime_backend,
-        )
+        if host_dispatch_context is not None:
+            raise RuntimeError(
+                "Evolution validation must route through its HOST_DRIVEN work-order terminal"
+            )
+        else:
+            validation_adapter = create_agent_runtime(
+                backend=execute_runtime_backend,
+                model=validation_model,
+                cwd=project_dir,
+                permission_mode="bypassPermissions",
+                # Validation runs on the EXECUTE stage; align its internal LLM too.
+                llm_backend=execute_runtime_backend,
+            )
 
         for attempt in range(1, max_attempts + 1):
             collect_result = await _run_collect()
@@ -1802,6 +1825,7 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
         llm_backend=evaluate_llm_backend,
+        host_dispatch_context=host_dispatch_context,
     )
     evolve_step = EvolveStepHandler(
         evolutionary_loop=evolutionary_loop,
@@ -1859,6 +1883,14 @@ def create_ouroboros_server(
         opencode_mode=opencode_mode,
     )
     host_bridge = HostBridgeHandler(event_store)
+
+    evaluate_handler = EvaluateHandler(
+        event_store=event_store,
+        llm_adapter=evaluation_llm_adapter if host_dispatch_context is not None else None,
+        llm_backend=evaluate_llm_backend,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
     tool_handlers = [
         execute_seed,
@@ -1943,13 +1975,9 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         BrownfieldHandler(_store=brownfield_store),
-        EvaluateHandler(
-            event_store=event_store,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        evaluate_handler,
         StartEvaluateHandler(
+            evaluate_handler=evaluate_handler,
             event_store=event_store,
             job_manager=job_manager,
             llm_backend=evaluate_llm_backend,

@@ -81,9 +81,7 @@ def test_work_order_rejects_missing_identifier(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("schema_version", ["", "0.9", "2.0"])
-def test_work_order_rejects_unsupported_schema_version(
-    tmp_path: Path, schema_version: str
-) -> None:
+def test_work_order_rejects_unsupported_schema_version(tmp_path: Path, schema_version: str) -> None:
     data = _order_data(tmp_path)
     data["schema_version"] = schema_version
 
@@ -131,9 +129,7 @@ def test_receipt_rejects_missing_required_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("schema_version", ["", "0.9", "2.0"])
-def test_receipt_rejects_unsupported_schema_version(
-    tmp_path: Path, schema_version: str
-) -> None:
+def test_receipt_rejects_unsupported_schema_version(tmp_path: Path, schema_version: str) -> None:
     data = _receipt_data(tmp_path)
     data["schema_version"] = schema_version
 

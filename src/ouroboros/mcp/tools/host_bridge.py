@@ -6,10 +6,11 @@ agent process, or alternate workflow engine.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 import json
 from pathlib import Path
+import re
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
@@ -36,6 +37,30 @@ class HostTerminalStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class HostAuthoritySource(StrEnum):
+    """Authority that supplied the immutable host startup policy."""
+
+    CHATGPT = "chatgpt"
+    FIXTURE = "fixture"
+
+
+class HostDispatchContext(BaseModel):
+    """Read-only host authority captured once by the MCP composition root."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    workspace_id: str = Field(min_length=1)
+    workspace_root: Path
+    sandbox_mode: str = Field(min_length=1)
+    approval_policy: str = Field(min_length=1)
+    authority_source: HostAuthoritySource
+
+    @field_validator("workspace_root")
+    @classmethod
+    def canonical_workspace(cls, value: Path) -> Path:
+        return HostWorkOrder.canonical_workspace(value)
 
 
 class HostWorkOrder(BaseModel):
@@ -117,9 +142,7 @@ class HostCompletionReceipt(BaseModel):
 
     @field_validator("completed_at", "cancelled_at")
     @classmethod
-    def require_terminal_timestamp_timezone(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def require_terminal_timestamp_timezone(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("terminal timestamps must include a timezone offset")
         return value
@@ -129,9 +152,24 @@ class HostCompletionReceipt(BaseModel):
         """Resolve changed paths and reject paths outside the selected workspace."""
         canonical_paths: list[Path] = []
         for changed_path in self.changed_paths:
-            candidate = changed_path.expanduser()
+            raw = str(changed_path)
+            validate_changed_path_lexical(raw)
+            normalized = raw.replace("\\", "/")
+            candidate = Path(normalized).expanduser()
             if not candidate.is_absolute():
                 candidate = self.workspace_root / candidate
+            relative = candidate.relative_to(self.workspace_root)
+            cursor = self.workspace_root
+            for part in relative.parts:
+                if cursor.exists():
+                    aliases = {entry.name.casefold(): entry.name for entry in cursor.iterdir()}
+                    exact = aliases.get(part.casefold())
+                    if exact is not None and exact != part:
+                        raise ValueError("changed_paths must preserve canonical path case")
+                cursor = cursor / part
+                is_junction = getattr(cursor, "is_junction", None)
+                if cursor.is_symlink() or (callable(is_junction) and is_junction()):
+                    raise ValueError("changed_paths must not traverse links or junctions")
             candidate = candidate.resolve(strict=False)
             if not candidate.is_relative_to(self.workspace_root):
                 raise ValueError("changed_paths must remain inside workspace_root")
@@ -185,12 +223,24 @@ class HostReceiptConflict(HostBridgeError):
     """Raised when a terminal dispatch receives a different receipt."""
 
 
+def validate_changed_path_lexical(raw: str) -> None:
+    """Reject cross-platform drive, UNC, and traversal forms before Path parsing."""
+    normalized = raw.replace("\\", "/")
+    parts = tuple(part for part in normalized.split("/") if part)
+    if ".." in parts or raw.startswith(("\\\\", "//")) or re.match(r"^[A-Za-z]:[\\/]", raw):
+        raise ValueError("changed_paths must remain inside workspace_root")
+
+
 def _dispatch_event_id(dispatch_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"ouroboros-host-dispatch:{dispatch_id}"))
 
 
 def _terminal_event_id(dispatch_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"ouroboros-host-terminal:{dispatch_id}"))
+
+
+def _phase_event_id(dispatch_id: str, event_type: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"ouroboros-host-phase:{dispatch_id}:{event_type}"))
 
 
 def dispatch_event_from_order(order: HostWorkOrder) -> BaseEvent:
@@ -220,9 +270,7 @@ def terminal_event_from_receipt(receipt: HostCompletionReceipt) -> BaseEvent:
     )
 
 
-def validate_receipt_identity(
-    order: HostWorkOrder, receipt: HostCompletionReceipt
-) -> None:
+def validate_receipt_identity(order: HostWorkOrder, receipt: HostCompletionReceipt) -> None:
     """Reject any receipt that weakens or changes the original host boundary."""
     identity_fields = (
         "dispatch_id",
@@ -243,6 +291,17 @@ def validate_receipt_identity(
                 f"receipt {field_name} does not match persisted work order"
             )
 
+    if receipt.terminal_status is HostTerminalStatus.COMPLETED:
+        criteria = tuple(result.criterion for result in receipt.criterion_results)
+        if criteria != order.acceptance_criteria or not all(
+            result.passed and result.evidence_refs for result in receipt.criterion_results
+        ):
+            raise HostBridgeError(
+                "completed receipt must pass every work-order acceptance criteria with evidence"
+            )
+        if not receipt.evidence:
+            raise HostBridgeError("completed receipt must include host evidence")
+
 
 class HostBridgeHandler:
     """Persist and close typed host work in Ouroboros Full's EventStore."""
@@ -257,9 +316,32 @@ class HostBridgeHandler:
             return order
         stored = await self._event_store.require_event(event.id)
         stored_order = HostWorkOrder.model_validate(stored.data["order"])
-        if stored_order != order:
+        stored_identity = stored_order.model_dump(mode="json", exclude={"created_at"})
+        requested_identity = order.model_dump(mode="json", exclude={"created_at"})
+        if stored_identity != requested_identity:
             raise HostDispatchConflict(order.dispatch_id)
         return stored_order
+
+    async def accept(self, order: HostWorkOrder) -> None:
+        """Record host acceptance without introducing another workflow."""
+        await self._event_store.append_idempotent(
+            BaseEvent(
+                id=_phase_event_id(order.dispatch_id, "host.dispatch.accepted"),
+                type="host.dispatch.accepted",
+                timestamp=order.created_at + timedelta(microseconds=1),
+                aggregate_type="host_dispatch",
+                aggregate_id=order.lineage_id,
+                data={"dispatch_id": order.dispatch_id, "status": "accepted"},
+            )
+        )
+
+    async def receipt(self, order: HostWorkOrder) -> HostCompletionReceipt | None:
+        """Project an already persisted terminal receipt for resume."""
+        try:
+            stored = await self._event_store.require_event(_terminal_event_id(order.dispatch_id))
+        except PersistenceError:
+            return None
+        return HostCompletionReceipt.model_validate(stored.data["receipt"])
 
     async def _require_order(self, dispatch_id: str) -> HostWorkOrder:
         try:
@@ -273,13 +355,12 @@ class HostBridgeHandler:
         validate_receipt_identity(order, receipt)
         event = terminal_event_from_receipt(receipt)
         inserted = await self._event_store.append_idempotent(event)
-        if inserted:
-            return receipt
-        stored = await self._event_store.require_event(event.id)
-        stored_receipt = HostCompletionReceipt.model_validate(stored.data["receipt"])
-        if stored_receipt != receipt:
-            raise HostReceiptConflict(receipt.dispatch_id)
-        return stored_receipt
+        if not inserted:
+            stored = await self._event_store.require_event(event.id)
+            stored_receipt = HostCompletionReceipt.model_validate(stored.data["receipt"])
+            if stored_receipt != receipt:
+                raise HostReceiptConflict(receipt.dispatch_id)
+        return receipt
 
 
 class _HostReceiptToolHandler:
@@ -291,16 +372,12 @@ class _HostReceiptToolHandler:
     def __init__(self, bridge: HostBridgeHandler) -> None:
         self._bridge = bridge
 
-    async def handle(
-        self, arguments: dict[str, Any]
-    ) -> Result[MCPToolResult, MCPServerError]:
+    async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         try:
             receipt = HostCompletionReceipt.model_validate(arguments.get("receipt"))
             if receipt.terminal_status not in self.allowed_statuses:
                 allowed = " or ".join(status.value for status in self.allowed_statuses)
-                raise HostBridgeError(
-                    f"{self.tool_name} requires terminal_status={allowed}"
-                )
+                raise HostBridgeError(f"{self.tool_name} requires terminal_status={allowed}")
             stored = await self._bridge.complete(receipt)
         except (HostBridgeError, PersistenceError, ValueError) as exc:
             return Result.err(MCPToolError(str(exc), tool_name=self.tool_name))

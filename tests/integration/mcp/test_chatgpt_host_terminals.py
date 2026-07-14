@@ -11,6 +11,7 @@ from ouroboros.mcp.tools.definitions import get_ouroboros_tools
 from ouroboros.mcp.tools.host_bridge import (
     CancelHostDispatchHandler,
     CompleteHostDispatchHandler,
+    HostBridgeError,
     HostBridgeHandler,
     HostCompletionReceipt,
     HostWorkOrder,
@@ -50,6 +51,17 @@ def _receipt(
     dispatch_id: str = "dispatch-terminal",
 ) -> HostCompletionReceipt:
     terminal_fields: dict[str, object] = {}
+    criterion_results: tuple[dict[str, object], ...] = ()
+    evidence: tuple[dict[str, str], ...] = ()
+    if status == "completed":
+        criterion_results = (
+            {
+                "criterion": "host work closes",
+                "passed": True,
+                "evidence_refs": ("fixture:test",),
+            },
+        )
+        evidence = ({"kind": "test", "value": "fixture:test"},)
     if status == "failed":
         terminal_fields["failure"] = {"code": "HOST_FAILED", "message": "task failed"}
     if status == "cancelled":
@@ -63,8 +75,8 @@ def _receipt(
         sandbox_mode="workspace-write",
         approval_policy="on-request",
         terminal_status=status,
-        criterion_results=(),
-        evidence=(),
+        criterion_results=criterion_results,
+        evidence=evidence,
         changed_paths=(),
         completed_at=datetime(2026, 7, 14, 5, 1, tzinfo=UTC),
         receipt_sha256={"completed": "a", "failed": "b", "cancelled": "c"}[status] * 64,
@@ -92,9 +104,7 @@ async def test_full_event_store_persists_each_host_terminal(
     await handler.dispatch(_order(tmp_path, dispatch_id))
 
     receipt = await handler.complete(_receipt(tmp_path, status=status, dispatch_id=dispatch_id))
-    events, cursor = await event_store.get_events_after(
-        "host_dispatch", "lineage-terminal", 0
-    )
+    events, cursor = await event_store.get_events_after("host_dispatch", "lineage-terminal", 0)
 
     assert receipt.terminal_status.value == status
     assert [event.type for event in events] == ["host.dispatch.requested", event_type]
@@ -116,12 +126,14 @@ def test_host_completion_tools_are_registered_with_full_wording(
         next(handler for handler in tools if isinstance(handler, CancelHostDispatchHandler)),
         CancelHostDispatchHandler,
     )
-    assert "closing an Ouroboros Full dispatch" in definitions[
-        "ouroboros_complete_host_dispatch"
-    ].description
-    assert "closing an Ouroboros Full dispatch" in definitions[
-        "ouroboros_cancel_host_dispatch"
-    ].description
+    assert (
+        "closing an Ouroboros Full dispatch"
+        in definitions["ouroboros_complete_host_dispatch"].description
+    )
+    assert (
+        "closing an Ouroboros Full dispatch"
+        in definitions["ouroboros_cancel_host_dispatch"].description
+    )
 
 
 def test_host_completion_tools_have_explicit_capability_metadata() -> None:
@@ -150,3 +162,22 @@ async def test_complete_tool_rejects_cancellation_receipt(
 
     assert result.is_err
     assert "requires terminal_status=completed or failed" in str(result.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("criterion_results", [(), ({"criterion": "host work closes", "passed": False},)])
+async def test_completed_receipt_requires_every_order_criterion_to_pass(
+    event_store: EventStore,
+    tmp_path: Path,
+    criterion_results: tuple[object, ...],
+) -> None:
+    bridge = HostBridgeHandler(event_store)
+    order = _order(tmp_path)
+    await bridge.dispatch(order)
+    receipt_data = _receipt(tmp_path, status="completed").model_dump(mode="json")
+    receipt_data["criterion_results"] = criterion_results
+    receipt_data["evidence"] = ({"kind": "test", "value": "fixture:test"},)
+    receipt = HostCompletionReceipt.model_validate(receipt_data)
+
+    with pytest.raises(HostBridgeError, match="acceptance criteria"):
+        await bridge.complete(receipt)
