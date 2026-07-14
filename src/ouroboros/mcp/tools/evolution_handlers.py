@@ -164,6 +164,7 @@ class EvolveStepHandler(BridgeAwareMixin):
     event_store: EventStore | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    host_dispatch_context: Any | None = field(default=None, repr=False)
 
     @property
     def TIMEOUT_SECONDS(self) -> float:
@@ -285,6 +286,12 @@ class EvolveStepHandler(BridgeAwareMixin):
                     "lineage_id is required",
                     tool_name="ouroboros_evolve_step",
                 )
+            )
+
+        if self.host_dispatch_context is not None:
+            return await self._handle_host_dispatch(
+                arguments,
+                continuation_tool="ouroboros_evolve_step",
             )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
@@ -549,6 +556,99 @@ class EvolveStepHandler(BridgeAwareMixin):
                 meta=meta,
             )
         )
+
+    async def _handle_host_dispatch(
+        self,
+        arguments: dict[str, Any],
+        *,
+        continuation_tool: str,
+        host_dispatch_context: Any | None = None,
+        event_store: EventStore | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Dispatch or complete one Evolve generation in the active host."""
+        from ouroboros.mcp.tools.host_bridge import HostStageBridge
+
+        context = host_dispatch_context or self.host_dispatch_context
+        lineage_id = str(arguments["lineage_id"])
+        requested_project_dir = arguments.get("project_dir")
+        try:
+            project_dir = Path(requested_project_dir or context.workspace_root).expanduser().resolve(
+                strict=True
+            )
+        except OSError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name=continuation_tool))
+        if not project_dir.is_dir() or not project_dir.is_relative_to(context.workspace_root):
+            return Result.err(
+                MCPToolError(
+                    "Evolve project_dir must remain inside the active ChatGPT workspace",
+                    tool_name=continuation_tool,
+                )
+            )
+
+        store = event_store or self.event_store or EventStore()
+        await store.initialize()
+        bridge = HostStageBridge(store, context)
+        dispatch_id = arguments.get("_host_dispatch_id")
+        if dispatch_id:
+            try:
+                receipt = await bridge.require_completed_receipt(
+                    dispatch_id=str(dispatch_id),
+                    session_id=lineage_id,
+                )
+            except Exception as exc:
+                return Result.err(MCPToolError(str(exc), tool_name=continuation_tool))
+            body = receipt.model_dump(mode="json")
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=f"Host completed one Evolve generation for {lineage_id}.",
+                        ),
+                    ),
+                    meta={
+                        "status": "completed",
+                        "dispatch_mode": "host_driven",
+                        "dispatch_id": receipt.dispatch_id,
+                        "session_id": lineage_id,
+                        "lineage_id": lineage_id,
+                        "receipt": body,
+                    },
+                    structured_content={"status": "completed", "receipt": body},
+                )
+            )
+
+        payload = build_evolve_subagent(
+            lineage_id=lineage_id,
+            seed_content=arguments.get("seed_content"),
+            execute=arguments.get("execute", True),
+            parallel=arguments.get("parallel", True),
+            skip_qa=arguments.get("skip_qa", False),
+            project_dir=str(project_dir),
+        )
+        continuation_arguments = {
+            key: value for key, value in arguments.items() if key != "_host_dispatch_id"
+        }
+        continuation_arguments["lineage_id"] = lineage_id
+        continuation_arguments["project_dir"] = str(project_dir)
+        criterion = f"Complete exactly one Full evolutionary generation for lineage {lineage_id}"
+        pending = await bridge.dispatch_pending(
+            stage="evolve",
+            session_id=lineage_id,
+            lineage_id=lineage_id,
+            payload=payload.to_dict(),
+            continuation_tool=continuation_tool,
+            continuation_arguments=continuation_arguments,
+            acceptance_criteria=(criterion,),
+            evidence_requirements=(
+                "evolve_generation evidence with generation, action, and QA result",
+            ),
+            pending_text=(
+                "Complete this Evolve work order in the active ChatGPT IDE, "
+                "submit its receipt, then invoke the continuation."
+            ),
+        )
+        return Result.ok(pending)
 
 
 def _checkpoint_passed_generation_acs(
@@ -932,11 +1032,17 @@ class StartEvolveStepHandler:
     job_manager: JobManager | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    host_dispatch_context: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
         self._job_manager = self.job_manager or JobManager(self._event_store)
-        self._evolve_handler = self.evolve_handler or EvolveStepHandler()
+        self._evolve_handler = self.evolve_handler or EvolveStepHandler(
+            event_store=self._event_store,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            host_dispatch_context=self.host_dispatch_context,
+        )
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -945,6 +1051,7 @@ class StartEvolveStepHandler:
             description=(
                 "Start one evolve_step generation in the background and return a job ID "
                 "immediately for later status checks. "
+                "In ChatGPT host mode, return a host work order immediately without a job. "
                 "In plugin mode, evolution is delegated to an OpenCode Task pane and "
                 "job_id is None — results appear in the Task pane instead of being "
                 "pollable via job_status/job_result."
@@ -963,6 +1070,14 @@ class StartEvolveStepHandler:
                     "lineage_id is required",
                     tool_name="ouroboros_start_evolve_step",
                 )
+            )
+
+        if self.host_dispatch_context is not None:
+            return await self._evolve_handler._handle_host_dispatch(
+                arguments,
+                continuation_tool="ouroboros_start_evolve_step",
+                host_dispatch_context=self.host_dispatch_context,
+                event_store=self._event_store,
             )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
