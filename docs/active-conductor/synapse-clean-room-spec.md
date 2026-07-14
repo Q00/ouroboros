@@ -1,7 +1,9 @@
 # Ouroboros Synapse Clean-Room Specification
 
 > Generated: 2026-07-12
-> Status: Implementation input
+> Status: Normative input for a stacked delivery. The contract layer implements
+> only the core/event items identified below; runtime and host availability
+> requires the later stack layers.
 > Source boundary: this document and Ouroboros repository contracts only
 
 ## Purpose
@@ -35,7 +37,7 @@ The following are original Ouroboros terms:
 
 ## Scope
 
-Implemented:
+Implemented in the contract layer:
 
 - validated immutable `SessionSignal` contract;
 - exact execution/scope/attempt target identity;
@@ -46,6 +48,10 @@ Implemented:
 - deterministic lifecycle projection;
 - idempotency identity and legal state-transition checks;
 - capability fields that default to unsupported;
+
+Implemented by the later runtime and host stack layers, and therefore not
+claimed as available from the contract layer alone:
+
 - exact-attempt EventStore target resolution and durable queue admission;
 - public discovery/delivery MCP schemas, validation, and composition-root registration;
 - in-process exact-attempt hub and tested leader-driven plus persisted

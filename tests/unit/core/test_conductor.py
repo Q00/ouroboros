@@ -9,7 +9,7 @@ from ouroboros.core.conductor import (
     ConductorDirective,
     validate_conductor_successor_authorization,
 )
-from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed import AcceptanceCriterionSpec, OntologySchema, Seed, SeedMetadata
 from ouroboros.evolution.loop import _conductor_preservation_error
 
 
@@ -133,3 +133,45 @@ def test_evolution_preservation_gate_names_every_unauthorized_direction_change()
     assert "goal" in error
     assert "acceptance_criteria" in error
     assert "constraints" in error
+
+
+@pytest.mark.parametrize(
+    "contract_update",
+    [
+        {"verify_command": "pytest tests/changed -q"},
+        {"expected_artifacts": ("changed-report.json",)},
+        {"output_assertion": "changed output"},
+        {"semantic_ac_key": "ac_ffffffffffffffff"},
+    ],
+)
+def test_evolution_preservation_gate_compares_full_structured_ac_contract(
+    contract_update: dict[str, object],
+) -> None:
+    approved = Seed(
+        goal="Keep the approved goal",
+        constraints=("Keep the compatibility contract",),
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="The behavior remains verified",
+                verify_command="pytest tests/original -q",
+                expected_artifacts=("original-report.json",),
+                output_assertion="original output",
+            ),
+        ),
+        ontology_schema=OntologySchema(name="Test", description="Test"),
+        metadata=SeedMetadata(ambiguity_score=0.1),
+    )
+    approved_ac = approved.acceptance_criteria[0]
+    assert isinstance(approved_ac, AcceptanceCriterionSpec)
+    successor_ac = approved_ac.model_copy(update=contract_update)
+    successor = approved.model_copy(update={"acceptance_criteria": (successor_ac,)})
+    directive = ConductorDirective(
+        source_attention_event_id="attention_1",
+        instruction="Correct evidence only.",
+        deterministic=True,
+    )
+
+    error = _conductor_preservation_error(approved, successor, directive)
+
+    assert error is not None
+    assert "acceptance_criteria" in error
