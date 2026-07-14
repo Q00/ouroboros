@@ -62,6 +62,14 @@ printf 'ouroboros %s\\n' "$*" >> {calls!s}
 exit 0
 """,
     )
+
+    if not include_uv:
+        # Keep pipx/pip interpreter-selection tests independent of Python
+        # binaries provided by the host runner. Individual tests opt candidates
+        # in via fake_commands.
+        for name in ("python3.14", "python3.13", "python3.12", "python3", "python"):
+            _write_executable(bin_dir / name, "#!/bin/sh\nexit 1\n")
+
     if fake_commands:
         for name, content in fake_commands.items():
             _write_executable(bin_dir / name, content)
