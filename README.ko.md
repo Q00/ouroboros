@@ -112,6 +112,22 @@ OUROBOROS_RUNTIME=kiro
 </details>
 
 <details>
+<summary><strong>GitHub Copilot CLI 빠른 시작</strong></summary>
+
+```bash
+gh auth login                                # 최초 1회 GitHub 인증(실시간 모델 검색에 사용)
+pipx install 'ouroboros-ai[mcp]'             # 또는: uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime copilot            # 모델 실시간 검색 및 기본값 선택,
+                                             # ~/.copilot/mcp-config.json에 MCP 서버 등록
+```
+
+Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. 다른 설정에서 사용하는 하이픈 형식의 Anthropic 모델 ID(`claude-opus-4-6`)는 런타임에서 Copilot의 점 표기 형식(`claude-opus-4.6`)으로 자동 변환되므로, 백엔드를 전환해도 기존 설정을 그대로 사용할 수 있습니다.
+
+자세한 내용은 [GitHub Copilot CLI 런타임 가이드](./docs/runtime-guides/copilot.md)를 참고하세요.
+
+</details>
+
+<details>
 <summary><strong>다른 설치 방법</strong></summary>
 
 **Claude Code 플러그인만** (시스템 패키지 없이):
