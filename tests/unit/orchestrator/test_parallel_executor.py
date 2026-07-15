@@ -8725,7 +8725,8 @@ class TestParallelACExecutor:
         # Early-stop fired after retry 1 (initial FAB + retry-1 FAB), before the
         # counter cap — yet the alternate harness was still consulted exactly once.
         assert alt_backends == ["codex"]
-        assert alternate_rerun_kwargs[0]["ac_spec"] is ac_spec
+        assert alternate_rerun_kwargs[0]["ac_spec"] == seed.acceptance_criteria[0]
+        assert alternate_rerun_kwargs[0]["ac_spec"].semantic_ac_key is not None
         assert alternate_rerun_kwargs[0]["investment_spec"] is investment
         assert alternate_rerun_kwargs[0]["decomposition_trustworthy"] is False
         # The failed alternate is surfaced as the authoritative result.

@@ -19,6 +19,57 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     # Control-plane directive vocabulary and contract
     "ControlContract": ("ouroboros.core.control_contract", "ControlContract"),
     "Directive": ("ouroboros.core.directive", "Directive"),
+    # Active Conductor decision and successor contracts
+    "ConductorActorMode": ("ouroboros.core.conductor", "ConductorActorMode"),
+    "ConductorDecisionPhase": (
+        "ouroboros.core.conductor",
+        "ConductorDecisionPhase",
+    ),
+    "ConductorDirective": ("ouroboros.core.conductor", "ConductorDirective"),
+    "ConductorEffect": ("ouroboros.core.conductor", "ConductorEffect"),
+    "EngineOwnershipState": (
+        "ouroboros.core.conductor",
+        "EngineOwnershipState",
+    ),
+    # Execution preferences
+    "EfficiencyMode": ("ouroboros.core.execution_preferences", "EfficiencyMode"),
+    "FrugalityAssurance": (
+        "ouroboros.core.execution_preferences",
+        "FrugalityAssurance",
+    ),
+    "ResolvedExecutionPreferences": (
+        "ouroboros.core.execution_preferences",
+        "ResolvedExecutionPreferences",
+    ),
+    "resolve_execution_preferences": (
+        "ouroboros.core.execution_preferences",
+        "resolve_execution_preferences",
+    ),
+    # Ouroboros Synapse
+    "SessionSignal": ("ouroboros.core.session_signal", "SessionSignal"),
+    "SessionSignalCapabilities": (
+        "ouroboros.core.session_signal",
+        "SessionSignalCapabilities",
+    ),
+    "SessionSignalCapabilityError": (
+        "ouroboros.core.session_signal",
+        "SessionSignalCapabilityError",
+    ),
+    "SessionSignalContractEffect": (
+        "ouroboros.core.session_signal",
+        "SessionSignalContractEffect",
+    ),
+    "SessionSignalMode": ("ouroboros.core.session_signal", "SessionSignalMode"),
+    "SessionSignalSource": ("ouroboros.core.session_signal", "SessionSignalSource"),
+    "SessionSignalState": ("ouroboros.core.session_signal", "SessionSignalState"),
+    "resolve_session_signal_mode": (
+        "ouroboros.core.session_signal",
+        "resolve_session_signal_mode",
+    ),
+    "derive_session_signal_id": (
+        "ouroboros.core.session_signal",
+        "derive_session_signal_id",
+    ),
     # Errors
     "OuroborosError": ("ouroboros.core.errors", "OuroborosError"),
     "ProviderError": ("ouroboros.core.errors", "ProviderError"),
@@ -33,6 +84,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "OntologyField": ("ouroboros.core.seed", "OntologyField"),
     "EvaluationPrinciple": ("ouroboros.core.seed", "EvaluationPrinciple"),
     "ExitCondition": ("ouroboros.core.seed", "ExitCondition"),
+    "derive_semantic_ac_key": ("ouroboros.core.seed", "derive_semantic_ac_key"),
     "OntologyConcept": ("ouroboros.core.seed_contract", "OntologyConcept"),
     "OntologyLens": ("ouroboros.core.seed_contract", "OntologyLens"),
     "SeedContract": ("ouroboros.core.seed_contract", "SeedContract"),

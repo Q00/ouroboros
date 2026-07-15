@@ -25,7 +25,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v8.3.0
         with:
           version: "latest"
 
@@ -36,11 +36,27 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --dev
+          if [[ "${{ matrix.python-version }}" == "3.14" ]]; then
+            echo "Installing dependency groups: dev"
+            uv sync --python "${{ matrix.python-version }}" --dev
+          else
+            echo "Installing dependency groups: dev + litellm-test"
+            uv sync --python "${{ matrix.python-version }}" --dev --group litellm-test
+          fi
+
+      - name: Check dependency consistency
+        run: |
+          uv run --python "${{ matrix.python-version }}" --no-sync python --version
+          uv run --python "${{ matrix.python-version }}" --no-sync python - <<'PY'
+          import importlib.util
+
+          print("litellm installed:", importlib.util.find_spec("litellm") is not None)
+          PY
+          uv pip check
 
       - name: Run pytest with coverage
         run: |
-          uv run pytest tests/ -n 4 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
+          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7

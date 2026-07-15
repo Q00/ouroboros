@@ -155,6 +155,7 @@ class TestOpenCodeRuntimeProperties:
         assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.permission_mode_support is ParamSupport.TRANSLATED
+        assert runtime.capabilities.session_signals.after_turn_delivery is True
 
 
 class TestOpenCodeRuntimeBuildCommand:

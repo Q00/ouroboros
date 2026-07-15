@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ouroboros.orchestrator.adapter import ParamSupport
+from ouroboros.orchestrator.adapter import ParamSupport, RuntimeHandle
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
 
@@ -69,6 +69,7 @@ def test_goose_capabilities_report_prompt_only_tool_restrictions_as_translated()
 
     assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
+    assert runtime.capabilities.session_signals.after_turn_delivery is True
 
 
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "accept_edits", "acceptedits"])
@@ -117,6 +118,34 @@ def test_goose_runtime_makes_streamed_generated_handle_resumable() -> None:
     assert runtime._resolve_resume_session_id(messages[0].resume_handle) == (
         initial_handle.native_session_id
     )
+
+
+def test_goose_runtime_derives_stable_name_for_executor_seeded_handle() -> None:
+    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    seeded = RuntimeHandle(
+        backend="goose",
+        metadata={"session_attempt_id": "exec_1_ac_1_attempt_1"},
+    )
+
+    first_command = runtime._build_command("/tmp/out.txt", runtime_handle=seeded)
+    first_name = first_command[first_command.index("-n") + 1]
+    assert "--resume" not in first_command
+
+    messages = runtime._convert_event(
+        {"type": "message", "message": {"content": [{"type": "text", "text": "Done"}]}},
+        seeded,
+    )
+    resumed_handle = messages[0].resume_handle
+    assert resumed_handle is not None
+    assert resumed_handle.native_session_id == first_name
+
+    second_command = runtime._build_command(
+        "/tmp/out.txt",
+        resume_session_id=runtime._resolve_resume_session_id(resumed_handle),
+        runtime_handle=resumed_handle,
+    )
+    assert "--resume" in second_command
+    assert second_command[second_command.index("-n") + 1] == first_name
 
 
 @pytest.mark.asyncio

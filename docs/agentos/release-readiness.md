@@ -23,6 +23,12 @@ Snapshot used for this pass:
   available baseline is the local `main` snapshot above, where `origin/main`
   resolves to the same commit.
 
+Post-snapshot correction (2026-07-13): #813 is the only open canonical issue in
+the Symposium cluster. Issues #814-#819 are closed; #814, #815, #816, and #819
+were folded into #813, while #817 and #818 closed separately. References below
+that classified those children as open are superseded by this correction and
+the folded-history rows added in this update.
+
 ## Canonical Issue Review Method
 
 This pass reviewed the release-relevant canonical representatives rather than
@@ -34,7 +40,8 @@ duplicating #961 as implementation work. The relevant set is:
   #1170, #1234, #1254, #1256, #1263, #579, #637, #640, #673, #674, #678, #688,
   #692.
 - Linked current/future canonical issues: #518, #573, #575, #614, #615, #725,
-  #813, #814, #815, #816, #817, #818, #819, #831, #578, #1139, #1239.
+  #813, #831, #578, #1139, #1239.
+- Closed/folded deliberation history: #814, #815, #816, #817, #818, #819.
 
 For each issue, the tables below record current status, release impact, and
 release disposition. Closed or folded child issues are reviewed separately in
@@ -64,9 +71,9 @@ scan recorded for this snapshot.
 | Open Track C canonical representatives | #925, #939, #946, #960 | These are the open surviving AgentOS substrate surfaces: long-running runtime reliability, plugin permissions/audit, projection vocabulary, and HITL approval authority. |
 | `ooo auto` canonical authority | #772, #1157, #1170 | #772 is the older tactical epic, #1157 is the current `ooo auto` SSOT sibling to #961, and #1170 is the minimal canonical acceptance-test slice used as release evidence. |
 | `ooo auto` open child/follow-up issues | #1234, #1254, #1256, #1263, #579, #637, #640, #673, #674, #678, #688, #692 | These are the open child or follow-up items that can affect retry/resume truthfulness, mandatory MCP dispatch, provenance, packaged-skill integration, Product-or-Die policy, and product-completion claims. |
-| Linked open canonical/design issues | #518, #573, #575, #614, #615, #725, #813, #814, #815, #816, #817, #818, #819, #831, #578, #1139, #1239 | These are linked canonical or design issues that remain open but are not release-critical unless #961, #1157, or verification promotes a narrow failing slice. |
+| Linked open canonical/design issues | #518, #573, #575, #614, #615, #725, #813, #831, #578, #1139, #1239 | These are linked canonical or design issues that remain open but are not release-critical unless #961, #1157, or verification promotes a narrow failing slice. |
 
-Open issue count in this release-readiness inventory: 38, excluding PR gates
+Open issue count in this release-readiness inventory: 32, excluding PR gates
 and closed/folded issues. The direct live checks also showed #920 and #956 as
 closed even though they remain canonical historical representatives in #961, so
 they stay in the folded/evidence tables rather than the open enumeration above.
@@ -77,8 +84,8 @@ they stay in the folded/evidence tables rather than the open enumeration above.
 | #961 canonical Track C representatives | #830, #892, #920, #925, #939, #946, #956, #960 | Canonical AgentOS substrate surfaces from #961. Open representatives feed release slices; closed representatives provide verification context only. |
 | Open `ooo auto` authority and child/follow-up issues | #772, #1157, #1170, #1234, #1254, #1256, #1263, #579, #637, #640, #673, #674, #678, #688, #692 | Product and runtime-completion lane. Release triage prioritizes truthful resume/retry, mandatory MCP dispatch, grounding/provenance, and documented policy gates. |
 | Closed/folded `ooo auto` RFC authority | #809 | Strategic RFC context only; accepted work is represented by current `auto` code and open authority/child issues above. |
-| Other open linked canonical/design issues | #518, #573, #575, #614, #615, #725, #813, #814, #815, #816, #817, #818, #819, #831, #578, #1139, #1239 | Keep as current-next or design/future depending on release-path risk; do not promote broad design work unless #961 or a concrete regression requires it. |
-| Closed/folded Track C children from #961 | #921-#924, #930-#938, #940-#945, #947-#955, #957-#959, #963-#968 | Reviewed through #961 closure/fold table; each maps to an active home and creates no duplicate release work. |
+| Other open linked canonical/design issues | #518, #573, #575, #614, #615, #725, #813, #831, #578, #1139, #1239 | Keep as current-next or design/future depending on release-path risk; do not promote broad design work unless #961 or a concrete regression requires it. |
+| Closed/folded linked issues | #814-#819, #921-#924, #930-#938, #940-#945, #947-#955, #957-#959, #963-#968 | Reviewed through their canonical owners; each creates no duplicate release work. |
 
 ## Duplicate And Overlap Register
 
@@ -100,7 +107,7 @@ multiple issue numbers.
 | Plugin permission/audit contract vs plugin ecosystem management | #939 for release contract; #725 for ecosystem manager design | #934, #949 | Release readiness checks core plugin lifecycle, permission, hook, and audit invariants under #939. #725 remains a future UserLevel plugin-manager surface. |
 | HITL authority vs projection/plugin/pre-mutation safety | #960 | #942, #955, #958 | HITL WAIT/RESUME authority belongs to #960. Projection and plugin issues can expose or respect the state, but must not define new authority semantics. |
 | Runtime profile, guidance provenance, and effort policy | #573 for profile vocabulary; #614/#615 for future policy | #923 | #923 was folded into these design parents. Keep profile docs/tests separate from external-guidance and reasoning-budget policy work. |
-| Multi-agent deliberation and interview lateral-review backlog | #813-#819 as design backlog | #924, #817 | #924 folded into the debate backlog. #817 is the interview recovery/lateral-review member of that backlog, not a release blocker unless #961 or #1157 promotes it. |
+| Multi-agent deliberation and interview lateral-review RFC | #813 | #814-#819, #924 | #813 is the open RFC owner. The other issue numbers are closed/folded history and create no release implementation work. |
 | Backend/adapter expansion outside the AgentOS release core | Future integration owners | #1139, #1239, #692 | These are adjacent integration/product incidents, not duplicates of the AgentOS substrate gate. Keep them out of release-critical slices unless current docs or behavior depend on them. |
 
 Release triage rule: when a new failure appears in an overlap cluster, attach
@@ -142,7 +149,7 @@ edges. It separates three kinds of blockers:
 | #830/#978 -> verifier/evidence semantics | Evidence schema, retry routing, and TraceGuard-style acceptance semantics own verdict meaning. | #1234, #946 verdict display, #956 schema refs. | Code blocker if verifier tests fail | Projection and IR may reference evidence; they must not redefine acceptance policy. |
 | #960 -> HITL approval authority | WAIT/RESUME and approval authority must stay under the HITL contract. | #942, #955, #958, plugin/pre-mutation safety surfaces. | Code blocker if advertised HITL authority fails | Keep broader HITL persistence/resume as P1/P2 unless release docs over-promise it. |
 | #573/#614/#615 -> runtime policy vocabulary | Profile taxonomy, external guidance provenance, and reasoning-budget policy remain design gates. | #923 and future runtime policy work. | Policy/design blocker | Do not promote to release code work while locked docs/tests remain coherent. |
-| #813-#819 -> deliberation/lateral-review backlog | Symposium/debate/lateral-review work is not on the current AgentOS release path. | #924, #817. | Policy/design blocker | Keep as design backlog unless #961 or #1157 promotes a concrete advertised-path bug. |
+| #813 -> deliberation/lateral-review RFC | Symposium/debate/lateral-review work is not on the current AgentOS release path. | Closed history: #814-#819, #924. | Policy/design blocker | Keep #813 as the design owner until its RFC closes; folded issues create no release work. |
 | #1139/#1239/#692 -> adjacent integration/product incidents | Backend expansion, interview adapter enhancement, and Discord gateway incident work are outside the core release gate. | Related docs or future product slices only. | Scope dependency | Do not block AgentOS readiness unless current release docs or behavior depend on them. |
 
 ### Dependency rollup by release bucket
@@ -152,8 +159,8 @@ edges. It separates three kinds of blockers:
 | External gates | #961, #1279, #1280, #1258 | Only release-critical remaining blockers identified in this snapshot if verification passes. |
 | Independent current-next surfaces | #925, #939, #946, #960 | Can proceed independently; none should wait for `ooo auto` throughput or Product-or-Die policy decisions. |
 | `ooo auto` product chain | #1157, #1170, #1234, #1254, #579, #637, #640, #673, #674, #678, #688, #692 | Governed by #1157; #1258 blocks stronger throughput claims; #637 and #1170 become code blockers only on reproduced verification failure. |
-| Policy/design-wait items | #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #814, #815, #816, #817, #818, #819, #578, #1139, #1239 | Do not consume release implementation time unless owners promote a narrow slice or verification shows current behavior regressed. |
-| Evidence-only folded items | #830, #892, #920, #956, #809, plus the closed/folded Track C issues enumerated in the folded table below | Create no new dependency edges; they point at their active homes in the folded table below. |
+| Policy/design-wait items | #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #578, #1139, #1239 | Do not consume release implementation time unless owners promote a narrow slice or verification shows current behavior regressed. |
+| Evidence-only folded items | #814-#819, #830, #892, #920, #956, #809, plus the closed/folded linked issues enumerated below | Create no new dependency edges; they point at their active homes in the folded table below. |
 
 Release-blocking conclusion for this snapshot: no unresolved local code
 dependency is known after triage. The remaining release blockers are external
@@ -198,13 +205,8 @@ green and release notes avoid over-claiming unsupported behavior.
 | #614 | Out of release implementation scope as external-guidance provenance policy. | Non-blocking policy/design-wait unless owners make it a release claim. |
 | #615 | Out of release implementation scope as reasoning-budget policy design. | Non-blocking policy/design-wait until a verifiable release contract is accepted. |
 | #725 | Out of release implementation scope as UserLevel plugin-manager ecosystem work. | Non-blocking design/future while #939 covers the core plugin contract gate. |
-| #813 | Out of release implementation scope as multi-agent deliberation backlog. | Non-blocking design/future unless #961 or #1157 promotes a narrow slice. |
-| #814 | Out of release implementation scope as multi-agent deliberation backlog. | Non-blocking design/future unless #961 or #1157 promotes a narrow slice. |
-| #815 | Out of release implementation scope as multi-agent deliberation backlog. | Non-blocking design/future unless #961 or #1157 promotes a narrow slice. |
-| #816 | Out of release implementation scope as multi-agent deliberation backlog. | Non-blocking design/future unless #961 or #1157 promotes a narrow slice. |
-| #817 | Out of release implementation scope as interview stagnation/lateral-review enhancement. | Non-blocking design/future unless advertised interview milestone behavior depends on it. |
-| #818 | Out of release implementation scope as multi-agent deliberation backlog. | Non-blocking design/future unless #961 or #1157 promotes a narrow slice. |
-| #819 | Out of release implementation scope as multi-agent deliberation backlog. | Non-blocking design/future unless #961 or #1157 promotes a narrow slice. |
+| #813 | Out of release implementation scope as the open Symposium deliberation RFC. | Non-blocking design/future until its RFC closes. |
+| #814-#819 | Closed/folded deliberation and lateral-review history. | Evidence-only; create fresh issues for any accepted implementation slice. |
 | #831 | In scope as the concrete malformed-turn MCP interview risk under #925. | Non-blocking current-next while the affected path is verified or disclosed; blocking code gate if a supported path hangs or returns unrecoverable malformed state. |
 | #578 | Out of release implementation scope as unified watchdog-control design. | Non-blocking design/future while current directive/watchdog verification passes. |
 | #1139 | Out of release implementation scope as future backend support. | Non-blocking unless release docs claim that backend as supported. |
@@ -447,8 +449,8 @@ Canonical priority rollup:
 | P0 external gate | #961, #1279, #1280, #1258 |
 | P0 code gate | None identified in the local snapshot; promote any failed verification-pack item here. |
 | P1 current-next | #925, #939, #946, #960, #1157, #1170, #1234, #1254, #579, #637, #640, #673, #674, #678, #688, #692, #831 |
-| P2 design/future | #772, #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #814, #815, #816, #817, #818, #819, #578, #1139, #1239 |
-| Done/folded | #830, #892, #920, #956, #809, #921-#924, #930-#938, #940-#945, #947-#955, #957-#959, #963-#968 |
+| P2 design/future | #772, #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #578, #1139, #1239 |
+| Done/folded | #814-#819, #830, #892, #920, #956, #809, #921-#924, #930-#938, #940-#945, #947-#955, #957-#959, #963-#968 |
 
 ### Mutually Exclusive Issue Classification
 
@@ -462,12 +464,12 @@ an issue belong to multiple categories in this snapshot.
 | P0 external gate | #961, #1279, #1280, #1258 | 4 |
 | P0 code gate | None identified in the local snapshot | 0 |
 | P1 current-next | #925, #939, #946, #960, #1157, #1170, #1234, #1254, #579, #637, #640, #673, #674, #678, #688, #692, #831 | 17 |
-| P2 design/future | #772, #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #814, #815, #816, #817, #818, #819, #578, #1139, #1239 | 19 |
-| Done/folded | #830, #892, #920, #956, #809, #921, #922, #923, #924, #930, #931, #932, #933, #934, #935, #936, #937, #938, #940, #941, #942, #943, #944, #945, #947, #948, #949, #950, #951, #952, #953, #954, #955, #957, #958, #959, #963, #964, #965, #966, #967, #968 | 42 |
+| P2 design/future | #772, #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #578, #1139, #1239 | 13 |
+| Done/folded | #814, #815, #816, #817, #818, #819, #830, #892, #920, #956, #809, #921, #922, #923, #924, #930, #931, #932, #933, #934, #935, #936, #937, #938, #940, #941, #942, #943, #944, #945, #947, #948, #949, #950, #951, #952, #953, #954, #955, #957, #958, #959, #963, #964, #965, #966, #967, #968 | 48 |
 
-Classification invariant for this snapshot: the table assigns 82 total items
-with no duplicate assignments. The open issue inventory is 38 issues excluding
-PR gates and closed/folded issues; adding the 2 PR gates and 42 done/folded
+Classification invariant for this corrected snapshot: the table assigns 82 total items
+with no duplicate assignments. The open issue inventory is 32 issues excluding
+PR gates and closed/folded issues; adding the 2 PR gates and 48 done/folded
 items yields the 82-item release-readiness review set.
 
 ### Open Child / Canonical Classification Rationale
@@ -506,13 +508,7 @@ classification before tagging a release candidate.
 | #614 | P2 design/future | External guidance provenance is a policy/security design gate for future prompt guidance. | Promote only when owners make guidance provenance a release claim or current behavior depends on it. |
 | #615 | P2 design/future | Reasoning-budget policy is future runtime-cost governance, not a current code gate. | Promote only after policy acceptance defines a verifiable release contract. |
 | #725 | P2 design/future | UserLevel plugin manager expands ecosystem operations beyond the core #939 plugin contract. | Promote if #961 makes plugin-manager operations part of the release-supported surface. |
-| #813 | P2 design/future | Multi-agent deliberation backlog item outside the current AgentOS release path. | Promote only if #961 or #1157 selects a concrete deliberation slice. |
-| #814 | P2 design/future | Multi-agent deliberation backlog item outside the current AgentOS release path. | Promote only if #961 or #1157 selects a concrete deliberation slice. |
-| #815 | P2 design/future | Multi-agent deliberation backlog item outside the current AgentOS release path. | Promote only if #961 or #1157 selects a concrete deliberation slice. |
-| #816 | P2 design/future | Multi-agent deliberation backlog item outside the current AgentOS release path. | Promote only if #961 or #1157 selects a concrete deliberation slice. |
-| #817 | P2 design/future | Interview stagnation/lateral-review enhancement is useful UX/recovery work but not required for the current candidate. | Promote if an advertised interview milestone path depends on this enhancement. |
-| #818 | P2 design/future | Multi-agent deliberation backlog item outside the current AgentOS release path. | Promote only if #961 or #1157 selects a concrete deliberation slice. |
-| #819 | P2 design/future | Multi-agent deliberation backlog item outside the current AgentOS release path. | Promote only if #961 or #1157 selects a concrete deliberation slice. |
+| #813 | P2 design/future | Open Symposium deliberation RFC outside the current AgentOS release path. | Ratify `docs/rfc/symposium-deliberation.md`, close #813, and track accepted implementation slices in fresh issues. |
 | #831 | P1 current-next | Concrete malformed-turn MCP interview risk under #925; release-relevant for long-context MCP interview paths. | Promote to P0 code gate if the supported path hangs, returns malformed tool-use state, or cannot provide truthful recovery. |
 | #578 | P2 design/future | Unified watchdog controls are design context while current directive-mapping/runtime tests pass. | Promote if watchdog/directive verification regresses in a release-supported path. |
 | #1139 | P2 design/future | Future backend support is an optional integration surface, not a core AgentOS blocker. | Promote only if release docs claim this backend as supported. |
@@ -641,7 +637,7 @@ Current design-wait examples in this inventory:
 | #518, #575, #578 | Broader lifecycle, outbox, and watchdog-control design remains future work while current AgentProcess/watchdog verification passes. |
 | #573, #614, #615 | Runtime profile, external-guidance provenance, and reasoning-budget policy need accepted policy/design boundaries before release code slices. |
 | #725 | UserLevel plugin-manager work expands ecosystem management beyond the core #939 plugin contract gate. |
-| #813-#819 | Multi-agent deliberation and lateral-review backlog is not on the current AgentOS release path unless #961 or #1157 promotes a concrete bug. |
+| #813 | The open Symposium deliberation RFC is not on the current AgentOS release path. Closed issues #814-#819 are evidence-only history. |
 | #1139, #1239 | Future backend and interview-adapter enhancements are optional integration/product surfaces, not current release blockers. |
 
 ## Release-Critical Classification
@@ -724,13 +720,13 @@ reproduces the risk described in the rationale.
 | #614 | Non-critical | External guidance provenance is a future policy/security design gate. |
 | #615 | Non-critical | Reasoning-budget policy is future runtime policy work. |
 | #725 | Non-critical | UserLevel plugin manager is ecosystem roadmap work, separate from core plugin release contracts. |
-| #813 | Non-critical | Multi-agent deliberation backlog; not on the current AgentOS release path. |
-| #814 | Non-critical | Multi-agent deliberation backlog; not on the current AgentOS release path. |
-| #815 | Non-critical | Multi-agent deliberation backlog; not on the current AgentOS release path. |
-| #816 | Non-critical | Multi-agent deliberation backlog; not on the current AgentOS release path. |
-| #817 | Non-critical | Interview stagnation/lateral-review enhancement; not required unless advertised milestone behavior depends on it. |
-| #818 | Non-critical | Multi-agent deliberation backlog; not on the current AgentOS release path. |
-| #819 | Non-critical | Multi-agent deliberation backlog; not on the current AgentOS release path. |
+| #813 | Non-critical | Open Symposium deliberation RFC; not on the current AgentOS release path. |
+| #814 | Done/folded | Verdict-envelope design history folded into #813. |
+| #815 | Done/folded | Membership-policy design history folded into #813. |
+| #816 | Done/folded | Evaluate-migration design question folded into #813. |
+| #817 | Done/closed | Interview milestone lateral contract recorded separately. |
+| #818 | Done/closed | Inline-progress follow-up closed without release work. |
+| #819 | Done/folded | Transcript-policy design history folded into #813. |
 | #831 | Non-critical, conditional P0 if advertised path hangs | Malformed-turn MCP interview risk should be retested/disclosed, but is not a known current release blocker. |
 | #578 | Non-critical | Unified watchdog controls remain design context while current directive-mapping tests pass. |
 | #1139 | Non-critical | Future backend support, not a core AgentOS release blocker. |
@@ -738,7 +734,7 @@ reproduces the risk described in the rationale.
 | #921 | Non-critical | Closed/folded into active `ooo auto` authorities. |
 | #922 | Non-critical | Closed/folded into lifecycle/control parents. |
 | #923 | Non-critical | Closed/folded into runtime policy/design parents. |
-| #924 | Non-critical | Closed/folded into the multi-agent deliberation backlog. |
+| #924 | Non-critical | Closed/folded into the canonical #813 Symposium deliberation RFC. |
 | #930 | Non-critical | Closed/folded into #956 Workflow IR. |
 | #931 | Non-critical | Closed/folded into shipped #830 evidence substrate. |
 | #932 | Non-critical | Closed/folded into #946 projection readiness. |
@@ -789,8 +785,8 @@ candidate gate.
 | Conditional P0 code gate / P1 current-next | #946 | Projection/read-model work supports observability and recovery evidence. | Non-blocking while current projection docs/tests pass. Promote to P0 code gate only if release verification cannot reconstruct required Run/Stage/Step/Artifact/Verdict evidence. |
 | Conditional P0 code gate / P1 current-next | #960 | HITL approval authority is safety-relevant, but broader persistence/resume work is not fully advertised as release-complete. | Non-blocking with accurate docs. Promote to P0 code gate if release-supported approval, WAIT, or RESUME authority fails or docs over-claim unsupported behavior. |
 | Conditional P0 code gate / P1 current-next | #1157, #1170, #1234, #1254, #579, #637, #640, #673, #674, #678, #688, #692 | These are current `ooo auto` product, evidence, recovery, dispatch, provenance, and UX slices. | Non-blocking when documented gaps remain truthful and targeted verification passes. Promote the narrow failing child to P0 if canonical acceptance, mandatory MCP dispatch, EventStore provenance, resume/retry truthfulness, or packaged-skill controls regress. |
-| P2 design/future | #772, #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #814, #815, #816, #817, #818, #819, #578, #1139, #1239 | These items either require product/architecture approval or expand future substrate, ecosystem, backend, policy, or deliberation capabilities beyond the current #961 candidate. | Not release-blocking unless #961 or an owner promotes a narrow release slice, or verification proves the current advertised behavior depends on the unresolved design. |
-| Done/folded evidence | #830, #892, #920, #956, #809, #921-#924, #930-#938, #940-#945, #947-#955, #957-#959, #963-#968 | These issues are closed, folded, or represented by active canonical owners and current tests/docs. | No direct release block. Use them as evidence/context only; reopen release work through the active owner or a reproduced candidate failure. |
+| P2 design/future | #772, #1256, #1263, #518, #573, #575, #614, #615, #725, #813, #578, #1139, #1239 | These items either require product/architecture approval or expand future substrate, ecosystem, backend, policy, or deliberation capabilities beyond the current #961 candidate. | Not release-blocking unless #961 or an owner promotes a narrow release slice, or verification proves the current advertised behavior depends on the unresolved design. |
+| Done/folded evidence | #814-#819, #830, #892, #920, #956, #809, #921-#924, #930-#938, #940-#945, #947-#955, #957-#959, #963-#968 | These issues are closed, folded, or represented by active canonical owners and current tests/docs. | No direct release block. Use them as evidence/context only; reopen release work through the active owner or a reproduced candidate failure. |
 
 ## Triage Summary: Owners And Next Actions
 
@@ -838,13 +834,13 @@ not create duplicate work.
 | #614 | Policy/security owner action: keep as future external guidance provenance design. |
 | #615 | Runtime policy owner action: keep as future reasoning-budget policy design. |
 | #725 | Plugin ecosystem owner action: keep as UserLevel plugin-manager roadmap work, separate from core plugin contract readiness. |
-| #813 | Design owner action: keep in the multi-agent deliberation backlog unless #961 or #1157 promotes it. |
-| #814 | Design owner action: keep in the multi-agent deliberation backlog unless #961 or #1157 promotes it. |
-| #815 | Design owner action: keep in the multi-agent deliberation backlog unless #961 or #1157 promotes it. |
-| #816 | Design owner action: keep in the multi-agent deliberation backlog unless #961 or #1157 promotes it. |
-| #817 | Interview UX/recovery owner action: keep as future stagnation/lateral-review work unless the advertised milestone path depends on it. |
-| #818 | Design owner action: keep in the multi-agent deliberation backlog unless #961 or #1157 promotes it. |
-| #819 | Design owner action: keep in the multi-agent deliberation backlog unless #961 or #1157 promotes it. |
+| #813 | Design owner action: ratify `docs/rfc/symposium-deliberation.md`, close #813, and open fresh issues for accepted implementation slices. |
+| #814 | No action; closed/folded verdict-envelope design history under #813. |
+| #815 | No action; closed/folded membership-policy design history under #813. |
+| #816 | No action; closed/folded evaluate-migration question under #813. |
+| #817 | No action; closed with the interview milestone lateral contract recorded in `docs/rfc/`. |
+| #818 | No action; closed without a release-critical implementation slice. |
+| #819 | No action; closed/folded transcript-policy design history under #813. |
 | #831 | Runtime UX owner action: retest or disclose the long-context MCP interview malformed-turn risk if that path remains in release scope. |
 | #578 | Runtime policy owner action: leave unified watchdog controls as design context while current directive mapping tests pass. |
 | #1139 | Integration owner action: keep as future backend support, not a core AgentOS release blocker. |
@@ -852,7 +848,7 @@ not create duplicate work.
 | #921 | No action; folded into #772 and #809. |
 | #922 | No action; folded into #518 and #575. |
 | #923 | No action; folded into #573, #614, and #615. |
-| #924 | No action; folded into #813-#819. |
+| #924 | No action; folded into the canonical #813 deliberation RFC. |
 | #930 | No action; folded into #956. |
 | #931 | No action; folded into shipped #830 substrate. |
 | #932 | No action; folded into #946. |
@@ -948,19 +944,13 @@ not create duplicate work.
 | #614 | Open external guidance contract design gate. | P2 design/future | Security/policy concern for future prompt guidance provenance; no release block for current local candidate. | Keep as policy/design. No local release code slice selected. |
 | #615 | Open reasoning budget / cognitive effort policy design gate. | P2 design/future | Runtime-cost policy concern for future agents; no release block for current candidate. | Keep as future runtime policy. No local release code slice selected. |
 | #725 | Open UserLevel plugin manager RFC/design parent. | P2 design/future | Plugin ecosystem readiness concern, separate from core plugin contract tests required for this release. | Related to plugin ecosystem operations, not core release readiness for this pass. |
-| #813 | Open/linked Symposium and debate design item. | P2 design/future | Multi-agent deliberation enhancement; no AgentOS release block unless #961 or #1157 promotes it to a concrete slice. | Keep in the design backlog. |
-| #814 | Open/linked Symposium and debate design item. | P2 design/future | Multi-agent deliberation enhancement; no AgentOS release block unless #961 or #1157 promotes it to a concrete slice. | Keep in the design backlog. |
-| #815 | Open/linked Symposium and debate design item. | P2 design/future | Multi-agent deliberation enhancement; no AgentOS release block unless #961 or #1157 promotes it to a concrete slice. | Keep in the design backlog. |
-| #816 | Open/linked Symposium and debate design item. | P2 design/future | Multi-agent deliberation enhancement; no AgentOS release block unless #961 or #1157 promotes it to a concrete slice. | Keep in the design backlog. |
-| #817 | Open/linked interview stagnation and lateral review design item. | P2 design/future | UX/recovery enhancement with existing advisory tests; no release block unless the affected interview milestone path is advertised as complete. | Keep in the design backlog. |
-| #818 | Open/linked Symposium and debate design item. | P2 design/future | Multi-agent deliberation enhancement; no AgentOS release block unless #961 or #1157 promotes it to a concrete slice. | Keep in the design backlog. |
-| #819 | Open/linked Symposium and debate design item. | P2 design/future | Multi-agent deliberation enhancement; no AgentOS release block unless #961 or #1157 promotes it to a concrete slice. | Keep in the design backlog. |
+| #813 | Open Symposium deliberation RFC. | P2 design/future | RFC closeout has no AgentOS release impact. | Ratify `docs/rfc/symposium-deliberation.md`, close #813, and use fresh issues for accepted implementation slices. |
 | #831 | Open MCP/interview malformed-turn UX bug referenced by #925. | P1 current-next | Runtime reliability and UX risk for long-context MCP interview paths; disclose or retest if that path is in release scope. | Document as the runtime reliability risk to revisit after release if the affected long-context MCP path remains in scope. |
 | #578 | Open RuntimeControls watchdog contract issue. | P2 design/future | Long-running stability context; current directive-mapping tests cover the release evidence slice. | Keep as design/future unless current watchdog/directive verification regresses. |
 | #1139 | Open future backend support item in the local inventory. | P2 design/future | Backend expansion only; no core AgentOS release block. | Integration enhancement, not a core AgentOS release blocker. |
 | #1239 | Open future interview adapter item in the local inventory. | P2 design/future | Interview adapter enhancement only; no release block for current candidate. | Product enhancement, not a release blocker. |
 
-### Closed/Folded Track C Issues From #961
+### Closed/Folded Linked Issues From #961
 
 These issues were reviewed through #961's closure table and should not create
 new release work. Their active home is the canonical representative listed in
@@ -968,10 +958,16 @@ new release work. Their active home is the canonical representative listed in
 
 | Issue | Current status | Priority | Release impact | Active home / disposition |
 | --- | --- | --- | --- | --- |
+| #814 | Closed/folded | Done/folded | No direct release impact; output-envelope design is preserved in `docs/rfc/verdict-envelope-v1.md`. | #813 Symposium deliberation RFC. |
+| #815 | Closed/folded | Done/folded | No direct release impact; membership policy is resolved by the #813 RFC. | #813 Symposium deliberation RFC. |
+| #816 | Closed/folded | Done/folded | No direct release impact; evaluate migration remains rejected without a separate evidence-backed issue. | #813 Symposium deliberation RFC. |
+| #817 | Closed | Done/folded | No direct release impact; the bounded interview milestone contract is recorded in `docs/rfc/interview-milestone-lateral-contract.md`. | Historical contract evidence. |
+| #818 | Closed | Done/folded | No direct release impact; no current release path depends on inline progress streaming. | Historical issue evidence. |
+| #819 | Closed/folded | Done/folded | No direct release impact; transcript persistence remains off by default in V1. | #813 Symposium deliberation RFC. |
 | #921 | Closed/folded | Done/folded | No direct release impact; covered by active `ooo auto` authorities. | #772 + #809 (`ooo auto` self-healing restatement). |
 | #922 | Closed/folded | Done/folded | No direct release impact; covered by lifecycle/control parents. | #518 + #575 (control/lifecycle restatement). |
 | #923 | Closed/folded | Done/folded | No direct release impact; covered by runtime policy/design parents. | #573 + #614 + #615 (runtime policy/replay input restatement). |
-| #924 | Closed/folded | Done/folded | No direct release impact; covered by the multi-agent deliberation design backlog. | #813-#819 (multi-agent deliberation restatement). |
+| #924 | Closed/folded | Done/folded | No direct release impact; covered by the canonical multi-agent deliberation RFC. | #813 (multi-agent deliberation restatement). |
 | #930 | Closed/folded | Done/folded | No direct release impact; Workflow IR evidence is under #956. | #956 (Workflow IR duplicate). |
 | #931 | Closed/folded | Done/folded | No direct release impact; typed evidence and retry routing are represented by shipped #830 substrate. | #830 typed evidence and retry routing already shipped. |
 | #932 | Closed/folded | Done/folded | No direct release impact; projection readiness is assessed through #946. | #946 RunSnapshot/safe-resume read model. |

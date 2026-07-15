@@ -129,8 +129,8 @@ class InvestmentAssessment:
 def assess_investment(spec: InvestmentSpec | None) -> InvestmentAssessment:
     """Normalize optional AC metadata into a fail-safe policy assessment.
 
-    Only complete low/low assessments from declared or measured, high-confidence
-    inputs may authorize a one-notch reduction. Inferred or absent inputs are
+    Only complete low/low assessments from measured, high-confidence inputs may
+    authorize a one-notch reduction. Declared, inferred, or absent inputs are
     observe-only/raise-only. Any high axis requires at least high effort.
     """
     if spec is None:
@@ -163,7 +163,7 @@ def assess_investment(spec: InvestmentSpec | None) -> InvestmentAssessment:
         not missing_signals
         and difficulty == "low"
         and stakes == "low"
-        and spec.provenance in {"declared", "measured"}
+        and spec.provenance == "measured"
         and spec.confidence == "high"
     )
 
@@ -181,7 +181,7 @@ def assess_investment(spec: InvestmentSpec | None) -> InvestmentAssessment:
             f"low difficulty and stakes with {spec.provenance} high-confidence evidence; "
             "one-notch reduction authorized"
         )
-    elif spec.provenance in {"inferred", "absent"}:
+    elif spec.provenance != "measured":
         rationale = (
             f"{spec.provenance} provenance cannot authorize cheapening; base effort preserved"
         )

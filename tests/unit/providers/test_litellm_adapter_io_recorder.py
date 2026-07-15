@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytest.importorskip("litellm", reason="LiteLLM adapter I/O recorder tests require litellm")
+
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io import content_hash

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -20,6 +21,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.config import get_goose_cli_path
+from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -116,6 +118,11 @@ class GooseCliRuntime(CodexCliRuntime):
             # per-invocation effort flag (verified via --help). Declared IGNORED
             # explicitly (also the default) to document the verified decision.
             reasoning_effort_support=ParamSupport.IGNORED,
+            session_signals=SessionSignalCapabilities(
+                inform_delivery=True,
+                background_reply=True,
+                after_turn_delivery=True,
+            ),
         )
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
@@ -183,6 +190,7 @@ class GooseCliRuntime(CodexCliRuntime):
         session_name = (
             resume_session_id
             or (runtime_handle.native_session_id if runtime_handle is not None else None)
+            or self._derive_session_name(runtime_handle)
             or f"ouroboros-{uuid4().hex[:12]}"
         )
         command = [
@@ -205,6 +213,24 @@ class GooseCliRuntime(CodexCliRuntime):
             command.extend(["--model", normalized_model])
 
         return command
+
+    def _derive_session_name(self, runtime_handle: RuntimeHandle | None) -> str | None:
+        """Derive a stable Goose name for an AC-scoped pre-session handle.
+
+        The executor seeds runtime handles with exact logical-attempt metadata
+        before Goose has emitted a native session identifier.  Goose itself does
+        not echo the ``-n`` name in current stream-json output, so both command
+        construction and event normalization must be able to recover the same
+        name independently.
+        """
+        if runtime_handle is None:
+            return None
+        for key in ("session_attempt_id", "session_scope_id", "turn_id"):
+            value = runtime_handle.metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                material = f"{self._cwd}\0{key}\0{value.strip()}".encode()
+                return f"ouroboros-{hashlib.sha256(material).hexdigest()[:12]}"
+        return None
 
     def _build_runtime_handle(
         self,
@@ -365,6 +391,8 @@ class GooseCliRuntime(CodexCliRuntime):
         """Convert Goose stream-json events into normalized messages."""
         event_type = self._extract_event_type(event)
         session_id = self._extract_event_session_id(event)
+        if session_id is None and current_handle is not None:
+            session_id = self._derive_session_name(current_handle)
         event_handle = (
             self._build_runtime_handle(session_id, current_handle) if session_id else current_handle
         )

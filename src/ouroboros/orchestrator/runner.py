@@ -40,7 +40,12 @@ from rich.text import Text
 
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_llm_model_for_role
+from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import OuroborosError
+from ouroboros.core.execution_preferences import (
+    execution_preferences_from_contract,
+    resolve_execution_preferences,
+)
 from ouroboros.core.seed import ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
@@ -138,6 +143,7 @@ if TYPE_CHECKING:
     from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
     from ouroboros.orchestrator.model_routing import ModelRouter
+    from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
@@ -338,6 +344,7 @@ def build_system_prompt(
     strategy_fragment = strategy.get_system_prompt_fragment()
     recovery_protocol = get_run_recovery_protocol_prompt()
     seed_contract = render_seed_contract_for_execution(SeedContract.from_seed(seed))
+    conductor_directive = _render_conductor_directive(seed)
 
     prompt = f"""{strategy_fragment}
 
@@ -347,10 +354,44 @@ def build_system_prompt(
 
 {recovery_protocol}"""
 
+    if conductor_directive:
+        prompt = f"{prompt}\n\n{conductor_directive}"
+
     context_pack_fragment = _context_pack_fragment(seed, repo_root)
     if context_pack_fragment:
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
+
+
+def _render_conductor_directive(seed: Seed) -> str:
+    """Render audited successor-only context without rewriting the Seed contract."""
+    raw_directive = (seed.model_extra or {}).get("conductor_directive")
+    if raw_directive is None:
+        return ""
+    if not isinstance(raw_directive, dict):
+        raise ValueError("Seed conductor_directive must be a structured object")
+    directive = ConductorDirective.from_mapping(raw_directive)
+    reasons = (
+        "\n".join(f"- {reason}" for reason in directive.rejected_reasons)
+        if directive.rejected_reasons
+        else "None recorded."
+    )
+    return f"""## Active Conductor Successor Directive
+This is bounded additive context for a successor execution. The Seed above remains
+the source of truth. Do not weaken or silently replace its approved direction.
+
+Instruction: {directive.instruction}
+Rejected evidence reasons:
+{reasons}
+
+Preservation contract:
+- goal: {str(directive.preserve_goal).lower()}
+- acceptance criteria: {str(directive.preserve_acceptance_criteria).lower()}
+- constraints: {str(directive.preserve_constraints).lower()}
+- non-goals: {str(directive.preserve_non_goals).lower()}
+
+Re-check the affected implementation and verification evidence, then report the
+specific correction made for this directive."""
 
 
 def _resolve_context_pack_root(
@@ -563,6 +604,9 @@ class OrchestratorRunner:
         max_parallel_workers: int = 3,
         fat_harness_mode: bool = False,
         base_model_tier: str | None = None,
+        efficiency_mode: str | None = None,
+        frugality_assurance: str | None = None,
+        session_signal_hub: SessionSignalHub | None = None,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -598,6 +642,13 @@ class OrchestratorRunner:
                 ``execute_seed`` handler from its ``model_tier`` tool arg
                 (small/medium/large → frugal/standard/frontier); the CLI passes
                 nothing so routing derives its own base tier.
+            efficiency_mode: ``adaptive`` allows decomposed-child tier lowering;
+                ``quality_first`` keeps children at the parent starting tier.
+            frugality_assurance: ``off``, ``observe``, or explicit ``strict``.
+                Strict is the only preference that can authorize an otherwise
+                eligible shadow baseline.
+            session_signal_hub: Optional shared Synapse registry used to deliver
+                bounded signals to exact active AC attempts.
         """
         self._adapter = adapter
         self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
@@ -618,6 +669,15 @@ class OrchestratorRunner:
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
+        self._session_signal_hub = session_signal_hub
+        self._execution_preferences_override_explicit = (
+            efficiency_mode is not None or frugality_assurance is not None
+        )
+        self._execution_preferences = resolve_execution_preferences(
+            efficiency_mode,
+            frugality_assurance,
+        )
+        self._requested_model_tier = base_model_tier
         # Effort-first investment dial (RFC #1405): base level for the runner's own
         # direct execution paths (single-AC / resume), which call execute_task
         # without going through ParallelACExecutor. Resolved once; None ⇒ dormant.
@@ -684,6 +744,7 @@ class OrchestratorRunner:
                 pinned_model=_model_pin,
                 base_tier_override=base_model_tier,
             )
+        self._apply_efficiency_mode_to_router()
         self._execution_contract: dict[str, Any] | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
@@ -694,8 +755,16 @@ class OrchestratorRunner:
         # dispatch. A future fully-attested experiment may incur the extra cost.
         from ouroboros.orchestrator.shadow_replay import shadow_replay_enabled_from_env
 
-        self._shadow_replay_enabled = shadow_replay_enabled_from_env()
-        if self._shadow_replay_enabled:
+        self._shadow_replay_requested = shadow_replay_enabled_from_env()
+        self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        if self._shadow_replay_requested and not self._shadow_replay_enabled:
+            log.warning(
+                "orchestrator.runner.shadow_replay_not_authorized",
+                frugality_assurance=self._execution_preferences.frugality_assurance.value,
+                explicit=self._execution_preferences.frugality_assurance_explicit,
+                note="Shadow replay requires explicitly requested strict assurance.",
+            )
+        elif self._shadow_replay_enabled:
             log.warning(
                 "orchestrator.runner.shadow_replay_enabled",
                 note=(
@@ -715,6 +784,22 @@ class OrchestratorRunner:
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
+
+    def _apply_efficiency_mode_to_router(self) -> None:
+        """Apply the public efficiency preference to the resolved tier router."""
+        if self._model_router is None or self._execution_preferences.child_model_lowering_enabled:
+            return
+        self._model_router = replace(
+            self._model_router,
+            child_tier=self._model_router.base_tier,
+        )
+
+    def _resolved_shadow_replay_enabled(self) -> bool:
+        """Gate the expensive proof harness on explicit strict authorization."""
+        return bool(
+            getattr(self, "_shadow_replay_requested", False)
+            and self._execution_preferences.strict_baseline_authorized
+        )
 
     def _announce_param_degradations(
         self,
@@ -925,6 +1010,41 @@ class OrchestratorRunner:
                 execution_id=execution_id,
                 error=str(exc),
             )
+
+    async def _report_frugality_retrospective(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        terminal_status: str,
+    ) -> bool:
+        """Best-effort execution-finalized evidence reporting.
+
+        The reporter itself returns before querying on ``paused``. Keeping this
+        wrapper best-effort preserves the observability-only contract: persistence
+        or projection failures never change execution success, routing, or retry
+        behavior.
+        """
+        from ouroboros.observability.frugality_retrospective import (
+            report_frugality_retrospective,
+        )
+
+        try:
+            return await report_frugality_retrospective(
+                self._event_store,
+                execution_id=execution_id,
+                session_id=session_id,
+                terminal_status=terminal_status,
+            )
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.frugality_retrospective.report_failed",
+                execution_id=execution_id,
+                session_id=session_id,
+                terminal_status=terminal_status,
+                error=str(exc),
+            )
+            return False
 
     async def _frugality_proof_cohort(
         self,
@@ -1698,12 +1818,106 @@ class OrchestratorRunner:
             proof_contract["seed_fingerprint"] = resolved_seed_fingerprint
         return {
             "version": EXECUTION_CONTRACT_VERSION,
+            "execution_preferences": self._execution_preferences.to_contract_data(),
             "model_routing": routing_contract,
             "frugality_proof": proof_contract,
             "resume": {
                 "workspace": self._resume_workspace_identity(),
             },
         }
+
+    async def _emit_run_configuration_resolved(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> None:
+        """Persist the user-facing run configuration before any AC dispatch."""
+        from ouroboros.config import get_cross_harness_redispatch_enabled
+        from ouroboros.events.base import BaseEvent
+
+        starting_tier = self._model_router.base_tier if self._model_router else None
+        starting_model = (
+            self._model_router.tier_models.get(starting_tier)
+            if self._model_router is not None and starting_tier is not None
+            else None
+        )
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.run.configuration_resolved",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "efficiency_mode": self._execution_preferences.efficiency_mode.value,
+                    "frugality_assurance": (self._execution_preferences.frugality_assurance.value),
+                    "primary_runtime_backend": getattr(self._adapter, "runtime_backend", "unknown"),
+                    "primary_harness_label": type(self._adapter).__name__[:80],
+                    "model_routing_enabled": self._model_router is not None,
+                    "requested_model_tier": self._requested_model_tier,
+                    "starting_model_tier": starting_tier,
+                    "starting_model": starting_model,
+                    "progressive_escalation_enabled": self._model_router is not None,
+                    "alternate_harness_enabled": get_cross_harness_redispatch_enabled(),
+                    "strict_baseline_authorized": (
+                        self._execution_preferences.strict_baseline_authorized
+                    ),
+                    "shadow_replay_enabled": self._shadow_replay_enabled,
+                },
+            )
+        )
+
+    async def _emit_execution_plan_created(
+        self,
+        *,
+        seed: Seed,
+        execution_id: str,
+        session_id: str,
+        execution_plan: Any,
+    ) -> None:
+        """Persist one bounded whole-run plan before the first level starts."""
+        from ouroboros.events.base import BaseEvent
+
+        levels: list[dict[str, Any]] = []
+        for stage in execution_plan.stages:
+            indices = [
+                index for index in stage.ac_indices if 0 <= index < len(seed.acceptance_criteria)
+            ]
+            levels.append(
+                {
+                    "level": stage.stage_number,
+                    "ac_indices": indices,
+                    "semantic_ac_keys": [
+                        seed.acceptance_criteria[index].semantic_ac_key for index in indices
+                    ],
+                    "ac_summaries": [
+                        " ".join(ac_text(seed.acceptance_criteria[index]).split())[:160]
+                        for index in indices
+                    ],
+                    "depends_on_levels": [dependency + 1 for dependency in stage.depends_on_stages],
+                }
+            )
+        first = levels[0] if levels else None
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.plan.created",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "total_acs": len(seed.acceptance_criteria),
+                    "total_levels": execution_plan.total_stages,
+                    "parallelizable": execution_plan.is_parallelizable,
+                    "levels": levels,
+                    "first_level": first["level"] if first is not None else None,
+                    "first_ac_indices": first["ac_indices"] if first is not None else [],
+                },
+            )
+        )
 
     def _validate_legacy_resume_identity(
         self,
@@ -1881,6 +2095,7 @@ class OrchestratorRunner:
         raw_proof = raw_contract.get("frugality_proof")
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
+        raw_preferences = raw_contract.get("execution_preferences")
         if (
             not isinstance(raw_proof, Mapping)
             or not isinstance(raw_routing, Mapping)
@@ -1930,6 +2145,28 @@ class OrchestratorRunner:
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
                 details={"invalid": "proof identity"},
+            )
+
+        persisted_preferences = execution_preferences_from_contract(raw_preferences)
+        preferences_migrated = persisted_preferences is None and raw_preferences is None
+        if persisted_preferences is None:
+            if not preferences_migrated:
+                raise OrchestratorError(
+                    message="Cannot resume with invalid execution preferences",
+                    details={"invalid": "execution_preferences"},
+                )
+            persisted_preferences = resolve_execution_preferences(None, None)
+        if (
+            self._execution_preferences_override_explicit
+            and self._execution_preferences != persisted_preferences
+        ):
+            raise OrchestratorError(
+                message="Cannot change efficiency or frugality preferences on resume",
+                details={
+                    "persisted_preferences": persisted_preferences.to_contract_data(),
+                    "requested_preferences": self._execution_preferences.to_contract_data(),
+                    "hint": "Start a new successor execution for an intentional change.",
+                },
             )
 
         current_seed_fingerprint = (
@@ -2076,6 +2313,8 @@ class OrchestratorRunner:
                     "hint": ("Pin the original runtime model/profile, or start a new session."),
                 },
             )
+        self._execution_preferences = persisted_preferences
+        self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
             self._execution_contract = self._build_execution_contract(
                 seed=seed,
@@ -2088,6 +2327,11 @@ class OrchestratorRunner:
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
         self._execution_contract = dict(raw_contract)
+        if preferences_migrated:
+            self._execution_contract["execution_preferences"] = (
+                persisted_preferences.to_contract_data()
+            )
+            return True
         return False
 
     @staticmethod
@@ -3049,6 +3293,12 @@ class OrchestratorRunner:
                 )
             )
 
+        await self._report_frugality_retrospective(
+            execution_id=execution_id,
+            session_id=session_id,
+            terminal_status="cancelled",
+        )
+
         log.info(
             "orchestrator.runner.session_cancelled_directly",
             execution_id=execution_id,
@@ -3344,6 +3594,11 @@ class OrchestratorRunner:
                         messages_processed=messages_processed,
                     )
                 )
+            await self._report_frugality_retrospective(
+                execution_id=execution_id,
+                session_id=session_id,
+                terminal_status=terminal_status.value,
+            )
             return Result.ok(
                 OrchestratorResult(
                     success=terminal_status == SessionStatus.COMPLETED,
@@ -3377,6 +3632,11 @@ class OrchestratorRunner:
                 error_message="Execution cancelled by external request",
                 messages_processed=messages_processed,
             )
+        )
+        await self._report_frugality_retrospective(
+            execution_id=execution_id,
+            session_id=session_id,
+            terminal_status="cancelled",
         )
 
         # Display cancellation notice
@@ -3574,6 +3834,10 @@ class OrchestratorRunner:
                 tool_prefix=self._mcp_tool_prefix,
                 strategy=strategy,
             )
+            await self._emit_run_configuration_resolved(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+            )
 
             # Execute with progress display
             messages_processed = 0
@@ -3619,6 +3883,27 @@ class OrchestratorRunner:
                     parallel_kwargs["force_sequential_levels"] = True
 
                 return await self._execute_parallel(**parallel_kwargs)
+
+            from ouroboros.orchestrator.dependency_analyzer import (
+                ACNode,
+                DependencyGraph,
+            )
+
+            direct_graph = DependencyGraph(
+                nodes=tuple(
+                    ACNode(index=index, content=ac_text(criterion), depends_on=())
+                    for index, criterion in enumerate(seed.acceptance_criteria)
+                ),
+                execution_levels=(tuple(range(len(seed.acceptance_criteria))),)
+                if seed.acceptance_criteria
+                else (),
+            )
+            await self._emit_execution_plan_created(
+                seed=seed,
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                execution_plan=direct_graph.to_execution_plan(),
+            )
         except asyncio.CancelledError:
             if session_registered and await is_cancellation_requested(tracker.session_id):
                 return await self._handle_cancellation(
@@ -4024,6 +4309,12 @@ class OrchestratorRunner:
             # Deterministic frugality proof over this execution's per-AC triads.
             # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
             await self._evaluate_frugality_proof(exec_id)
+            if terminal_status in {"completed", "failed", "cancelled"}:
+                await self._report_frugality_retrospective(
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                    terminal_status=terminal_status,
+                )
 
             log.info(
                 "orchestrator.runner.execute_completed",
@@ -4099,6 +4390,11 @@ class OrchestratorRunner:
                     error_message=str(e),
                     messages_processed=messages_processed,
                 )
+            )
+            await self._report_frugality_retrospective(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status="failed",
             )
 
             return Result.err(
@@ -4200,6 +4496,13 @@ class OrchestratorRunner:
 
         execution_plan = dependency_graph.to_execution_plan()
 
+        await self._emit_execution_plan_created(
+            seed=seed,
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            execution_plan=execution_plan,
+        )
+
         # Log execution plan
         log.info(
             "orchestrator.runner.execution_plan",
@@ -4257,6 +4560,7 @@ class OrchestratorRunner:
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,
             shadow_replay_enabled=self._shadow_replay_enabled,
+            session_signal_hub=self._session_signal_hub,
         )
 
         # Check for cancellation before starting parallel execution
@@ -4441,6 +4745,12 @@ class OrchestratorRunner:
         # Deterministic frugality proof over this execution's per-AC triads.
         # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
         await self._evaluate_frugality_proof(exec_id)
+        if terminal_status in {"completed", "failed", "cancelled"}:
+            await self._report_frugality_retrospective(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status=terminal_status,
+            )
 
         log.info(
             "orchestrator.runner.parallel_completed",
@@ -4902,6 +5212,12 @@ Note: This is a resumed session. Please continue from where execution was interr
             # Deterministic frugality proof over this execution's per-AC triads.
             # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
             await self._evaluate_frugality_proof(tracker.execution_id)
+            if terminal_status in {"completed", "failed", "cancelled"}:
+                await self._report_frugality_retrospective(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    terminal_status=terminal_status,
+                )
 
             log.info(
                 "orchestrator.runner.resume_completed",
@@ -4949,6 +5265,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                     status="failed",
                     error_message=str(e),
                 )
+            )
+            await self._report_frugality_retrospective(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+                terminal_status="failed",
             )
 
             return Result.err(

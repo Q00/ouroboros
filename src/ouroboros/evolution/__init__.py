@@ -23,6 +23,13 @@ from ouroboros.evolution.loop import (
 )
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import OntologyMutation, ReflectEngine, ReflectOutput
+from ouroboros.evolution.rewind import (
+    CommittedRewindResult,
+    NoOpRewindObserver,
+    RewindCommitter,
+    RewindObservationSnapshot,
+    RewindObserver,
+)
 from ouroboros.evolution.wonder import WonderEngine, WonderOutput
 
 __all__ = [
@@ -33,6 +40,11 @@ __all__ = [
     "GenerationResult",
     "StepAction",
     "StepResult",
+    "CommittedRewindResult",
+    "NoOpRewindObserver",
+    "RewindCommitter",
+    "RewindObservationSnapshot",
+    "RewindObserver",
     # Engines
     "WonderEngine",
     "ReflectEngine",

@@ -131,7 +131,7 @@ class TestInvestmentAssessment:
             rationale="missing difficulty and stakes; base effort preserved",
         )
 
-    def test_declared_low_axes_require_high_confidence_to_cheapen(self) -> None:
+    def test_declared_low_axes_never_authorize_cheaper_execution(self) -> None:
         low_confidence = assess_investment(
             InvestmentSpec(
                 difficulty="low",
@@ -150,7 +150,14 @@ class TestInvestmentAssessment:
         )
 
         assert low_confidence.can_cheapen is False
-        assert high_confidence.can_cheapen is True
+        assert high_confidence.can_cheapen is False
+        decision = decide_effort(
+            ParamSupport.NATIVE,
+            base_effort="high",
+            is_decomposed_child=False,
+            investment_assessment=high_confidence,
+        )
+        assert decision.level == "high"
 
     @pytest.mark.parametrize("provenance", ["inferred", "absent"])
     def test_inferred_or_absent_inputs_never_authorize_cheaper_execution(
@@ -172,7 +179,7 @@ class TestInvestmentAssessment:
             InvestmentSpec(
                 difficulty="low",
                 stakes="high",
-                provenance="declared",
+                provenance="measured",
                 confidence="high",
             )
         )
@@ -210,7 +217,7 @@ class TestInvestmentAssessment:
             InvestmentSpec(
                 difficulty="low",
                 stakes="low",
-                provenance="declared",
+                provenance="measured",
                 confidence="high",
             )
         )

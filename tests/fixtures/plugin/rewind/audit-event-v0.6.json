@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.6",
+  "event_type": "plugin.hook.completed",
+  "occurred_at": "2026-07-13T06:00:01Z",
+  "plugin": {
+    "name": "rewind-observer",
+    "version": "1.0.0",
+    "source_type": "plugin_home"
+  },
+  "observation": {
+    "kind": "rewind",
+    "id": "event-1",
+    "aggregate_type": "lineage",
+    "aggregate_id": "lin-1"
+  },
+  "trust_state": "trusted",
+  "capabilities_used": [],
+  "permissions_used": ["plugin:rewind:observe"],
+  "provenance": {
+    "correlation_id": "event-1",
+    "hook_name": "on_rewind",
+    "failure_policy": "fail_open",
+    "returncode": "0",
+    "timeout_seconds": "5",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "result": {"status": "success"}
+}

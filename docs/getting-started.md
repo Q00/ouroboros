@@ -111,16 +111,17 @@ No Python, pip, or API key configuration needed -- Claude Code handles the runti
 ```bash
 pip install ouroboros-ai              # Base package (core engine)
 pip install ouroboros-ai[claude]      # + Claude Code runtime deps; pair with [mcp] for the MCP server
-pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support (100+ models)
+pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support; Python 3.12-3.13
 pip install ouroboros-ai[mcp]         # + MCP server/client runtime support
 pip install ouroboros-ai[tui]         # + Textual terminal UI
-pip install ouroboros-ai[all]         # Everything (claude + litellm + mcp + tui)
+pip install ouroboros-ai[all]         # Everything (claude + litellm + mcp + tui); Python 3.12-3.13
 
 ouroboros --version                   # verify CLI
 ```
 
 > **Which extra do I need?** If you only use Claude Code as your runtime, install `ouroboros-ai[mcp,claude]` — `[claude]` covers the Claude runtime deps and `[mcp]` is required for the MCP server.
-> For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]`.
+> For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
+> Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
 
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
@@ -134,17 +135,17 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 git clone https://github.com/Q00/ouroboros
 cd ouroboros
 uv sync                              # base dependencies only
-uv sync --all-extras                  # or: include all optional extras
+uv sync --python 3.13 --all-extras    # include all optional extras, including LiteLLM
 uv run ouroboros --version            # verify CLI
 ```
 
-Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Ouroboros still supports Python 3.12+, so if your local 3.14 interpreter is a prerelease build or hits dependency compatibility issues before the CLI starts, pin a supported stable interpreter explicitly while preserving the dependency profile you chose above:
+Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
 
 ```bash
-uv sync --python 3.12                  # base dependencies
-uv sync --python 3.12 --all-extras     # or: include optional backends/extras
-uv run --python 3.12 ouroboros --version
-uv run --python 3.12 pytest tests/unit/ -q
+uv sync --python 3.13                  # base dependencies on the preferred current interpreter
+uv sync --python 3.13 --all-extras     # include optional backends/extras, including LiteLLM
+uv run --python 3.13 ouroboros --version
+uv run --python 3.13 pytest tests/unit/ -q
 ```
 
 > See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contributor setup (linting, testing, pre-commit hooks).
@@ -390,7 +391,7 @@ pip install --force-reinstall ouroboros-ai
 ouroboros --version
 ```
 
-For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. If that local interpreter is a beta/RC build or dependency-sensitive environment, recreate the environment with an explicit supported stable interpreter first, preserving your dependency-profile flags as needed (for example `uv sync --python 3.12` or `uv sync --python 3.12 --all-extras`), then rerun commands with the same interpreter such as `uv run --python 3.12 ouroboros --version`.
+For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. Use Python 3.13 for LiteLLM-bearing source environments such as `uv sync --python 3.13 --all-extras`, or Python 3.12 when validating the lower supported bound. Core and non-LiteLLM source environments still support Python 3.12-3.14.
 
 ### API key not found
 

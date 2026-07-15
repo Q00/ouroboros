@@ -4,6 +4,13 @@
 
 Snapshot: 2026-05-29 18:40 KST.
 
+Post-snapshot correction (2026-07-13): #813 remains the canonical open
+Symposium deliberation RFC. Issues #814-#819 are closed; #814, #815, #816, and
+#819 were folded into #813, while #817 and #818 closed separately. The canonical
+closeout contract is `docs/rfc/symposium-deliberation.md`. Any graph or table
+below that previously treated those child issues as active is superseded by this
+correction.
+
 This document is a point-in-time triage view for the AgentOS issue set. It is
 not a new source of truth. GitHub issues, especially #961 and #1256, remain the
 normative records. Use this page to see which recently merged PRs resolved
@@ -65,11 +72,11 @@ flowchart TD
     D --> I518["#518 AgentProcess lifecycle"]
     D --> I614["#614 external guidance contract"]
     D --> I615["#615 reasoning budget policy"]
-    D --> I813["#813 Symposium primitive"]
-    I813 --> I814["#814 verdict envelope"]
-    I813 --> I815["#815 stateful debate policy"]
-    I813 --> I816["#816 evaluate consensus migration"]
-    I813 --> I819["#819 persistent transcript"]
+    D --> I813["#813 open: Symposium deliberation RFC"]
+    I813 --> I814["#814 closed/folded: verdict envelope"]
+    I813 --> I815["#815 closed/folded: membership policy"]
+    I813 --> I816["#816 closed/folded: evaluate migration question"]
+    I813 --> I819["#819 closed/folded: transcript policy"]
     D --> I831["#831 interview MCP hang watchlist"]
     D --> I1139["#1139 Pi runtime bridge"]
     D --> I1239["#1239 reference-aware interviews"]
@@ -84,8 +91,8 @@ flowchart TD
     class LegendMeta,I961,I1157,I1256 meta
     class LegendOpen,I1254,I1258,I1170,I1263,I1234,I939 open
     class LegendMerged,A1282,B1260,B1281,B1284,B1286,B1289,B1290,C1276,C1277 merged
-    class LegendClosed,A920,A925,A960,B1257,C946,C956 closed
-    class LegendBacklog,I518,I614,I615,I813,I814,I815,I816,I819,I831,I1139,I1239 backlog
+    class LegendClosed,A920,A925,A960,B1257,C946,C956,I814,I815,I816,I819 closed
+    class LegendBacklog,I518,I614,I615,I813,I831,I1139,I1239 backlog
     class A,B,C,D track
 ```
 
@@ -202,11 +209,11 @@ uv run pytest tests/unit/auto/test_pipeline_partial_product_terminal.py \
 | #518 | D | Long-lived AgentProcess lifecycle design item. | Keep for later runtime lifecycle planning. |
 | #614 | D | External guidance contract design item. | Define project/user skill guidance boundaries. |
 | #615 | D | Runtime reasoning budget policy design item. | Define budget/cognitive-effort policy and enforcement surface. |
-| #813 | D | Symposium primitive RFC. | Pick naming/envelope/adoption plan before child migration. |
-| #814 | D | Child of Symposium-style dispatch direction. | Standardize verdict envelope after #813 direction. |
-| #815 | D | Debate-pool policy question. | Decide whether stateful agents may join debates. |
-| #816 | D | Needs-info migration from score average to debate. | Revisit after #813/#814 policy is accepted. |
-| #819 | D | Persistent transcript for multi-persona debate. | Revisit after the debate primitive is accepted. |
+| #813 | D | Open Symposium deliberation RFC. | Ratify `docs/rfc/symposium-deliberation.md`, refresh folded-history references, then close the issue. |
+| #814 | D | Closed/folded output-envelope design history. | Use `docs/rfc/verdict-envelope-v1.md`; open fresh adapter issues after #813 acceptance. |
+| #815 | D | Closed/folded membership-policy history. | Lateral remains stateless-only; named typed panels own stateful roles. |
+| #816 | D | Closed/folded evaluate-migration question. | Do not migrate execution without a reproduced failure and measurable success criterion. |
+| #819 | D | Closed/folded transcript-policy history. | V1 persistence stays off; any opt-in storage requires a fresh issue. |
 | #831 | D | Watchlist, not an active release blocker. #834/#837/#972 added contract hygiene and diagnostics, but the original trace likely crossed into Claude Code/SDK behavior. | Do not spend more harness-engineering effort unless it reproduces again on the supported MCP interview path; disclose or reopen as active only on a fresh failure. |
 | #1139 | D | Pi support via runtime bridge. | Keep as integration design work, separate from release readiness. |
 | #1239 | D | Reference-aware interview adapters RFC. | Define adapter/glossary provenance contract before implementation. |
@@ -225,6 +232,8 @@ uv run pytest tests/unit/auto/test_pipeline_partial_product_terminal.py \
    - Remaining #939 hook dispatch, permissions, and audit slices.
 5. Keep Track D as a deliberate design backlog. It should not block the current
    AgentOS release-readiness lane unless #961 reclassifies one of those issues.
+   Close #813 when the canonical Symposium RFC is ratified; do not revive its
+   folded child issue numbers for implementation.
    For #831 specifically, prefer watchlist/disclosure over more harness work
    unless a fresh supported-path hang reproduces.
 

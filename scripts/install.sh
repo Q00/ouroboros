@@ -14,6 +14,8 @@ set -euo pipefail
 PACKAGE_NAME="ouroboros-ai"
 CLICK_SPEC="click>=8.1.0,<9.0.0"
 MIN_PYTHON="3.12"
+DEFAULT_PYTHON_SPEC=">=3.12"
+LITELLM_PYTHON_SPEC=">=3.12,<3.14"
 IS_LOCAL=false
 RECONFIGURE="${OUROBOROS_INSTALL_RECONFIGURE:-}"
 EXPLICIT_RUNTIME="${OUROBOROS_INSTALL_RUNTIME:-}"
@@ -148,70 +150,44 @@ elif command -v pipx &>/dev/null; then
   _ok "pipx found: $(pipx --version)"
 fi
 
-# NOTE: Interpreter selection branches (uv, pipx, pip) are not covered
-# by automated tests. When modifying this logic, manually verify:
-#   1. `uv` available → uses `uv tool install --python ">=3.12"` (uv manages Python)
-#   2. `pipx` available, no `uv` → probes python3.{14,13,12}/python3/python,
-#      picks first >= 3.12, passes --python to pipx; exits if none found
-#   3. Neither available → falls back to `python3 -m pip install --user`;
-#      exits if python3/python < 3.12
-#   4. Python < 3.12 with no uv/pipx → prints error and exits
-# See bot review on PR #432 for context.
-
-# Helper: check whether a Python executable meets MIN_PYTHON
+# Helper: check whether a Python executable meets the selected profile's range.
 _python_ok() {
   local cmd="$1"
+  local spec="${2:-$DEFAULT_PYTHON_SPEC}"
   local ver
   ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
-  [ -n "$ver" ] && [ "$(printf '%s\n' "$MIN_PYTHON" "$ver" | sort -V | head -n1)" = "$MIN_PYTHON" ]
+  if [ -z "$ver" ]; then
+    return 1
+  fi
+  if [ "$(printf '%s\n' "$MIN_PYTHON" "$ver" | sort -V | head -n1)" != "$MIN_PYTHON" ]; then
+    return 1
+  fi
+  if [ "$spec" = "$LITELLM_PYTHON_SPEC" ] && [ "$(printf '%s\n' "3.14" "$ver" | sort -V | head -n1)" = "3.14" ]; then
+    return 1
+  fi
+  return 0
 }
 
-# Python check: always required for pip; also needed by pipx to pick the right interpreter.
-if [ "$HAS_UV" = false ]; then
-  if [ "$HAS_PIPX" = true ]; then
-    # For pipx: probe versioned candidates first, then fall back to generic names.
-    for cmd in python3.14 python3.13 python3.12 python3 python; do
-      if command -v "$cmd" &>/dev/null && _python_ok "$cmd"; then
-        PYTHON="$(command -v "$cmd")"
-        break
-      fi
-    done
-    if [ -z "$PYTHON" ]; then
-      _blank
-      _err "pipx requires Python >=${MIN_PYTHON}, but none was found."
-      _blank
-      _say "${BOLD}Install one of these, then run the installer again:${RESET}"
-      _info "uv: pipx install uv"
-      _info "uv: pip install --user uv"
-      _info "uv: brew install uv"
-      _info "uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
-      _info "Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
-      exit 1
-    fi
-    _ok "Python found: $($PYTHON --version)"
+_python_requirement_message() {
+  if [ "${INSTALL_PYTHON_SPEC:-$DEFAULT_PYTHON_SPEC}" = "$LITELLM_PYTHON_SPEC" ]; then
+    printf 'Python %s (Ouroboros LiteLLM profiles support Python 3.12-3.13; use Python 3.13)' "$LITELLM_PYTHON_SPEC"
   else
-    # pip fallback: any matching python3/python will do.
-    for cmd in python3 python; do
-      if command -v "$cmd" &>/dev/null && _python_ok "$cmd"; then
-        PYTHON="$cmd"
-        break
-      fi
-    done
-    if [ -z "$PYTHON" ]; then
-      _blank
-      _err "No installer found: uv, pipx, or Python >=${MIN_PYTHON}."
-      _blank
-      _say "${BOLD}Install one of these, then run the installer again:${RESET}"
-      _info "uv: pipx install uv"
-      _info "uv: pip install --user uv"
-      _info "uv: brew install uv"
-      _info "uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
-      _info "Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
-      exit 1
-    fi
-    _ok "Python found: $($PYTHON --version)"
+    printf 'Python %s' "$DEFAULT_PYTHON_SPEC"
   fi
-fi
+}
+
+_print_python_install_remediation() {
+  _say "${BOLD}Install one of these, then run the installer again:${RESET}"
+  _info "uv: pipx install uv"
+  _info "uv: pip install --user uv"
+  _info "uv: brew install uv"
+  _info "uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  if [ "${INSTALL_PYTHON_SPEC:-$DEFAULT_PYTHON_SPEC}" = "$LITELLM_PYTHON_SPEC" ]; then
+    _info "Python 3.13: https://www.python.org/downloads/"
+  else
+    _info "Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
+  fi
+}
 
 # 2. Detect runtimes
 _step "2/4  Choosing an agent backend" "Codex, Claude, Hermes, OpenCode, Gemini, Goose, Kiro, Copilot, Pi, and GJC are supported."
@@ -456,6 +432,54 @@ else
 fi
 
 INSTALL_SPEC="${PACKAGE_NAME}${EXTRAS}"
+INSTALL_PYTHON_SPEC="$DEFAULT_PYTHON_SPEC"
+case "$EXTRAS" in
+  "[all]" | "[litellm]" | *litellm*)
+    INSTALL_PYTHON_SPEC="$LITELLM_PYTHON_SPEC"
+    ;;
+esac
+
+# Python check: always required for pip; also needed by pipx to pick the right interpreter.
+if [ "$HAS_UV" = false ]; then
+  if [ "$HAS_PIPX" = true ]; then
+    # For pipx: probe versioned candidates first, then fall back to generic names.
+    for cmd in python3.14 python3.13 python3.12 python3 python; do
+      if command -v "$cmd" &>/dev/null && _python_ok "$cmd" "$INSTALL_PYTHON_SPEC"; then
+        PYTHON="$(command -v "$cmd")"
+        break
+      fi
+    done
+    if [ -z "$PYTHON" ]; then
+      _blank
+      _err "pipx requires $(_python_requirement_message), but none was found."
+      _blank
+      _print_python_install_remediation
+      exit 1
+    fi
+    _ok "Python found: $($PYTHON --version)"
+  else
+    # pip fallback: prefer explicit compatible versions for constrained profiles.
+    if [ "$INSTALL_PYTHON_SPEC" = "$LITELLM_PYTHON_SPEC" ]; then
+      PYTHON_CANDIDATES="python3.13 python3.12 python3 python"
+    else
+      PYTHON_CANDIDATES="python3 python"
+    fi
+    for cmd in $PYTHON_CANDIDATES; do
+      if command -v "$cmd" &>/dev/null && _python_ok "$cmd" "$INSTALL_PYTHON_SPEC"; then
+        PYTHON="$cmd"
+        break
+      fi
+    done
+    if [ -z "$PYTHON" ]; then
+      _blank
+      _err "No installer found: uv, pipx, or $(_python_requirement_message)."
+      _blank
+      _print_python_install_remediation
+      exit 1
+    fi
+    _ok "Python found: $($PYTHON --version)"
+  fi
+fi
 
 _step "3/4  Installing Ouroboros" "Package: ${INSTALL_SPEC}"
 _say "Installing ${INSTALL_SPEC} ..."
@@ -468,7 +492,7 @@ if [ "$HAS_UV" = true ]; then
   _info "Install method: uv tool install"
   # `click` is also declared in pyproject, but keep this explicit so the
   # installer can repair already-published wheels whose metadata missed it.
-  UV_ARGS=(tool install --upgrade --python ">=3.12" "$PACKAGE_NAME" --with "$CLICK_SPEC")
+  UV_ARGS=(tool install --upgrade --python "$INSTALL_PYTHON_SPEC" "$PACKAGE_NAME" --with "$CLICK_SPEC")
   if [ -n "$PRE_FLAG" ]; then
     UV_ARGS+=(--prerelease=allow)
   fi
@@ -483,7 +507,7 @@ if [ "$HAS_UV" = true ]; then
       UV_ARGS+=(
         --with "mcp==1.28.1"
         --with "claude-agent-sdk==0.2.110"
-        --with "anthropic==0.112.0"
+        --with "anthropic==0.116.0"
       )
       ;;
     "[mcp,tui]")
@@ -493,14 +517,14 @@ if [ "$HAS_UV" = true ]; then
       UV_ARGS+=(
         --with "mcp==1.28.1"
         --with "claude-agent-sdk==0.2.110"
-        --with "anthropic==0.112.0"
-        --with "litellm==1.90.0"
+        --with "anthropic==0.116.0"
+        --with "litellm==1.91.0"
       )
       ;;
   esac
   # Every install ships the settings GUI (`ouroboros config`).
   UV_ARGS+=(
-    --with "textual==8.2.7"
+    --with "textual==8.2.8"
     --with "textual-serve==1.1.3"
   )
   uv "${UV_ARGS[@]}"
@@ -574,18 +598,14 @@ else
   _info "No backend selected; skipping runtime setup."
 fi
 
-# Refresh Codex rules/skills whenever this machine appears to use Codex, even
-# if the preserved primary runtime is another backend. Setup already does this
-# for `--runtime codex`, but upgrades and `all` installs should not leave stale
-# ~/.codex artifacts behind.
-if [ -n "$OUROBOROS_SETUP_CMD" ] && {
-  [ "$RUNTIME" = "codex" ] ||
-    [ "$EXTRAS" = "[all]" ] ||
-    [ "$HAS_CODEX" = true ] ||
-    [ -d "$HOME/.codex" ]
-}; then
-  _info "Refreshing Codex rules and skills"
-  "$OUROBOROS_SETUP_CMD" codex refresh || _warn "Codex artifact refresh skipped; run: ouroboros codex refresh"
+# Refresh already-installed artifacts for every detected runtime, even those
+# that are not the preserved primary backend. Setup only wires the selected
+# runtime, so upgrades must not leave other runtimes' rules/skills/bridges
+# stale. `setup refresh` is presence-gated per artifact and never touches MCP
+# registrations or config.
+if [ -n "$OUROBOROS_SETUP_CMD" ]; then
+  _info "Refreshing runtime artifacts for detected runtimes"
+  "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
 
 # 5. Claude Code integration (MCP + skills)
@@ -605,13 +625,13 @@ if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" =
   if [ "$INSTALL_METHOD" = "uv" ]; then
     case "$EXTRAS" in
       "[mcp,claude]" | "[mcp,claude,tui]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python",">=3.12","--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
         ;;
       "[all]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python",">=3.12","--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
         ;;
       *)
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python",">=3.12","--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
         ;;
     esac
   elif [ "$INSTALL_METHOD" = "pipx" ]; then
@@ -675,6 +695,8 @@ if command -v claude &>/dev/null; then
   claude plugin marketplace add Q00/ouroboros 2>/dev/null || true
   claude plugin marketplace update ouroboros 2>/dev/null || true
   if claude plugin install ouroboros@ouroboros 2>/dev/null; then
+    # `install` is a no-op for an already-installed plugin — `update` moves it to the latest version
+    claude plugin update ouroboros@ouroboros >/dev/null 2>&1 || true
     _ok "Skills installed"
   else
     _warn "Skills skipped. Manual install: claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros"

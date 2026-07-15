@@ -222,7 +222,7 @@ async def test_authorized_low_investment_lowers_effort_and_records_exact_inputs(
     investment = InvestmentSpec(
         difficulty="low",
         stakes="low",
-        provenance="declared",
+        provenance="measured",
         confidence="high",
     )
 
@@ -232,7 +232,7 @@ async def test_authorized_low_investment_lowers_effort_and_records_exact_inputs(
     assert len(assessed) == 1
     assert assessed[0].data["difficulty"] == "low"
     assert assessed[0].data["stakes"] == "low"
-    assert assessed[0].data["provenance"] == "declared"
+    assert assessed[0].data["provenance"] == "measured"
     assert assessed[0].data["confidence"] == "high"
     assert assessed[0].data["can_cheapen"] is True
     assert assessed[0].data["used_signals"] == [

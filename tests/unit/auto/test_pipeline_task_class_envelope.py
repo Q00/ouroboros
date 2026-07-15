@@ -204,13 +204,16 @@ async def test_envelope_carries_active_task_class_on_single_match(tmp_path) -> N
 
     assert result.active_task_class == TaskClass.CLI.value
     ac = state.seed_artifact["acceptance_criteria"]
+    ac_descriptions = [
+        item.get("description", "") if isinstance(item, dict) else item for item in ac
+    ]
     # Template entries are prepended in order.
     for index, expected in enumerate(profile.default_ac_template):
-        assert ac[index] == expected, (
+        assert ac_descriptions[index] == expected, (
             f"AC[{index}] should be the L1-d-prepended template entry; got {ac[index]!r}"
         )
     # The user's original AC remains present after the template.
-    assert "`habit list` prints stable stdout containing created habits" in ac
+    assert "`habit list` prints stable stdout containing created habits" in ac_descriptions
 
 
 @pytest.mark.asyncio
@@ -246,12 +249,15 @@ async def test_envelope_leaves_active_task_class_none_when_unmatched(tmp_path) -
 
     assert result.active_task_class is None
     ac = state.seed_artifact["acceptance_criteria"]
+    ac_descriptions = [
+        item.get("description", "") if isinstance(item, dict) else item for item in ac
+    ]
     library_template_entries = TASK_CLASS_CATALOG[TaskClass.LIBRARY].default_ac_template
     for template_entry in library_template_entries:
-        assert template_entry not in ac, (
+        assert template_entry not in ac_descriptions, (
             f"unmatched inference must not inject library template entry: {template_entry!r}"
         )
-    assert any("Changed behavior" in item and "tests" in item for item in ac)
+    assert any("Changed behavior" in item and "tests" in item for item in ac_descriptions)
 
 
 @pytest.mark.asyncio
@@ -292,11 +298,14 @@ async def test_envelope_leaves_active_task_class_none_when_ambiguous(tmp_path) -
 
     assert result.active_task_class is None
     ac = state.seed_artifact["acceptance_criteria"]
+    ac_descriptions = [
+        item.get("description", "") if isinstance(item, dict) else item for item in ac
+    ]
     # No catalog templates were injected — user AC stays as-is (plus
     # any normalization the existing pipeline applies, but the
     # template entries from L1-d.CLI are not added).
     cli_template_entries = TASK_CLASS_CATALOG[TaskClass.CLI].default_ac_template
     for template_entry in cli_template_entries:
-        assert template_entry not in ac, (
+        assert template_entry not in ac_descriptions, (
             f"ambiguous inference must not inject CLI template entry: {template_entry!r}"
         )

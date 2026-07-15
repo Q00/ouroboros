@@ -335,6 +335,66 @@ class TestFrugalityTelemetry:
         )
         assert board["meta"]["frugality"] == {"status": "proven", "reason": "ok"}
 
+    def test_frugality_retrospective_summary_reaches_meta(self) -> None:
+        board = reduce_board(
+            [
+                _ev(
+                    "execution.frugality_retrospective.reported",
+                    retrospective_version="v1",
+                    trigger="execution_finalized",
+                    terminal_status="failed",
+                    evidence_only=True,
+                    coverage={
+                        "measured_attempts": 3,
+                        "unknown_attempts": 1,
+                        "invalid_attempts": 0,
+                        "total_measured_tokens": 250.0,
+                    },
+                    evidence_signals=[
+                        {
+                            "name": "retry_associated_spend",
+                            "token_spend": 100.0,
+                            "attempt_count": 1,
+                        },
+                        {
+                            "name": "unaccepted_spend",
+                            "token_spend": 150.0,
+                            "attempt_count": 2,
+                        },
+                    ],
+                )
+            ]
+        )
+
+        assert board["meta"]["frugality_retrospective"] == {
+            "terminal_status": "failed",
+            "measured_attempts": 3,
+            "unknown_attempts": 1,
+            "invalid_attempts": 0,
+            "total_measured_tokens": 250.0,
+            "retry_associated_tokens": 100.0,
+            "retry_associated_attempts": 1,
+            "unaccepted_tokens": 150.0,
+            "unaccepted_attempts": 2,
+        }
+
+    def test_frugality_retrospective_malformed_payload_is_omitted(self) -> None:
+        board = reduce_board(
+            [
+                _ev(
+                    "execution.frugality_retrospective.reported",
+                    retrospective_version="v1",
+                    trigger="execution_finalized",
+                    terminal_status="paused",
+                    evidence_only=True,
+                    coverage={},
+                    evidence_signals=[],
+                )
+            ]
+        )
+
+        assert board["meta"]["frugality_retrospective"] is None
+
 
 class TestToolAndMeta:
     def test_tool_activity_attached_to_node(self) -> None:

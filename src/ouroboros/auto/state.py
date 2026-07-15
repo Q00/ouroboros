@@ -454,6 +454,9 @@ class AutoPipelineState:
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     skip_run: bool = False
+    efficiency_mode: str = "adaptive"
+    frugality_assurance: str = "observe"
+    frugality_assurance_explicit: bool = False
     # Default raised 12 → 50 so the AI answer refiner has room to converge
     # ambiguity to the closure threshold. Operational impact: a goal that does
     # NOT converge can now run up to 50 interview rounds (≈ one provider call per
@@ -1076,6 +1079,9 @@ class AutoPipelineState:
         payload.setdefault("deadline_at", None)
         payload.setdefault("deadline_at_epoch", None)
         payload.setdefault("user_preferences", {})
+        payload.setdefault("efficiency_mode", "adaptive")
+        payload.setdefault("frugality_assurance", "observe")
+        payload.setdefault("frugality_assurance_explicit", False)
         payload.setdefault("last_qa_score", None)
         payload.setdefault("last_qa_verdict", None)
         payload.setdefault("last_qa_passed", None)
@@ -1180,6 +1186,22 @@ class AutoPipelineState:
         if self.required_grade not in {"A", "B", "C"}:
             msg = "required_grade must be one of A, B, or C"
             raise ValueError(msg)
+        from ouroboros.core.execution_preferences import resolve_execution_preferences
+
+        try:
+            resolved_preferences = resolve_execution_preferences(
+                self.efficiency_mode,
+                self.frugality_assurance,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid execution preferences: {exc}") from exc
+        if not isinstance(self.frugality_assurance_explicit, bool):
+            raise ValueError("frugality_assurance_explicit must be a boolean")
+        if (
+            resolved_preferences.frugality_assurance.value == "strict"
+            and not self.frugality_assurance_explicit
+        ):
+            raise ValueError("strict frugality assurance must be explicitly authorized")
         for field_name in ("max_interview_rounds", "max_repair_rounds"):
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
