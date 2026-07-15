@@ -148,6 +148,8 @@ def test_packaged_skill_frontmatter_exposes_tool_specific_context_keys() -> None
             "skip_run",
             "complete_product",
             "pipeline_timeout_seconds",
+            "efficiency_mode",
+            "frugality_assurance",
         ),
         "run": ("seed_path", "cwd"),
         "ralph": ("lineage_id",),
@@ -166,7 +168,12 @@ def test_packaged_skill_bodies_expose_tool_specific_context_keys() -> None:
     context_keys_by_tool = discover_skill_body_context_keys()
 
     expected_subset = {
-        "ouroboros_start_execute_seed": ("seed_content", "session_id"),
+        "ouroboros_start_execute_seed": (
+            "seed_content",
+            "efficiency_mode",
+            "frugality_assurance",
+            "session_id",
+        ),
         "ouroboros_job_wait": ("job_id", "cursor"),
         "ouroboros_job_result": ("job_id",),
         "ouroboros_ac_tree_hud": ("session_id", "cursor"),
@@ -261,6 +268,8 @@ def test_discover_skill_context_keys_merges_packaged_frontmatter_and_body_usage(
     )
     assert context_keys_by_tool["ouroboros_start_execute_seed"] == (
         "seed_content",
+        "efficiency_mode",
+        "frugality_assurance",
         "session_id",
     )
     assert context_keys_by_tool["ouroboros_start_auto"] == (
@@ -272,6 +281,8 @@ def test_discover_skill_context_keys_merges_packaged_frontmatter_and_body_usage(
         "skip_run",
         "complete_product",
         "pipeline_timeout_seconds",
+        "efficiency_mode",
+        "frugality_assurance",
     )
     assert context_keys_by_tool["ouroboros_interview"] == (
         "initial_context",

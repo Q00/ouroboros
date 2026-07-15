@@ -314,3 +314,23 @@ Using Codex CLI as the runtime backend requires an OpenAI API key and incurs sta
 - Number of tool calls and iterations
 
 Refer to [OpenAI's pricing page](https://openai.com/pricing) for current rates.
+
+## Active Conductor and Synapse
+
+Codex CLI is a proven Synapse `inform` and `after_turn` backend: Ouroboros
+resumes the same persisted Codex thread after the current turn, and only reports
+`applied` after the resumed provider turn emits an acknowledgement. It does not
+advertise live checkpoint `redirect` or hard `replace`.
+
+This becomes publicly callable only in the complete MCP host layer, which
+registers the discovery/delivery tools and shares one Synapse hub with run and
+Auto execution. Contract-only or runtime-only stack layers provide test and
+manual-smoke coverage but do not by themselves expose the public control path.
+
+During `ooo run`/`ooo auto`, the main host keeps one exclusive read-only observer
+and reports runtime/model routing, efficiency/frugality policy, the bounded
+Discover summary, total dependency/parallel levels, first scheduled ACs, route or
+harness changes, attention, and terminal assurance. The user can keep talking in
+the main session; it semantically selects the affected AC and never asks for
+internal IDs. English is the canonical guidance language, while the host phrases
+these facts naturally in the user's current conversation language.

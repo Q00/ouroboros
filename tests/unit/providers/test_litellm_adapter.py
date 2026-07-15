@@ -3,7 +3,9 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import litellm
+import pytest
+
+litellm = pytest.importorskip("litellm", reason="LiteLLM adapter tests require litellm")
 
 from ouroboros.config.models import CredentialsConfig, ProviderCredentials
 from ouroboros.core.errors import ConfigError, ProviderError

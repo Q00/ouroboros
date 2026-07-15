@@ -1,0 +1,18 @@
+{
+  "source": "Q00/ouroboros",
+  "purpose": "Local plugin manifest schema v0.6: promotes the observe-only on_rewind hook for Q00/ouroboros#1464 while leaving schema 0.5 reserved for #1462.",
+  "note": "Iterates on archived v0.4 without modifying it. Adds on_rewind, plugin:rewind:observe, fail_open-only validation, and an observation audit subject that is mutually exclusive with command. Generic lifecycle and tool-call hook contracts remain compatible.",
+  "local_extensions": {
+    "plugin.schema.json": [
+      "Bumped $id/title/schema_version const from 0.4 to 0.6; 0.5 remains reserved for #1462.",
+      "Added on_rewind to hooks[].name and plugin:rewind:observe to hooks[].permissions.",
+      "Constrained on_rewind to failure_policy='fail_open' and required the rewind observe scope in the hook declaration.",
+      "Preserved lifecycle/tool-call hooks and all archived v0.4 behavior."
+    ],
+    "audit-event.schema.json": [
+      "Added mutually exclusive command and observation subjects.",
+      "Defined observation.kind='rewind' with lineage aggregate identity.",
+      "Restricted rewind provenance to the bounded allowlist and SHA-256 digest shapes."
+    ]
+  }
+}

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
@@ -92,6 +93,34 @@ async def test_ralph_loop_runs_multiple_generations_until_converged() -> None:
     assert result.stop_reason == "converged"
     assert result.iteration_count == 3
     assert [call.get("seed_content") for call in evolve.calls] == ["goal: test", None, None]
+
+
+@pytest.mark.asyncio
+async def test_ralph_loop_forwards_conductor_directive_only_to_first_generation() -> None:
+    evolve = _FakeEvolveHandler(["continue", "converged"])
+    runner = RalphLoopRunner(evolve)
+    directive = ConductorDirective(
+        source_attention_event_id="attention_1",
+        instruction="Correct the rejected evidence without weakening the Seed.",
+        deterministic=True,
+    )
+
+    result = await runner.run(
+        RalphLoopConfig(
+            lineage_id="lin_conductor",
+            max_generations=2,
+            conductor_directive=directive,
+            conductor_decision_id="decision_1",
+            predecessor_execution_id="exec_predecessor",
+        )
+    )
+
+    assert result.status == "completed"
+    assert evolve.calls[0]["conductor_directive"] == directive.to_event_data()
+    assert evolve.calls[0]["conductor_decision_id"] == "decision_1"
+    assert evolve.calls[0]["predecessor_execution_id"] == "exec_predecessor"
+    assert "conductor_directive" not in evolve.calls[1]
+    assert "conductor_decision_id" not in evolve.calls[1]
 
 
 @pytest.mark.asyncio

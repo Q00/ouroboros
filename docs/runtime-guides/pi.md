@@ -275,3 +275,16 @@ Ouroboros workflows.
 **`ooo ...` is sent to the model as ordinary chat inside Pi**
 Run `ouroboros setup --runtime pi`, then restart Pi or run `/reload`. Confirm
 that `~/.pi/agent/extensions/ouroboros-ooo-bridge.ts` exists.
+
+## Active Conductor and Synapse
+
+Pi CLI is a proven Synapse `inform`/`after_turn` backend using the same exact Pi
+project session ID. It does not claim live checkpoint `redirect` or hard
+`replace`.
+
+During a run, one exclusive read-only observer relays the current runtime/model,
+efficiency assurance, bounded Discover targets, dependency/parallel levels,
+first scheduled ACs, attention, and terminal assurance. The main session stays
+available and selects the relevant AC semantically rather than asking the user
+for IDs. English is the canonical instruction language; the host renders the UX
+naturally in the current conversation language.

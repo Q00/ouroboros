@@ -2019,13 +2019,94 @@ class TestAsyncJobHandlers:
         assert observer["job_id"] == "job_test"
         assert observer["session_id"] == result.value.meta["session_id"]
         assert observer["execution_id"] == result.value.meta["execution_id"]
-        assert observer["wait"]["arguments"]["wait_for"] == "ac_change"
+        assert observer["wait"]["arguments"]["stream"] == "linked"
+        assert observer["wait"]["arguments"]["wait_for"] == "attention_or_ac_change"
         assert observer["relay"]["mode"] == "event_driven"
         assert observer["parent_session"]["availability"] == "available_after_handoff"
         assert observer["follow_result_job_keys"] == ["chained_evaluate_job_id"]
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_" in result.value.text_content
+
+    async def test_start_execute_seed_resume_reports_persisted_execution_preferences(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Resume acknowledgement must not replace quality-first with fresh defaults."""
+
+        class FakeEventStore:
+            async def initialize(self) -> None:
+                return None
+
+        class FakeJobManager:
+            async def allocate_job_id(self):
+                return "job_resume_preferences"
+
+            async def start_job(self, *, job_type, initial_message, runner, links, job_id=None):
+                runner.close()
+                return SimpleNamespace(
+                    job_id=job_id or "job_resume_preferences",
+                    links=links,
+                    status=SimpleNamespace(value="queued"),
+                    cursor=1,
+                )
+
+        tracker = SessionTracker.create(
+            "exec_resume_preferences",
+            "seed-resume-preferences",
+            session_id="orch_resume_preferences",
+        ).with_progress(
+            {
+                "execution_contract": {
+                    "execution_preferences": {
+                        "efficiency_mode": "quality_first",
+                        "frugality_assurance": "off",
+                        "frugality_assurance_explicit": False,
+                    }
+                }
+            }
+        )
+        reconstruction_calls = 0
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                nonlocal reconstruction_calls
+                reconstruction_calls += 1
+                assert session_id == "orch_resume_preferences"
+                return Result.ok(tracker)
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        execute_handler = MagicMock()
+        execute_handler.agent_runtime_backend = None
+        execute_handler.llm_backend = None
+        handler = StartExecuteSeedHandler(
+            execute_handler=execute_handler,
+            event_store=FakeEventStore(),
+            job_manager=FakeJobManager(),
+            agent_runtime_backend="codex",
+            opencode_mode=None,
+        )
+
+        result = await handler.handle(
+            {
+                "seed_content": "goal: test",
+                "session_id": "orch_resume_preferences",
+            }
+        )
+
+        assert result.is_ok
+        assert reconstruction_calls == 1
+        assert result.value.meta["execution_id"] == "exec_resume_preferences"
+        assert result.value.meta["efficiency_mode"] == "quality_first"
+        assert result.value.meta["frugality_assurance"] == "off"
+        assert "Efficiency Mode: quality_first" in result.value.text_content
+        assert "Frugality Assurance: off" in result.value.text_content
 
     async def test_start_execute_seed_plugin_marks_delegation_unverified(
         self,

@@ -21,6 +21,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed, ac_texts
@@ -344,6 +345,7 @@ class ReflectEngine:
         wonder_output: WonderOutput,
         lineage: OntologyLineage,
         regression_report: RegressionReport | None = None,
+        conductor_directive: ConductorDirective | None = None,
     ) -> Result[ReflectOutput, ProviderError]:
         """Reflect on execution results and propose evolution.
 
@@ -370,6 +372,7 @@ class ReflectEngine:
             wonder_output,
             lineage,
             regression_report,
+            conductor_directive,
         )
 
         messages = [
@@ -476,11 +479,31 @@ Guidelines:
         wonder: WonderOutput,
         lineage: OntologyLineage,
         regression_report: RegressionReport,
+        conductor_directive: ConductorDirective | None = None,
     ) -> str:
         parts = ["## Current Seed"]
         parts.append(f"Goal: {seed.goal}")
         parts.append(f"Constraints: {list(seed.constraints)}")
         parts.append(f"Acceptance Criteria: {list(ac_texts(seed.acceptance_criteria))}")
+
+        if conductor_directive is not None:
+            parts.append("\n## Active Conductor Successor Directive")
+            parts.append(f"Instruction: {conductor_directive.instruction}")
+            if conductor_directive.rejected_reasons:
+                parts.append("Rejected evidence reasons:")
+                parts.extend(f"  - {reason}" for reason in conductor_directive.rejected_reasons)
+            parts.append(
+                "Preserve approved direction exactly where these flags are true: "
+                f"goal={conductor_directive.preserve_goal}, "
+                "acceptance_criteria="
+                f"{conductor_directive.preserve_acceptance_criteria}, "
+                f"constraints={conductor_directive.preserve_constraints}, "
+                f"non_goals={conductor_directive.preserve_non_goals}."
+            )
+            parts.append(
+                "Use the directive to correct implementation or evidence. Do not relax a "
+                "preserved field to make evaluation easier."
+            )
 
         parts.append(f"\n## Ontology: {seed.ontology_schema.name}")
         parts.append(f"Description: {seed.ontology_schema.description}")

@@ -985,6 +985,75 @@ class TestSessionRelatedEvents:
         assert "other-execution-child" not in aggregate_ids
         assert "sess-related-only" not in aggregate_ids
 
+    async def test_latest_execution_job_status_follows_linked_job_stream(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        execution_id = "exec-job-status"
+        await event_store.append(
+            BaseEvent(
+                type="mcp.job.created",
+                aggregate_type="job",
+                aggregate_id="job-status-1",
+                data={
+                    "status": "queued",
+                    "links": {"execution_id": execution_id},
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="mcp.job.interrupted",
+                aggregate_type="job",
+                aggregate_id="job-status-1",
+                data={"status": "interrupted"},
+            )
+        )
+
+        assert await event_store.get_latest_execution_job_status(execution_id) == ("interrupted")
+        assert await event_store.get_latest_execution_job_status("exec-missing") is None
+
+    async def test_session_signal_query_is_exact_and_replay_ordered(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        base = datetime.now(UTC)
+        matching = [
+            BaseEvent(
+                id=f"signal-event-{index}",
+                type=f"control.session.signal.{state}",
+                timestamp=base + timedelta(seconds=index),
+                aggregate_type="session_signal",
+                aggregate_id="sig_exact",
+                data={
+                    "expected_execution_id": "exec_exact",
+                    "target_session_scope_id": "scope_exact",
+                    "target_session_attempt_id": "attempt_exact",
+                },
+            )
+            for index, state in enumerate(("requested", "accepted", "queued"))
+        ]
+        unrelated = BaseEvent(
+            type="control.session.signal.queued",
+            aggregate_type="session_signal",
+            aggregate_id="sig_other",
+            data={
+                "expected_execution_id": "exec_exact",
+                "target_session_scope_id": "scope_exact",
+                "target_session_attempt_id": "attempt_other",
+            },
+        )
+        for event in [*matching, unrelated]:
+            await event_store.append(event)
+
+        result = await event_store.query_session_signal_events(
+            execution_id="exec_exact",
+            session_scope_id="scope_exact",
+            session_attempt_id="attempt_exact",
+        )
+
+        assert [event.id for event in result] == [event.id for event in matching]
+
     async def test_session_related_events_do_not_join_on_lossy_normalized_scope(
         self,
         event_store: EventStore,

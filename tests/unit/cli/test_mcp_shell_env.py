@@ -93,6 +93,28 @@ def test_shell_env_cache_skips_login_shell(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("CACHED_TEST_API_KEY", raising=False)
 
 
+def test_shell_env_cache_merges_other_provider_key_when_anthropic_is_present(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Mixed-backend MCP workers must not skip OpenAI env recovery."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-present")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cache_file = tmp_path / "shell-env.json"
+    cache_file.write_text(json.dumps({"OPENAI_API_KEY": "openai-cached"}), encoding="utf-8")
+    monkeypatch.setattr(mcp, "_SHELL_ENV_CACHE_FILE", cache_file)
+
+    def fail_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("login shell must not run on a cache hit")
+
+    monkeypatch.setattr(mcp.subprocess, "run", fail_run)
+
+    mcp._ensure_shell_env(timeout=1.25)
+
+    assert os.environ["OPENAI_API_KEY"] == "openai-cached"
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
 def test_shell_env_cache_written_with_whitelisted_subset(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin")

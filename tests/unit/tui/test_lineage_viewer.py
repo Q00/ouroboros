@@ -11,6 +11,8 @@ Tests for:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from ouroboros.core.lineage import (
@@ -22,7 +24,9 @@ from ouroboros.core.lineage import (
     OntologyLineage,
 )
 from ouroboros.core.seed import OntologyField, OntologySchema
+from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.evolution.rewind import CommittedRewindResult
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.tui.events import GenerationSelected, LineageSelected
 from ouroboros.tui.screens.lineage_detail import GenerationDetailPanel, LineageDetailScreen
@@ -421,3 +425,93 @@ class TestLineageDetailScreenRewind:
         mock_store = object()
         screen = LineageDetailScreen(lineage, event_store=mock_store)
         assert screen._event_store is mock_store
+
+    @pytest.mark.asyncio
+    async def test_perform_rewind_delegates_before_checkout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lineage = make_lineage()
+        calls: list[tuple[OntologyLineage, int]] = []
+
+        class _Committer:
+            async def rewind_to(self, current: OntologyLineage, target: int):
+                calls.append((current, target))
+                return Result.ok(
+                    CommittedRewindResult(
+                        lineage=current.rewind_to(target),
+                        lineage_id=current.lineage_id,
+                        from_generation=current.current_generation,
+                        to_generation=target,
+                        rewind_event_id="rewind-tui-1",
+                        rewind_occurred_at=datetime(2026, 7, 13, tzinfo=UTC),
+                    )
+                )
+
+        class _Process:
+            returncode = 0
+
+            async def communicate(self):
+                return b"dirty\n", b""
+
+        class _App:
+            def __init__(self) -> None:
+                self.popped = False
+
+            def pop_screen(self) -> None:
+                self.popped = True
+
+        app = _App()
+        notifications: list[str] = []
+
+        async def _create_subprocess(*_args, **_kwargs):
+            return _Process()
+
+        def _get_app(_screen):
+            return app
+
+        def _notify(message, **_kwargs):
+            notifications.append(message)
+
+        monkeypatch.setattr(
+            "ouroboros.tui.screens.lineage_detail.asyncio.create_subprocess_exec",
+            _create_subprocess,
+        )
+        monkeypatch.setattr(LineageDetailScreen, "app", property(_get_app))
+        screen = LineageDetailScreen(lineage, rewind_committer=_Committer())
+        monkeypatch.setattr(screen, "notify", _notify)
+
+        await screen._perform_rewind(1)
+
+        assert calls == [(lineage, 1)]
+        assert screen._lineage.current_generation == 1
+        assert app.popped is True
+        assert any("working tree is dirty" in message for message in notifications)
+
+    @pytest.mark.asyncio
+    async def test_commit_failure_starts_no_checkout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.core.errors import OuroborosError
+
+        lineage = make_lineage()
+
+        class _Committer:
+            async def rewind_to(self, current, target):  # noqa: ARG002
+                return Result.err(OuroborosError("commit failed"))
+
+        async def _unexpected_subprocess(*args, **kwargs):
+            raise AssertionError("checkout must not start when commit fails")
+
+        notifications: list[str] = []
+
+        def _notify(message, **_kwargs):
+            notifications.append(message)
+
+        monkeypatch.setattr(
+            "ouroboros.tui.screens.lineage_detail.asyncio.create_subprocess_exec",
+            _unexpected_subprocess,
+        )
+        screen = LineageDetailScreen(lineage, rewind_committer=_Committer())
+        monkeypatch.setattr(screen, "notify", _notify)
+
+        await screen._perform_rewind(1)
+
+        assert notifications == ["Failed to commit rewind: commit failed"]

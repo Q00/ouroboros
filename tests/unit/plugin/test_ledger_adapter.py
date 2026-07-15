@@ -8,10 +8,13 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 import pytest
 
+from ouroboros.events.base import BaseEvent
 from ouroboros.plugin.ledger_adapter import (
     AUDIT_EVENT_TYPES,
     PLUGIN_AGGREGATE_TYPE,
+    PluginLedgerAdapter,
     make_event_sink,
+    plugin_event_to_base_event,
     unwrap_plugin_event,
     wrap_plugin_event,
 )
@@ -84,6 +87,44 @@ def test_wrap_basic_envelope() -> None:
     # payload contains the full audit event
     assert env["payload"]["schema_version"] == "0.1"
     assert env["payload"]["plugin"]["name"] == "github-pr-ops"
+
+
+def test_plugin_event_to_base_event_preserves_audit_subject() -> None:
+    audit_event = _audit_event("plugin.completed")
+
+    event = plugin_event_to_base_event(audit_event, correlation_id="corr-base")
+
+    assert event.type == "plugin.completed"
+    assert event.aggregate_type == "plugin"
+    assert event.aggregate_id == "corr-base"
+    assert event.data == audit_event
+
+
+@pytest.mark.asyncio
+async def test_plugin_ledger_adapter_flushes_ordered_batch() -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.initialized = False
+            self.batches: list[list[BaseEvent]] = []
+
+        async def initialize(self) -> None:
+            self.initialized = True
+
+        async def append_batch(self, events) -> None:
+            self.batches.append(list(events))
+
+    store = _Store()
+    adapter = PluginLedgerAdapter(store, correlation_id="corr-ledger")
+    adapter.audit_sink(_audit_event("plugin.invoked"))
+    adapter.audit_sink(_audit_event("plugin.completed"))
+
+    await adapter.flush()
+
+    assert store.initialized is True
+    assert [[event.type for event in batch] for batch in store.batches] == [
+        ["plugin.invoked", "plugin.completed"]
+    ]
+    assert adapter.pending_events == ()
 
 
 def test_wrap_does_not_mutate_input() -> None:

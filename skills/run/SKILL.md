@@ -74,12 +74,28 @@ fallback instead of retrying the failing call.
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
+   Before a fresh start, when the user has not already chosen an efficiency
+   policy, ask in outcome language:
+
+   - **Efficient execution** — start parallel/decomposed work economically and
+     strengthen the route only when recovery requires it. Send
+     `efficiency_mode="adaptive"` and `frugality_assurance="observe"`.
+   - **Quality-first execution** — keep child work at the parent starting tier.
+     Send `efficiency_mode="quality_first"` and `frugality_assurance="off"`.
+
+   `frugality_assurance="strict"` is a separate explicit opt-in because it may
+   spend extra work on proof. Never enable it merely because efficient execution
+   was chosen. Do not ask again on resume; the server restores the persisted
+   policy and rejects an attempted resume-time change.
+
 3. **Start background execution** with `ouroboros_start_execute_seed`:
    ```
    Tool: ouroboros_start_execute_seed
    Arguments:
      seed_content: <the seed YAML>
      model_tier: "medium"  (or as specified by user)
+     efficiency_mode: <adaptive or quality_first>
+     frugality_assurance: <observe, off, or explicit strict>
      max_iterations: 10    (or as specified by user)
    ```
    This returns immediately with a `job_id`, `session_id`, and `execution_id`.
@@ -122,9 +138,16 @@ fallback instead of retrying the failing call.
    Session ID: <session_id>
    Execution ID: <execution_id>
    Live view: <dashboard_url, or `ouroboros tui open`>
+   Runtime/harness: <response.meta.runtime_backend>
+   LLM backend: <response.meta.llm_backend>
+   Efficiency: <response.meta.efficiency_mode>
+   Frugality assurance: <response.meta.frugality_assurance>
 
-   A read-only observer will post meaningful progress, attention, and completion
-   events here. This conversation stays available while the run continues.
+   Observation: <confirmed read-only child observer, or durable catch-up mode>.
+   With a confirmed observer, meaningful progress, attention, and completion
+   events will be posted here. Without one, the run still survives this turn
+   and I will catch up from durable events on your next message or status request.
+   This conversation stays available while the run continues.
    We can refine requirements, inspect or review code, or work on an unrelated
    task in an isolated worktree. I will check for active-worker conflicts before
    editing this run's workspace.
@@ -135,6 +158,12 @@ fallback instead of retrying the failing call.
    child/subagent session primitive, spawn exactly one observer session and pass
    that object unchanged. Codex requires explicit native subagent delegation;
    Claude Code uses one Task/Agent child. The observer must:
+
+   - On Codex, call the native `spawn_agent` primitive exactly once with
+     `task_name="run_observer"` and include `response.meta.job_observer`
+     unchanged in the child message. A `wait` call is not a spawn.
+   - Require the spawn result to return a live child ID/path before saying an
+     observer is connected or before ending the start turn.
 
    - remain read-only: no repository edits, execution control, or worker fan-out;
    - own the job cursor exclusively and reload deferred MCP schemas immediately
@@ -158,20 +187,54 @@ fallback instead of retrying the failing call.
    Handle observer messages as events, not as a transcript:
 
    - `phase_changed` / `progress_advanced`: relay at most 1-2 concise lines.
+     Interpret the structured subtype, not raw logs:
+     - `run_configuration`: state the current runtime/harness, starting model or
+       tier when known, efficiency mode, and frugality assurance. If the exact
+       model is not known yet, say it will be reported by the first routing event.
+     - `execution_plan`: state total ACs, total dependency/parallel levels,
+       whether work can run in parallel, and the first scheduled AC summaries.
+     - `discovery_summary`: say which bounded targets the AC is examining and
+       the purpose; never expose search queries, raw commands, or reasoning.
+     - `level_started` / `level_completed`: say which parallel level is active
+       or finished and the meaningful success/failure counts.
+     - `ac_routing` / `harness_changed`: say "currently running with" and report
+       only initial routing or a real model/tier/harness change.
+     - `ac_verified`: report the completed AC and its compact assurance evidence.
    - `attention_required`: surface the blocker or pending decision immediately
      and ask the user only when human judgment is required.
    - `terminal`: fetch/present the final result and any chained evaluation.
+   - Synapse `.queued` / `.delivering`: say the exact AC has a pending or claimed
+     intent signal and name
+     the effective boundary; do not claim application yet.
+   - Synapse `.applied` / `.completed`: confirm runtime-proven application and
+     relay the bounded AC reply when present.
+   - Synapse `.rejected` / `.delivery_uncertain`: surface immediately and never
+     claim the AC changed course.
    - Suppress unchanged heartbeats and raw tool output.
+
+   Render every relay in the user's current conversation language. Keep event
+   codes and effective-mode values unchanged only when exact diagnostics help.
+   These are English canonical host instructions. Phrase the facts naturally in
+   the active conversation language.
 
    This ownership split is the default for SOL-class models: the main model
    performs one start handoff, while a small isolated context owns the repetitive
    wait/result state machine.
 
+   If child creation is unavailable, fails, or returns no live child, do not
+   claim that an observer exists or promise live proactive messages. The
+   detached worker survives the stdio MCP turn. Tell the user that progress is
+   durable and will be caught up on the next parent turn or explicit status
+   request. Keep the turn open only when the user explicitly asked for live
+   watching; then use the fallback below.
+
 6. **Fallback: low-token relay loop in the main session.**
 
-   Use this only when `response.meta.job_observer` is absent or the host has no
-   independent child session primitive. Do not run it in parallel with a
-   delegated observer.
+   Use this only when `response.meta.job_observer` is absent, the host has no
+   independent child session primitive, and the user explicitly asked to keep
+   watching in the current turn. Do not run it in parallel with a delegated
+   observer. Otherwise end the turn safely and catch up from the same cursor on
+   the next parent turn.
 
    Use `ouroboros_job_wait`, not repeated `ouroboros_ac_tree_hud`, for routine
    monitoring. Keep the latest cursor and previous progress counters from the
@@ -200,6 +263,8 @@ fallback instead of retrying the failing call.
        cursor: <cursor>
        timeout_seconds: 180
        view: "summary"
+       stream: "linked"
+       wait_for: "attention_or_ac_change"
 
      cursor = response.meta.cursor
 
@@ -264,6 +329,54 @@ fallback instead of retrying the failing call.
 
    Do not paste the full raw tool output unless the user asks for raw status.
    Do not add speculative ETA unless the tool provides one.
+
+   **Synapse intent refinement:** When the user gives additive implementation
+   intent during an active run, the main session owns target selection; never ask
+   the user for internal AC/session IDs.
+
+   Immediately before each Synapse call, reload its deferred schemas with
+   `tool discovery query: "+ouroboros session signal"`.
+
+   1. Take `execution_id` from the start result or observer contract and call
+      `ouroboros_session_signal_targets(execution_id=...)`.
+   2. Match the user's meaning against each target's `ac_content`, display path,
+      and current HUD activity when needed. One active target may be selected
+      directly. With multiple targets, select only when one is materially more
+      relevant; ask a short user-language clarification only for genuine ties.
+   3. For additive implementation refinement, call `ouroboros_session_signal`
+      with the selected target's exact scope/attempt/execution guards,
+      `contract_effect="additive"`, `source="user"`, `mode="redirect"`, and
+      `fallback_mode="after_turn"`. Copy `expected_contract_version` when target
+      discovery supplies it, and create one stable idempotency key for this exact
+      user turn. If the target went stale, rediscover once instead of asking for
+      IDs.
+   4. When the user asks the AC a read-only question or requests assurance rather
+      than an implementation change, use `mode="inform"` and
+      `contract_effect="additive"`, and omit `fallback_mode` entirely because it
+      is valid only for redirect. Synapse runs a no-tools reply turn when the
+      runtime supports it; relay the bounded reply from the completed event.
+   5. Tell the user which AC was selected and report the returned effective mode.
+      Wait for observer `.applied` or `.completed` before saying it was reflected.
+
+   Never use Synapse to change approved goals, ACs, constraints, or non-goals;
+   those require an approved shared successor or replacement contract.
+
+   **Active Conductor attention handling:** `recommended_host_actions` is the
+   authoritative menu. Never invent a mutating tool call.
+
+   1. VERIFY with at most one short-lived read-only host child using the supplied
+      evidence IDs. If the host has no verifier primitive, surface the attention
+      and stop before mutation.
+   2. DECIDE among the ordered menu actions. Engine-owned retry/routing must be
+      closed before any successor action is considered.
+   3. LOG `phase="selected"` through
+      `ouroboros_record_conductor_decision` before ACT. For a specification
+      change in run mode, obtain explicit user approval and bind its receipt.
+   4. ACT only when the menu names a currently registered MCP tool. A corrective
+      successor must preserve the approved contract unless the user approved the
+      shared specification change.
+   5. LOG exactly one terminal `completed`, `failed`, or `declined` outcome. Do
+      not silently retry a failed conductor action.
 
 7. **Use `ouroboros_ac_tree_hud` only for manual drill-down or anomaly checks.**
 

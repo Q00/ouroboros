@@ -19,6 +19,10 @@ from ouroboros.dashboard.board import (
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.tui.app import OuroborosTUI
+from ouroboros.tui.events import (
+    FrugalityRetrospectiveReported,
+    create_message_from_event,
+)
 
 # A fixed, mixed-provider run: a run-level backend (claude) plus one worker that
 # ran on codex_cli. ac_1 must resolve to its per-worker provider; ac_2 has no
@@ -255,6 +259,50 @@ class TestTelemetryFoldAgreement:
         assert ledger.model_by_node == {}
         assert ledger.tokens_by_node == {}
         assert ledger.total_tokens == 0.0
+
+    def test_web_reduce_and_tui_incremental_fold_agree_on_retrospective(self) -> None:
+        payload = {
+            "execution_id": "exec_1",
+            "session_id": "sess_1",
+            "retrospective_version": "v1",
+            "trigger": "execution_finalized",
+            "terminal_status": "completed",
+            "evidence_only": True,
+            "coverage": {
+                "measured_attempts": 2,
+                "unknown_attempts": 1,
+                "invalid_attempts": 0,
+                "total_measured_tokens": 150.0,
+            },
+            "evidence_signals": [
+                {
+                    "name": "retry_associated_spend",
+                    "token_spend": 100.0,
+                    "attempt_count": 1,
+                }
+            ],
+        }
+        board = reduce_board(
+            [
+                {
+                    "event_type": "execution.frugality_retrospective.reported",
+                    "payload": payload,
+                }
+            ],
+            execution_id="exec_1",
+        )
+        event = BaseEvent(
+            type="execution.frugality_retrospective.reported",
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data=payload,
+        )
+        message = create_message_from_event(event)
+        assert isinstance(message, FrugalityRetrospectiveReported)
+        app = OuroborosTUI(execution_id="exec_1")
+        app.on_frugality_retrospective_reported(message)
+
+        assert app.state.frugality_retrospective == board["meta"]["frugality_retrospective"]
 
 
 class TestProviderIdentityReachesTui:

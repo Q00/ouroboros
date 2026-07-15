@@ -236,10 +236,16 @@ class HandlerRunStarter:
         *,
         cwd: str,
         use_worktree: bool = True,
+        efficiency_mode: str = "adaptive",
+        frugality_assurance: str = "observe",
+        frugality_assurance_explicit: bool = False,
     ) -> None:
         self.handler = handler
         self.cwd = cwd
         self.use_worktree = use_worktree
+        self.efficiency_mode = efficiency_mode
+        self.frugality_assurance = frugality_assurance
+        self.frugality_assurance_explicit = frugality_assurance_explicit
 
     async def __call__(self, seed: Seed, *, idempotency_key: str = "") -> dict[str, object]:
         seed_yaml = yaml.dump(
@@ -249,7 +255,10 @@ class HandlerRunStarter:
             "seed_content": seed_yaml,
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
+            "efficiency_mode": self.efficiency_mode,
         }
+        if self.frugality_assurance_explicit:
+            arguments["frugality_assurance"] = self.frugality_assurance
         if idempotency_key:
             arguments["idempotency_key"] = idempotency_key
         result = _unwrap(

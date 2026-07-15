@@ -8,6 +8,7 @@ Public API:
 """
 
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
+from ouroboros.mcp.tools.conductor_handler import RecordConductorDecisionHandler
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     ACDashboardHandler,
@@ -57,6 +58,7 @@ from ouroboros.mcp.tools.definitions import (
     start_ralph_handler,
 )
 from ouroboros.mcp.tools.registry import ToolRegistry
+from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
 
 __all__ = [
     "ACTreeHUDHandler",
@@ -78,6 +80,7 @@ __all__ = [
     "MeasureDriftHandler",
     "OUROBOROS_TOOLS",
     "QueryEventsHandler",
+    "RecordConductorDecisionHandler",
     "RalphHandler",
     "StartRalphHandler",
     "SessionStatusHandler",
@@ -85,6 +88,8 @@ __all__ = [
     "StartEvolveStepHandler",
     "StartExecuteSeedHandler",
     "ToolRegistry",
+    "SynapseSignalHandler",
+    "SynapseTargetsHandler",
     "ac_tree_hud_handler",
     "cancel_job_handler",
     "evaluate_handler",

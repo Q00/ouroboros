@@ -18,6 +18,7 @@ from ouroboros.tui.events import (
     DriftUpdated,
     ExecutionUpdated,
     FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     PauseRequested,
     PhaseChanged,
     ResumeRequested,
@@ -317,6 +318,38 @@ class TestOuroborosTUIMessageHandlers:
             FrugalityProofEvaluated(status="fail_no_frugality", token_reduction_pct=None, reason="")
         )
         assert app.state.frugality_summary == "⚖ frugal −20% tok"
+
+    def test_on_frugality_retrospective_reported_sets_neutral_summary_once(self) -> None:
+        app = OuroborosTUI()
+        summary = {
+            "terminal_status": "failed",
+            "measured_attempts": 3,
+            "unknown_attempts": 1,
+            "invalid_attempts": 0,
+            "total_measured_tokens": 250.0,
+            "retry_associated_tokens": 100.0,
+            "retry_associated_attempts": 1,
+            "unaccepted_tokens": 150.0,
+            "unaccepted_attempts": 2,
+        }
+
+        app.on_frugality_retrospective_reported(
+            FrugalityRetrospectiveReported(execution_id="exec_1", summary=summary)
+        )
+
+        assert app.state.frugality_retrospective == summary
+        assert app.state.frugality_retrospective_summary == (
+            "Evidence: retry-associated 100 tok | unaccepted 150 tok | "
+            "coverage 3 measured/1 unknown/0 invalid"
+        )
+
+        app.on_frugality_retrospective_reported(
+            FrugalityRetrospectiveReported(
+                execution_id="exec_1",
+                summary={**summary, "measured_attempts": 999},
+            )
+        )
+        assert app.state.frugality_retrospective == summary
 
     def test_apply_provider_tags_stamps_frugality_telemetry_onto_tree(self) -> None:
         """Folded tier/model/tokens are stamped onto the AC tree node for rendering."""

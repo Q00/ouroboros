@@ -191,6 +191,31 @@ def test_explicit_reference_confirmation_promotes_exact_user_statement() -> None
     assert promoted.confirmation_authority.value == "user"
 
 
+@pytest.mark.parametrize(
+    "confirmation",
+    [
+        "확인된 요구사항은 키보드만으로 탐색할 수 있어야 한다는 것입니다.",
+        "確認済みの要件は、キーボードだけで移動できることです。",
+    ],
+)
+def test_non_english_confirmation_after_reference_contrast_is_preserved(
+    confirmation: str,
+) -> None:
+    distillation = build_requirement_distillation(_reference_state(confirmation=confirmation))
+
+    applied = apply_requirement_distillation(_requirements(), distillation)
+
+    assert applied.promotion.is_ready_for_seed
+    assert applied.requirements["acceptance_criteria"] == confirmation
+    promoted = [
+        candidate
+        for candidate in applied.promotion.promoted
+        if candidate.candidate_id == "round-3:requirement"
+    ][0]
+    assert promoted.content_source is CandidateContentSource.USER_STATED
+    assert promoted.confirmation_authority is ConfirmationAuthority.USER
+
+
 def test_non_reference_interview_preserves_legacy_extraction() -> None:
     state = InterviewState(
         interview_id="legacy",

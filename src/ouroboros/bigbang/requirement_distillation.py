@@ -142,7 +142,9 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
                 text=answer,
             )
         )
-        if not _EXPLICIT_REQUIREMENT_RE.search(answer):
+        explicitly_required = bool(_EXPLICIT_REQUIREMENT_RE.search(answer))
+        confirmed_after_reference_contrast = bool(resolved_reference_ids)
+        if not explicitly_required and not confirmed_after_reference_contrast:
             continue
 
         referenced = tuple(

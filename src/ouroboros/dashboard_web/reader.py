@@ -40,6 +40,7 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.ac.model_routed",
     "execution.ac.token_attribution.reported",
     "execution.frugality_proof.evaluated",
+    "execution.frugality_retrospective.reported",
 )
 
 

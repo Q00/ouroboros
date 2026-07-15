@@ -159,6 +159,8 @@ class TestHermesCliRuntime:
         assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
         assert runtime.capabilities.permission_mode_support is ParamSupport.TRANSLATED
+        assert runtime.capabilities.targeted_resume is True
+        assert runtime.capabilities.session_signals.after_turn_delivery is False
 
     def test_constructor_accepts_llm_backend(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
@@ -1126,6 +1128,25 @@ class TestHermesCliRuntime:
         assert messages[0].data["subtype"] == "error"
         assert messages[0].content == "Hermes execution failed:\nboom"
         assert messages[0].resume_handle == handle
+
+    @pytest.mark.asyncio
+    async def test_execute_task_reads_success_session_id_from_stderr(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess(
+            "Completed",
+            stderr="session_id: 20260713_004624_559062\n",
+        )
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            messages = [message async for message in runtime.execute_task("Do the thing")]
+
+        assert len(messages) == 1
+        assert messages[0].content == "Completed"
+        assert messages[0].resume_handle is not None
+        assert messages[0].resume_handle.native_session_id == "20260713_004624_559062"
 
     @pytest.mark.asyncio
     async def test_execute_task_times_out_when_hermes_never_emits_output(self) -> None:

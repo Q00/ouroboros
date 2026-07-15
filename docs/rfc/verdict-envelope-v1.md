@@ -1,9 +1,10 @@
 # Verdict Envelope v1
 
-Issue: #814
+Issue history: #814, closed and folded into #813 on 2026-06-07.
 
-Status: schema-first design RFC. This document fixes the multi-persona verdict
-output shape before subsystem adoption.
+Status: schema-first design RFC and output companion to
+`docs/rfc/symposium-deliberation.md`. This document fixes the multi-persona
+verdict output shape before subsystem adoption.
 
 ## Problem
 
@@ -42,7 +43,7 @@ or dataclass models in implementation PRs.
   ],
   "evidence_used": ["evt_123", "artifact_456"],
   "transcript_ref": "evt_transcript_789",
-  "follow_up_issue_refs": ["#1306"],
+  "follow_up_issue_refs": [],
   "metadata": {
     "source": "evaluation.stage3"
   }
@@ -60,7 +61,9 @@ Field rules:
 - `dissent` is optional and contains pairwise or topic-level disagreement.
 - `evidence_used` contains stable event IDs, artifact IDs, fact IDs, or handles
   that substantiate the verdict.
-- `transcript_ref` is optional until #819 provides durable transcript storage.
+- `transcript_ref` is optional and is `null` or absent by default. Any durable
+  transcript storage requires a fresh issue with explicit privacy, retention,
+  purge, and retrieval policy.
 - `follow_up_issue_refs` lists implementation issues opened from this design.
 - `metadata` is for subsystem-specific values that must not define verdict
   semantics.
@@ -78,19 +81,26 @@ Field rules:
 | MCP tool text outputs | `verdict` plus `metadata.rendered_text` | Text must stop being the semantic source of truth. |
 | MCP tool meta outputs | `metadata` | Existing meta can be preserved under namespaced keys. |
 
-## Follow-up Implementation Issues
+## Fresh Follow-up Implementation Issues
 
-- #814 follow-up A: add a shared `VerdictEnvelopeV1` model and JSON schema.
-- #814 follow-up B: adapt `ConsensusResult` / deliberative evaluation outputs
+- Add a shared `VerdictEnvelopeV1` model and JSON schema.
+- Adapt `ConsensusResult` / deliberative evaluation outputs
   to expose `VerdictEnvelopeV1`.
-- #814 follow-up C: emit `verdict_envelope` from Stage 3 evaluation events.
-- #814 follow-up D: add MCP tool result metadata for `verdict_envelope` while
+- Emit `verdict_envelope` from Stage 3 evaluation events.
+- Add MCP tool result metadata for `verdict_envelope` while
   preserving current rendered text for compatibility.
-- #1306: use typed verifier output and retry admission for TraceGuard-backed H1
-  deliver verdicts.
+
+These must be opened as fresh issues after #813 is accepted. The folded issue
+number #814 is historical and is not an active implementation tracker.
+
+## Existing Related History
+
+- #1306, now closed, tracked typed verifier output and retry admission for
+  TraceGuard-backed H1 deliver verdicts. It is evidence, not an active child of
+  #813 or #814.
 
 ## Non-goals
 
 - Do not require every user-facing response to auto-synthesize a verdict.
 - Do not replace subsystem-specific detailed result models.
-- Do not make transcript storage mandatory before #819.
+- Do not make transcript storage mandatory in V1.

@@ -1,4 +1,4 @@
-"""Integration test: built wheel ships the vendored 0.1 schema assets.
+"""Integration test: built wheel preserves packaged assets and metadata.
 
 This guards the failure mode the round-2 bot review flagged and
 round-4 sharpened: the unit-level `resources.files()` check passes
@@ -10,9 +10,11 @@ shipped archive.
 
 from __future__ import annotations
 
+from email.parser import Parser
 from pathlib import Path
 import shutil
 import subprocess
+import tomllib
 import zipfile
 
 import pytest
@@ -27,10 +29,8 @@ BUILTIN_GLOSSARY_PACKS = ("ui_ux_basics.yaml",)
     shutil.which("uv") is None,
     reason="uv not on PATH — wheel build cannot run in this environment.",
 )
-def test_built_wheel_ships_vendored_schemas(tmp_path: Path) -> None:
-    """Build the wheel for real and assert each supported schema version's
-    `plugin.schema.json` and `audit-event.schema.json` are present in the
-    shipped archive — exactly once each, with no duplicate ZIP entries.
+def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
+    """Build the wheel and verify schema assets plus dependency markers.
 
     A future change that drops the `force-include` for
     `src/ouroboros/plugin/schemas` from `pyproject.toml` will fail this
@@ -80,6 +80,25 @@ def test_built_wheel_ships_vendored_schemas(tmp_path: Path) -> None:
             "`pyproject.toml` `force-include` regression. "
             f"Missing: {sorted(missing)}. Wheel ships: {sorted(present_set)}"
         )
+
+        metadata_paths = [name for name in names if name.endswith(".dist-info/METADATA")]
+        assert len(metadata_paths) == 1, f"expected one METADATA file, got {metadata_paths}"
+        metadata = Parser().parsestr(archive.read(metadata_paths[0]).decode("utf-8"))
+        requires_dist = metadata.get_all("Requires-Dist") or []
+
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    litellm_requirement = pyproject["project"]["optional-dependencies"]["litellm"][0]
+    litellm_pin = litellm_requirement.partition(";")[0].strip()
+    wheel_litellm_requirements = [
+        requirement for requirement in requires_dist if requirement.startswith(litellm_pin)
+    ]
+
+    assert len(wheel_litellm_requirements) == 2
+    for extra in ("all", "litellm"):
+        assert any(
+            "python_version < '3.14'" in requirement and f"extra == '{extra}'" in requirement
+            for requirement in wheel_litellm_requirements
+        ), f"wheel metadata lost the LiteLLM Python marker for [{extra}]"
 
 
 @pytest.mark.skipif(

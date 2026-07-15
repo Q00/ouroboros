@@ -1693,6 +1693,9 @@ def build_execute_subagent(
     skip_qa: bool = False,
     auto_evaluate: bool = True,
     model_tier: str | None = None,
+    efficiency_mode: str = "adaptive",
+    frugality_assurance: str = "observe",
+    frugality_assurance_explicit: bool = False,
     max_parallel_workers: int | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for seed execution.
@@ -1706,6 +1709,8 @@ def build_execute_subagent(
     scope_lines: list[str] = [
         f"Session ID: {session_id or 'new'}",
         f"Max Iterations: {max_iterations}",
+        f"Efficiency Mode: {efficiency_mode}",
+        f"Frugality Assurance: {frugality_assurance}",
     ]
     if seed_path:
         scope_lines.append(f"Seed File Path: {seed_path}")
@@ -1786,6 +1791,9 @@ def build_execute_subagent(
         "skip_qa": skip_qa,
         "auto_evaluate": auto_evaluate,
         "model_tier": model_tier,
+        "efficiency_mode": efficiency_mode,
+        "frugality_assurance": frugality_assurance,
+        "frugality_assurance_explicit": frugality_assurance_explicit,
         "max_parallel_workers": max_parallel_workers,
     }
 
@@ -2094,6 +2102,9 @@ def build_evolve_subagent(
     parallel: bool = True,
     skip_qa: bool = False,
     project_dir: str | None = None,
+    conductor_directive: Mapping[str, Any] | None = None,
+    conductor_decision_id: str | None = None,
+    predecessor_execution_id: str | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for one generation of the evolutionary loop.
 
@@ -2108,6 +2119,18 @@ def build_evolve_subagent(
     project_dir_note = ""
     if project_dir:
         project_dir_note = f"\n## Project Directory\n{project_dir}\n"
+
+    conductor_note = ""
+    if conductor_directive is not None:
+        conductor_blob = _bounded_json(conductor_directive, 6_000)
+        conductor_note = (
+            "\n## Active Conductor Successor Directive\n"
+            f"decision_id: {conductor_decision_id or 'missing'}\n"
+            f"predecessor_execution_id: {predecessor_execution_id or 'missing'}\n"
+            "Apply this bounded directive additively. Preserve every direction field "
+            "marked true and do not weaken the Seed.\n"
+            f"```json\n{conductor_blob}\n```\n"
+        )
 
     parallel_note = (
         "\n## Parallel\nExecute acceptance criteria in parallel.\n"
@@ -2149,7 +2172,7 @@ Gen 2+ lifecycle (no seed — reconstruct from prior generation):
 
 ## Lineage ID
 {lineage_id}
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{conductor_note}
 Return a generation report containing: generation number, phase, action
 (continue / converged / stagnated / exhausted / failed), ontology similarity,
 evaluation verdict, and any ontology delta (added / removed / modified
@@ -2164,6 +2187,10 @@ call you again."""
         "skip_qa": skip_qa,
         "project_dir": project_dir,
     }
+    if conductor_directive is not None:
+        context["conductor_directive"] = dict(conductor_directive)
+        context["conductor_decision_id"] = conductor_decision_id
+        context["predecessor_execution_id"] = predecessor_execution_id
 
     return build_subagent_payload(
         tool_name="ouroboros_evolve_step",
@@ -2191,6 +2218,9 @@ def build_ralph_subagent(
     execution_id: str | None = None,
     checkpoint_commits: tuple[dict[str, Any], ...] = (),
     checkpoint_attempted_ac_ids: tuple[str, ...] = (),
+    conductor_directive: Mapping[str, Any] | None = None,
+    conductor_decision_id: str | None = None,
+    predecessor_execution_id: str | None = None,
     delegation_depth: int = 1,
     allow_nested_ouroboros_ralph: bool = False,
 ) -> SubagentPayload:
@@ -2347,6 +2377,17 @@ def build_ralph_subagent(
             "iterations.\n"
         )
 
+    conductor_note = ""
+    if conductor_directive is not None:
+        conductor_note = (
+            "\n## Active Conductor Successor\n"
+            f"decision_id: {conductor_decision_id or 'missing'}\n"
+            f"predecessor_execution_id: {predecessor_execution_id or 'missing'}\n"
+            "This Ralph invocation is one bounded successor generation. Apply the "
+            "directive additively and do not weaken any preserved Seed direction.\n"
+            f"```json\n{_bounded_json(conductor_directive, 6_000)}\n```\n"
+        )
+
     prompt = f"""## Your Task
 
 Run a Ralph loop for the given lineage inside this OpenCode child session.
@@ -2378,7 +2419,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}{budget_note}{checkpoint_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{total_timeout_note}{timeout_note}{progress_note}{budget_note}{checkpoint_note}{conductor_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -2417,6 +2458,10 @@ do not enqueue another background Ralph job."""
             context["execution_id"] = execution_id
         context["checkpoint_commits"] = [dict(item) for item in checkpoint_commits]
         context["checkpoint_attempted_ac_ids"] = list(checkpoint_attempted_ac_ids)
+    if conductor_directive is not None:
+        context["conductor_directive"] = dict(conductor_directive)
+        context["conductor_decision_id"] = conductor_decision_id
+        context["predecessor_execution_id"] = predecessor_execution_id
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

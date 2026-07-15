@@ -213,10 +213,17 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "skip_run",
         "complete_product",
         "pipeline_timeout_seconds",
+        "efficiency_mode",
+        "frugality_assurance",
     ),
     "ouroboros_start_evaluate": ("session_id", "artifact"),
     "ouroboros_start_evolve_step": ("lineage_id",),
-    "ouroboros_start_execute_seed": ("seed_content", "session_id"),
+    "ouroboros_start_execute_seed": (
+        "seed_content",
+        "efficiency_mode",
+        "frugality_assurance",
+        "session_id",
+    ),
     "ouroboros_start_ralph": ("lineage_id",),
     "ouroboros_submit_fanout_results": ("fanout_id", "results"),
 }

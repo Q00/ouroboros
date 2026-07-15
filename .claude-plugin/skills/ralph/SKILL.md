@@ -103,7 +103,23 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      ```
      [Ralph] Started background loop: <job_id>
      Lineage: <lineage_id>
+     Live view: <response.meta.dashboard_url, or `ouroboros tui open`>
+
+     A read-only observer will report meaningful progress, attention, and terminal
+     events here. This conversation remains available for other safe work.
      ```
+
+   - If `response.meta.job_observer` is present and the host supports an
+     independent Task/Agent child, spawn exactly one read-only observer and pass
+     the contract unchanged. It owns wait/result and the cursor exclusively. The
+     main session must not poll the same job. Keep the conversation available for
+     read-only review, explicit control, or unrelated work in an isolated
+     worktree; check active-worker overlap before writing to Ralph's workspace.
+     Do not claim an observer until Task/Agent returns a live child handle. If
+     child creation fails, do not promise live proactive relays. The detached
+     worker survives the stdio turn; catch up from durable events on the next
+     parent turn or explicit status request. Keep the turn open only for
+     explicit live watching.
 
    - If `response.meta.status == "delegated_to_plugin"` and
      `response.meta.job_id is None`, report that OpenCode plugin mode delegated
@@ -111,12 +127,34 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      `ouroboros_job_result`, or `ouroboros_cancel_job` without a job id; follow
      the host Task widget/session lifecycle instead.
 
-4. **Monitor non-plugin job progress** with job tooling when a `job_id` exists:
-   - `ouroboros_job_wait(job_id, cursor, timeout_seconds=120)` for long polling;
+4. **Monitor non-plugin progress in the polling owner** when a `job_id` exists.
+
+   The delegated observer is the default owner. Use the main-session loop only
+   when no independent child exists and the user asked for live watching;
+   otherwise catch up on the next parent turn. Never run both:
+   - `ouroboros_job_wait(job_id, cursor, timeout_seconds=120, stream="linked", wait_for="attention_or_ac_change")` for long polling;
      after every wait/status response, update `cursor = response.meta.cursor`
    - `ouroboros_job_status(job_id)` for a quick status check
    - `ouroboros_job_result(job_id)` when the job is terminal
    - `ouroboros_cancel_job(job_id)` if the user says stop/cancel
+
+   Relay Synapse `queued`, `applied`, `completed`, `rejected`, and
+   `delivery_uncertain` states in the user's current conversation language.
+   Never describe `queued` as applied, and surface rejected or uncertain
+   delivery immediately.
+   Also relay run configuration, total ACs and dependency/parallel levels, first
+   scheduled ACs, bounded Discover targets, material model/harness changes,
+   level transitions, and verified AC completion. Never expose raw commands or
+   model reasoning.
+
+   For a live AC question or additive refinement, reload
+   `+ouroboros session signal`, call `ouroboros_session_signal_targets`, and
+   semantically select the relevant AC without asking for internal IDs. Use
+   `mode="inform"` for read-only assurance and omit `fallback_mode` in that
+   mode. Use exact guards with
+   `contract_effect="additive"`, `source="user"`, `mode="redirect"`, and explicit
+   `fallback_mode="after_turn"` for implementation refinement. Shared contract
+   changes require an approved successor.
 
 5. **On non-plugin job termination**, fetch `ouroboros_job_result(job_id)` and
    summarize the final job result and next step:
@@ -137,6 +175,19 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
 6. **On OpenCode plugin delegation**, rely on the child Task result as the
    terminal surface. Summarize the Task completion/error state and lineage id; do
    not claim a local Ralph job can be polled or cancelled.
+
+### Active Conductor decision policy
+
+For `attention_required`, use at most one short-lived read-only verifier. Without
+that primitive, surface the evidence and do not ACT. Otherwise VERIFY → DECIDE
+from `recommended_host_actions` → LOG `selected` with
+`ouroboros_record_conductor_decision` → ACT only a menu-listed registered tool →
+LOG one `completed`, `failed`, or `declined` outcome. Ralph may use a directive
+only for the first and sole bounded successor generation (`max_generations=1`),
+and only when deterministic and non-relaxing.
+
+These are English canonical instructions. Render them naturally in the user's
+conversation language.
 
 ## Tool Mapping
 
