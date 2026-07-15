@@ -18,6 +18,7 @@ ambiguity scoring.  User controls when to stop.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import json
 import os
@@ -39,6 +40,7 @@ from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE, PMInterviewEngine
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.initial_context import resolve_initial_context_input
+from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
@@ -756,6 +758,12 @@ class PMInterviewHandler:
                 "pm_handler.start.brownfield_repos",
                 count=len(resolved),
                 paths=[r.path for r in resolved],
+            )
+            # Redirect exploration to persistent snapshot worktrees pinned to
+            # the remote default branch (created once, then fetch + hard-reset
+            # per start) so a stale local checkout never leaks into PRD context.
+            brownfield_repos = await asyncio.to_thread(
+                refresh_pm_snapshot_worktrees, brownfield_repos
             )
 
         result = await engine.ask_opening_and_start(
