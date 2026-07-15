@@ -5962,13 +5962,18 @@ class TestZombieJobReconciliation:
         owner_pid: int | None,
         owner_start_time: float | None,
         session_id: str | None = None,
+        execution_id: str | None = None,
     ) -> None:
         writer = JobManager(store)
         data: dict = {
             "job_type": "execute_seed",
             "status": JobStatus.RUNNING.value,
             "message": "Running execute_seed",
-            "links": {"session_id": session_id, "execution_id": None, "lineage_id": None},
+            "links": {
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "lineage_id": None,
+            },
         }
         if owner_pid is not None:
             data["owner_pid"] = owner_pid
@@ -5993,6 +5998,53 @@ class TestZombieJobReconciliation:
             assert [event.type for event in events] == [
                 "mcp.job.created",
                 "mcp.job.interrupted",
+            ]
+        finally:
+            await store.close()
+
+    async def test_dead_owner_with_failed_execution_terminal_recovers_failed_job(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store,
+                "job_linked_terminal_failed",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id="orch_terminal_failed",
+                execution_id="exec_terminal_failed",
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_terminal_failed",
+                    data={
+                        "session_id": "orch_terminal_failed",
+                        "status": "failed",
+                        "error_message": "Orchestrator execution failed: boom",
+                    },
+                )
+            )
+            restarted = JobManager(store)
+
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+                snapshot = await restarted.get_snapshot("job_linked_terminal_failed")
+
+            assert snapshot.status is JobStatus.FAILED
+            assert snapshot.result_text == (
+                "Linked execution failed before the MCP job reached a terminal event "
+                "(execution_id=exec_terminal_failed): Orchestrator execution failed: boom"
+            )
+            assert snapshot.result_meta["failed_from_linked_execution_failure"] is True
+            assert snapshot.result_meta.get("interrupted_from_dead_owner") is not True
+            events, _ = await store.get_events_after(
+                "job", "job_linked_terminal_failed", last_row_id=0
+            )
+            assert [event.type for event in events] == [
+                "mcp.job.created",
+                "mcp.job.failed",
             ]
         finally:
             await store.close()

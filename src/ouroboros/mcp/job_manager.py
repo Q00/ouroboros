@@ -1368,12 +1368,14 @@ class JobManager:
             event_type="execution.terminal",
             limit=1,
         )
+        terminal_failure_events = []
         if terminal_events:
             status = terminal_events[0].data.get("status")
             if status == "completed":
                 return None
             if status not in {"failed", "cancelled", "interrupted"}:
                 return None
+            terminal_failure_events.append(terminal_events[0])
 
         failed_session_events = await self._event_store.query_execution_related_events(
             snapshot.links.execution_id,
@@ -1391,11 +1393,11 @@ class JobManager:
             if event.data.get("success") is False
             or str(event.data.get("outcome") or "").casefold() == "failed"
         ]
-        if not failed_session_events and not failed_outcomes:
+        if not terminal_failure_events and not failed_session_events and not failed_outcomes:
             return None
 
         detail = None
-        for event in [*failed_session_events, *failed_outcomes]:
+        for event in [*terminal_failure_events, *failed_session_events, *failed_outcomes]:
             data = event.data
             for key in ("error", "error_message", "final_message", "message"):
                 value = data.get(key)
