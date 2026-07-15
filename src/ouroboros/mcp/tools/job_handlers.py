@@ -1349,6 +1349,12 @@ class JobWaitHandler:
                         f"stream_events {len(stream_items)} "
                         f"cursor={snapshot.cursor}{more}: {summaries}"
                     )
+                elif snapshot.is_terminal:
+                    text = _render_compact_job_snapshot(
+                        snapshot,
+                        progress,
+                        include_message=view == "summary",
+                    )
                 else:
                     text = f"unchanged cursor={snapshot.cursor}"
             elif execution_progress_changed:

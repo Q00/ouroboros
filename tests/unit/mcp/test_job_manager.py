@@ -4714,6 +4714,45 @@ class TestJobManager:
         assert result.value.meta["view"] == "summary"
         assert result.value.text_content == "unchanged cursor=15"
 
+    async def test_job_wait_summary_terminal_unchanged_line_identifies_job(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_terminal_summary",
+            job_type="auto",
+            status=JobStatus.COMPLETED,
+            message="Auto finished",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=15,
+            links=JobLinks(session_id="session_wait_terminal_summary"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {
+                "job_id": "job_wait_terminal_summary",
+                "cursor": 15,
+                "timeout_seconds": 0,
+                "view": "summary",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["is_terminal"] is True
+        assert "job_wait_terminal_summary" in result.value.text_content
+        assert result.value.text_content != "unchanged cursor=15"
+
     async def test_job_wait_compact_view_surfaces_execution_progress_without_job_change(
         self, tmp_path
     ) -> None:
