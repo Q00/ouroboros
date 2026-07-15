@@ -92,13 +92,13 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Claude Code, Codex CLI, Kiro CLI 모두 지원합니다. 런타임 감지, MCP 서버 등록, 스킬 설치까지 자동으로 처리됩니다.
+> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI를 지원합니다. 설치 프로그램은 Claude Code, Codex CLI, Hermes CLI를 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. OpenCode, Kiro, GitHub Copilot CLI, Gemini CLI 또는 Pi CLI는 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
 
 <details>
 <summary><strong>Kiro CLI 빠른 시작</strong></summary>
 
 ```bash
-pip install ouroboros-ai
+pip install 'ouroboros-ai[mcp,claude]'
 ouroboros setup            # Kiro CLI 감지 및 MCP 서버 등록
 ```
 
