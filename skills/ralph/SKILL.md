@@ -125,12 +125,16 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      `send_message` calls only enqueue mailbox events and cannot revive an ended
      parent turn. Relay meaningful updates and wait again until the terminal
      summary arrives. User input may interrupt the wait; handle it and resume
-     waiting while observation remains active. This relay loop must not poll the
-     Ouroboros job or take cursor ownership. If spawn fails, do not promise live
-     proactive relays: the detached worker continues after the stdio turn, and
-     the main session catches up from durable events on the next interaction or
-     explicit status request. Keep the main turn open in the fallback polling
-     loop only when the user asked for live watching.
+     waiting while observation remains active unless the user asks to stop live
+     observation or replaces the active request. Then end only the relay loop,
+     keep the durable job running, and offer next-turn or explicit-status catch-
+     up. If the observer child fails, is cancelled, or exits before a terminal
+     summary, use that same fallback instead of waiting indefinitely. This relay
+     loop must not poll the Ouroboros job or take cursor ownership. If spawn
+     fails, do not promise live proactive relays: the detached worker continues
+     after the stdio turn, and the main session catches up from durable events
+     on the next interaction or explicit status request. Keep the main turn open
+     in the fallback polling loop only when the user asked for live watching.
 
    - If `response.meta.status == "delegated_to_plugin"` and
      `response.meta.job_id is None`, report that OpenCode plugin mode delegated

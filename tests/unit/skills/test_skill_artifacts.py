@@ -141,6 +141,9 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
             assert "wait_agent" in text
             assert "cannot revive" in compact or "cannot wake" in compact
             assert "must not poll" in normalized
+            assert "stop live observation" in compact
+            assert "keep the durable job running" in compact
+            assert "instead of waiting indefinitely" in compact
 
     for skill in ("run", "auto", "ralph"):
         text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
@@ -157,6 +160,8 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     )
     assert "wait_agent" in codex_instructions
     assert "cannot revive a parent turn" in codex_instructions
+    assert "stop live observation" in codex_instructions
+    assert "without cancelling the durable job" in codex_instructions
 
 
 def test_run_and_auto_route_human_intent_without_exposing_internal_ids() -> None:

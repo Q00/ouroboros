@@ -122,12 +122,16 @@ When an auto start response includes `response.meta.job_id`:
    remains active. A child `send_message` only queues a mailbox event; it cannot
    revive an ended parent turn. Relay meaningful updates and wait again until
    the observer sends its terminal summary. User input may interrupt the wait;
-   handle it and resume waiting while observation remains active. This parent
-   relay loop must not call job wait/result or take cursor ownership. If spawn
-   fails, do not promise live proactive relays. The detached worker continues
-   after the stdio turn; say that durable progress will be caught up on the next
-   parent turn or an explicit status request. Keep the current turn open in the
-   fallback polling loop only when the user asked for live watching.
+   handle it and resume waiting while observation remains active unless the user
+   asks to stop live observation or replaces the active request. Then end only
+   the relay loop, keep the durable job running, and offer next-turn or explicit-
+   status catch-up. If the observer child fails, is cancelled, or exits before a
+   terminal summary, use that same fallback instead of waiting indefinitely.
+   This parent relay loop must not call job wait/result or take cursor ownership.
+   If spawn fails, do not promise live proactive relays. The detached worker
+   continues after the stdio turn; say that durable progress will be caught up
+   on the next parent turn or an explicit status request. Keep the current turn
+   open in the fallback polling loop only when the user asked for live watching.
 3. If child-to-parent progress messages are supported, the observer relays only
    meaningful `phase_changed`, `progress_advanced`, `attention_required`, and
    `terminal` events in at most 1-2 lines. During interview, it may use

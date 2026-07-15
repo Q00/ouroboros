@@ -2022,10 +2022,8 @@ class TestAsyncJobHandlers:
         assert observer["wait"]["arguments"]["stream"] == "linked"
         assert observer["wait"]["arguments"]["wait_for"] == "attention_or_ac_change"
         assert observer["relay"]["mode"] == "event_driven"
-        assert (
-            observer["parent_session"]["availability"]
-            == "available_during_interruptible_relay_wait"
-        )
+        assert observer["parent_session"]["availability"] == "available_after_handoff"
+        assert observer["host_lifecycle"]["codex_parent_relay"]["wait_tool"] == "wait_agent"
         assert observer["follow_result_job_keys"] == ["chained_evaluate_job_id"]
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content

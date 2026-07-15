@@ -83,10 +83,11 @@ so outside the conversation that the user is actively using.
 - one `wait` tool call template with a cursor and terminal wake-up
 - one `result` tool call template
 - `follow_result_job_keys` for evaluation/Ralph/downstream jobs
-- `main_session_policy="relay_wait_while_observer_active"`
-- a Codex parent relay lifecycle: after `spawn_agent` acknowledges a live
-  observer, the parent keeps its turn open with interruptible `wait_agent`
-  calls until the observer reaches terminal state
+- the backward-compatible `main_session_policy="start_and_on_demand_only"`
+- an additive `host_lifecycle.codex_parent_relay` policy: after `spawn_agent`
+  acknowledges a live observer, the Codex parent keeps its turn open with
+  interruptible `wait_agent` calls until the observer reaches terminal state,
+  the observer child exits, or the user opts out of live observation
 - event relay rules for progress, attention, and terminal notifications
 - parent-session availability, live-view, and workspace-write policies
 - self-contained `instructions` and `restrictions`, so the child does not need
@@ -98,7 +99,10 @@ execution, or spawn implementation workers. On Codex, child `send_message`
 calls enqueue mailbox events but cannot revive a parent turn that already
 ended. Therefore the parent, not the observer, owns an interruptible
 `wait_agent` relay loop. This loop does not poll the Ouroboros job and does not
-violate exclusive cursor ownership.
+violate exclusive cursor ownership. A user opt-out stops only the live relay;
+the durable job continues and can be caught up on the next parent turn or an
+explicit status request. Observer child failure uses the same fallback rather
+than leaving the parent waiting indefinitely.
 
 ## Tradeoffs
 
@@ -124,3 +128,5 @@ violate exclusive cursor ownership.
 7. A confirmed Codex observer keeps the parent turn open via `wait_agent`, so
    Synapse delivery and completion messages are relayed without another user
    prompt.
+8. A user can stop live observation without cancelling the durable job, and an
+   observer child exit falls back to durable catch-up.

@@ -97,7 +97,9 @@ Excluded:
   Ralph work. For live Codex relays, however, a confirmed observer keeps the
   parent turn open in an interruptible `wait_agent` loop because child mailbox
   messages cannot revive an ended parent turn. Without an observer, the host
-  says so and catches up from durable events on the next parent turn.
+  says so and catches up from durable events on the next parent turn. A user may
+  end live observation without cancelling the durable job; observer child exit
+  also falls back to next-turn or explicit-status catch-up.
 
 ## Decisions
 

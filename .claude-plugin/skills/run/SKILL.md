@@ -132,7 +132,12 @@ fallback instead of retrying the failing call.
    terminal summary. Child `send_message` calls only queue mailbox events and
    cannot revive an ended parent turn. Relay meaningful updates, handle user
    input if it interrupts the wait, and resume waiting while the observer is
-   active. This relay loop must not poll the job or take cursor ownership.
+   active unless the user asks to stop live observation or replaces the active
+   request. Then end only the relay loop, keep the durable job running, and
+   offer next-turn or explicit-status catch-up. If the observer child fails, is
+   cancelled, or exits before a terminal summary, use that same fallback instead
+   of waiting indefinitely. This relay loop must not poll the job or take cursor
+   ownership.
    If creation fails, do not promise live proactive relays. The detached worker
    survives the stdio turn; catch up from durable events on the next parent turn
    or explicit status request. Keep the fallback polling loop open only for

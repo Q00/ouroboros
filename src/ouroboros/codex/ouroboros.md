@@ -64,13 +64,18 @@ the observer is active. The observer's `send_message` only queues a parent
 mailbox event; it cannot revive a parent turn that already ended. Relay each
 meaningful mailbox update, then call `wait_agent` again until the observer sends
 its terminal summary. Use waits of at most 60 seconds so user input can steer
-the active turn; handle that input and resume waiting while the observer remains
-active. This parent relay wait does not call job tools and does not take the
-observer's exclusive cursor ownership. If spawn is unavailable or fails, do not
-claim live proactive observation. The detached worker survives the stdio turn;
-tell the user that the main session will catch up from durable events on their
-next message or explicit status request. Keep the current turn open in the
-fallback polling loop only when the user explicitly asks for live watching.
+the active turn. Handle that input and resume waiting while the observer remains
+active unless the user asks to stop live observation or replaces the active
+request. In that case, end the relay loop without cancelling the durable job and
+state that catch-up remains available on the next turn or explicit status
+request. If the observer child fails, is cancelled, or exits before returning a
+terminal job summary, stop waiting and use the same durable catch-up fallback.
+This parent relay wait does not call job tools and does not take the observer's
+exclusive cursor ownership. If spawn is unavailable or fails, do not claim live
+proactive observation. The detached worker survives the stdio turn; tell the
+user that the main session will catch up from durable events on their next
+message or explicit status request. Keep the current turn open in the fallback
+polling loop only when the user explicitly asks for live watching.
 
 Immediately after observer delegation, give one compact handoff to the user:
 - show `meta.dashboard_url` when present; otherwise mention that
