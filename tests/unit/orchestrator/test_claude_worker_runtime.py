@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -97,6 +98,11 @@ class TestRuntimeWiring:
     def test_persisted_runtime_declares_targeted_resume(self) -> None:
         rt = build_claude_worker_runtime(cwd="/tmp", persist_sessions=True)
         assert rt.capabilities.targeted_resume is True
+
+    def test_normalizes_path_cwd(self, tmp_path: Path) -> None:
+        rt = build_claude_worker_runtime(cwd=tmp_path, persist_sessions=True)
+
+        assert rt.working_directory == str(tmp_path)
 
     def test_declares_native_model_override(self) -> None:
         # The transport routes a per-call model to ``claude --model``, so the

@@ -19,11 +19,15 @@ from textual.binding import Binding
 
 from ouroboros.dashboard.board import ProviderLedger, fold_provider_event
 from ouroboros.tui.events import (
+    ACModelRouted,
+    ACTokenAttribution,
     ACUpdated,
     AgentThinkingUpdated,
     CostUpdated,
     DriftUpdated,
     ExecutionUpdated,
+    FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     LogMessage,
     PauseRequested,
     PhaseChanged,
@@ -34,6 +38,8 @@ from ouroboros.tui.events import (
     TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
+    format_frugality_retrospective_summary,
+    format_frugality_summary,
 )
 from ouroboros.tui.screens import (
     DashboardScreenV3,
@@ -340,15 +346,6 @@ class OuroborosTUI(App[None]):
             return False
         return not (context.session_id and self._state.session_id != context.session_id)
 
-    def _iter_subscription_sources(
-        self, context: _EventSubscriptionContext
-    ) -> tuple[tuple[str, str], ...]:
-        """Return the active aggregates that should feed the HUD."""
-        sources: list[tuple[str, str]] = [("execution", context.execution_id)]
-        if context.session_id:
-            sources.insert(0, ("session", context.session_id))
-        return tuple(sources)
-
     def _process_subscription_event(self, event: BaseEvent) -> None:
         """Forward a subscribed event into TUI state and installed screens."""
         self._state.add_log(
@@ -420,26 +417,33 @@ class OuroborosTUI(App[None]):
     async def _subscribe_to_events(self, context: _EventSubscriptionContext) -> None:
         """Subscribe to EventStore for live updates.
 
-        Uses incremental fetching via get_events_after() to avoid replaying
-        the full event history on every poll cycle. This keeps each poll at
-        O(new_events) instead of O(total_events).
+        Uses incremental fetching via query_session_related_events_after() to
+        avoid replaying the full event history on every poll cycle, keeping each
+        poll at O(new_events) instead of O(total_events).
+
+        The related-events query matches the session/execution aggregates AND any
+        worker-scoped aggregate whose payload references this run's session_id /
+        execution_id (the exact predicates the web Kanban reader applies). This is
+        what lets per-AC telemetry — model_routed / token_attribution and per-worker
+        provider identity, all persisted under ``exec_<id>_node_<NODEID>`` scopes
+        with the run id only in the payload — reach the HUD. A single rowid cursor
+        advances across all matched scopes, so each event is delivered exactly once.
         """
         if self._event_store is None or not context.execution_id:
             return
 
-        last_row_ids = dict.fromkeys(self._iter_subscription_sources(context), 0)
+        last_row_id = 0
 
         while self._is_subscription_active(context):
             try:
-                new_events: list[BaseEvent] = []
-                for source in self._iter_subscription_sources(context):
-                    aggregate_type, aggregate_id = source
-                    events, last_row_ids[source] = await self._event_store.get_events_after(
-                        aggregate_type,
-                        aggregate_id,
-                        last_row_ids[source],
-                    )
-                    new_events.extend(events)
+                (
+                    new_events,
+                    last_row_id,
+                ) = await self._event_store.query_session_related_events_after(
+                    session_id=context.session_id,
+                    execution_id=context.execution_id,
+                    last_row_id=last_row_id,
+                )
 
                 if new_events:
                     for event in sorted(new_events, key=lambda item: (item.timestamp, item.id)):
@@ -568,6 +572,14 @@ class OuroborosTUI(App[None]):
         # state's provider_by_node dict, so resetting it clears both.
         self._provider_ledger.reset()
         self._state.board_providers.clear()
+        # Wipe frugality telemetry so the next run starts from zero.
+        self._state.tier_by_node.clear()
+        self._state.model_by_node.clear()
+        self._state.tokens_by_node.clear()
+        self._state.run_total_tokens = 0.0
+        self._state.frugality_summary = None
+        self._state.frugality_retrospective = None
+        self._state.frugality_retrospective_summary = None
         self._state.add_log("info", "tui.main", f"Monitoring execution: {execution_id}")
         # Forward to logs screen
         try:
@@ -715,6 +727,63 @@ class OuroborosTUI(App[None]):
         """Handle agent thinking update."""
         self._state.thinking[message.ac_id] = message.thinking_text
         self._forward_to_dashboard("on_agent_thinking_updated", message)
+
+    @staticmethod
+    def _telemetry_node_key(node_id: str | None, ac_index: int) -> str | None:
+        """Resolve the tree-node key a frugality event should stamp.
+
+        Mirrors the tree's own node-key resolution: the stable ``node_id`` when
+        present, otherwise the ``ac_<index>`` fallback the tree uses for a bare AC.
+        Returns None when neither is usable so we never stamp the wrong node.
+        """
+        if node_id:
+            return node_id
+        if ac_index >= 0:
+            return f"ac_{ac_index}"
+        return None
+
+    def on_acmodel_routed(self, message: ACModelRouted) -> None:
+        """Fold per-AC model-tier routing (latest-wins per node) into state."""
+        key = self._telemetry_node_key(message.node_id, message.ac_index)
+        if key is None:
+            return
+        if message.model_tier:
+            self._state.tier_by_node[key] = message.model_tier
+        if message.model:
+            self._state.model_by_node[key] = message.model
+        self._notify_ac_tree_updated()
+
+    def on_actoken_attribution(self, message: ACTokenAttribution) -> None:
+        """Fold per-AC token spend into state: per-node accumulate + run total."""
+        if message.token_spend < 0:
+            return
+        self._state.run_total_tokens += message.token_spend
+        key = self._telemetry_node_key(message.node_id, message.ac_index)
+        if key is not None:
+            self._state.tokens_by_node[key] = (
+                self._state.tokens_by_node.get(key, 0.0) + message.token_spend
+            )
+        self._notify_ac_tree_updated()
+
+    def on_frugality_proof_evaluated(self, message: FrugalityProofEvaluated) -> None:
+        """Fold the run-end frugality verdict once, then hand it to the dashboard."""
+        if self._state.frugality_summary is None:
+            self._state.frugality_summary = format_frugality_summary(
+                message.status, message.token_reduction_pct
+            )
+        self._forward_to_dashboard("on_frugality_proof_evaluated", message)
+
+    def on_frugality_retrospective_reported(
+        self,
+        message: FrugalityRetrospectiveReported,
+    ) -> None:
+        """Fold the execution-finalized evidence report once for live display."""
+        if self._state.frugality_retrospective is None:
+            self._state.frugality_retrospective = dict(message.summary)
+            self._state.frugality_retrospective_summary = format_frugality_retrospective_summary(
+                message.summary
+            )
+        self._forward_to_dashboard("on_frugality_retrospective_reported", message)
 
     def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
         # Update state with AC tree from workflow progress (smart merge)
@@ -998,7 +1067,21 @@ class OuroborosTUI(App[None]):
         self, message: LineageSelectorScreen.LineageSelected
     ) -> None:
         """Handle lineage selection and push the detail screen."""
-        self.push_screen(LineageDetailScreen(message.lineage, event_store=self._event_store))
+        assert self._event_store is not None
+        from ouroboros.evolution.loop import EvolutionaryLoop
+        from ouroboros.plugin.rewind import build_lockfile_rewind_observer
+
+        rewind_committer = EvolutionaryLoop(
+            self._event_store,
+            rewind_observer=build_lockfile_rewind_observer(self._event_store),
+        )
+        self.push_screen(
+            LineageDetailScreen(
+                message.lineage,
+                event_store=self._event_store,
+                rewind_committer=rewind_committer,
+            )
+        )
 
     def set_pause_callback(self, callback: Any) -> None:
         self._pause_callback = callback
@@ -1037,7 +1120,14 @@ class OuroborosTUI(App[None]):
         not a board card and is never tagged.
         """
         ledger = self._provider_ledger
-        if not ledger.provider_by_node and not ledger.run_provider:
+        state = self._state
+        if (
+            not ledger.provider_by_node
+            and not ledger.run_provider
+            and not state.tier_by_node
+            and not state.model_by_node
+            and not state.tokens_by_node
+        ):
             return
         nodes = self._state.ac_tree.get("nodes")
         if not isinstance(nodes, dict):
@@ -1046,13 +1136,28 @@ class OuroborosTUI(App[None]):
         for node_id, node in nodes.items():
             if node_id == root_id or not isinstance(node, dict):
                 continue
+            embedded_id = str(node.get("node_id") or "")
             provider = (
                 ledger.provider_by_node.get(node_id)
-                or ledger.provider_by_node.get(str(node.get("node_id") or ""))
+                or ledger.provider_by_node.get(embedded_id)
                 or ledger.run_provider
             )
             if provider:
                 node["provider"] = provider
+            # Frugality telemetry — identical resolution to provider (node_id key,
+            # then the embedded node_id), so a tier/model/token learned before OR
+            # after the node was created still lands on it.
+            tier = state.tier_by_node.get(node_id) or state.tier_by_node.get(embedded_id)
+            if tier:
+                node["model_tier"] = tier
+            model = state.model_by_node.get(node_id) or state.model_by_node.get(embedded_id)
+            if model:
+                node["model"] = model
+            tokens = state.tokens_by_node.get(node_id)
+            if tokens is None:
+                tokens = state.tokens_by_node.get(embedded_id)
+            if tokens is not None:
+                node["tokens"] = tokens
 
     def _notify_ac_tree_updated(self) -> None:
         """Notify dashboard that AC tree has been updated."""

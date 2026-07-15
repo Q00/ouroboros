@@ -985,6 +985,75 @@ class TestSessionRelatedEvents:
         assert "other-execution-child" not in aggregate_ids
         assert "sess-related-only" not in aggregate_ids
 
+    async def test_latest_execution_job_status_follows_linked_job_stream(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        execution_id = "exec-job-status"
+        await event_store.append(
+            BaseEvent(
+                type="mcp.job.created",
+                aggregate_type="job",
+                aggregate_id="job-status-1",
+                data={
+                    "status": "queued",
+                    "links": {"execution_id": execution_id},
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="mcp.job.interrupted",
+                aggregate_type="job",
+                aggregate_id="job-status-1",
+                data={"status": "interrupted"},
+            )
+        )
+
+        assert await event_store.get_latest_execution_job_status(execution_id) == ("interrupted")
+        assert await event_store.get_latest_execution_job_status("exec-missing") is None
+
+    async def test_session_signal_query_is_exact_and_replay_ordered(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        base = datetime.now(UTC)
+        matching = [
+            BaseEvent(
+                id=f"signal-event-{index}",
+                type=f"control.session.signal.{state}",
+                timestamp=base + timedelta(seconds=index),
+                aggregate_type="session_signal",
+                aggregate_id="sig_exact",
+                data={
+                    "expected_execution_id": "exec_exact",
+                    "target_session_scope_id": "scope_exact",
+                    "target_session_attempt_id": "attempt_exact",
+                },
+            )
+            for index, state in enumerate(("requested", "accepted", "queued"))
+        ]
+        unrelated = BaseEvent(
+            type="control.session.signal.queued",
+            aggregate_type="session_signal",
+            aggregate_id="sig_other",
+            data={
+                "expected_execution_id": "exec_exact",
+                "target_session_scope_id": "scope_exact",
+                "target_session_attempt_id": "attempt_other",
+            },
+        )
+        for event in [*matching, unrelated]:
+            await event_store.append(event)
+
+        result = await event_store.query_session_signal_events(
+            execution_id="exec_exact",
+            session_scope_id="scope_exact",
+            session_attempt_id="attempt_exact",
+        )
+
+        assert [event.id for event in result] == [event.id for event in matching]
+
     async def test_session_related_events_do_not_join_on_lossy_normalized_scope(
         self,
         event_store: EventStore,
@@ -1170,6 +1239,109 @@ class TestSessionRelatedEvents:
             ("execution.subagent.started", "evolve_lin_parent_generation_1_child_0")
         ]
         assert next_cursor > cursor
+
+    async def test_blank_scope_returns_no_events_not_whole_store(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """A blank session with no execution must fail closed, not scan the store.
+
+        With an empty ``session_id`` and no ``execution_id`` there is no scope
+        predicate, and ``or_()`` over zero clauses emits a WHERE-less query — this
+        pins that the query returns nothing rather than the entire event store.
+        """
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-unrelated",
+                data={"execution_id": "exec-unrelated", "seed_id": "seed-unrelated"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="exec-unrelated",
+                data={"session_id": "sess-unrelated", "message_count": 1},
+            )
+        )
+
+        result = await event_store.query_session_related_events(
+            "",
+            execution_id=None,
+            limit=None,
+        )
+
+        assert result == []
+
+    async def test_blank_scope_after_returns_no_events_and_unchanged_cursor(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """The incremental variant must also fail closed and leave the cursor put."""
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-unrelated",
+                data={"execution_id": "exec-unrelated", "seed_id": "seed-unrelated"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="exec-unrelated",
+                data={"session_id": "sess-unrelated", "message_count": 1},
+            )
+        )
+
+        events, cursor = await event_store.query_session_related_events_after(
+            "",
+            execution_id=None,
+            last_row_id=0,
+        )
+
+        assert events == []
+        assert cursor == 0
+
+    async def test_blank_session_with_execution_still_returns_execution_rows(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """The TUI case that motivated the empty-session change must keep working.
+
+        A blank session paired with a real ``execution_id`` still carries an
+        execution scope, so the query returns that execution's related rows.
+        """
+        execution_id = "exec-tui-scope"
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={"execution_id": execution_id, "message_count": 1},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.heartbeat",
+                aggregate_type="execution",
+                aggregate_id="exec-other-scope",
+                data={"execution_id": "exec-other", "message_count": 1},
+            )
+        )
+
+        result = await event_store.query_session_related_events(
+            "",
+            execution_id=execution_id,
+            limit=None,
+        )
+        aggregate_ids = {event.aggregate_id for event in result}
+
+        assert execution_id in aggregate_ids
+        assert "exec-other-scope" not in aggregate_ids
 
 
 class TestGetAllSessions:

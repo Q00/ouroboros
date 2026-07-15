@@ -18,9 +18,13 @@ from ouroboros.providers.factory import (
 from ouroboros.providers.gjc_llm_adapter import GjcLLMAdapter
 from ouroboros.providers.goose_cli_adapter import GooseCliLLMAdapter
 from ouroboros.providers.hermes_cli_adapter import HermesCliLLMAdapter
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 from ouroboros.providers.pi_llm_adapter import PiLLMAdapter
+
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 
 
 class _FakeEventStore:
@@ -185,11 +189,15 @@ class TestCreateLLMAdapter:
 
     def test_creates_litellm_adapter(self) -> None:
         """LiteLLM backend returns LiteLLMAdapter."""
+        if LiteLLMAdapter is None:
+            pytest.skip("litellm not installed")
         adapter = create_llm_adapter(backend="litellm")
         assert isinstance(adapter, LiteLLMAdapter)
 
     def test_forwards_io_recorder_to_litellm_adapter(self) -> None:
         """LiteLLM factory path preserves explicit recorder wiring."""
+        if LiteLLMAdapter is None:
+            pytest.skip("litellm not installed")
         recorder = IOJournalRecorder(
             event_store=_FakeEventStore(),
             target_type="execution",
@@ -220,6 +228,34 @@ class TestCreateLLMAdapter:
             RuntimeError, match="litellm backend requested but litellm is not installed"
         ):
             create_llm_adapter(backend="litellm")
+
+    def test_litellm_import_error_on_python_314_names_supported_remedy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Python 3.14 guidance must not recommend an unsupported LiteLLM install."""
+        module_name = "ouroboros.providers.litellm_adapter"
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+            if name == module_name:
+                raise ImportError("No module named 'litellm'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setattr(
+            "ouroboros.providers.factory.sys.version_info",
+            (3, 14, 0, "final", 0),
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            create_llm_adapter(backend="litellm")
+
+        message = str(exc_info.value)
+        assert "Python >=3.12,<3.14" in message
+        assert "Python 3.13" in message
+        assert "python3.13 -m pip install 'ouroboros-ai[litellm]'" in message
+        assert "python3.14" not in message.lower()
 
     def test_creates_codex_adapter(self) -> None:
         """Codex backend returns CodexCliLLMAdapter."""

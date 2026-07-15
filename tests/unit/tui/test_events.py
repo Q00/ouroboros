@@ -6,10 +6,14 @@ import pytest
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.tui.events import (
+    ACModelRouted,
+    ACTokenAttribution,
     ACUpdated,
     CostUpdated,
     DriftUpdated,
     ExecutionUpdated,
+    FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     LogMessage,
     PauseRequested,
     PhaseChanged,
@@ -18,6 +22,8 @@ from ouroboros.tui.events import (
     TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
+    format_frugality_retrospective_summary,
+    format_frugality_summary,
 )
 
 
@@ -665,3 +671,292 @@ class TestCreateMessageFromEvent:
         msg = create_message_from_event(event)
 
         assert msg is None
+
+
+class TestFrugalityTelemetryEvents:
+    """Tests for the frugality telemetry events feeding the TUI dashboard."""
+
+    def test_model_routed_event(self) -> None:
+        """model_routed events convert to ACModelRouted with routing fields."""
+        event = BaseEvent(
+            type="execution.ac.model_routed",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={
+                "node_id": "node_7",
+                "ac_index": 2,
+                "model_tier": "frugal",
+                "model": "claude-haiku-4-5",
+                "model_mode": "enforced",
+                "retry_attempt": 1,
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, ACModelRouted)
+        assert msg.node_id == "node_7"
+        assert msg.ac_index == 2
+        assert msg.model_tier == "frugal"
+        assert msg.model == "claude-haiku-4-5"
+        assert msg.model_mode == "enforced"
+        assert msg.retry_attempt == 1
+
+    def test_model_routed_falls_back_to_ac_index_without_node_id(self) -> None:
+        """A model_routed event without node_id still carries the ac_index key."""
+        event = BaseEvent(
+            type="execution.ac.model_routed",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={"ac_index": 0, "model_tier": "standard", "model_mode": "advised"},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, ACModelRouted)
+        assert msg.node_id is None
+        assert msg.ac_index == 0
+
+    def test_model_routed_without_join_key_returns_none(self) -> None:
+        """A model_routed event with neither node_id nor a valid ac_index is dropped."""
+        event = BaseEvent(
+            type="execution.ac.model_routed",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={"model_tier": "frugal"},
+        )
+
+        assert create_message_from_event(event) is None
+
+    def test_token_attribution_event(self) -> None:
+        """token_attribution events convert to ACTokenAttribution with the spend."""
+        event = BaseEvent(
+            type="execution.ac.token_attribution.reported",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={
+                "node_id": "node_7",
+                "ac_index": 2,
+                "token_spend": 1234.5,
+                "model_tier": "frugal",
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, ACTokenAttribution)
+        assert msg.node_id == "node_7"
+        assert msg.ac_index == 2
+        assert msg.token_spend == 1234.5
+        assert msg.model_tier == "frugal"
+
+    def test_token_attribution_malformed_spend_returns_none(self) -> None:
+        """A non-numeric token_spend is malformed and dropped."""
+        event = BaseEvent(
+            type="execution.ac.token_attribution.reported",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={"node_id": "node_7", "ac_index": 2, "token_spend": "lots"},
+        )
+
+        assert create_message_from_event(event) is None
+
+    def test_token_attribution_rejects_bool_spend(self) -> None:
+        """A bool token_spend (a Python int subclass) must not be treated as numeric."""
+        event = BaseEvent(
+            type="execution.ac.token_attribution.reported",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={"node_id": "node_7", "ac_index": 2, "token_spend": True},
+        )
+
+        assert create_message_from_event(event) is None
+
+    @pytest.mark.parametrize(
+        "token_spend",
+        [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -1,
+            -0.5,
+            10**400,
+        ],
+    )
+    def test_token_attribution_rejects_non_finite_or_negative_spend(
+        self, token_spend: float
+    ) -> None:
+        """Non-finite (NaN/±Inf), negative, or unconvertible (``OverflowError``) spend
+        is malformed and dropped at parse.
+
+        Mirrors the board reducer's finite-number guard so a poisoned payload never
+        reaches the run total (negatives were previously dropped only downstream).
+        """
+        event = BaseEvent(
+            type="execution.ac.token_attribution.reported",
+            aggregate_type="ac",
+            aggregate_id="ac_abc",
+            data={"node_id": "node_7", "ac_index": 2, "token_spend": token_spend},
+        )
+
+        assert create_message_from_event(event) is None
+
+    def test_frugality_proof_event(self) -> None:
+        """frugality_proof events convert to FrugalityProofEvaluated."""
+        event = BaseEvent(
+            type="execution.frugality_proof.evaluated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "status": "pass",
+                "token_reduction_pct": 18.0,
+                "reason": "18% fewer tokens with no grounding regression",
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityProofEvaluated)
+        assert msg.status == "pass"
+        assert msg.token_reduction_pct == 18.0
+        assert msg.reason.startswith("18%")
+
+    def test_frugality_proof_negative_reduction_pct_is_kept(self) -> None:
+        """A negative ``token_reduction_pct`` legitimately means spend increased —
+        unlike ``token_spend``, it must NOT be dropped."""
+        event = BaseEvent(
+            type="execution.frugality_proof.evaluated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"status": "fail_no_frugality", "token_reduction_pct": -5.0},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityProofEvaluated)
+        assert msg.token_reduction_pct == -5.0
+
+    @pytest.mark.parametrize(
+        "token_reduction_pct",
+        [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            10**400,
+        ],
+    )
+    def test_frugality_proof_rejects_non_finite_or_unconvertible_pct(
+        self, token_reduction_pct: float
+    ) -> None:
+        """Non-finite (NaN/±Inf) or unconvertible (``OverflowError``) ``token_reduction_pct``
+        is malformed and omitted (never crashes ``create_message_from_event``).
+
+        Mirrors the board reducer's finite-number guard (``dashboard.board._coerce_spend``)
+        so a poisoned payload never crashes live TUI event polling.
+        """
+        event = BaseEvent(
+            type="execution.frugality_proof.evaluated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"status": "pass", "token_reduction_pct": token_reduction_pct},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityProofEvaluated)
+        assert msg.token_reduction_pct is None
+
+    def test_frugality_proof_without_status_returns_none(self) -> None:
+        """A frugality_proof event lacking a status string is dropped."""
+        event = BaseEvent(
+            type="execution.frugality_proof.evaluated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={"token_reduction_pct": 18.0},
+        )
+
+        assert create_message_from_event(event) is None
+
+    def test_frugality_retrospective_event(self) -> None:
+        event = BaseEvent(
+            type="execution.frugality_retrospective.reported",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "execution_id": "exec_123",
+                "retrospective_version": "v1",
+                "trigger": "execution_finalized",
+                "terminal_status": "failed",
+                "evidence_only": True,
+                "coverage": {
+                    "measured_attempts": 3,
+                    "unknown_attempts": 1,
+                    "invalid_attempts": 0,
+                    "total_measured_tokens": 250.0,
+                },
+                "evidence_signals": [
+                    {
+                        "name": "retry_associated_spend",
+                        "token_spend": 100.0,
+                        "attempt_count": 1,
+                    },
+                    {
+                        "name": "unaccepted_spend",
+                        "token_spend": 150.0,
+                        "attempt_count": 2,
+                    },
+                ],
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, FrugalityRetrospectiveReported)
+        assert msg.execution_id == "exec_123"
+        assert msg.summary["retry_associated_tokens"] == 100.0
+        assert msg.summary["unaccepted_tokens"] == 150.0
+
+    def test_frugality_retrospective_malformed_event_returns_none(self) -> None:
+        event = BaseEvent(
+            type="execution.frugality_retrospective.reported",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "retrospective_version": "v1",
+                "trigger": "execution_finalized",
+                "terminal_status": "paused",
+                "evidence_only": True,
+                "coverage": {},
+                "evidence_signals": [],
+            },
+        )
+
+        assert create_message_from_event(event) is None
+
+    def test_format_frugality_summary_pass_includes_reduction(self) -> None:
+        """A PASS verdict shows the token reduction percentage."""
+        assert format_frugality_summary("pass", 18.0) == "⚖ frugal −18% tok"
+
+    def test_format_frugality_summary_non_pass_omits_percentage(self) -> None:
+        """A non-PASS verdict is a bare labelled line, no percentage."""
+        assert format_frugality_summary("fail_no_frugality", None) == "⚖ no savings"
+
+    def test_format_frugality_retrospective_summary_is_neutral(self) -> None:
+        line = format_frugality_retrospective_summary(
+            {
+                "retry_associated_tokens": 1200.0,
+                "retry_associated_attempts": 1,
+                "unaccepted_tokens": 500.0,
+                "unaccepted_attempts": 1,
+                "measured_attempts": 3,
+                "unknown_attempts": 1,
+                "invalid_attempts": 0,
+            }
+        )
+
+        assert line == (
+            "Evidence: retry-associated 1.2k tok | unaccepted 500 tok | "
+            "coverage 3 measured/1 unknown/0 invalid"
+        )
+        assert "waste" not in line.lower()
+        assert "avoidable" not in line.lower()

@@ -140,7 +140,10 @@ class TestCheckMcpImport:
             with patch("builtins.__import__", side_effect=_import_error_for("mcp")):
                 result = check_mcp_import()
         assert result.status == "fail"
-        assert result.remediation != ""
+        # The remediation must name the canonical extras: uv tool install
+        # replaces the tool env with exactly the requested extras, so a
+        # subset spec would strip the user's other extras.
+        assert "[mcp,claude]" in result.remediation
 
     def test_passes_when_installed_returns_version(self):
         # mcp is installed — check that version string is included in the message
@@ -178,7 +181,7 @@ class TestCheckClaudeAgentSdkImport:
         ):
             result = check_claude_agent_sdk_import()
         assert result.status == "fail"
-        assert result.remediation != ""
+        assert "[mcp,claude]" in result.remediation
 
     def test_warns_when_not_importable_on_codex_backend(self):
         """Missing SDK on a Codex runtime is only a warning, not a failure."""
@@ -192,6 +195,9 @@ class TestCheckClaudeAgentSdkImport:
             result = check_claude_agent_sdk_import()
         assert result.status == "warn"
         assert "codex" in result.message
+        # The remediation must name the canonical extras (see check_mcp_import's
+        # test for why a subset spec would regress the operator-facing fix).
+        assert "[mcp,claude]" in result.remediation
 
     def test_warns_when_not_importable_on_opencode_backend(self):
         """Missing SDK on an OpenCode runtime is only a warning."""
@@ -205,6 +211,7 @@ class TestCheckClaudeAgentSdkImport:
             result = check_claude_agent_sdk_import()
         assert result.status == "warn"
         assert "opencode" in result.message
+        assert "[mcp,claude]" in result.remediation
 
     def test_passes_with_unknown_version(self):
         mock_sdk = MagicMock()
@@ -266,12 +273,31 @@ class TestCheckLitellmImport:
         with patch("builtins.__import__", side_effect=_import_error_for("litellm")):
             result = check_litellm_import()
         assert result.status == "warn"
-        assert result.remediation != ""
+        # The uv-tool form must name the full canonical extras: uv tool install
+        # replaces the tool env with exactly the requested extras, so a subset
+        # spec would strip the user's other extras (mcp, claude).
+        assert "[mcp,claude,litellm]" in result.remediation
 
     def test_does_not_fail_when_missing(self):
         with patch("builtins.__import__", side_effect=_import_error_for("litellm")):
             result = check_litellm_import()
         assert result.status != "fail"
+
+    def test_warns_with_python_313_remediation_on_python_314(self):
+        """Doctor should not recommend installing LiteLLM into Python 3.14."""
+        with (
+            patch("builtins.__import__", side_effect=_import_error_for("litellm")),
+            patch.object(sys, "version_info", (3, 14, 0, "final", 0)),
+        ):
+            result = check_litellm_import()
+
+        assert result.status == "warn"
+        assert "Python >=3.12,<3.14" in result.remediation
+        assert "Python 3.13" in result.remediation
+        assert "python3.13 -m pip install 'ouroboros-ai[litellm]'" in result.remediation
+        assert "uv tool install --python 3.13 --force" in result.remediation
+        assert "[mcp,claude,litellm]" in result.remediation
+        assert "python3.14" not in result.remediation.lower()
 
 
 # ---------------------------------------------------------------------------

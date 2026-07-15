@@ -47,6 +47,8 @@ from ouroboros.tui.events import (
     CostUpdated,
     DriftUpdated,
     ExecutionUpdated,
+    FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     ParallelBatchCompleted,
     ParallelBatchStarted,
     PauseRequested,
@@ -56,6 +58,8 @@ from ouroboros.tui.events import (
     ToolCallCompleted,
     ToolCallStarted,
     WorkflowProgressUpdated,
+    format_frugality_retrospective_summary,
+    format_frugality_summary,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +87,26 @@ _TOOL_ACTIVITY_FALLBACK_LABELS = {
     "missing": "working",
     "unavailable": "working",
 }
+
+_MODEL_SHORT_PREFIXES = ("claude-", "us.anthropic.", "anthropic.")
+
+
+def _compact_tokens(value: float) -> str:
+    """Render a token count compactly, e.g. 1200 -> ``1.2k``."""
+    if value >= 1000:
+        return f"{value / 1000:.1f}k"
+    return str(int(value))
+
+
+def _short_model(model: str) -> str:
+    """Compact a model id to its family token, e.g. ``claude-haiku-4-5`` -> ``haiku``."""
+    slug = model.rsplit("/", 1)[-1]
+    for prefix in _MODEL_SHORT_PREFIXES:
+        if slug.startswith(prefix):
+            slug = slug[len(prefix) :]
+            break
+    family = slug.split("-", 1)[0]
+    return family or slug
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -292,6 +316,24 @@ class NodeDetailPanel(Static):
                     yield Label("Provider:", classes="label")
                     yield Static(f"[cyan]{provider}[/]", classes="value")
 
+            model = node.get("model")
+            tier = node.get("model_tier")
+            if (isinstance(model, str) and model) or (isinstance(tier, str) and tier):
+                parts = []
+                if isinstance(model, str) and model:
+                    parts.append(f"[cyan]{_short_model(model)}[/]")
+                if isinstance(tier, str) and tier:
+                    parts.append(f"[dim]{tier}[/]")
+                with Horizontal(classes="detail-row"):
+                    yield Label("Model:", classes="label")
+                    yield Static(" ".join(parts), classes="value")
+
+            tokens = node.get("tokens")
+            if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
+                with Horizontal(classes="detail-row"):
+                    yield Label("Tokens:", classes="label")
+                    yield Static(f"[cyan]{_compact_tokens(float(tokens))}[/]", classes="value")
+
             with Horizontal(classes="detail-row"):
                 yield Label("Atomic:", classes="label")
                 is_atomic = node.get("is_atomic", False)
@@ -475,6 +517,18 @@ class SelectableACTree(Static):
             provider = child_data.get("provider")
             if isinstance(provider, str) and provider:
                 label += f" [dim cyan]\\[{provider}][/]"
+
+            # Frugality telemetry: model-tier badge (model family, vendor prefix
+            # stripped) + compact token spend, both stamped from TUIState.
+            model = child_data.get("model")
+            tier = child_data.get("model_tier")
+            if isinstance(model, str) and model:
+                label += f" [dim]⚡{_short_model(model)}[/]"
+            elif isinstance(tier, str) and tier:
+                label += f" [dim]⚡{tier}[/]"
+            tokens = child_data.get("tokens")
+            if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
+                label += f" [dim]{_compact_tokens(float(tokens))}[/]"
 
             # P2: Show inline tool activity for executing nodes
             activity = self._active_tools.get(child_id) or self._activity_from_node(child_data)
@@ -786,7 +840,55 @@ class DashboardScreenV3(Screen[None]):
                     parts.append(f"[dim]{elapsed}[/]")
                 if cost:
                     parts.append(f"[dim]{cost}[/]")
-                self._phase_bar.progress_text = "  ".join(parts)
+                run_total = self._state.run_total_tokens if self._state else 0.0
+                if run_total > 0:
+                    parts.append(f"[dim]Σ {_compact_tokens(run_total)} tok[/]")
+                # Preserve a run-end frugality verdict already appended to the bar.
+                verdict = self._frugality_verdict_suffix()
+                self._phase_bar.progress_text = "  ".join(parts) + verdict
+
+    def _frugality_verdict_suffix(self) -> str:
+        """Return the run-end proof and retrospective summaries as one suffix."""
+        if self._state is None:
+            return ""
+        summaries = [
+            self._state.frugality_summary,
+            self._state.frugality_retrospective_summary,
+        ]
+        rendered = [summary for summary in summaries if summary]
+        return f"  {'  '.join(rendered)}" if rendered else ""
+
+    @staticmethod
+    def _strip_frugality_suffix(value: str) -> str:
+        markers = [
+            position for marker in ("⚖", "Evidence:") if (position := value.find(marker)) >= 0
+        ]
+        return value[: min(markers)].rstrip() if markers else value.rstrip()
+
+    def on_frugality_proof_evaluated(self, message: FrugalityProofEvaluated) -> None:
+        """Append the one-line run-end frugality verdict to the phase bar."""
+        if self._phase_bar is None:
+            return
+        line = format_frugality_summary(message.status, message.token_reduction_pct)
+        base = self._strip_frugality_suffix(self._phase_bar.progress_text)
+        retrospective = (
+            self._state.frugality_retrospective_summary if self._state is not None else None
+        )
+        suffix = "  ".join(item for item in (line, retrospective) if item)
+        self._phase_bar.progress_text = f"{base}  {suffix}" if base else suffix
+
+    def on_frugality_retrospective_reported(
+        self,
+        message: FrugalityRetrospectiveReported,
+    ) -> None:
+        """Append the neutral execution-finalized evidence line to the phase bar."""
+        if self._phase_bar is None:
+            return
+        line = format_frugality_retrospective_summary(message.summary)
+        base = self._strip_frugality_suffix(self._phase_bar.progress_text)
+        proof = self._state.frugality_summary if self._state is not None else None
+        suffix = "  ".join(item for item in (proof, line) if item)
+        self._phase_bar.progress_text = f"{base}  {suffix}" if base else suffix
 
     def on_subtask_updated(self, message: SubtaskUpdated) -> None:
         """Handle sub-task updates.

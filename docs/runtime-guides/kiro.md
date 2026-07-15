@@ -22,7 +22,7 @@ prompting.
 ## Setup
 
 ```bash
-pip install 'ouroboros-ai[claude]'   # the [claude] extras ship the Agent SDK types Ouroboros reuses
+pip install 'ouroboros-ai[mcp,claude]'   # [claude] ships the Agent SDK types Ouroboros reuses; [mcp] the MCP server
 ouroboros setup --runtime kiro
 ```
 

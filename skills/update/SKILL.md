@@ -80,7 +80,7 @@ When the user invokes this skill:
 
 4. **Run update** (if user chose to update):
 
-   a. **Update PyPI package** — detect the original install method and preserve `[claude]` extras:
+   a. **Update PyPI package** — detect the original install method and preserve `[mcp,claude]` extras:
 
    Check which installer was used:
    ```bash
@@ -88,36 +88,37 @@ When the user invokes this skill:
    pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
    ```
 
-   > This skill runs inside Claude Code, so always use `ouroboros-ai[claude]`
-   > (includes `claude-agent-sdk` and `anthropic` required for MCP tools).
+   > This skill runs inside Claude Code, so always use `ouroboros-ai[mcp,claude]`
+   > (includes `mcp` for the MCP server plus `claude-agent-sdk` and `anthropic`
+   > required for MCP tools).
 
    - If installed via **uv tool** (most common with install.sh):
      ```bash
      # For pre-release targets:
-     uv tool install --upgrade --prerelease=allow ouroboros-ai[claude]
+     uv tool install --upgrade --prerelease=allow 'ouroboros-ai[mcp,claude]'
      # For stable targets:
-     uv tool install --upgrade ouroboros-ai[claude]
+     uv tool install --upgrade 'ouroboros-ai[mcp,claude]'
      ```
 
    - If installed via **pipx**:
      > `pipx upgrade` cannot add extras to an existing venv — use `install --force` to reinstall with extras.
      ```bash
      # For pre-release targets:
-     pipx install --force --pip-args='--pre' ouroboros-ai[claude]
+     pipx install --force --pip-args='--pre' 'ouroboros-ai[mcp,claude]'
      # For stable targets:
-     pipx install --force ouroboros-ai[claude]
+     pipx install --force 'ouroboros-ai[mcp,claude]'
      ```
 
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     python3 -m pip install --upgrade --pre ouroboros-ai[claude]
+     python3 -m pip install --upgrade --pre 'ouroboros-ai[mcp,claude]'
      # For stable targets:
-     python3 -m pip install --upgrade ouroboros-ai[claude]
+     python3 -m pip install --upgrade 'ouroboros-ai[mcp,claude]'
      ```
 
-   > **Note**: The `[claude]` extra is critical — it installs `claude-agent-sdk` and
-   > `anthropic` which are required for MCP tool execution. Omitting it causes MCP
+   > **Note**: The `[mcp,claude]` extras are critical. Omitting `[mcp]` makes the MCP
+   > server fail to boot (ImportError at startup); omitting `[claude]` causes MCP
    > tools to fail silently at call time.
 
    b. **Update runtime integration**:
@@ -145,7 +146,7 @@ When the user invokes this skill:
    For Codex CLI (already handled by step b above — skip this step).
 
    This ensures `~/.claude/mcp.json` has the latest MCP command and args
-   (e.g., `ouroboros-ai[claude]` extras). Skips if already up to date.
+   (e.g., `ouroboros-ai[mcp,claude]` extras). Skips if already up to date.
 
    d. **Verify and update CLAUDE.md version marker**:
    ```bash

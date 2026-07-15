@@ -90,6 +90,7 @@ def test_tracks_requested_permission_mode_and_declares_ignored_support() -> None
     assert requested_runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
     assert requested_runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
     assert requested_runtime.capabilities.permission_mode_support is ParamSupport.IGNORED
+    assert requested_runtime.capabilities.session_signals.after_turn_delivery is True
 
 
 def test_build_command_rejects_unsafe_resume_session_id() -> None:

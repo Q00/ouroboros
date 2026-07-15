@@ -2233,6 +2233,11 @@ class StartEvaluateHandler:
             links=JobLinks(session_id=session_id),
             work_fn=_runner,
             cancelled_text="Evaluation cancelled before work began.",
+            detached_tool_name="ouroboros_start_evaluate",
+            detached_arguments=arguments,
+            runtime_backend=self.agent_runtime_backend,
+            llm_backend=self.llm_backend,
+            opencode_mode=self.opencode_mode,
         )
 
         text = (
@@ -2242,20 +2247,22 @@ class StartEvaluateHandler:
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result "
             "to monitor it."
         )
+        meta = {
+            "job_id": snapshot.job_id,
+            "session_id": session_id,
+            "status": snapshot.status.value,
+            "cursor": snapshot.cursor,
+            "job_observer": build_job_observer_contract(
+                job_id=snapshot.job_id,
+                cursor=snapshot.cursor,
+                session_id=session_id,
+            ),
+        }
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=False,
-                meta={
-                    "job_id": snapshot.job_id,
-                    "session_id": session_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
-                    "job_observer": build_job_observer_contract(
-                        job_id=snapshot.job_id,
-                        cursor=snapshot.cursor,
-                        session_id=session_id,
-                    ),
-                },
+                meta=meta,
+                structured_content=dict(meta),
             )
         )

@@ -62,6 +62,14 @@ printf 'ouroboros %s\\n' "$*" >> {calls!s}
 exit 0
 """,
     )
+
+    if not include_uv:
+        # Keep pipx/pip interpreter-selection tests independent of Python
+        # binaries provided by the host runner. Individual tests opt candidates
+        # in via fake_commands.
+        for name in ("python3.14", "python3.13", "python3.12", "python3", "python"):
+            _write_executable(bin_dir / name, "#!/bin/sh\nexit 1\n")
+
     if fake_commands:
         for name, content in fake_commands.items():
             _write_executable(bin_dir / name, content)
@@ -102,7 +110,7 @@ def _expected_pins_for_extras(*extra_names: str) -> list[str]:
         for dep in extras.get(extra_name, []):
             stripped = dep.strip()
             if stripped:
-                expected_pins.append(stripped)
+                expected_pins.append(stripped.partition(";")[0].strip())
     return expected_pins
 
 
@@ -140,8 +148,9 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     assert "Runtime: opencode (preserved from" in result.stdout
     assert "Installing .[tui] ..." in result.stdout
     assert (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines() == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime opencode --non-interactive",
+        "ouroboros setup refresh",
     ]
 
 
@@ -156,7 +165,7 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.28.1 --with claude-agent-sdk==0.2.110 --with anthropic==0.112.0 --with textual==8.2.7 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.28.1 --with claude-agent-sdk==0.2.110 --with anthropic==0.116.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
     _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
@@ -203,8 +212,9 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Runtime: pi (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
+        "ouroboros setup refresh",
     ]
 
 
@@ -302,6 +312,178 @@ def test_pipx_install_setup_prefers_existing_path_command_over_stale_home_local_
     assert not any(call.startswith("stale-home-ouroboros setup") for call in calls)
 
 
+def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
+    assert "--with litellm==1.91.0" in calls
+
+    mcp_config = json.loads(
+        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
+    )
+    assert mcp_config["mcpServers"]["ouroboros"]["args"][:2] == [
+        "--python",
+        ">=3.12,<3.14",
+    ]
+
+
+def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "codex"},
+        fake_commands={"codex": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "uv tool install --upgrade --python >=3.12 ." in calls
+    assert ">=3.12,<3.14" not in calls
+
+
+def test_all_runtime_pipx_selects_python_313_when_314_is_available(tmp_path: Path) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    python_313 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\necho \'Python 3.13.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.14": python_314,
+            "python3.13": python_313,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert f"pipx install --force --python {tmp_path}/bin/python3.13 .[all]" in calls
+    assert f"--python {tmp_path}/bin/python3.14" not in calls
+
+
+def test_all_runtime_pipx_fails_before_install_when_only_python_314_exists(
+    tmp_path: Path,
+) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.14": python_314,
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Python >=3.12,<3.14" in result.stdout
+    assert "Python 3.13" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "pipx install" not in calls_path.read_text(encoding="utf-8")
+
+
+def test_all_runtime_pipx_rejects_python_315_for_litellm_range(tmp_path: Path) -> None:
+    python_315 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.15; exit 0; fi\necho \'Python 3.15.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "pipx": '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pipx 0.0.0-test"; exit 0; fi\nprintf "pipx %s\\n" "$*" >> __CALLS__\nexit 0\n'.replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.15": python_315,
+            "python3": python_315,
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Python >=3.12,<3.14" in result.stdout
+    calls_path = tmp_path / "calls.log"
+    assert not calls_path.exists() or "pipx install" not in calls_path.read_text(encoding="utf-8")
+
+
+def test_all_runtime_pip_fallback_fails_before_install_when_only_python_314_exists(
+    tmp_path: Path,
+) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={"python3": python_314},
+    )
+
+    assert result.returncode == 1
+    assert "Python >=3.12,<3.14" in result.stdout
+    assert "Python 3.13" in result.stdout
+
+
+def test_all_runtime_pip_fallback_selects_313_when_generic_python3_is_314(
+    tmp_path: Path,
+) -> None:
+    python_314 = (
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.14; exit 0; fi\necho \'Python 3.14.0\'\n'
+    )
+    python_313 = (
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then printf \'pip313 %s\\n\' "$*" >> __CALLS__; exit 0; fi\n'
+        "echo 'Python 3.13.0'\n"
+    ).replace("__CALLS__", str(tmp_path / "calls.log"))
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={
+            "python3": python_314,
+            "python3.13": python_313,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "pip313 -m pip install --user --upgrade .[all] click>=8.1.0,<9.0.0" in calls
+
+
+def test_all_runtime_pip_fallback_uses_compatible_python(tmp_path: Path) -> None:
+    python_313 = (
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then echo 3.13; exit 0; fi\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then printf \'pip %s\\n\' "$*" >> __CALLS__; exit 0; fi\n'
+        "echo 'Python 3.13.0'\n"
+    ).replace("__CALLS__", str(tmp_path / "calls.log"))
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "all"},
+        fake_commands={"python3": python_313},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "pip -m pip install --user --upgrade .[all] click>=8.1.0,<9.0.0" in calls
+
+
 def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
@@ -312,12 +494,13 @@ def test_detects_pi_as_single_runtime_and_runs_pi_setup(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "Pi:" in result.stdout
     assert calls == [
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3",
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3",
         "ouroboros setup --runtime pi --non-interactive",
+        "ouroboros setup refresh",
     ]
 
 
-def test_explicit_codex_refreshes_codex_artifacts(tmp_path: Path) -> None:
+def test_explicit_codex_refreshes_runtime_artifacts(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_INSTALL_RUNTIME": "codex"},
@@ -327,10 +510,10 @@ def test_explicit_codex_refreshes_codex_artifacts(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "ouroboros setup --runtime codex --non-interactive" in calls
-    assert "ouroboros codex refresh" in calls
+    assert "ouroboros setup refresh" in calls
 
 
-def test_preserved_non_codex_runtime_still_refreshes_codex_when_detected(tmp_path: Path) -> None:
+def test_preserved_non_codex_runtime_still_refreshes_runtime_artifacts(tmp_path: Path) -> None:
     config_dir = tmp_path / "home" / ".ouroboros"
     config_dir.mkdir(parents=True)
     (config_dir / "config.yaml").write_text(
@@ -346,7 +529,7 @@ def test_preserved_non_codex_runtime_still_refreshes_codex_when_detected(tmp_pat
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "ouroboros setup --runtime opencode --non-interactive" in calls
-    assert "ouroboros codex refresh" in calls
+    assert "ouroboros setup refresh" in calls
 
 
 def test_preserved_codex_runtime_refreshes_claude_skills_when_detected(tmp_path: Path) -> None:
@@ -374,7 +557,7 @@ def test_preserved_codex_runtime_refreshes_claude_skills_when_detected(tmp_path:
     assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
 
 
-def test_all_runtime_install_refreshes_codex_artifacts(tmp_path: Path) -> None:
+def test_all_runtime_install_refreshes_runtime_artifacts(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_INSTALL_RUNTIME": "all"},
@@ -382,7 +565,7 @@ def test_all_runtime_install_refreshes_codex_artifacts(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8").splitlines()
-    assert "ouroboros codex refresh" in calls
+    assert "ouroboros setup refresh" in calls
 
 
 def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path) -> None:
@@ -396,7 +579,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert (
-        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with textual==8.2.7 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 ouroboros-ai --with click>=8.1.0,<9.0.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
     assert "--prerelease=allow" not in calls

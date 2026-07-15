@@ -6,7 +6,9 @@ tier* runs it — the frugality lever ``ooo run`` leans on. The RLM thesis is th
 decomposing a big goal into small, verified-MECE acceptance criteria makes each
 child easy enough to run on a cheaper model, so decomposed children drop one tier
 (``standard`` -> ``frugal`` -> haiku) while top-level ACs keep today's default
-(``standard`` -> sonnet). A failing AC earns a stronger model on retry.
+(``standard`` -> sonnet). A failing AC earns a stronger model on retry, and one
+that keeps failing climbs the ladder progressively — one tier per retry past the
+escalation threshold, capped at the frontier ceiling.
 
 Note the deliberate asymmetry with effort routing V5: that module stopped lowering
 a decomposed child's *reasoning depth* (a harder child needs at least as much
@@ -162,9 +164,11 @@ class ModelRouter:
             decomposition makes children cheap enough for the frugal tier).
         base_tier: The tier top-level / non-decomposed ACs start at. Defaults to
             one notch above ``child_tier`` so the top keeps today's model.
-        escalation_retry_threshold: The ``retry_attempt`` at which the tier is
-            raised one notch (``retry_attempt`` is 0 on the initial dispatch),
-            mirroring effort routing's retry-raise semantics.
+        escalation_retry_threshold: The ``retry_attempt`` at which tier escalation
+            begins (``retry_attempt`` is 0 on the initial dispatch). From this
+            attempt onward the tier climbs one notch PER retry (capped at the
+            frontier ceiling), so a persistently failing unit walks the whole
+            ladder rather than stalling one notch up.
     """
 
     tier_models: Mapping[str, str]
@@ -440,9 +444,15 @@ def decide_model(
             not itself a MECE attestation; proof admission separately requires a
             deterministic decomposition-trust signal.
         retry_attempt: Same-runtime retry index for this unit (0 on the initial
-            dispatch). At ``router.escalation_retry_threshold`` onward the tier is
-            raised one notch, applied AFTER the child drop so a failing child's
-            escalation beats the drop: a hard child earns a stronger model.
+            dispatch). From ``router.escalation_retry_threshold`` onward the tier
+            climbs PROGRESSIVELY — one notch per retry at or past the threshold
+            (``max(0, retry_attempt - threshold + 1)`` notches), capped at the
+            frontier ceiling — applied AFTER the child drop so a failing child's
+            escalation beats the drop: a hard child earns a progressively stronger
+            model the longer it keeps failing. This is a deliberate asymmetry with
+            effort routing V5, which keeps its single-notch retry raise: reasoning
+            depth has no multi-level budget pressure to climb through, but the model
+            tier ladder does, so only tiers escalate step by step across retries.
         suggested_tier: An explicit starting tier (e.g. from an ExecutionProfile
             hint) used in place of ``router.base_tier``.
 
@@ -459,8 +469,12 @@ def decide_model(
     if is_decomposed_child:
         # THE RLM frugality move: a decomposed child runs one tier cheaper.
         tier = lower_one_notch(tier)
-    if retry_attempt >= router.escalation_retry_threshold:
-        # Applied after the child drop so escalation beats the drop.
+    # PROGRESSIVE retry escalation: raise one tier per retry at or past the
+    # threshold, capped at the frontier ceiling. Applied AFTER the child drop so
+    # a failing child's escalation beats the drop — a hard child earns a
+    # progressively stronger model the longer it keeps failing.
+    escalation_notches = max(0, retry_attempt - router.escalation_retry_threshold + 1)
+    for _ in range(escalation_notches):
         tier = raise_one_notch(tier)
 
     resolved = _resolve_model_for_tier(tier, router.tier_models)

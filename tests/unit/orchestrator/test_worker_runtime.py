@@ -79,6 +79,20 @@ class TestCapabilities:
         assert caps.tool_restriction_support is ParamSupport.IGNORED
         assert caps.system_prompt_support is ParamSupport.NATIVE
         assert caps.reasoning_effort_support is ParamSupport.NATIVE
+        assert caps.session_signals.after_turn_delivery is True
+        assert caps.session_signals.checkpoint_redirect is False
+
+    def test_after_turn_requires_targeted_resume(self) -> None:
+        transport = _FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1"))
+        runtime = LeaderDrivenWorkerRuntime(
+            transport=transport,
+            runtime_backend="codex_mcp",
+            llm_backend="codex",
+            targeted_resume=False,
+        )
+
+        assert runtime.capabilities.targeted_resume is False
+        assert runtime.capabilities.session_signals.after_turn_delivery is False
 
     def test_protocol_properties(self) -> None:
         rt = _runtime(_FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1")))

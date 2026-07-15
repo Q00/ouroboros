@@ -24,6 +24,7 @@ from ouroboros.plugin.hooks import (
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
     HOOK_OUTCOME_AUDIT_EVENTS,
+    HOOK_REWIND_OBSERVE_SCOPE,
     HOOK_RUNTIME_AUDIT_EVENTS,
     TERMINAL_DEFERRED_HOOK_KINDS,
     TERMINAL_DEFERRED_HOOK_NAMES,
@@ -56,6 +57,7 @@ class TestHookKindEnumeration:
             "on_cancel",
             "before_tool_call",
             "after_tool_call",
+            "on_rewind",
         }
 
     def test_terminal_observability_hook_set_is_exact(self) -> None:
@@ -90,7 +92,6 @@ class TestHookKindEnumeration:
             "before_state_commit",
             "after_state_commit",
             "on_event",
-            "on_rewind",
         }
 
     def test_hook_sets_are_disjoint(self) -> None:
@@ -142,6 +143,7 @@ class TestRoutingHelpers:
         # Tool-call hooks were promoted into v1 by #939 PR F-1.
         assert is_v1_hook_kind("before_tool_call")
         assert is_v1_hook_kind("after_tool_call")
+        assert is_v1_hook_kind("on_rewind")
         assert not is_v1_hook_kind("on_event")
         assert not is_v1_hook_kind("before_artifact_write")
         assert not is_v1_hook_kind("unknown_hook")
@@ -177,7 +179,7 @@ class TestRoutingHelpers:
 
     def test_excluded_hook_kind_router(self) -> None:
         assert is_excluded_hook_kind("before_runtime_start")
-        assert is_excluded_hook_kind("on_rewind")
+        assert not is_excluded_hook_kind("on_rewind")
         assert not is_excluded_hook_kind("before_invocation")
         assert not is_excluded_hook_kind("before_tool_call")
 
@@ -186,6 +188,9 @@ class TestRoutingHelpers:
         assert not is_v1_hook_kind(unknown)
         assert not is_deferred_hook_kind(unknown)
         assert not is_excluded_hook_kind(unknown)
+
+    def test_rewind_permission_scope_is_stable(self) -> None:
+        assert HOOK_REWIND_OBSERVE_SCOPE == "plugin:rewind:observe"
 
 
 def test_hook_runtime_audit_event_contract_includes_invoked_and_completed() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import TYPE_CHECKING, Literal
 
 import structlog
@@ -74,6 +75,7 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # envelope has nothing to restrict on that path (enforcement is
 # vacuously satisfied).
 _BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = soft_tool_enforcement_backends()
+_LITELLM_PYTHON_SPEC = ">=3.12,<3.14"
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,9 +312,8 @@ def _create_litellm_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     try:
         from ouroboros.providers.litellm_adapter import LiteLLMAdapter
     except ImportError as exc:
-        msg = (
-            "litellm backend requested but litellm is not installed. "
-            "Install with: pip install 'ouroboros-ai[litellm]'"
+        msg = litellm_missing_dependency_message(
+            "litellm backend requested but litellm is not installed."
         )
         raise RuntimeError(msg) from exc
 
@@ -322,6 +323,20 @@ def _create_litellm_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
         timeout=request.timeout,
         max_retries=request.max_retries,
         io_recorder=request.io_recorder,
+    )
+
+
+def litellm_missing_dependency_message(prefix: str) -> str:
+    """Return install guidance that respects LiteLLM's Python support range."""
+    if sys.version_info >= (3, 14):
+        return (
+            f"{prefix} Ouroboros' LiteLLM profile supports Python {_LITELLM_PYTHON_SPEC}. "
+            "Create a Python 3.13 environment, then install with: "
+            "python3.13 -m pip install 'ouroboros-ai[litellm]'."
+        )
+    return (
+        f"{prefix} Install with: pip install 'ouroboros-ai[litellm]' "
+        "or uv tool install --force --with litellm ouroboros-ai."
     )
 
 
@@ -414,4 +429,9 @@ def create_llm_adapter(
     )
 
 
-__all__ = ["create_llm_adapter", "resolve_llm_backend", "resolve_llm_permission_mode"]
+__all__ = [
+    "create_llm_adapter",
+    "litellm_missing_dependency_message",
+    "resolve_llm_backend",
+    "resolve_llm_permission_mode",
+]

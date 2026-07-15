@@ -21,7 +21,7 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 - Python >= 3.12
 - Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
 
-> The `[claude]` extra (`pip install ouroboros-ai[claude]`) installs `claude-agent-sdk` and `anthropic` -- required for Claude Code runtime integration. The base `ouroboros-ai` package does not include these.
+> Install with the `[mcp,claude]` extras (`pip install ouroboros-ai[mcp,claude]`): `[claude]` installs `claude-agent-sdk` and `anthropic` -- required for Claude Code runtime integration -- and `[mcp]` installs the MCP server runtime. The base `ouroboros-ai` package includes neither.
 
 ## Configuration
 
@@ -127,3 +127,17 @@ Using Claude Code as the runtime backend with a Pro or Max Plan means:
 - Typical simple tasks: 15-30 seconds
 - Complex multi-file tasks: 1-3 minutes
 > **Note:** Pro plan ($20/month) works but has lower usage limits. For long agentic workflows, **Max plan is recommended** to avoid hitting limits mid-session.
+
+## Active Conductor and Synapse
+
+Claude Agent SDK and persisted Claude worker sessions are proven Synapse
+`inform`/`after_turn` transports. Delivery resumes the same native session only
+after the current turn; resumability is not presented as live checkpoint
+`redirect`, and hard `replace` remains unsupported.
+
+The main Claude conversation delegates exactly one read-only observer, stays
+available to the user, and relays current runtime/model, efficiency assurance,
+bounded Discover targets, dependency/parallel levels, first scheduled ACs,
+attention, and terminal assurance. It chooses an AC semantically without asking
+for internal IDs. Guidance is canonical English; the host responds naturally in
+the user's current conversation language.

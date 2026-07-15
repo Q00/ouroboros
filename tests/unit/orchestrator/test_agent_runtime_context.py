@@ -58,6 +58,9 @@ def test_context_membership_is_narrow() -> None:
         "llm_backend",
         "mcp_bridge",
         "control",
+        # Synapse needs one shared exact-attempt registry so MCP admission and
+        # active worker dispatch cannot resolve different runtime owners.
+        "synapse",
     }
     actual = {f.name for f in dataclasses.fields(AgentRuntimeContext)}
     assert actual == expected

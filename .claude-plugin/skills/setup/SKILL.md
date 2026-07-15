@@ -151,12 +151,12 @@ Runtime backend            [✓] Detected
 | Environment | Mode | Action |
 |:------------|:-----|:-------|
 | uvx + Python >= 3.12 | **Ready** | Proceed to MCP registration (uvx mode — extras always included) |
-| No uvx + `ouroboros` binary in PATH | **Check deps** | Verify `[claude]` extras, then proceed (binary mode) |
-| No uvx + Python >= 3.12 + `python3 -m ouroboros` works | **Check deps** | Verify `[claude]` extras, then proceed (pip mode) |
+| No uvx + `ouroboros` binary in PATH | **Check deps** | Verify `[mcp,claude]` extras, then proceed (binary mode) |
+| No uvx + Python >= 3.12 + `python3 -m ouroboros` works | **Check deps** | Verify `[mcp,claude]` extras, then proceed (pip mode) |
 | uvx + Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
 | No uvx + no ouroboros binary + no pip package | **Install needed** | Install uv first, then proceed |
 
-**For binary/pip modes — verify `[claude]` extras are installed:**
+**For binary/pip modes — verify `[mcp,claude]` extras are installed:**
 
 Check method depends on how ouroboros was installed:
 ```bash
@@ -166,15 +166,15 @@ pipx list 2>/dev/null | grep -q ouroboros && echo "PIPX" || echo "NOT_PIPX"
 
 - **pipx users** (binary mode, installed via pipx):
   ```bash
-  pipx runpip ouroboros-ai show claude-agent-sdk 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
+  pipx runpip ouroboros-ai show claude-agent-sdk 2>/dev/null && pipx runpip ouroboros-ai show mcp 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
   ```
-  If `DEPS_MISSING`: `pipx install --force ouroboros-ai[claude]`
+  If `DEPS_MISSING`: `pipx install --force 'ouroboros-ai[mcp,claude]'`
 
 - **pip users** (pip mode):
   ```bash
-  python3 -c "import claude_agent_sdk" 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
+  python3 -c "import claude_agent_sdk, mcp" 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
   ```
-  If `DEPS_MISSING`: `python3 -m pip install ouroboros-ai[claude]`
+  If `DEPS_MISSING`: `python3 -m pip install 'ouroboros-ai[mcp,claude]'`
 
 If deps are missing and the user doesn't want to fix manually, recommend uv. Prefer
 package-manager paths over the vendor pipe-to-shell when the user's environment supports
@@ -188,7 +188,7 @@ Or install uv (recommended — handles deps automatically). Any one of:
 Then re-run: ooo setup
 ```
 
-**IMPORTANT**: The MCP server requires one of: (1) uvx, (2) ouroboros binary in PATH, or (3) ouroboros pip-installed. For options 2 and 3, the `[claude]` extra must also be installed. If none are available, guide the user to install uv — do NOT write a non-working fallback to mcp.json.
+**IMPORTANT**: The MCP server requires one of: (1) uvx, (2) ouroboros binary in PATH, or (3) ouroboros pip-installed. For options 2 and 3, the `[mcp,claude]` extras must also be installed. If none are available, guide the user to install uv — do NOT write a non-working fallback to mcp.json.
 
 **If prerequisites are missing, show:**
 ```
@@ -238,7 +238,7 @@ This enables:
 **Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects).
 
 Choose the MCP command based on how ouroboros is installed (check in order):
-1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"]}`
+1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]}`
 2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"]}`
 3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}`
 4. If none of the above → **do NOT write to mcp.json**. Instead show the prerequisites message from Step 1 and stop.
@@ -621,7 +621,7 @@ For Full Mode, install Python >= 3.12:
 uvx is recommended but not required. Alternative:
 
 Install Ouroboros globally (see docs/getting-started.md for all options):
-  pip install ouroboros-ai
+  pip install 'ouroboros-ai[mcp,claude]'
 
 Then update ~/.claude/mcp.json with:
   "command": "python"

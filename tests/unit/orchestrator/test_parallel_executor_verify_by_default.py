@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,7 +15,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
-from ouroboros.orchestrator.model_routing import ModelRouter
+from ouroboros.orchestrator.model_routing import ModelRouter, decide_model
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -475,6 +476,228 @@ async def test_retry_reaches_pending_native_model_escalation(tmp_path: Any) -> N
 
     assert calls == [[0], [0], [0]]
     assert ac_retry_attempts[0] == 2
+
+
+def _native_escalation_executor(tmp_path: Any, *, ac_retry_attempts: int) -> ParallelACExecutor:
+    """A verify-off executor whose adapter enforces model overrides natively and
+    whose router escalates from the ``standard`` base at retry threshold 2.
+
+    Shared by the ladder-walk regressions below. The three-tier ladder plus a
+    NATIVE ``model_override_support`` are exactly the conditions the retry loop's
+    ``pending_enforced_escalation`` branch requires before it lets an identical
+    failure class keep dispatching instead of early-stopping.
+    """
+    adapter = _StubAdapter(str(tmp_path))
+    adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        model_override_support=ParamSupport.NATIVE,
+    )
+    return ParallelACExecutor(
+        adapter=adapter,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=False,
+        ac_retry_attempts=ac_retry_attempts,
+        model_router=ModelRouter(
+            tier_models={"frugal": "haiku-x", "standard": "sonnet-x", "frontier": "opus-x"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=2,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_top_level_walks_whole_ladder_to_frontier(tmp_path: Any) -> None:
+    """Executor-level pin for the ``escalation_threshold`` doc claim
+    (docs/config-reference.md) that "a persistently failing unit walks the whole
+    ladder rather than stalling one tier up" — the early-stop truncation is part
+    of the *effective* runtime contract, not just the pure routing policy.
+
+    ac_retry_attempts=3, threshold=2, identical failure class every attempt. A
+    TOP-LEVEL unit starts at ``standard`` and, under the model ladder, would be
+    routed ``standard`` (retry 0) -> ``standard`` (retry 1) -> ``frontier``
+    (retry 2). The retry loop must:
+      * defeat early-stop while a stronger tier is still pending (retry 1's
+        next attempt is ``frontier``), so it keeps dispatching, and
+      * resume early-stop once the frontier ceiling is dispatched — retry 3
+        would still be ``frontier`` (no escalation pending beyond the cap), so a
+        4th identical-class attempt must NOT be burned.
+
+    So exactly 3 dispatches occur and the final one lands at ``frontier``.
+    """
+    executor = _native_escalation_executor(tmp_path, ac_retry_attempts=3)
+    router = executor._model_router
+    assert router is not None
+    seed = _seed_with_specs("ac")
+    ac_retry_attempts = {0: 0}
+    calls: list[list[int]] = []
+    routed_tiers: list[str | None] = []
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        calls.append(list(kwargs["batch_indices"]))
+        # Mirror the production seam: the tier a top-level unit would be routed
+        # to for this same dispatch is a pure function of the retry_attempt the
+        # loop advanced before dispatching.
+        routed_tiers.append(
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=False,
+                retry_attempt=kwargs["ac_retry_attempts"][0],
+            ).tier
+        )
+        return [_fail(0, "EVIDENCE_MISSING")]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts=ac_retry_attempts,
+        execution_counters=None,
+    )
+
+    # Ladder walked to the ceiling, then early-stop resumed: no 4th burn.
+    assert calls == [[0], [0], [0]]
+    assert ac_retry_attempts[0] == 2
+    assert routed_tiers == ["standard", "standard", "frontier"]
+
+
+@pytest.mark.asyncio
+async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> None:
+    """A decomposed CHILD (routed one tier below top-level) must also walk its
+    whole ladder to ``frontier`` — the finding's expectation.
+
+    The batch retry loop carries top-level indices; the child start tier is not a
+    loop input but a property of the routing seam (``resolve_execute_model`` /
+    ``decide_model`` with ``is_decomposed_child=True``). A decomposed parent
+    re-runs its children — routed one tier cheaper and sharing the parent's retry
+    counter — on every retry, so the early-stop predicate reads ``is_decomposed``
+    off the dispatched result and probes the CHILD ladder for a pending escalation.
+    This mirrors reality by returning a decomposed failing result and computing the
+    child tier the loop's per-attempt ``retry_attempt`` would route to, exactly as
+    the executor does inside ``_execute_single_ac``.
+
+    ac_retry_attempts=3, threshold=2, identical failure class every attempt. The
+    child ladder is frugal, frugal, standard, frontier (retry 0..3), so reaching
+    ``frontier`` requires a 4th dispatch at retry 3. The ladder-truth predicate
+    keeps dispatching while the next retry resolves to a stronger enforced model
+    and resumes early-stop only once the frontier ceiling is reached.
+    """
+    executor = _native_escalation_executor(tmp_path, ac_retry_attempts=3)
+    router = executor._model_router
+    assert router is not None
+    seed = _seed_with_specs("ac")
+    ac_retry_attempts = {0: 0}
+    calls: list[list[int]] = []
+    routed_tiers: list[str | None] = []
+
+    def _decomposed_fail() -> ACExecutionResult:
+        # A decomposed parent whose children (routed one tier cheaper) failed:
+        # the predicate keys off ``is_decomposed`` to probe the child ladder.
+        base = _fail(0, "EVIDENCE_MISSING")
+        return replace(base, is_decomposed=True)
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        calls.append(list(kwargs["batch_indices"]))
+        routed_tiers.append(
+            decide_model(
+                ParamSupport.NATIVE,
+                router=router,
+                is_decomposed_child=True,
+                retry_attempt=kwargs["ac_retry_attempts"][0],
+            ).tier
+        )
+        return [_decomposed_fail()]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts=ac_retry_attempts,
+        execution_counters=None,
+    )
+
+    # The child is re-dispatched through retry 3 so its ladder reaches the
+    # frontier ceiling despite the repeated failure class.
+    assert calls == [[0], [0], [0], [0]]
+    assert routed_tiers[-1] == "frontier"
+
+
+@pytest.mark.asyncio
+async def test_retry_non_native_runtime_plain_early_stops(tmp_path: Any) -> None:
+    """A router whose model override is only advised (not NATIVE) cannot enforce a
+    stronger model, so the ladder-truth probe must degrade to the plain early-stop:
+    an identical failure class stops at 2 dispatches even though the tier ladder
+    WOULD escalate on the next retry under a native runtime.
+    """
+    adapter = _StubAdapter(str(tmp_path))
+    adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        model_override_support=ParamSupport.TRANSLATED,
+    )
+    executor = ParallelACExecutor(
+        adapter=adapter,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=False,
+        ac_retry_attempts=2,
+        model_router=ModelRouter(
+            tier_models={"frugal": "haiku-x", "standard": "sonnet-x", "frontier": "opus-x"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            # Threshold 1: under NATIVE the retry-1 dispatch would escalate to
+            # ``frontier`` and defeat early-stop — the ADVISED guard must suppress that.
+            escalation_retry_threshold=1,
+        ),
+    )
+    seed = _seed_with_specs("ac")
+    ac_retry_attempts = {0: 0}
+    calls: list[list[int]] = []
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        calls.append(list(kwargs["batch_indices"]))
+        return [_fail(0, "EVIDENCE_MISSING")]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    await executor._run_batch_with_verify_and_retry(
+        seed=seed,
+        batch_executable=[0],
+        session_id="s",
+        execution_id="e",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts=ac_retry_attempts,
+        execution_counters=None,
+    )
+
+    assert calls == [[0], [0]]
+    assert ac_retry_attempts[0] == 1
 
 
 @pytest.mark.asyncio

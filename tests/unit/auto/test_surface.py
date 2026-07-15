@@ -558,6 +558,8 @@ async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> No
         "assumption_only_sections": [],
         "assumption_sources": [],
         "runtime_probe_evidence": [],
+        "efficiency_mode": "adaptive",
+        "frugality_assurance": "observe",
     }
 
 
