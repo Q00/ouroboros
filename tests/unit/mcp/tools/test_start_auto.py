@@ -396,7 +396,9 @@ class TestBackgroundJobPath:
         assert observer["ownership"] == "exclusive"
         assert observer["job_id"] == "job_auto_001"
         assert observer["session_id"] == auto_session_id
-        assert observer["main_session_policy"] == "start_and_on_demand_only"
+        assert observer["main_session_policy"] == "relay_wait_while_observer_active"
+        assert observer["host_lifecycle"]["codex_parent_wait_tool"] == "wait_agent"
+        assert observer["host_lifecycle"]["parent_wait_required_while_observer_active"] is True
         assert observer["follow_result_job_keys"] == [
             "job_id",
             "ralph_job_id",

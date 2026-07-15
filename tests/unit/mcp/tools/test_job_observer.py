@@ -40,13 +40,17 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
             "arguments": {"job_id": "job_123"},
         },
         "follow_result_job_keys": ["chained_evaluate_job_id"],
-        "main_session_policy": "start_and_on_demand_only",
+        "main_session_policy": "relay_wait_while_observer_active",
         "host_lifecycle": {
             "spawn_required_for_live_relay": True,
             "codex_spawn_tool": "spawn_agent",
             "codex_task_name": "run_observer",
             "spawn_ack_required": True,
             "wait_is_not_spawn": True,
+            "codex_parent_wait_tool": "wait_agent",
+            "codex_parent_wait_timeout_ms": 60000,
+            "parent_wait_required_while_observer_active": True,
+            "parent_wait_interruptible_by_user": True,
             "durable_job_survives_parent_turn": True,
             "fallback_keep_turn_open": False,
             "fallback_notification_timing": "next_parent_turn_or_explicit_status",
@@ -65,7 +69,7 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
             "attention_priority": "immediate",
         },
         "parent_session": {
-            "availability": "available_after_handoff",
+            "availability": "available_during_interruptible_relay_wait",
             "initial_handoff": [
                 "show_job_and_session_handles",
                 "show_dashboard_url_or_tui_command",
@@ -85,6 +89,8 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
         "instructions": [
             "For live proactive relays, create one real child with the host spawn primitive and require its live agent/session acknowledgement; a wait call is not a spawn.",
             "On Codex call spawn_agent exactly once with task_name run_observer and include this contract unchanged in the child message.",
+            "After Codex receives the live child acknowledgement, the parent must keep its turn open with wait_agent while the observer is active. A child send_message only reaches the parent's mailbox; it does not wake a parent turn that already ended.",
+            "Use wait_agent with a timeout no greater than host_lifecycle.codex_parent_wait_timeout_ms, relay meaningful mailbox updates, and wait again until the observer reports terminal completion. User input may interrupt the wait and must be handled before observation resumes.",
             "If spawning is unavailable or fails, do not claim an observer exists. State that the durable worker continues independently and that the parent will catch up on the next turn or explicit status request; keep the turn open only when the user explicitly asked for live watching.",
             "Reload deferred Ouroboros tool schemas immediately before each tool call.",
             "Call wait.tool with wait.arguments; replace the local cursor from response meta.",

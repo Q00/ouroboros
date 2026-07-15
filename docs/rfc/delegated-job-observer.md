@@ -30,16 +30,20 @@ main session              observer session             Ouroboros
     |---------------------------->| background job          |
     | receive job_observer        |                         |
     | spawn observer ------------>| job_wait (exclusive) -->|
-    | remain available            | ...                     |
+    | wait_agent (interruptible)  | ...                     |
+    |<-- sparse mailbox events ---|                         |
+    | wait_agent again            |                         |
     |                             | job_result ------------>|
     |<----------------------------| compact terminal result |
 ```
 
 The observer owns the cursor and terminal result retrieval exclusively. The
-main session owns the start call, user conversation, and explicit on-demand
-status checks. Hosts without child sessions use the declared main-session
-fallback. OpenCode plugin mode remains unchanged because the execution itself
-already belongs to a plugin child and returns no pollable job ID.
+main session owns the start call, user conversation, explicit on-demand status
+checks, and the host mailbox relay wait. On Codex that wait is interruptible by
+new user input, so the conversation remains usable without ending the parent
+turn. Hosts without child sessions use the declared main-session fallback.
+OpenCode plugin mode remains unchanged because the execution itself already
+belongs to a plugin child and returns no pollable job ID.
 
 From the user's perspective the parent is event-driven: the observer translates
 long-poll responses into only `phase_changed`, `progress_advanced`,
@@ -79,7 +83,10 @@ so outside the conversation that the user is actively using.
 - one `wait` tool call template with a cursor and terminal wake-up
 - one `result` tool call template
 - `follow_result_job_keys` for evaluation/Ralph/downstream jobs
-- `main_session_policy="start_and_on_demand_only"`
+- `main_session_policy="relay_wait_while_observer_active"`
+- a Codex parent relay lifecycle: after `spawn_agent` acknowledges a live
+  observer, the parent keeps its turn open with interruptible `wait_agent`
+  calls until the observer reaches terminal state
 - event relay rules for progress, attention, and terminal notifications
 - parent-session availability, live-view, and workspace-write policies
 - self-contained `instructions` and `restrictions`, so the child does not need
@@ -87,7 +94,11 @@ so outside the conversation that the user is actively using.
 - a sequential fallback for hosts without child sessions
 
 The observer is read-only. It must not edit the repository, cancel/resume the
-execution, or spawn implementation workers.
+execution, or spawn implementation workers. On Codex, child `send_message`
+calls enqueue mailbox events but cannot revive a parent turn that already
+ended. Therefore the parent, not the observer, owns an interruptible
+`wait_agent` relay loop. This loop does not poll the Ouroboros job and does not
+violate exclusive cursor ownership.
 
 ## Tradeoffs
 
@@ -110,3 +121,6 @@ execution, or spawn implementation workers.
 5. `ooo run` and `ooo auto` retain a bounded main-session fallback.
 6. The observer follows chained evaluation or downstream job IDs before
    returning its final summary.
+7. A confirmed Codex observer keeps the parent turn open via `wait_agent`, so
+   Synapse delivery and completion messages are relayed without another user
+   prompt.

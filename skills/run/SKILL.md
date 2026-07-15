@@ -184,6 +184,15 @@ fallback instead of retrying the failing call.
    `job_id` is absent because plugin mode already delegated the whole execution,
    follow that plugin child lifecycle instead.
 
+   On Codex, a confirmed observer also requires a parent relay loop. After
+   `spawn_agent` returns a live child ID/path, keep the parent turn open with
+   `wait_agent` calls of at most 60 seconds. A child `send_message` only queues a
+   mailbox event and cannot wake a parent turn that has already ended. Relay
+   meaningful observer updates, then wait again until the child returns its
+   terminal summary. User input may interrupt the wait; handle it and resume the
+   relay loop while the observer remains active. This wait loop must never call
+   Ouroboros job tools or compete for the observer's cursor.
+
    Handle observer messages as events, not as a transcript:
 
    - `phase_changed` / `progress_advanced`: relay at most 1-2 concise lines.

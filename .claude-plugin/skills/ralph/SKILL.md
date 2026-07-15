@@ -116,10 +116,16 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
      read-only review, explicit control, or unrelated work in an isolated
      worktree; check active-worker overlap before writing to Ralph's workspace.
      Do not claim an observer until Task/Agent returns a live child handle. If
+     child creation succeeds on Codex, keep the parent turn open with
+     `wait_agent` calls of at most 60 seconds until the observer returns its
+     terminal summary. Child `send_message` calls only queue mailbox events and
+     cannot revive an ended parent turn. Relay meaningful updates, handle user
+     input if it interrupts the wait, and resume waiting while the observer is
+     active. This relay loop must not poll the job or take cursor ownership. If
      child creation fails, do not promise live proactive relays. The detached
      worker survives the stdio turn; catch up from durable events on the next
-     parent turn or explicit status request. Keep the turn open only for
-     explicit live watching.
+     parent turn or explicit status request. Keep the fallback polling loop open
+     only for explicit live watching.
 
    - If `response.meta.status == "delegated_to_plugin"` and
      `response.meta.job_id is None`, report that OpenCode plugin mode delegated

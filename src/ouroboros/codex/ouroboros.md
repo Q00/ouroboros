@@ -58,12 +58,19 @@ shell or coding work.
 For Codex delegation, call the native `spawn_agent` primitive exactly once with
 `task_name="run_observer"` and include `meta.job_observer` unchanged in the child
 message. A `wait` call does not create an observer. Do not claim delegation or
-end the start turn until the spawn result returns a live child ID/path. If spawn
-is unavailable or fails, do not claim live proactive observation. The detached
-worker survives the stdio turn; tell the user that the main session will catch
-up from durable events on their next message or explicit status request. Keep
-the current turn open in the fallback loop only when the user explicitly asks
-for live watching.
+end the start turn until the spawn result returns a live child ID/path. After a
+live child is acknowledged, keep the parent turn open with `wait_agent` while
+the observer is active. The observer's `send_message` only queues a parent
+mailbox event; it cannot revive a parent turn that already ended. Relay each
+meaningful mailbox update, then call `wait_agent` again until the observer sends
+its terminal summary. Use waits of at most 60 seconds so user input can steer
+the active turn; handle that input and resume waiting while the observer remains
+active. This parent relay wait does not call job tools and does not take the
+observer's exclusive cursor ownership. If spawn is unavailable or fails, do not
+claim live proactive observation. The detached worker survives the stdio turn;
+tell the user that the main session will catch up from durable events on their
+next message or explicit status request. Keep the current turn open in the
+fallback polling loop only when the user explicitly asks for live watching.
 
 Immediately after observer delegation, give one compact handoff to the user:
 - show `meta.dashboard_url` when present; otherwise mention that
