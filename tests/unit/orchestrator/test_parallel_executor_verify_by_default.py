@@ -1150,8 +1150,7 @@ class TestSuccessContractBlock:
         assert block.startswith("SUCCESS CONTRACT for this AC:")
         assert (
             "- Run locally before completion: make build. "
-            "The verify gate re-runs it and records authoritative evidence."
-            in block
+            "The verify gate re-runs it and records authoritative evidence." in block
         )
         assert (
             "- Expected artifacts: dist/app, dist/app.map — ensure they exist in the workspace"
@@ -1164,8 +1163,7 @@ class TestSuccessContractBlock:
         block = _build_success_contract_block(spec)
         assert (
             "- Run locally before completion: pytest -q. "
-            "The verify gate re-runs it and records authoritative evidence."
-            in block
+            "The verify gate re-runs it and records authoritative evidence." in block
         )
         assert "Expected artifacts" not in block
         assert "Expected output" not in block
