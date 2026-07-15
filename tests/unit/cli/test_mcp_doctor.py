@@ -283,6 +283,22 @@ class TestCheckLitellmImport:
             result = check_litellm_import()
         assert result.status != "fail"
 
+    def test_warns_with_python_313_remediation_on_python_314(self):
+        """Doctor should not recommend installing LiteLLM into Python 3.14."""
+        with (
+            patch("builtins.__import__", side_effect=_import_error_for("litellm")),
+            patch.object(sys, "version_info", (3, 14, 0, "final", 0)),
+        ):
+            result = check_litellm_import()
+
+        assert result.status == "warn"
+        assert "Python >=3.12,<3.14" in result.remediation
+        assert "Python 3.13" in result.remediation
+        assert "python3.13 -m pip install 'ouroboros-ai[litellm]'" in result.remediation
+        assert "uv tool install --python 3.13 --force" in result.remediation
+        assert "[mcp,claude,litellm]" in result.remediation
+        assert "python3.14" not in result.remediation.lower()
+
 
 # ---------------------------------------------------------------------------
 # check_codex_oauth_auth

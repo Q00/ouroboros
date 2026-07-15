@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
+from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
@@ -909,6 +910,8 @@ class RuntimeCapabilities:
         tool_restriction_support: How the runtime honors the ``tools``
             allow-list passed to ``execute_task``.
         permission_mode_support: How the runtime honors ``permission_mode``.
+        session_signals: Ouroboros Synapse capabilities. Every field defaults to
+            unsupported; resumability never implies live signal delivery.
 
     The three ``*_support`` fields default to :attr:`ParamSupport.NATIVE` so
     existing runtimes and ``FULL_CAPABILITIES`` are unchanged; a runtime opts in
@@ -950,6 +953,9 @@ class RuntimeCapabilities:
     # INTERNAL/EXTERNAL only when its surface demonstrably supports it — this is
     # the capability the sub-agent dispatch gate reads instead of a backend name.
     subagent_orchestration: SubagentOrchestration = SubagentOrchestration.NONE
+    # Synapse is independently capability-gated.  Existing runtimes must remain
+    # unchanged until a transport proves and tests each delivery boundary.
+    session_signals: SessionSignalCapabilities = field(default_factory=SessionSignalCapabilities)
 
 
 # Default capability profile for first-class backends (Claude, Codex).
@@ -1171,6 +1177,11 @@ class ClaudeAgentAdapter:
             reasoning_effort_support=ParamSupport.NATIVE,
             enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
             model_override_support=ParamSupport.NATIVE,
+            session_signals=SessionSignalCapabilities(
+                inform_delivery=True,
+                background_reply=True,
+                after_turn_delivery=True,
+            ),
         )
 
     def _is_transient_error(self, error: Exception) -> bool:
@@ -1469,7 +1480,10 @@ class ClaudeAgentAdapter:
         Raises:
             ProviderError: If SDK initialization fails.
         """
-        effective_tools = tools or DEFAULT_TOOLS
+        # ``None`` means the caller did not choose a tool policy and receives
+        # the normal execution defaults.  An explicit empty list is different:
+        # Synapse ``inform`` uses it to create a read-only, no-tools reply turn.
+        effective_tools = DEFAULT_TOOLS if tools is None else tools
 
         log.info(
             "orchestrator.adapter.task_started",

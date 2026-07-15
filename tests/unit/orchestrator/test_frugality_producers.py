@@ -1569,6 +1569,11 @@ class TestLiveRunPathsTriggerProof:
                 _FakeParallelExecutor,
             ),
             patch.object(runner, "_evaluate_frugality_proof", AsyncMock()) as proof,
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=True),
+            ) as retrospective,
         ):
             result = await runner._execute_parallel(
                 seed=seed,
@@ -1583,3 +1588,8 @@ class TestLiveRunPathsTriggerProof:
         assert result.is_ok
         # The proof was evaluated for THIS execution after the terminal event.
         proof.assert_awaited_once_with("exec_parallel")
+        retrospective.assert_awaited_once_with(
+            execution_id="exec_parallel",
+            session_id=tracker.session_id,
+            terminal_status="completed",
+        )

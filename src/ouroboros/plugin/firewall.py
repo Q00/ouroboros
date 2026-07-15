@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -54,6 +55,7 @@ from ouroboros.plugin.hooks import (
     HOOK_COMPLETED_EVENT,
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
+    HOOK_REWIND_OBSERVE_SCOPE,
     HOOK_TOOL_INTERCEPT_BLOCKED_EVENT,
     HOOK_TOOL_INTERCEPT_COMPLETED_EVENT,
     HOOK_TOOL_INTERCEPT_REQUESTED_EVENT,
@@ -64,12 +66,15 @@ from ouroboros.plugin.hooks import (
     HookKind,
 )
 from ouroboros.plugin.manifest import HookSpec, PluginManifest
-from ouroboros.plugin.trust_store import TrustRecord
+from ouroboros.plugin.trust_store import TrustRecord, TrustStore
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
 
 SCHEMA_VERSION = "0.1"
 HOOK_AUDIT_SCHEMA_VERSION = "0.3"
 DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS = 300.0
+REWIND_HOOK_AUDIT_SCHEMA_VERSION = "0.6"
+
+logger = logging.getLogger(__name__)
 
 EventSink = Callable[[dict], None]
 ConfirmFn = Callable[[str], bool]
@@ -97,6 +102,15 @@ class InvocationResult:
     stderr_sha256: str | None = None
     stdout_bytes: bytes | None = None
     stderr_bytes: bytes | None = None
+    events: tuple[dict, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class RewindHookDispatchResult:
+    """Bounded outcome for one post-commit rewind hook candidate."""
+
+    status: Literal["completed", "blocked", "failed"]
+    reason: str | None = None
     events: tuple[dict, ...] = field(default_factory=tuple)
 
 
@@ -329,8 +343,432 @@ def _event_envelope(
     return event
 
 
+_REWIND_PROVENANCE_KEYS = frozenset(
+    {
+        "correlation_id",
+        "hook_name",
+        "failure_policy",
+        "reason",
+        "returncode",
+        "timeout_seconds",
+        "stdout_sha256",
+        "stderr_sha256",
+        "skipped_count",
+    }
+)
+
+
+def _rewind_event_envelope(
+    *,
+    event_type: str,
+    manifest: PluginManifest,
+    rewind_event_id: str,
+    lineage_id: str,
+    trust_state: str,
+    permissions_used: Iterable[str],
+    result: dict | None = None,
+    provenance: dict[str, str] | None = None,
+) -> dict:
+    """Build the truthful v0.6 observation audit subject for rewind hooks."""
+    final_provenance = dict(provenance or {})
+    unexpected = set(final_provenance).difference(_REWIND_PROVENANCE_KEYS)
+    if unexpected:
+        raise ValueError(f"unsupported rewind provenance keys: {sorted(unexpected)!r}")
+    event: dict = {
+        "schema_version": REWIND_HOOK_AUDIT_SCHEMA_VERSION,
+        "event_type": event_type,
+        "occurred_at": datetime.now(tz=UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        "plugin": {
+            "name": manifest.name,
+            "version": manifest.version,
+            "source_type": _source_type_for_event(manifest),
+        },
+        "observation": {
+            "kind": "rewind",
+            "id": rewind_event_id,
+            "aggregate_type": "lineage",
+            "aggregate_id": lineage_id,
+        },
+        "trust_state": trust_state,
+        "capabilities_used": [],
+        "permissions_used": list(permissions_used),
+        "result": result or {"status": "success"},
+    }
+    if final_provenance:
+        event["provenance"] = final_provenance
+    return event
+
+
+def _coerce_rewind_output(value: object) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="surrogateescape")
+    return b""
+
+
+def dispatch_rewind_hook(
+    *,
+    manifest: PluginManifest,
+    hook_index: int,
+    plugin_home: Path,
+    source_type: str,
+    source_identity: str,
+    artifact_digest: str,
+    trust_store: TrustStore,
+    rewind_event_id: str,
+    lineage_id: str,
+    payload_json: str,
+    timeout_seconds: float,
+    event_sink: EventSink,
+    subprocess_runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    skipped_count: int = 1,
+) -> RewindHookDispatchResult:
+    """Validate and launch one v0.6 post-commit rewind observer.
+
+    This helper has no return channel that can alter the committed rewind. Its
+    result is diagnostic only; every trust, digest, subprocess, and audit-sink
+    failure is contained to the observer phase.
+    """
+    emitted: list[dict] = []
+
+    def _emit(event: dict) -> None:
+        emitted.append(event)
+        try:
+            event_sink(event)
+        except Exception as exc:
+            logger.warning(
+                "plugin.rewind_audit_sink_failed",
+                extra={
+                    "plugin": manifest.name,
+                    "rewind_event_id": rewind_event_id,
+                    "error": str(exc),
+                },
+            )
+
+    def _finish(
+        *,
+        status: Literal["blocked", "failed"],
+        reason: str,
+        message: str,
+        trust_state: str = "blocked",
+        provenance: dict[str, str] | None = None,
+    ) -> RewindHookDispatchResult:
+        details = {
+            "correlation_id": rewind_event_id,
+            "hook_name": "on_rewind",
+            "failure_policy": "fail_open",
+            "reason": reason,
+            **(provenance or {}),
+        }
+        _emit(
+            _rewind_event_envelope(
+                event_type=HOOK_BLOCKED_EVENT if status == "blocked" else HOOK_FAILED_EVENT,
+                manifest=manifest,
+                rewind_event_id=rewind_event_id,
+                lineage_id=lineage_id,
+                trust_state=trust_state,
+                permissions_used=(HOOK_REWIND_OBSERVE_SCOPE,),
+                result={"status": status, "message": message},
+                provenance=details,
+            )
+        )
+        return RewindHookDispatchResult(status=status, reason=reason, events=tuple(emitted))
+
+    def _budget_exhausted() -> bool:
+        return deadline is not None and monotonic() >= deadline
+
+    def _finish_budget_exhausted() -> RewindHookDispatchResult:
+        emit_rewind_budget_exhausted(
+            manifest=manifest,
+            rewind_event_id=rewind_event_id,
+            lineage_id=lineage_id,
+            skipped_count=skipped_count,
+            event_sink=_emit,
+        )
+        return RewindHookDispatchResult(
+            status="blocked",
+            reason="dispatch_budget_exhausted",
+            events=tuple(emitted),
+        )
+
+    if _budget_exhausted():
+        return _finish_budget_exhausted()
+
+    try:
+        hook = manifest.hooks[hook_index]
+    except IndexError:
+        return _finish(
+            status="blocked",
+            reason="invalid_hook_index",
+            message="rewind hook declaration index is out of range",
+        )
+
+    required_rewind_permission = any(
+        permission.scope == HOOK_REWIND_OBSERVE_SCOPE and permission.required
+        for permission in manifest.permissions
+    )
+    if (
+        manifest.schema_version != REWIND_HOOK_AUDIT_SCHEMA_VERSION
+        or hook.name != HookKind.ON_REWIND.value
+        or hook.failure_policy != HookFailurePolicy.FAIL_OPEN.value
+        or hook.permissions != (HOOK_REWIND_OBSERVE_SCOPE,)
+        or not required_rewind_permission
+    ):
+        return _finish(
+            status="blocked",
+            reason="invalid_hook_contract",
+            message="rewind hook must be v0.6, fail_open, and hold required observe scope",
+        )
+
+    if not source_type or not source_identity or not artifact_digest:
+        return _finish(
+            status="blocked",
+            reason="incomplete_install_metadata",
+            message="rewind hooks require complete source and artifact metadata",
+        )
+    if source_type != manifest.source.type or source_type == "first_party":
+        return _finish(
+            status="blocked",
+            reason="install_subject_mismatch",
+            message="lockfile source type does not match an eligible installed plugin",
+        )
+
+    if _budget_exhausted():
+        return _finish_budget_exhausted()
+    try:
+        current_digest = canonical_tree_hash(plugin_home)
+    except (OSError, ValueError, EscapingSymlinkError, UnsupportedFileTypeError) as exc:
+        return _finish(
+            status="blocked",
+            reason="plugin_home_unreadable",
+            message=f"installed plugin bytes are unreadable: {type(exc).__name__}",
+        )
+    if _budget_exhausted():
+        return _finish_budget_exhausted()
+    if current_digest != artifact_digest:
+        return _finish(
+            status="blocked",
+            reason="artifact_digest_mismatch",
+            message="installed plugin bytes no longer match the lockfile digest",
+        )
+
+    if _budget_exhausted():
+        return _finish_budget_exhausted()
+    try:
+        is_disabled = trust_store.is_disabled_for_subject(
+            manifest.name,
+            source_type=source_type,
+            source_identity=source_identity,
+        )
+        trust_record = trust_store.read(manifest.name)
+    except (OSError, ValueError) as exc:
+        return _finish(
+            status="blocked",
+            reason="trust_state_unreadable",
+            message=f"plugin trust state is unreadable: {type(exc).__name__}",
+        )
+    if _budget_exhausted():
+        return _finish_budget_exhausted()
+    if is_disabled:
+        return _finish(
+            status="blocked",
+            reason="disabled",
+            message="plugin is disabled for this install subject",
+            trust_state="disabled",
+        )
+    if (
+        trust_record is None
+        or not trust_record.source_type
+        or not trust_record.source_identity
+        or not trust_record.artifact_digest
+        or trust_record.version != manifest.version
+        or trust_record.source_type != source_type
+        or trust_record.source_identity != source_identity
+        or trust_record.artifact_digest != artifact_digest
+    ):
+        return _finish(
+            status="blocked",
+            reason="trust_subject_mismatch",
+            message="plugin trust record does not match the complete install subject",
+        )
+    if not trust_record.has_scope(HOOK_REWIND_OBSERVE_SCOPE):
+        return _finish(
+            status="blocked",
+            reason="permission_not_trusted",
+            message="plugin:rewind:observe is not trusted for this install subject",
+        )
+
+    try:
+        hook_argv = shlex.split(hook.entrypoint.command)
+    except ValueError as exc:
+        return _finish(
+            status="failed",
+            reason="entrypoint_invalid",
+            message=f"hook entrypoint is not parseable: {exc}",
+            trust_state="trusted",
+            provenance={"timeout_seconds": f"{timeout_seconds:g}"},
+        )
+    if not hook_argv:
+        return _finish(
+            status="failed",
+            reason="entrypoint_invalid",
+            message="hook entrypoint command is empty after tokenization",
+            trust_state="trusted",
+            provenance={"timeout_seconds": f"{timeout_seconds:g}"},
+        )
+
+    effective_timeout = timeout_seconds
+    if deadline is not None:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return _finish_budget_exhausted()
+        effective_timeout = min(effective_timeout, remaining)
+
+    provenance = {
+        "correlation_id": rewind_event_id,
+        "hook_name": hook.name,
+        "failure_policy": hook.failure_policy,
+        "timeout_seconds": f"{effective_timeout:g}",
+    }
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["OUROBOROS_PLUGIN_HOME"] = str(plugin_home)
+    env["OUROBOROS_PLUGIN_REWIND_PAYLOAD"] = payload_json
+    if deadline is not None:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return _finish_budget_exhausted()
+        effective_timeout = min(effective_timeout, remaining)
+        provenance["timeout_seconds"] = f"{effective_timeout:g}"
+    _emit(
+        _rewind_event_envelope(
+            event_type=HOOK_INVOKED_EVENT,
+            manifest=manifest,
+            rewind_event_id=rewind_event_id,
+            lineage_id=lineage_id,
+            trust_state="trusted",
+            permissions_used=hook.permissions,
+            provenance=provenance,
+        )
+    )
+
+    runner = subprocess_runner or subprocess.run
+    try:
+        completed = runner(
+            hook_argv,
+            capture_output=True,
+            check=False,
+            timeout=effective_timeout,
+            cwd=str(plugin_home),
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return _finish(
+            status="failed",
+            reason="timeout",
+            message=f"on_rewind hook timed out after {effective_timeout:g}s",
+            trust_state="trusted",
+            provenance={
+                "timeout_seconds": f"{effective_timeout:g}",
+                "stdout_sha256": hashlib.sha256(_coerce_rewind_output(exc.stdout)).hexdigest(),
+                "stderr_sha256": hashlib.sha256(_coerce_rewind_output(exc.stderr)).hexdigest(),
+            },
+        )
+    except OSError as exc:
+        return _finish(
+            status="failed",
+            reason="startup_error",
+            message=f"on_rewind hook failed to start: {type(exc).__name__}",
+            trust_state="trusted",
+            provenance={"timeout_seconds": f"{effective_timeout:g}"},
+        )
+
+    stdout = _coerce_rewind_output(completed.stdout)
+    stderr = _coerce_rewind_output(completed.stderr)
+    run_provenance = {
+        **provenance,
+        "returncode": str(completed.returncode),
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+    }
+    if completed.returncode != 0:
+        return _finish(
+            status="failed",
+            reason="nonzero_exit",
+            message=f"on_rewind hook exited with code {completed.returncode}",
+            trust_state="trusted",
+            provenance={
+                "timeout_seconds": f"{effective_timeout:g}",
+                "returncode": str(completed.returncode),
+                "stdout_sha256": run_provenance["stdout_sha256"],
+                "stderr_sha256": run_provenance["stderr_sha256"],
+            },
+        )
+
+    _emit(
+        _rewind_event_envelope(
+            event_type=HOOK_COMPLETED_EVENT,
+            manifest=manifest,
+            rewind_event_id=rewind_event_id,
+            lineage_id=lineage_id,
+            trust_state="trusted",
+            permissions_used=hook.permissions,
+            provenance=run_provenance,
+        )
+    )
+    return RewindHookDispatchResult(status="completed", events=tuple(emitted))
+
+
+def emit_rewind_budget_exhausted(
+    *,
+    manifest: PluginManifest,
+    rewind_event_id: str,
+    lineage_id: str,
+    skipped_count: int,
+    event_sink: EventSink,
+) -> RewindHookDispatchResult:
+    """Record deterministic skipping after the global rewind deadline."""
+    event = _rewind_event_envelope(
+        event_type=HOOK_BLOCKED_EVENT,
+        manifest=manifest,
+        rewind_event_id=rewind_event_id,
+        lineage_id=lineage_id,
+        trust_state="blocked",
+        permissions_used=(HOOK_REWIND_OBSERVE_SCOPE,),
+        result={"status": "blocked", "message": "rewind dispatch budget exhausted"},
+        provenance={
+            "correlation_id": rewind_event_id,
+            "hook_name": "on_rewind",
+            "failure_policy": "fail_open",
+            "reason": "dispatch_budget_exhausted",
+            "skipped_count": str(skipped_count),
+        },
+    )
+    try:
+        event_sink(event)
+    except Exception as exc:
+        logger.warning(
+            "plugin.rewind_audit_sink_failed",
+            extra={
+                "plugin": manifest.name,
+                "rewind_event_id": rewind_event_id,
+                "error": str(exc),
+            },
+        )
+    return RewindHookDispatchResult(
+        status="blocked",
+        reason="dispatch_budget_exhausted",
+        events=(event,),
+    )
+
+
 def _matching_hooks(manifest: PluginManifest, hook_kind: HookKind) -> tuple[HookSpec, ...]:
-    if manifest.schema_version not in {"0.3", "0.4"}:
+    if manifest.schema_version not in {"0.3", "0.4", "0.6"}:
         return ()
     return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
 
@@ -1524,7 +1962,7 @@ def _matching_tool_call_hooks(
     Tool-call hooks are a v0.4 vocabulary addition; v0.1/0.2/0.3 manifests
     never carry them, so any other schema version matches nothing.
     """
-    if manifest.schema_version != "0.4":
+    if manifest.schema_version not in {"0.4", "0.6"}:
         return ()
     return tuple(hook for hook in manifest.hooks if hook.name == hook_kind.value)
 
@@ -1940,9 +2378,12 @@ __all__ = [
     "ConfirmFn",
     "EventSink",
     "InvocationResult",
+    "RewindHookDispatchResult",
     "SCHEMA_VERSION",
     "ToolCallDecision",
     "dispatch_after_tool_call",
     "dispatch_before_tool_call",
+    "dispatch_rewind_hook",
+    "emit_rewind_budget_exhausted",
     "invoke_plugin",
 ]

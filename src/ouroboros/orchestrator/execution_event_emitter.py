@@ -51,6 +51,8 @@ class ExecutionEventEmitter:
     ) -> None:
         self._event_store = event_store
         self._safe_emit_event = safe_emit_event
+        self._last_ac_phase: dict[str, str] = {}
+        self._last_discovery_signature: dict[str, tuple[tuple[str, ...], str]] = {}
 
     @staticmethod
     def runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
@@ -411,6 +413,10 @@ class ExecutionEventEmitter:
         model_mode: str,
         retry_attempt: int,
         runtime_backend: str | None,
+        semantic_ac_key: str | None = None,
+        base_model_tier: str | None = None,
+        escalation_retry_threshold: int | None = None,
+        model_escalated: bool = False,
     ) -> None:
         """Persist per-AC model-tier-routing telemetry.
 
@@ -436,6 +442,10 @@ class ExecutionEventEmitter:
                     "model_mode": model_mode,
                     "retry_attempt": retry_attempt,
                     "runtime_backend": runtime_backend,
+                    "semantic_ac_key": semantic_ac_key,
+                    "base_model_tier": base_model_tier,
+                    "escalation_retry_threshold": escalation_retry_threshold,
+                    "model_escalated": model_escalated,
                 },
             )
         )
@@ -503,6 +513,7 @@ class ExecutionEventEmitter:
         unsupported_claim_rate: float,
         rejected_reasons: list[str],
         accepted_fact_count: int,
+        semantic_ac_key: str | None = None,
         grounding_regression: bool | None = None,
         grounding_regression_mode: str | None = None,
     ) -> None:
@@ -531,6 +542,7 @@ class ExecutionEventEmitter:
             "unsupported_claim_rate": unsupported_claim_rate,
             "rejected_reasons": rejected_reasons,
             "accepted_fact_count": accepted_fact_count,
+            "semantic_ac_key": semantic_ac_key,
         }
         # Strict bool only: a non-bool would be dropped by the proof's
         # ``_strict_bool`` guard anyway, so never smuggle a truthy string here.
@@ -544,6 +556,113 @@ class ExecutionEventEmitter:
                 aggregate_type=runtime_identity.runtime_scope.aggregate_type,
                 aggregate_id=runtime_identity.session_scope_id,
                 data=data,
+            )
+        )
+
+    async def observe_ac_activity(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        execution_id: str,
+        session_id: str,
+        semantic_ac_key: str,
+        projected: Any,
+        is_final: bool,
+    ) -> None:
+        """Emit bounded semantic phase/discovery events on material changes."""
+        tool_name = projected.tool_name if isinstance(projected.tool_name, str) else ""
+        normalized_tool = tool_name.casefold()
+        tool_input = projected.tool_input if isinstance(projected.tool_input, dict) else {}
+
+        phase: str | None = None
+        purpose: str | None = None
+        targets: list[str] = []
+        if is_final:
+            phase = "deliver"
+        elif normalized_tool in {"read", "glob", "grep", "search", "list", "ls"}:
+            phase = "discover"
+            purpose = "Inspect the relevant repository surface for this acceptance criterion."
+            for key in ("file_path", "path", "glob", "pattern"):
+                value = tool_input.get(key)
+                if isinstance(value, str) and value.strip():
+                    label = " ".join(value.split())[:160]
+                    if key == "pattern" and normalized_tool in {"grep", "search"}:
+                        label = f"search:{label}"
+                    targets.append(label)
+        elif normalized_tool in {"write", "edit", "apply_patch", "multiedit"}:
+            phase = "implement"
+        elif normalized_tool in {"bash", "shell", "exec", "exec_command"}:
+            command = tool_input.get("command") or tool_input.get("cmd")
+            command_text = command.casefold() if isinstance(command, str) else ""
+            if any(
+                marker in command_text
+                for marker in (
+                    "pytest",
+                    " ruff",
+                    "ruff ",
+                    "mypy",
+                    "npm test",
+                    "pnpm test",
+                    "cargo test",
+                    "go test",
+                    "typecheck",
+                    "lint",
+                )
+            ):
+                phase = "verify"
+            elif command_text and any(
+                marker in command_text
+                for marker in ("rg ", "grep ", "find ", "ls ", "sed -n", "git status")
+            ):
+                phase = "discover"
+                purpose = "Inspect repository state needed to plan or verify this AC."
+                targets = ["repository state"]
+
+        scope_key = runtime_identity.ac_id
+        if phase is not None and self._last_ac_phase.get(scope_key) != phase:
+            self._last_ac_phase[scope_key] = phase
+            await self._safe_emit_event(
+                BaseEvent(
+                    type="execution.ac.phase_changed",
+                    aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                    aggregate_id=runtime_identity.session_scope_id,
+                    data={
+                        **runtime_identity.to_metadata(),
+                        "schema_version": 1,
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "semantic_ac_key": semantic_ac_key,
+                        "phase": phase,
+                        "source": "deterministic_tool_classifier",
+                    },
+                )
+            )
+
+        bounded_targets = tuple(dict.fromkeys(targets))[:5]
+        if phase != "discover" or not bounded_targets or purpose is None:
+            return
+        signature = (bounded_targets, purpose)
+        if self._last_discovery_signature.get(scope_key) == signature:
+            return
+        self._last_discovery_signature[scope_key] = signature
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.discovery.updated",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "semantic_ac_key": semantic_ac_key,
+                    "ac_index": runtime_identity.root_ac_index
+                    if runtime_identity.root_ac_index is not None
+                    else runtime_identity.ac_index,
+                    "targets": list(bounded_targets),
+                    "purpose": purpose[:240],
+                    "source": "deterministic_tool_classifier",
+                },
             )
         )
 

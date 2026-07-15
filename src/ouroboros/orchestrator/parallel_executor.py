@@ -42,7 +42,18 @@ from typing import TYPE_CHECKING, Any, Literal
 import anyio
 from rich.console import Console
 
-from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text
+from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, derive_semantic_ac_key
+from ouroboros.core.session_signal import (
+    SessionSignalMode,
+    bounded_session_signal_reply,
+)
+from ouroboros.events.session_signal import (
+    create_session_signal_applied_event,
+    create_session_signal_completed_event,
+    create_session_signal_delivery_started_event,
+    create_session_signal_delivery_uncertain_event,
+    create_session_signal_rejected_event,
+)
 
 # Import the harness submodules directly, NOT the ``ouroboros.harness`` package
 # aggregate: ``harness.__init__`` pulls in ``deliver_routing`` which imports from
@@ -277,6 +288,11 @@ from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
+from ouroboros.orchestrator.synapse import (
+    SessionSignalTarget,
+    render_after_turn_signal_prompt,
+    render_inform_signal_prompt,
+)
 from ouroboros.orchestrator.verifier import (
     Verifier,
     VerifierContractError,
@@ -293,9 +309,53 @@ if TYPE_CHECKING:
         StagedExecutionPlan,
     )
     from ouroboros.orchestrator.model_routing import ModelRouter
+    from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+
+
+def _is_session_signal_application_acknowledgement(message: AgentMessage) -> bool:
+    """Return whether a resumed-turn message proves provider context entry."""
+    subtype = message.data.get("subtype")
+    if message.type == "assistant":
+        return bool(message.content.strip()) and subtype not in {"error", "runtime_error"}
+    return message.type == "result" and subtype == "success"
+
+
+def _bounded_session_signal_runtime_reply(messages: list[AgentMessage]) -> str | None:
+    """Build one bounded provider reply without persisting a raw transcript.
+
+    Some CLIs emit one assistant message while streaming transports such as
+    Goose emit many token chunks.  Prefer an explicit completion payload when
+    present; otherwise concatenate only the acknowledging assistant chunks from
+    this signal turn.  A successful result message is the final fallback.
+    """
+    assistant_messages = [
+        message
+        for message in messages
+        if message.type == "assistant"
+        and _is_session_signal_application_acknowledgement(message)
+        and message.content.strip()
+    ]
+    completion_messages = [
+        message for message in assistant_messages if message.data.get("subtype") == "completion"
+    ]
+    if completion_messages:
+        return bounded_session_signal_reply(completion_messages[-1].content)
+    if assistant_messages:
+        return bounded_session_signal_reply(
+            "".join(message.content for message in assistant_messages)
+        )
+
+    for message in reversed(messages):
+        if message.type != "result":
+            continue
+        if not _is_session_signal_application_acknowledgement(message):
+            continue
+        if message.content.strip():
+            return bounded_session_signal_reply(message.content)
+    return None
 
 
 # -- Frugality-proof producer helpers ----------------------------------------
@@ -807,6 +867,7 @@ class ParallelACExecutor:
         ac_retry_attempts: int = 0,
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
+        session_signal_hub: SessionSignalHub | None = None,
     ):
         """Initialize executor.
 
@@ -884,6 +945,7 @@ class ParallelACExecutor:
         # successful decomposed child is re-executed in an isolated workspace to
         # measure its parent-tier baseline spend. See ``shadow_replay`` module.
         self._shadow_replay_enabled = shadow_replay_enabled
+        self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
@@ -920,6 +982,8 @@ class ParallelACExecutor:
             self._cross_harness_redispatch_enabled = cross_harness_redispatch
         # AC identities that have already consumed their one alt-harness redispatch.
         self._alt_harness_redispatched_acs: set[str] = set()
+        self._alt_harness_status_by_root: dict[int, str] = {}
+        self._recovery_exhausted_emitted: set[tuple[str, int]] = set()
 
     @staticmethod
     def _build_dispatch_rate_gate(adapter: AgentRuntime) -> RateLimitGate:
@@ -2345,6 +2409,7 @@ class ParallelACExecutor:
         execution_counters: dict[str, int] | None,
         node_identity: ExecutionNodeIdentity,
         start_time: datetime,
+        semantic_ac_key: str,
     ) -> ACExecutionResult:
         """Dispatch one finalized split through the shared recursive child path."""
         sub_acs = [child.description for child in decision.children]
@@ -2404,6 +2469,7 @@ class ParallelACExecutor:
                     sub_ac_index=legacy_sub_ac_index,
                     node_identity=child_node_identity,
                     decomposition_trustworthy=decision.trustworthy,
+                    semantic_ac_key=semantic_ac_key,
                 )
             except BaseException as exc:
                 if isinstance(exc, anyio.get_cancelled_exc_class()):
@@ -2538,8 +2604,14 @@ class ParallelACExecutor:
         *,
         prompt: str,
         system_prompt: str,
+        independent_session: bool = False,
     ) -> str:
-        """Run one bounded tool-free decomposition-policy request."""
+        """Run one bounded tool-free decomposition-policy request.
+
+        Semantic attestation must not resume the proposer conversation. Passing
+        ``independent_session=True`` starts a fresh runtime session even when the
+        parent executor inherited a resumable handle.
+        """
         self._announce_param_degradations(system_prompt=system_prompt, tools=[])
         await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
         response_text = ""
@@ -2548,7 +2620,7 @@ class ParallelACExecutor:
                 prompt=prompt,
                 tools=[],
                 system_prompt=system_prompt,
-                resume_handle=self._inherited_runtime_handle,
+                resume_handle=None if independent_session else self._inherited_runtime_handle,
             ):
                 if not message.content:
                     continue
@@ -2686,6 +2758,7 @@ class ParallelACExecutor:
         node_identity: ExecutionNodeIdentity,
         ac_spec: AcceptanceCriterionSpec | None,
         start_time: datetime,
+        semantic_ac_key: str,
     ) -> tuple[ACExecutionResult | None, DecompositionDecisionRecord | None]:
         """Run cause-matched bounce recovery before alternate-harness fallback."""
         if self._decomposition_mode != "bounce_only" or result.success:
@@ -2783,6 +2856,7 @@ class ParallelACExecutor:
                 execution_counters=execution_counters,
                 node_identity=node_identity,
                 start_time=start_time,
+                semantic_ac_key=semantic_ac_key,
             )
             return recovered, decision
         return None, decision
@@ -2810,6 +2884,7 @@ class ParallelACExecutor:
         same_runtime_budget_exhausted: bool = True,
         ac_spec: AcceptanceCriterionSpec | None = None,
         decomposition_trustworthy: bool = False,
+        semantic_ac_key: str | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -2846,6 +2921,11 @@ class ParallelACExecutor:
         """
         start_time = datetime.now(UTC)
         execution_context_id = execution_id or session_id
+        semantic_ac_key = semantic_ac_key or (
+            ac_spec.semantic_ac_key
+            if ac_spec is not None and ac_spec.semantic_ac_key is not None
+            else derive_semantic_ac_key(ac_spec or ac_content)
+        )
         if node_identity is None:
             node_identity = ExecutionNodeIdentity.root(
                 execution_context_id=execution_context_id,
@@ -2922,6 +3002,7 @@ class ParallelACExecutor:
                 execution_counters=execution_counters,
                 node_identity=node_identity,
                 start_time=start_time,
+                semantic_ac_key=semantic_ac_key,
             )
 
         if (
@@ -2981,6 +3062,7 @@ class ParallelACExecutor:
             "node_identity": node_identity,
             "ac_spec": ac_spec,
             "decomposition_trustworthy": decomposition_trustworthy,
+            "semantic_ac_key": semantic_ac_key,
         }
         while True:
             atomic_result = await self._execute_atomic_ac(
@@ -3005,6 +3087,7 @@ class ParallelACExecutor:
                 node_identity=node_identity,
                 ac_spec=ac_spec,
                 decomposition_trustworthy=decomposition_trustworthy,
+                semantic_ac_key=semantic_ac_key,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if not atomic_result.success:
@@ -3028,6 +3111,7 @@ class ParallelACExecutor:
                         node_identity=node_identity,
                         ac_spec=ac_spec,
                         start_time=start_time,
+                        semantic_ac_key=semantic_ac_key,
                     )
                     if bounce_decision is not None:
                         node_decision = bounce_decision
@@ -3194,12 +3278,24 @@ class ParallelACExecutor:
             exclude={from_backend} if from_backend else None,
             weights=_safe_backend_outcome_weights(),
         )
+        root_ac_index = (
+            rerun_kwargs["node_identity"].root_ac_index
+            if isinstance(rerun_kwargs.get("node_identity"), ExecutionNodeIdentity)
+            else int(rerun_kwargs["ac_index"])
+        )
         if not decision.should_redispatch or decision.to_backend is None:
+            self._alt_harness_status_by_root.setdefault(
+                root_ac_index,
+                "not_attempted"
+                if decision.reason in {"disabled_by_config", "no_alternative_runtime"}
+                else "not_eligible",
+            )
             return None
 
         # Consume the one-per-AC cap up front so a re-run that itself fails does
         # not trigger a second harness hop.
         self._alt_harness_redispatched_acs.add(ac_key)
+        self._alt_harness_status_by_root[root_ac_index] = "not_attempted"
         try:
             alt_result = await self._run_single_ac_on_backend(
                 decision.to_backend,
@@ -3210,6 +3306,7 @@ class ParallelACExecutor:
                 failure_class=failure.value if failure is not None else None,
             )
         except Exception as exc:  # never make a failure worse
+            self._alt_harness_status_by_root[root_ac_index] = "failed"
             log.warning(
                 "parallel_executor.alt_harness_redispatch_failed",
                 to_backend=decision.to_backend,
@@ -3218,7 +3315,11 @@ class ParallelACExecutor:
             )
             return None
         if alt_result is None:
+            self._alt_harness_status_by_root[root_ac_index] = "failed"
             return None
+        self._alt_harness_status_by_root[root_ac_index] = (
+            "succeeded" if alt_result.success else "failed"
+        )
         # Surface the alternate attempt as the authoritative outcome regardless of
         # its success: the alternate backend ran in the SAME workspace and may
         # have left edits, so on failure the caller must report the alternate's
@@ -3324,6 +3425,7 @@ class ParallelACExecutor:
             # no parent-tier model and the replay self-skips — threading the flag
             # just keeps the throwaway executor's behavior consistent.
             shadow_replay_enabled=self._shadow_replay_enabled,
+            session_signal_hub=self._session_signal_hub,
         )
         return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
 
@@ -3415,6 +3517,7 @@ class ParallelACExecutor:
             response = await self._dispatch_decomposition_prompt(
                 prompt=prompt,
                 system_prompt=system_prompt,
+                independent_session=True,
             )
             if len(response) > 10_000:
                 raise ValueError
@@ -4042,6 +4145,7 @@ Respond with either ATOMIC or the structured JSON object only.
         retry_prompt_extra: str = "",
         ac_spec: AcceptanceCriterionSpec | None = None,
         decomposition_trustworthy: bool = False,
+        semantic_ac_key: str | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -4049,6 +4153,7 @@ Respond with either ATOMIC or the structured JSON object only.
             ACExecutionResult for this AC.
         """
         ac_session_id: str | None = None
+        semantic_ac_key = semantic_ac_key or derive_semantic_ac_key(ac_spec or ac_content)
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -4200,6 +4305,19 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             suggested_tier=suggested_tier,
         )
+        initial_model_decision, _initial_model_kwargs = resolve_execute_model(
+            self._adapter,
+            router=self._model_router,
+            is_decomposed_child=is_sub_ac,
+            retry_attempt=0,
+            suggested_tier=suggested_tier,
+        )
+        model_escalated = bool(
+            retry_attempt > 0
+            and model_decision.model is not None
+            and initial_model_decision.model is not None
+            and model_decision.model != initial_model_decision.model
+        )
         if model_decision.model is not None:
             log.debug(
                 "orchestrator.executor.model_routed",
@@ -4221,6 +4339,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 model_mode=model_decision.mode,
                 retry_attempt=retry_attempt,
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                semantic_ac_key=semantic_ac_key,
+                base_model_tier=(
+                    self._model_router.base_tier if self._model_router is not None else None
+                ),
+                escalation_retry_threshold=(
+                    self._model_router.escalation_retry_threshold
+                    if self._model_router is not None
+                    else None
+                ),
+                model_escalated=model_escalated,
             )
         # Merge the model override into the effort kwargs. The merged dict flows
         # through LeafDispatcher.stream → execute_task unchanged (LeafDispatcher
@@ -4263,7 +4391,30 @@ Respond with either ATOMIC or the structured JSON object only.
                     shadow_snapshot_stack.close()
                 shadow_snapshot_stack = contextlib.ExitStack()
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
+        signal_target: SessionSignalTarget | None = None
+        signal_target_registered = False
         try:
+            if self._session_signal_hub is not None:
+                signal_target = SessionSignalTarget(
+                    execution_id=execution_context_id,
+                    session_scope_id=runtime_identity.session_scope_id,
+                    session_attempt_id=runtime_identity.session_attempt_id,
+                    runtime_backend=self._adapter.runtime_backend,
+                    capabilities=self._adapter.capabilities.session_signals,
+                    orchestrator_session_id=session_id,
+                    ac_id=runtime_identity.ac_id,
+                    ac_content=ac_content,
+                    display_label=label,
+                    ac_index=runtime_identity.ac_index,
+                    parent_ac_index=runtime_identity.parent_ac_index,
+                    sub_ac_index=runtime_identity.sub_ac_index,
+                    node_id=runtime_identity.node_id,
+                    display_path=runtime_identity.display_path,
+                    depth=runtime_identity.depth,
+                )
+                await self._session_signal_hub.register_replaying(signal_target)
+                signal_target_registered = True
+
             await LeafDispatcher(self).stream(
                 state=dispatch_state,
                 prompt=prompt,
@@ -4280,6 +4431,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 sub_ac_index=sub_ac_index,
                 node_identity=node_identity,
                 retry_attempt=retry_attempt,
+                semantic_ac_key=semantic_ac_key,
                 label=label,
                 indent=indent,
                 execution_counters=execution_counters,
@@ -4311,6 +4463,184 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_attempt=retry_attempt,
                     depth=depth,
                 )
+
+            if signal_target is not None and self._session_signal_hub is not None:
+                await self._session_signal_hub.refresh_pending(signal_target)
+                while True:
+                    queued_signal = self._session_signal_hub.pop_pending(signal_target)
+                    if queued_signal is None:
+                        break
+                    if queued_signal.signal.is_expired():
+                        await self._event_store.append(
+                            create_session_signal_rejected_event(
+                                queued_signal.signal,
+                                rejection_code="expired_before_delivery",
+                                detail=(
+                                    "The SessionSignal expired while waiting for the runtime "
+                                    "delivery boundary."
+                                ),
+                                effective_mode=queued_signal.effective_mode,
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        continue
+                    if queued_signal.effective_mode not in {
+                        SessionSignalMode.INFORM,
+                        SessionSignalMode.AFTER_TURN,
+                    }:
+                        await self._event_store.append(
+                            create_session_signal_rejected_event(
+                                queued_signal.signal,
+                                rejection_code="delivery_mode_not_implemented",
+                                detail=(
+                                    "The active runtime receiver currently implements "
+                                    "inform and after_turn delivery only."
+                                ),
+                                effective_mode=queued_signal.effective_mode,
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        continue
+
+                    message_count_before_signal = dispatch_state.message_count
+                    primary_final_message = dispatch_state.final_message
+                    primary_success = dispatch_state.success
+                    await self._event_store.append(
+                        create_session_signal_delivery_started_event(
+                            queued_signal.signal,
+                            effective_mode=queued_signal.effective_mode,
+                            runtime_backend=signal_target.runtime_backend,
+                            orchestrator_session_id=session_id,
+                        )
+                    )
+                    inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+                    try:
+                        await LeafDispatcher(self).stream(
+                            state=dispatch_state,
+                            prompt=(
+                                render_inform_signal_prompt(queued_signal.signal)
+                                if inform_mode
+                                else render_after_turn_signal_prompt(queued_signal.signal)
+                            ),
+                            tools=[] if inform_mode else tools,
+                            system_prompt=system_prompt,
+                            execute_effort_kwargs=execute_effort_kwargs,
+                            runtime_identity=runtime_identity,
+                            execution_context_id=execution_context_id,
+                            session_id=session_id,
+                            ac_index=ac_index,
+                            ac_content=ac_content,
+                            is_sub_ac=is_sub_ac,
+                            parent_ac_index=parent_ac_index,
+                            sub_ac_index=sub_ac_index,
+                            node_identity=node_identity,
+                            retry_attempt=retry_attempt,
+                            semantic_ac_key=semantic_ac_key,
+                            label=label,
+                            indent=indent,
+                            execution_counters=execution_counters,
+                        )
+                    except Exception as exc:
+                        await self._event_store.append(
+                            create_session_signal_delivery_uncertain_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                detail=(
+                                    "The runtime follow-up failed across the delivery "
+                                    f"boundary: {type(exc).__name__}."
+                                ),
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        if inform_mode:
+                            dispatch_state.success = primary_success
+                            dispatch_state.final_message = primary_final_message
+                            continue
+                        raise
+
+                    signal_messages = messages[message_count_before_signal:]
+                    acknowledgement_messages = [
+                        message
+                        for message in signal_messages
+                        if _is_session_signal_application_acknowledgement(message)
+                    ]
+                    if not acknowledgement_messages:
+                        detail = (
+                            "The resumed runtime returned no messages."
+                            if not signal_messages
+                            else (
+                                "The resumed runtime returned only error or "
+                                "non-acknowledging messages."
+                            )
+                        )
+                        await self._event_store.append(
+                            create_session_signal_delivery_uncertain_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                detail=detail,
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        if inform_mode:
+                            dispatch_state.success = primary_success
+                            dispatch_state.final_message = primary_final_message
+                            continue
+                        dispatch_state.success = False
+                        dispatch_state.final_message = (
+                            "Synapse after-turn delivery could not be acknowledged."
+                        )
+                        break
+
+                    reply = _bounded_session_signal_runtime_reply(signal_messages)
+                    signal_success = dispatch_state.success
+
+                    await self._event_store.append_batch(
+                        [
+                            create_session_signal_applied_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                acknowledgement=(
+                                    "Runtime emitted "
+                                    f"{len(acknowledgement_messages)} acknowledging "
+                                    "message(s) after receiving the signal turn."
+                                ),
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            ),
+                            create_session_signal_completed_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                summary=(
+                                    "Inform signal processing completed"
+                                    if inform_mode and signal_success
+                                    else (
+                                        "After-turn signal processing completed"
+                                        if signal_success
+                                        else "SessionSignal was applied but the runtime "
+                                        "reported an error"
+                                    )
+                                ),
+                                reply=reply,
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            ),
+                        ]
+                    )
+                    if inform_mode:
+                        dispatch_state.success = primary_success
+                        dispatch_state.final_message = primary_final_message
+
+                self._session_signal_hub.unregister(signal_target)
+                signal_target_registered = False
+
+                runtime_handle = dispatch_state.runtime_handle
+                ac_session_id = dispatch_state.ac_session_id
+                final_message = dispatch_state.final_message
+                success = dispatch_state.success
 
             self._remember_ac_runtime_handle(
                 ac_index,
@@ -4431,6 +4761,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 execution_id=execution_context_id,
                 session_id=session_id,
                 is_sub_ac=is_sub_ac,
+                semantic_ac_key=semantic_ac_key,
                 success=success,
                 typed_evidence=typed_evidence,
                 verifier_verdict=verifier_verdict,
@@ -4561,6 +4892,26 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         finally:
             try:
+                if (
+                    signal_target_registered
+                    and signal_target is not None
+                    and self._session_signal_hub is not None
+                ):
+                    pending_signals = self._session_signal_hub.unregister(signal_target)
+                    signal_target_registered = False
+                    for pending_signal in pending_signals:
+                        await self._safe_emit_event(
+                            create_session_signal_rejected_event(
+                                pending_signal.signal,
+                                rejection_code="target_ended_before_boundary",
+                                detail=(
+                                    "The runtime attempt ended before the queued signal "
+                                    "reached its delivery boundary."
+                                ),
+                                effective_mode=pending_signal.effective_mode,
+                                runtime_backend=signal_target.runtime_backend,
+                            )
+                        )
                 # Frugality-proof token axis (seed AC2). Attribute this leaf's real
                 # runtime-measured spend on EVERY exit — success, stall, and the
                 # mid-stream exception path all consumed tokens, and spend is spend.
@@ -4655,6 +5006,7 @@ Respond with either ATOMIC or the structured JSON object only.
         execution_id: str,
         session_id: str,
         is_sub_ac: bool,
+        semantic_ac_key: str | None = None,
         success: bool,
         typed_evidence: EvidenceRecord | None,
         verifier_verdict: VerifierVerdict | None,
@@ -4733,6 +5085,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 unsupported_claim_rate=verdict.unsupported_claim_rate,
                 rejected_reasons=list(verdict.rejected_reasons),
                 accepted_fact_count=len(verdict.accepted_fact_ids),
+                semantic_ac_key=semantic_ac_key,
                 # A paired baseline deliver verdict is not available in the
                 # isolated replay.  Fail closed: an accepted child cannot be a
                 # newly-rejected regression; any rejected child is conservatively
@@ -4974,6 +5327,55 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         )
 
+    async def _emit_recovery_exhausted(
+        self,
+        *,
+        seed: Seed,
+        result: ACExecutionResult,
+        root_ac_index: int,
+        session_id: str,
+        execution_id: str,
+        retry_termination_reason: str,
+    ) -> None:
+        """Emit the authoritative root-AC recovery-closure fact exactly once."""
+        from ouroboros.events.base import BaseEvent
+
+        if result.success or result.outcome is not ACExecutionOutcome.FAILED:
+            return
+        emission_key = (execution_id or session_id, root_ac_index)
+        if emission_key in self._recovery_exhausted_emitted:
+            return
+        self._recovery_exhausted_emitted.add(emission_key)
+
+        criterion = seed.acceptance_criteria[root_ac_index]
+        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+        alternate_status = self._alt_harness_status_by_root.get(
+            root_ac_index,
+            "not_attempted" if self._cross_harness_redispatch_enabled else "not_attempted",
+        )
+        if alternate_status == "failed":
+            retry_termination_reason = "alternate_harness_exhausted"
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.recovery_exhausted",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": root_ac_index,
+                    "semantic_ac_key": semantic_ac_key,
+                    "retry_attempt": result.retry_attempt,
+                    "configured_retry_attempts": self._ac_retry_attempts,
+                    "retry_termination_reason": retry_termination_reason,
+                    "alternate_redispatch_status": alternate_status,
+                    "last_failure_class": self._failure_class_for_result(result) or "unknown",
+                    "success": False,
+                },
+            )
+        )
+
     async def _compute_sibling_flip_gated_out(
         self,
         *,
@@ -5101,6 +5503,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # cross-harness redispatch until the V3 loop below is spent.
             same_runtime_budget_exhausted=self._ac_retry_attempts <= 0,
         )
+        retry_termination_reasons: dict[int, str] = {}
         # V1 gate on freshly-successful ACs.
         for position, ac_idx in enumerate(batch_executable):
             result = results[position]
@@ -5121,6 +5524,21 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
 
         if self._ac_retry_attempts <= 0:
+            for position, ac_idx in enumerate(batch_executable):
+                result = results[position]
+                if isinstance(result, ACExecutionResult):
+                    await self._emit_recovery_exhausted(
+                        seed=seed,
+                        result=result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        retry_termination_reason=(
+                            "budget_exhausted"
+                            if self._is_retryable_failure(result)
+                            else "not_retryable"
+                        ),
+                    )
             return results
 
         # V3 retry loop: re-dispatch non-stall failures up to the configured
@@ -5197,6 +5615,12 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
 
                 if not self._is_retryable_failure(gated):
+                    if (
+                        isinstance(gated, ACExecutionResult)
+                        and not gated.success
+                        and gated.outcome is ACExecutionOutcome.FAILED
+                    ):
+                        retry_termination_reasons[ac_idx] = "not_retryable"
                     pending.discard(ac_idx)
                     continue
                 new_class = (
@@ -5277,6 +5701,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         ac_index=ac_idx,
                         failure_class=new_class,
                     )
+                    retry_termination_reasons[ac_idx] = "repeated_failure_early_stop"
                     # The same-runtime path has given up before the retry cap, so
                     # its recovery budget is effectively spent — the alt-harness
                     # boundary. When this dispatch was not already the final
@@ -5320,8 +5745,25 @@ Respond with either ATOMIC or the structured JSON object only.
                     continue
                 last_failure_class[ac_idx] = new_class
                 if ac_retry_attempts[ac_idx] >= self._ac_retry_attempts:
+                    retry_termination_reasons.setdefault(ac_idx, "budget_exhausted")
                     pending.discard(ac_idx)
 
+        for position, ac_idx in enumerate(batch_executable):
+            result = results[position]
+            if isinstance(result, ACExecutionResult):
+                await self._emit_recovery_exhausted(
+                    seed=seed,
+                    result=result,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    retry_termination_reason=retry_termination_reasons.get(
+                        ac_idx,
+                        "budget_exhausted"
+                        if self._is_retryable_failure(result)
+                        else "not_retryable",
+                    ),
+                )
         return results
 
     async def _maybe_redispatch_alt_harness_for_batch_ac(

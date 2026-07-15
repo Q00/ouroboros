@@ -31,6 +31,7 @@ from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.pm.handoff import build_pm_dev_handoff_command
 from ouroboros.providers.factory import (
     create_llm_adapter,
+    litellm_missing_dependency_message,
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
@@ -54,10 +55,8 @@ def _create_pm_litellm_adapter() -> Any:
         from ouroboros.providers.litellm_adapter import LiteLLMAdapter
     except ModuleNotFoundError as exc:
         if exc.name == "litellm":
-            msg = (
-                "PM interviews require the optional LiteLLM dependency. "
-                "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
-                "`uv tool install --force --with litellm ouroboros-ai`."
+            msg = litellm_missing_dependency_message(
+                "PM interviews require the optional LiteLLM dependency."
             )
             raise RuntimeError(msg) from exc
         raise
@@ -68,10 +67,8 @@ def _create_pm_litellm_adapter() -> Any:
 def _raise_missing_litellm_dependency(exc: ModuleNotFoundError) -> None:
     """Convert a missing optional LiteLLM import into install guidance."""
     if exc.name == "litellm" or "litellm" in str(exc):
-        msg = (
-            "PM interviews require the optional LiteLLM dependency. "
-            "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
-            "`uv tool install --force --with litellm ouroboros-ai`."
+        msg = litellm_missing_dependency_message(
+            "PM interviews require the optional LiteLLM dependency."
         )
         raise RuntimeError(msg) from exc
     raise exc

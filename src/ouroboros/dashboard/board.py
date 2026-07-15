@@ -19,6 +19,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ouroboros.observability.frugality_retrospective import (
+    project_frugality_retrospective,
+)
+
 # Status columns, in board order. Node statuses map onto these directly
 # (verified distinct values: pending / executing / completed / failed); synonyms
 # from other emitters are normalized via ``_STATUS_ALIASES``.
@@ -340,6 +344,7 @@ def reduce_board(
         "provider": None,
         "total_tokens": 0.0,
         "frugality": None,
+        "frugality_retrospective": None,
     }
 
     for ev in events:
@@ -420,6 +425,11 @@ def reduce_board(
                 frugality["reason"] = str(reason)
             if frugality:
                 meta["frugality"] = frugality
+
+        elif event_type == "execution.frugality_retrospective.reported":
+            retrospective = project_frugality_retrospective(payload)
+            if retrospective is not None:
+                meta["frugality_retrospective"] = retrospective
 
         elif event_type == "workflow.progress.updated":
             if payload.get("completed_count") is not None:

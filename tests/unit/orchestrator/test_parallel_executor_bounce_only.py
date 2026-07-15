@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.decomposition_policy import (
     BounceCause,
     DecompositionChild,
@@ -430,9 +430,17 @@ class _SequenceRuntime:
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
         self.prompts: list[str] = []
+        self.resume_handles: list[RuntimeHandle | None] = []
 
-    async def execute_task(self, prompt: str, **_kwargs: Any):
+    async def execute_task(
+        self,
+        prompt: str,
+        *,
+        resume_handle: RuntimeHandle | None = None,
+        **_kwargs: Any,
+    ):
         self.prompts.append(prompt)
+        self.resume_handles.append(resume_handle)
         yield AgentMessage(type="result", content=self.responses.pop(0))
 
 
@@ -539,12 +547,14 @@ async def test_generic_structured_proposal_requires_independent_attestation(
     source: DecompositionSource,
 ) -> None:
     runtime = _SequenceRuntime([_generic_proposal(), _attestation(established=True)])
+    inherited_handle = RuntimeHandle(backend="claude", native_session_id="proposal-session")
     executor = ParallelACExecutor(
         adapter=runtime,
         event_store=AsyncMock(),
         console=MagicMock(),
         decomposition_mode="bounce_only",
         cross_harness_redispatch=False,
+        inherited_runtime_handle=inherited_handle,
     )
 
     result = await executor._try_decompose_ac(
@@ -562,6 +572,7 @@ async def test_generic_structured_proposal_requires_independent_attestation(
     assert result.trustworthy is True
     assert result.semantic_status is SemanticAttestationStatus.ESTABLISHED
     assert len(runtime.prompts) == 2
+    assert runtime.resume_handles == [inherited_handle, None]
 
 
 @pytest.mark.asyncio

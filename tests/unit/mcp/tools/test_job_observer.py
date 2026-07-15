@@ -31,7 +31,8 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
                 "cursor": 7,
                 "timeout_seconds": 180,
                 "view": "summary",
-                "wait_for": "ac_change",
+                "stream": "linked",
+                "wait_for": "attention_or_ac_change",
             },
         },
         "result": {
@@ -40,6 +41,16 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
         },
         "follow_result_job_keys": ["chained_evaluate_job_id"],
         "main_session_policy": "start_and_on_demand_only",
+        "host_lifecycle": {
+            "spawn_required_for_live_relay": True,
+            "codex_spawn_tool": "spawn_agent",
+            "codex_task_name": "run_observer",
+            "spawn_ack_required": True,
+            "wait_is_not_spawn": True,
+            "durable_job_survives_parent_turn": True,
+            "fallback_keep_turn_open": False,
+            "fallback_notification_timing": "next_parent_turn_or_explicit_status",
+        },
         "relay": {
             "mode": "event_driven",
             "target": "parent_session",
@@ -72,6 +83,9 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
             "tui_command": "ouroboros tui open",
         },
         "instructions": [
+            "For live proactive relays, create one real child with the host spawn primitive and require its live agent/session acknowledgement; a wait call is not a spawn.",
+            "On Codex call spawn_agent exactly once with task_name run_observer and include this contract unchanged in the child message.",
+            "If spawning is unavailable or fails, do not claim an observer exists. State that the durable worker continues independently and that the parent will catch up on the next turn or explicit status request; keep the turn open only when the user explicitly asked for live watching.",
             "Reload deferred Ouroboros tool schemas immediately before each tool call.",
             "Call wait.tool with wait.arguments; replace the local cursor from response meta.",
             "If the wait returns non-terminal or times out unchanged, repeat silently.",
@@ -89,8 +103,12 @@ def test_job_observer_contract_assigns_exclusive_read_only_ownership() -> None:
             "no_duplicate_polling_owner",
         ],
         "fallback": {
-            "host_action": "poll_in_main_session",
-            "wait_for": "ac_change",
+            "host_action": "catch_up_on_next_parent_turn",
+            "keep_main_turn_open": False,
+            "durable_worker_continues": True,
+            "live_proactive_relay": False,
+            "stream": "linked",
+            "wait_for": "attention_or_ac_change",
             "view": "summary",
         },
     }

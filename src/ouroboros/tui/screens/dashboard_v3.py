@@ -48,6 +48,7 @@ from ouroboros.tui.events import (
     DriftUpdated,
     ExecutionUpdated,
     FrugalityProofEvaluated,
+    FrugalityRetrospectiveReported,
     ParallelBatchCompleted,
     ParallelBatchStarted,
     PauseRequested,
@@ -57,6 +58,7 @@ from ouroboros.tui.events import (
     ToolCallCompleted,
     ToolCallStarted,
     WorkflowProgressUpdated,
+    format_frugality_retrospective_summary,
     format_frugality_summary,
 )
 
@@ -846,27 +848,47 @@ class DashboardScreenV3(Screen[None]):
                 self._phase_bar.progress_text = "  ".join(parts) + verdict
 
     def _frugality_verdict_suffix(self) -> str:
-        """Return the ``⚖`` frugality verdict already on the bar, as an appendable suffix.
-
-        Lets a live progress refresh rebuild the counter without dropping a
-        run-end verdict that landed earlier (the ``⚖`` glyph marks its start).
-        """
-        if self._phase_bar is None:
+        """Return the run-end proof and retrospective summaries as one suffix."""
+        if self._state is None:
             return ""
-        current = self._phase_bar.progress_text
-        marker = current.find("⚖")
-        return f"  {current[marker:]}" if marker >= 0 else ""
+        summaries = [
+            self._state.frugality_summary,
+            self._state.frugality_retrospective_summary,
+        ]
+        rendered = [summary for summary in summaries if summary]
+        return f"  {'  '.join(rendered)}" if rendered else ""
+
+    @staticmethod
+    def _strip_frugality_suffix(value: str) -> str:
+        markers = [
+            position for marker in ("⚖", "Evidence:") if (position := value.find(marker)) >= 0
+        ]
+        return value[: min(markers)].rstrip() if markers else value.rstrip()
 
     def on_frugality_proof_evaluated(self, message: FrugalityProofEvaluated) -> None:
         """Append the one-line run-end frugality verdict to the phase bar."""
         if self._phase_bar is None:
             return
         line = format_frugality_summary(message.status, message.token_reduction_pct)
-        base = self._phase_bar.progress_text
-        marker = base.find("⚖")
-        if marker >= 0:
-            base = base[:marker].rstrip()
-        self._phase_bar.progress_text = f"{base}  {line}" if base else line
+        base = self._strip_frugality_suffix(self._phase_bar.progress_text)
+        retrospective = (
+            self._state.frugality_retrospective_summary if self._state is not None else None
+        )
+        suffix = "  ".join(item for item in (line, retrospective) if item)
+        self._phase_bar.progress_text = f"{base}  {suffix}" if base else suffix
+
+    def on_frugality_retrospective_reported(
+        self,
+        message: FrugalityRetrospectiveReported,
+    ) -> None:
+        """Append the neutral execution-finalized evidence line to the phase bar."""
+        if self._phase_bar is None:
+            return
+        line = format_frugality_retrospective_summary(message.summary)
+        base = self._strip_frugality_suffix(self._phase_bar.progress_text)
+        proof = self._state.frugality_summary if self._state is not None else None
+        suffix = "  ".join(item for item in (proof, line) if item)
+        self._phase_bar.progress_text = f"{base}  {suffix}" if base else suffix
 
     def on_subtask_updated(self, message: SubtaskUpdated) -> None:
         """Handle sub-task updates.

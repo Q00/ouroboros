@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from ouroboros.dashboard_web.reader import _connect_readonly
+from ouroboros.dashboard_web.reader import _RELEVANT_EVENT_TYPES, _connect_readonly
 
 
 def _make_db(path) -> None:
@@ -47,3 +47,7 @@ def test_readonly_connect_is_actually_read_only(tmp_path) -> None:
         assert with_error
     finally:
         conn.close()
+
+
+def test_reader_includes_execution_frugality_retrospective() -> None:
+    assert "execution.frugality_retrospective.reported" in _RELEVANT_EVENT_TYPES

@@ -42,15 +42,15 @@ uv run ouroboros --version   # verify
 uv run pytest tests/unit/ -q # run tests
 ```
 
-**Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv)
+**Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv). LiteLLM-bearing profiles support Python 3.12-3.13.
 
-This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Python 3.12 and 3.13 remain supported. If your local 3.14 interpreter is a beta/RC build or hits dependency compatibility issues, recreate the same contributor environment with an explicit stable interpreter, preserving any dependency-profile flags you need:
+This repository's `.python-version` defaults source checkouts to **stable Python 3.14** for local development. Core and non-LiteLLM contributor environments support Python 3.12-3.14. LiteLLM-bearing environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
 
 ```bash
-uv sync --python 3.12                  # base dependencies
-uv sync --python 3.12 --all-extras     # or: include optional backends/extras
-uv run --python 3.12 ouroboros --version
-uv run --python 3.12 pytest tests/unit/ -q
+uv sync --python 3.13                  # base dependencies on the preferred current interpreter
+uv sync --python 3.13 --all-extras     # include optional backends/extras, including LiteLLM
+uv run --python 3.13 ouroboros --version
+uv run --python 3.13 pytest tests/unit/ -q
 ```
 
 ---
@@ -335,9 +335,9 @@ uv run ruff check src/ tests/
 ### Python Version
 
 - **Minimum supported**: Python 3.12
-- **Test matrix**: Python 3.12, 3.13, and 3.14
+- **Test matrix**: Python 3.12, 3.13, and 3.14 for core/non-LiteLLM profiles; Python 3.12 and 3.13 for LiteLLM-bearing profiles
 - **Source-checkout default**: `.python-version` selects stable Python 3.14 for local development
-- Use `uv sync --python 3.12` (plus the same dependency-profile flags, such as `--all-extras`, when needed) before `uv run --python 3.12 ...` when validating compatibility below the checkout default or when a local 3.14 prerelease/dependency combination fails before the CLI starts.
+- Use `uv sync --python 3.13 --all-extras` before `uv run --python 3.13 ...` for current LiteLLM-bearing contributor environments. Python 3.12 remains supported for lower-bound validation.
 - Use modern Python features (type unions `|`, match statements, etc.)
 
 ---

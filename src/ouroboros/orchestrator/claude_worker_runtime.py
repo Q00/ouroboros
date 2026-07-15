@@ -320,7 +320,7 @@ class ClaudeWorkerTransport:
 def build_claude_worker_runtime(
     *,
     cli_path: str | None = None,
-    cwd: str | None = None,
+    cwd: str | os.PathLike[str] | None = None,
     permission_mode: str | None = None,
     model: str | None = None,
     llm_backend: str | None = None,
@@ -339,16 +339,17 @@ def build_claude_worker_runtime(
     ``--add-dir`` grants (deduped, capped). Empty (the default) is a byte-for-byte
     no-op — the worker command is identical to the pre-C4 invocation.
     """
+    normalized_cwd = os.fspath(cwd) if cwd is not None else None
     return LeaderDrivenWorkerRuntime(
         transport=ClaudeWorkerTransport(
             cli_path=cli_path,
-            cwd=cwd,
+            cwd=normalized_cwd,
             persist_sessions=persist_sessions,
             context_reference_dirs=context_reference_dirs,
         ),
         runtime_backend="claude_mcp",
         llm_backend=llm_backend or "claude",
-        cwd=cwd,
+        cwd=normalized_cwd,
         permission_mode=permission_mode,
         model=model,
         reasoning_effort_support=ParamSupport.NATIVE,

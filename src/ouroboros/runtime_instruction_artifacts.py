@@ -66,6 +66,14 @@ def _upsert_marked_section(existing: str, section: str) -> str:
     return f"{base}\n\n{section}"
 
 
+def has_managed_section(path: str | Path) -> bool:
+    """Return True when *path* already contains the setup-managed guide section."""
+    try:
+        return _SECTION_START in Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _write_managed_section(path: Path, backend: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -203,6 +211,7 @@ __all__ = [
     "gemini_instruction_path",
     "gjc_agent_dir",
     "gjc_instruction_path",
+    "has_managed_section",
     "install_copilot_instruction_artifact",
     "install_gemini_instruction_artifact",
     "install_gjc_instruction_artifact",

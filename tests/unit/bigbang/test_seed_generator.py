@@ -580,6 +580,7 @@ class TestSeedGeneratorExtraction:
             assert first.output_assertion is None
             assert first.to_seed_value() == {
                 "description": "CLI exits successfully",
+                "semantic_ac_key": first.semantic_ac_key,
                 "verify_command": "python -m app",
             }
             assert isinstance(second, AcceptanceCriterionSpec)

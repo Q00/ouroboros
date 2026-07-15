@@ -153,6 +153,32 @@ class TestBuildSystemPrompt:
         assert "spinning" in prompt
         assert "no acceptance-criterion progress" in prompt
 
+    def test_renders_bounded_successor_directive_after_seed_contract(
+        self,
+        sample_seed: Seed,
+    ) -> None:
+        seed = Seed.from_dict(
+            {
+                **sample_seed.to_dict(),
+                "conductor_directive": {
+                    "source_attention_event_id": "attention_1",
+                    "instruction": "Add repository evidence for the rejected claim.",
+                    "rejected_reasons": ["The cited file was not observed."],
+                    "deterministic": True,
+                },
+            }
+        )
+
+        prompt = build_system_prompt(seed)
+
+        assert prompt.index("## Seed Contract") < prompt.index(
+            "## Active Conductor Successor Directive"
+        )
+        assert "The Seed above remains" in prompt
+        assert "the source of truth" in prompt
+        assert "Add repository evidence for the rejected claim." in prompt
+        assert "- acceptance criteria: true" in prompt
+
     def test_handles_empty_constraints(self) -> None:
         """Test handling seed with no constraints."""
         seed = Seed(
@@ -1310,6 +1336,11 @@ class TestOrchestratorRunner:
             patch.object(runner, "_unregister_session"),
             patch.object(runner._session_repo, "mark_paused", mark_paused),
             patch.object(runner._session_repo, "mark_failed", mark_failed),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ) as retrospective,
         ):
             result = await runner.execute_precreated_session(
                 seed=sample_seed,
@@ -1336,6 +1367,7 @@ class TestOrchestratorRunner:
         assert terminal.data["status"] == "paused"
         assert terminal.data["pause_seconds"] == 18000
         assert terminal.data["pause_kind"] == "usage_limit"
+        retrospective.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_seed_exception_marks_session_failed(
@@ -1693,6 +1725,11 @@ class TestOrchestratorRunner:
                 "mark_failed",
                 AsyncMock(return_value=Result.ok(None)),
             ) as mark_failed,
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ) as retrospective,
         ):
             result = await runner.resume_session("sess_resume", sample_seed)
 
@@ -1701,6 +1738,7 @@ class TestOrchestratorRunner:
         assert result.value.final_message == "Codex rejected the resume command"
         mark_paused.assert_awaited_once()
         mark_failed.assert_not_called()
+        retrospective.assert_not_awaited()
 
     def test_recoverable_failure_ignores_ordinary_429(
         self,
