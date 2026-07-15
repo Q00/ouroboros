@@ -2405,7 +2405,7 @@ class JobManager:
     ) -> None:
         """Persist one job event."""
         await self._ensure_initialized()
-        await self._event_store.append(
+        cursor = await self._event_store.append_with_rowid(
             BaseEvent(
                 id=event_id or str(uuid4()),
                 type=event_type,
@@ -2414,4 +2414,4 @@ class JobManager:
                 data={**data, "timestamp": datetime.now(UTC).isoformat()},
             )
         )
-        self._merge_live_snapshot(job_id, data, cursor=await self._event_store.get_current_rowid())
+        self._merge_live_snapshot(job_id, data, cursor=cursor)

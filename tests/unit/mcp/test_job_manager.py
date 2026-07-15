@@ -4046,6 +4046,55 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_live_status_snapshot_uses_appended_job_rowid_not_global_head(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        manager = JobManager(store)
+        runner: asyncio.Future[MCPToolResult] = asyncio.Future()
+        original_get_current_rowid = store.get_current_rowid
+        poison_writes = 0
+
+        async def poisoned_get_current_rowid() -> int:
+            nonlocal poison_writes
+            poison_writes += 1
+            await store.append(
+                BaseEvent(
+                    id=f"evt_unrelated_cursor_poison_{poison_writes}",
+                    type="execution.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cursor_poison",
+                    timestamp=datetime(2026, 4, 22, tzinfo=UTC),
+                    data={"poison_write": poison_writes},
+                )
+            )
+            return await original_get_current_rowid()
+
+        monkeypatch.setattr(store, "get_current_rowid", poisoned_get_current_rowid)
+
+        try:
+            started = await manager.start_job(
+                job_type="execute_seed",
+                runner=runner,
+                initial_message="Queued execute_seed",
+                links=JobLinks(execution_id="exec_live_cursor_exact"),
+            )
+            snapshot = await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
+            _events, persisted_cursor = await store.get_events_after(
+                "job",
+                started.job_id,
+                last_row_id=0,
+            )
+
+            assert poison_writes == 0
+            assert snapshot.cursor == persisted_cursor
+        finally:
+            if not runner.done():
+                runner.cancel()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_job_wait_terminal_mode_uses_newer_live_snapshot(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         snapshot = JobSnapshot(

@@ -393,13 +393,22 @@ class EventStore:
         Raises:
             PersistenceError: If the append operation fails.
         """
+        await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
+
+    async def append_with_rowid(
+        self,
+        event: BaseEvent,
+        *,
+        _skip_workflow_ir_guard: bool = False,
+    ) -> int:
+        """Append an event and return its exact SQLite rowid."""
         if self._engine is None:
             raise PersistenceError(
                 "EventStore not initialized. Call initialize() first.",
-                operation="append",
+                operation="append_with_rowid",
             )
         if not isinstance(event, BaseEvent):
-            self._raise_invalid_append_input(event, operation="append")
+            self._raise_invalid_append_input(event, operation="append_with_rowid")
 
         # Guard the workflow IR lifecycle family from direct raw appends:
         # ``WorkflowLifecycleEvent`` enforces the replay-unsafe key blocklist
@@ -425,7 +434,19 @@ class EventStore:
             try:
                 async with self._engine.begin() as conn:
                     await conn.execute(events_table.insert().values(**event.to_db_dict()))
-                return
+                    rowid = await conn.scalar(
+                        select(text("rowid"))
+                        .select_from(events_table)
+                        .where(events_table.c.id == event.id)
+                    )
+                    if not isinstance(rowid, int):
+                        raise PersistenceError(
+                            "Inserted event rowid was not returned.",
+                            operation="append_with_rowid",
+                            table="events",
+                            details={"event_id": event.id, "event_type": event.type},
+                        )
+                return rowid
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -440,6 +461,12 @@ class EventStore:
                     table="events",
                     details={"event_id": event.id, "event_type": event.type},
                 ) from e
+        raise PersistenceError(
+            "Failed to append event after retries.",
+            operation="insert",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
 
     async def append_batch(self, events: list[BaseEvent]) -> None:
         """Append multiple events atomically in a single transaction.
