@@ -108,6 +108,7 @@ _SENTINEL_DEFAULT_BACKENDS = (
     | _GROK_LLM_BACKENDS
     | _ZCODE_LLM_BACKENDS
 )
+_ZCODE_SCRIPT_SUFFIXES = frozenset({".cjs", ".js", ".mjs"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
@@ -172,7 +173,7 @@ def _is_placeholder_api_key(value: str) -> bool:
 # Environment variables that determine HOW Ouroboros executes work. This
 # is the single authoritative trust boundary: a cloned repository's `.env`
 # must not be able to change which binary runs or whether the user's
-# approval gate applies. Three classes, all remote-code-execution sinks
+# approval gate applies. Four classes, all remote-code-execution sinks
 # when sourced from an untrusted location:
 #   1. Explicit CLI path overrides fed straight into a subprocess.
 #   2. Runtime/backend selectors that pick which adapter (and therefore
@@ -181,6 +182,8 @@ def _is_placeholder_api_key(value: str) -> bool:
 #   3. Permission-mode overrides — setting acceptEdits/bypassPermissions
 #      silently removes the human approval gate, letting a malicious repo
 #      auto-approve arbitrary tool calls (effectively RCE).
+#   4. Runtime-native preload hooks such as NODE_OPTIONS, which can execute
+#      attacker-controlled code before a spawned JavaScript CLI starts.
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
 # the project-directory .env that travels with a cloned repo. Trusted .env
@@ -192,6 +195,9 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
     {
         # Search PATH used by shutil.which()/bare executable spawning.
         "PATH",
+        # Node/Electron preload hook. A project .env could otherwise inject a
+        # --require/--import payload before a spawned JavaScript CLI starts.
+        "NODE_OPTIONS",
         # Explicit executable-path overrides.
         "OUROBOROS_CLI_PATH",
         "OUROBOROS_CODEX_CLI_PATH",
@@ -1570,6 +1576,24 @@ def get_grok_cli_path() -> str | None:
     return None
 
 
+def _is_runnable_zcode_cli_path(path: str | Path) -> bool:
+    """Whether *path* matches one of the supported Zcode launch shapes."""
+    candidate = Path(path)
+    if not candidate.is_file():
+        return False
+    if candidate.suffix.lower() in _ZCODE_SCRIPT_SUFFIXES:
+        return os.access(candidate, os.R_OK)
+    return shutil.which(str(candidate.resolve())) is not None
+
+
+def _canonical_zcode_cli_path(path: str | Path) -> str:
+    """Return a stable path that remains valid after the caller changes cwd."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = candidate.resolve()
+    return str(candidate)
+
+
 def get_zcode_cli_path() -> str | None:
     """Get the zcode CLI path (Z.ai GLM-5 agent) from environment or config.
 
@@ -1579,35 +1603,38 @@ def get_zcode_cli_path() -> str | None:
         3. macOS app-bundle default (/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs)
         4. None (resolve from PATH at runtime)
 
-    The zcode CLI is executed via Node.js: the returned path should point to the
-    zcode.cjs script, and the runtime wrapper will invoke it as ``node <cli_path>``.
+    The returned path may point to the app-bundle ``zcode.cjs`` script or to a
+    directly executable wrapper. Official macOS app bundles declare an
+    ``electron-node`` runtime in sibling metadata; the runtime wrapper then
+    uses ZCode's bundled Electron/Node executable instead of the system Node.
 
-    Stale env var / config values that don't point to an executable file are
-    treated as missing so callers can fall back to PATH discovery instead of
-    persisting an unusable path.
+    Stale env var / config values that don't point to a readable JavaScript
+    entry script or a directly executable wrapper are treated as missing, so
+    callers can fall back to PATH discovery instead of persisting an unusable
+    path.
 
     Returns:
         Path to the zcode CLI script or None.
     """
     env_path = os.environ.get("OUROBOROS_ZCODE_CLI_PATH", "").strip()
     if env_path:
-        resolved = str(Path(env_path).expanduser())
-        if Path(resolved).is_file():
+        resolved = _canonical_zcode_cli_path(env_path)
+        if _is_runnable_zcode_cli_path(resolved):
             return resolved
 
     try:
         config = load_config()
         zcode_path = getattr(config.orchestrator, "zcode_cli_path", None)
         if zcode_path:
-            resolved = str(Path(zcode_path).expanduser())
-            if Path(resolved).is_file():
+            resolved = _canonical_zcode_cli_path(zcode_path)
+            if _is_runnable_zcode_cli_path(resolved):
                 return resolved
     except ConfigError:
         pass
 
     # macOS app-bundle default
     macos_bundle_path = Path("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
-    if macos_bundle_path.is_file():
+    if _is_runnable_zcode_cli_path(macos_bundle_path):
         return str(macos_bundle_path)
 
     return None

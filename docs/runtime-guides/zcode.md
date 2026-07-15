@@ -1,225 +1,166 @@
-# Zcode Runtime
+# Zcode CLI Runtime
 
-Run Ouroboros workflow execution and LLM-backed authoring through the locally
-installed Zcode CLI.
+Run Ouroboros workflows and completion-backed authoring through Z.ai's locally
+installed ZCode coding agent. The runtime supports either the macOS app-bundle
+`zcode.cjs` entry script or a `zcode` executable available on `PATH`.
 
-Zcode integration has two separate surfaces:
-
-1. **Terminal path**: Ouroboros launches Zcode from the shell for runtime
-   execution and, when selected, LLM completion roles.
-2. **GUI path**: Zcode GUI launches Ouroboros through MCP. This is a separate
-   plugin packaging path and is not proven by the terminal smoke test below.
-
-This guide covers the terminal path.
-
-## Mental Model
-
-```text
-Terminal / CLI / MCP client
-      |
-      | selects runtime_backend: zcode or llm.backend: zcode
-      v
-Ouroboros runtime/provider adapter
-      |
-      | shells out to zcode --prompt --json --mode <mode> --cwd <cwd>
-      v
-Zcode CLI
-      |
-      | uses Zcode's own auth, model config, tools, and session state
-      v
-GLM/Z.ai model turn
-```
-
-Ouroboros owns Seed parsing, workflow orchestration, evaluation handoff, event
-storage, and backend selection. Zcode owns model access, model selection, and
-the actual agent turn.
+> The vendor does not currently publish a stable CLI or JSON-output contract.
+> This adapter is pinned to behavior measured from Zcode CLI 0.15.0 and 0.15.2
+> and to the captured fixtures under `tests/fixtures/zcode/`. Treat ZCode
+> application upgrades as compatibility events and rerun the Zcode runtime
+> tests after an upgrade.
 
 ## Prerequisites
 
 | Requirement | Why |
 | --- | --- |
-| ZCode.app or `zcode` CLI | Provider runtime |
-| Z.ai login | Zcode needs its own authenticated model access |
-| Ouroboros base package | Provides `ouroboros` CLI and adapters |
+| ZCode desktop app or `zcode` executable | Provides the coding-agent runtime |
+| A configured Z.ai provider/model | Zcode reads provider and model selection from its own config |
+| Compatible Node.js for a standalone `.cjs` path | Official app bundles use their bundled Electron/Node runtime; standalone scripts use the system Node |
+| Ouroboros base package | No provider-specific Python extra is required |
 
-On macOS app-bundle installs, the CLI entry script is typically:
-
-```bash
-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-```
-
-Point Ouroboros at it:
+## Quick start
 
 ```bash
-export OUROBOROS_ZCODE_CLI_PATH=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-```
-
-If `zcode` is already on `PATH`, the explicit env var is optional.
-
-## Model Selection
-
-Zcode has no `--model` CLI flag. Passing `--model` is a hard CLI rejection.
-
-Select the model through Zcode itself, for example:
-
-```text
-~/.zcode/cli/config.json  ->  model.main
-```
-
-or from an interactive Zcode session using `/model`.
-
-Ouroboros intentionally does not forward `CompletionConfig.model` or runtime
-model overrides to the Zcode CLI. The Zcode runtime emits a warning if a
-non-default model is requested so the mismatch is visible.
-
-## Quick Start: Runtime Execution
-
-The shortest terminal entry point is:
-
-```bash
-ozo "Build a REST API"
-```
-
-That is equivalent to `ouroboros zcode "Build a REST API"` and starts an
-Ouroboros interview with Zcode selected for both authoring and the later workflow
-handoff. Two shorter convenience subcommands cover the common follow-up actions:
-
-```bash
-ozo qa ./some-file.txt --quality-bar "PASS if this is clear."
-ozo run seed.yaml
-```
-
-The longer first-party form still works:
-
-```bash
-ouroboros zcode "Build a REST API"
-ouroboros zcode qa ./some-file.txt --quality-bar "PASS if this is clear."
-ouroboros zcode run seed.yaml
-```
-
-The short `ozo run` / `zcode run` alias keeps the common path small. If you need
-MCP configuration flags such as `--mcp-config` or `--mcp-tool-prefix`, use the
-full `ouroboros run workflow ... --runtime zcode` form below.
-
-The convenience command automatically uses the standard macOS ZCode.app CLI path
-when it exists:
-
-```text
-/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-```
-
-Use the explicit environment variable only when your Zcode CLI is elsewhere:
-
-```bash
-export OUROBOROS_ZCODE_CLI_PATH=/path/to/zcode.cjs
-```
-
-## Full Terminal Options
-
-Use Zcode as the execution runtime:
-
-```bash
-export OUROBOROS_AGENT_RUNTIME=zcode
-export OUROBOROS_ZCODE_CLI_PATH=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-
+ouroboros setup --runtime zcode
 ouroboros run workflow seed.yaml --runtime zcode
 ```
 
-That command is the workflow entry point once a Seed is available.
-`--runtime zcode` is also accepted by terminal-facing orchestration commands
-that hand work to an agent runtime:
+If setup cannot find ZCode automatically, configure one of:
 
 ```bash
-ouroboros init start --runtime zcode "Build a REST API"
-ouroboros auto --runtime zcode "Update this project"
-ouroboros mcp serve --runtime zcode
-```
-
-The smoke test below proves the lower-level terminal contract that these paths
-depend on: Ouroboros can construct a Zcode runtime and execute a real Zcode task
-from a shell process.
-
-For a local smoke test against the real Zcode CLI:
-
-```bash
-export OUROBOROS_ZCODE_SMOKE=1
 export OUROBOROS_ZCODE_CLI_PATH=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-
-SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
-  uv run --python 3.13 python -m pytest tests/integration/test_zcode_cli_smoke.py -q
 ```
 
-Run it from an Ouroboros checkout or another environment where the
-`ouroboros-ai` package is installed in editable/development mode.
+```yaml
+orchestrator:
+  runtime_backend: zcode
+  zcode_cli_path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+```
 
-The smoke test is skipped unless `OUROBOROS_ZCODE_SMOKE=1` is set, so regular
-CI does not require Zcode credentials or network access. When enabled, it proves
-two terminal contracts:
+## CLI path resolution
 
-- `create_agent_runtime(backend="zcode")` can execute a real Zcode task.
-- `ZcodeCliLLMAdapter` can satisfy a structured `json_object`
-  `CompletionConfig.response_format` through the real Zcode CLI.
+The runtime resolves the CLI in this order:
 
-## Quick Start: LLM Roles
+1. Constructor argument `cli_path=...`
+2. `OUROBOROS_ZCODE_CLI_PATH`
+3. `orchestrator.zcode_cli_path` in `~/.ouroboros/config.yaml`
+4. `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`
+5. `zcode` on `PATH`
 
-Use Zcode for completion-style LLM roles:
+Official app bundles include `.node-bundle-meta.json` with
+`runtime: electron-node`. Ouroboros reads that metadata, launches
+`ZCode.app/Contents/MacOS/ZCode`, and sets `ELECTRON_RUN_AS_NODE=1`, matching
+ZCode's own launcher. A configured script inside a `.app` bundle fails closed
+when the metadata, plist, or bundled executable is missing or invalid; it never
+falls back to an unrelated system Node. Standalone `.cjs`, `.js`, or `.mjs`
+paths use the system Node.js. Other paths are treated as executable wrappers or
+binaries and are invoked directly. `NODE_OPTIONS` is removed from both Node
+launch shapes so a project or parent process cannot preload JavaScript into the
+vendor CLI.
+
+## Runtime and LLM backend
+
+Zcode can drive both agentic execution and Ouroboros completion roles. Set the
+runtime independently with `ouroboros setup --runtime zcode`, or select Zcode
+for interview, Seed generation, evaluation, and QA through:
 
 ```bash
 export OUROBOROS_LLM_BACKEND=zcode
-export OUROBOROS_ZCODE_CLI_PATH=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
-
-ouroboros qa ./some-artifact.txt \
-  --artifact-type document \
-  --quality-bar "PASS if the artifact is internally consistent."
 ```
 
-For commands that expose an LLM backend flag, the explicit form is:
+Commands that expose an explicit backend flag also accept `--llm-backend
+zcode`. The completion adapter uses the same measured `--prompt --json`
+summary contract as the runtime, returns the top-level `response`, and validates
+requested `json_object` or `json_schema` output before accepting a result.
 
-```bash
-ouroboros init start --llm-backend zcode "Design a CLI tool"
-ouroboros mcp serve --llm-backend zcode
-```
+Zcode owns model selection in its configuration and exposes no `--model` flag.
+Requested Ouroboros model names are therefore not reported as observed effective
+identity unless a trusted Zcode output or configuration source confirms them.
 
-The adapter requests `zcode --prompt --json`, parses Zcode's single JSON
-summary, and returns the top-level `response` field as the completion text. For
-structured output callers, it injects a JSON-only directive, extracts the JSON
-payload, validates `json_object` / `json_schema` requirements, and retries
-non-conforming responses before returning an error.
+## Headless contract
 
-## Runtime Contract
-
-For a normal execution task, Ouroboros launches:
+For an official macOS app-bundle script, each task uses this command shape:
 
 ```text
-zcode --json --prompt <PROMPT> --mode <edit|yolo> [--cwd <cwd>] [--resume <sessionId>]
+ELECTRON_RUN_AS_NODE=1 <ZCode.app/Contents/MacOS/ZCode> <zcode.cjs> \
+  --json \
+  --prompt <PROMPT> \
+  --mode <edit|yolo> \
+  [--cwd <PATH>] \
+  [--resume <SESSION_ID>]
 ```
 
-When `OUROBOROS_ZCODE_CLI_PATH` points to a `.cjs`, `.js`, or `.mjs` script,
-Ouroboros invokes it as:
+The measured `--json` behavior is one pretty-printed summary object emitted at
+the end of the turn, not an NDJSON event stream. The runtime reassembles stdout
+before parsing it and maps the top-level `response` to one terminal assistant
+message. The top-level `sessionId` becomes the resume handle.
 
-```text
-node <path-to-zcode.cjs> --json --prompt <PROMPT> ...
-```
+## Live compatibility evidence
 
-| Argument | Why |
+The official notarized macOS ARM packages were exercised end to end with a
+local OpenAI-compatible model endpoint, so the vendor process, streaming model
+adapter, JSON summary, persisted session, and `--resume` path were all real:
+
+| ZCode app | CLI | Result |
+| --- | --- | --- |
+| 3.2.5 | 0.15.0 | Headless JSON response and same-session resume passed |
+| 3.3.5 | 0.15.2 | Headless JSON response and same-session resume passed |
+
+Both bundles declare `runtime: electron-node` and include Electron 41 / Node
+24. Running their `zcode.cjs` directly with Node 20 fails on the vendor's
+`node:sqlite` import; the app-bundle launcher selection above prevents that
+environment-dependent failure.
+
+The adapter does not emit `--non-interactive`, `--approval-mode`, or `--model`.
+Those are not accepted Zcode 0.15.0 or 0.15.2 flags. Model selection remains in
+Zcode's own configuration, including `~/.zcode/cli/config.json` `model.main`.
+
+## Permission mapping
+
+| Ouroboros mode | Zcode `--mode` | Behavior |
+| --- | --- | --- |
+| `acceptEdits` | `edit` | Default non-interactive edit mode |
+| `bypassPermissions` | `yolo` | Explicit full bypass |
+| `default` | `edit` | Normalized to the safe non-interactive default |
+
+## Buffered-output timeout behavior
+
+Zcode stays silent until its final JSON summary is ready. The inherited
+60-second first-output watchdog is therefore disabled by default because it
+would otherwise become a 60-second total-task limit. Callers that require a
+no-output deadline can pass `startup_output_timeout_seconds` explicitly.
+
+This is an operational tradeoff: without an explicit outer deadline, a vendor
+process that never emits its summary can remain pending. Production callers
+should retain their workflow-level deadline or configure a suitable startup
+output timeout for their expected task duration.
+
+## Capabilities and limits
+
+| Capability | Status |
 | --- | --- |
-| `--json` | Requests Zcode's machine-readable summary object |
-| `--prompt` | Runs one non-interactive prompt without opening the TUI |
-| `--mode` | Maps Ouroboros permissions: `acceptEdits` -> `edit`, `bypassPermissions` -> `yolo` |
-| `--cwd` | Runs Zcode from the selected project directory |
-| `--resume` | Resumes a prior Zcode session when a runtime handle provides one |
+| Headless execution | Yes, via `--prompt --json` |
+| Structured final output | Yes, one summary object per turn |
+| Intermediate tool events | No, not present in measured stdout |
+| Targeted session resume | Yes, via `--resume <sessionId>` |
+| Per-call model override | No, model selection is Zcode-owned |
+| LLM-completion backend | Yes, via the buffered JSON summary adapter |
+| Setup-owned instruction artifact | No, capability guide rendering is the fallback |
 
-Zcode emits one buffered JSON summary at completion instead of a continuous
-NDJSON stream. For that reason the Zcode runtime disables the inherited
-first-output watchdog by default; otherwise a healthy long run could be killed
-before Zcode prints its final summary.
+## Troubleshooting
 
-## Terminal vs GUI Success
+**Zcode is not detected.** Set `OUROBOROS_ZCODE_CLI_PATH`, configure
+`orchestrator.zcode_cli_path`, or put a `zcode` executable on `PATH`.
 
-The terminal smoke test proves that Ouroboros can drive Zcode from the shell.
-It does not prove that the Zcode GUI can drive Ouroboros.
+**A standalone script reports a missing Node built-in such as `node:sqlite`.**
+Use the intact ZCode app-bundle path so Ouroboros can select the bundled
+Electron/Node runtime, install a Node version compatible with that Zcode build,
+or configure a directly executable `zcode` wrapper.
 
-The GUI path requires a Zcode plugin/MCP package that lets the Zcode GUI start
-`ouroboros mcp serve` and call tools such as `ouroboros_interview`,
-`ouroboros_execute_seed`, and `ouroboros_qa`. That is the next integration
-step after the terminal path is stable.
+**A model override has no effect.** Zcode has no per-invocation `--model`
+flag. Select the model in ZCode's own provider/model configuration.
+
+**Parsing breaks after a ZCode update.** Run
+`tests/unit/orchestrator/test_zcode_cli_runtime.py` and recapture the vendor
+summary fixture before changing the parser contract.

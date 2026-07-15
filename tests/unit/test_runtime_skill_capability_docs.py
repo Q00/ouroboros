@@ -37,11 +37,12 @@ def test_cli_reference_setup_runtime_list_includes_supported_runtime_backends() 
     docs = Path("docs/cli-reference.md").read_text(encoding="utf-8")
 
     assert (
-        "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`"
+        "`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`"
         in docs
     )
     assert (
-        "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, and GJC"
+        "Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, GJC, Antigravity, Grok, and Zcode"
         in docs
     )
-    assert "`kiro-cli`, `copilot`, `goose`, `pi`, and `gjc` CLI binaries" in docs
+    assert "ouroboros setup --runtime zcode" in docs
+    assert Path("docs/runtime-guides/zcode.md").is_file()

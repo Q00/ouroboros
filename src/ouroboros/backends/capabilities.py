@@ -522,9 +522,10 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         soft_tool_enforcement=True,
     ),
     BackendCapability(
-        # Zcode (Z.ai GLM-5.x desktop agent) — supports both agentic runtime
-        # (via ``node zcode.cjs --prompt --json``) and structured LLM completions
-        # (zcode-cli adapter), matching the codex contract.
+        # Zcode (Z.ai GLM-5.x desktop agent) — the app-bundle ``zcode.cjs``
+        # script runs through ZCode's bundled Electron/Node runtime and emits
+        # one JSON summary. The LLM adapter consumes that same measured summary
+        # contract for structured completions and interview answering.
         name="zcode",
         aliases=("zcode_cli",),
         supports_runtime=True,

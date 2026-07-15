@@ -13,7 +13,7 @@ The runtime backend is selected via the `orchestrator.runtime_backend` config ke
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | gemini | kiro | copilot | pi | gjc | antigravity | grok
+  runtime_backend: claude   # Supported values: claude | codex | opencode | hermes | gemini | kiro | copilot | pi | gjc | antigravity | grok | zcode
                             # The runtime abstraction layer also accepts custom
                             # adapters registered in runtime_factory.py
 ```
@@ -26,7 +26,7 @@ ouroboros run workflow --runtime codex seed.yaml
 
 You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` environment variable.
 
-> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, Gemini CLI, Kiro CLI, GitHub Copilot CLI, Pi CLI, GJC, the Antigravity CLI (`agy`, Google's Gemini-CLI successor — runtime-only), and the Grok Build CLI (`grok`, xAI — runtime-only) are the natively shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter). For the full contracts, see [runtime-guides/antigravity.md](runtime-guides/antigravity.md) and [runtime-guides/grok.md](runtime-guides/grok.md).
+> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, Gemini CLI, Kiro CLI, GitHub Copilot CLI, Pi CLI, GJC, Antigravity (`agy`), Grok Build (`grok`), and Zcode (`zcode`) are natively shipped backends. Antigravity, Grok, and Zcode are runtime-only. Additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture - How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
 
 ## Capability Matrix
 
@@ -209,6 +209,7 @@ The table below covers the currently shipped backends. Because Ouroboros uses a 
 | Have a GitHub Copilot subscription and want the live model picker       | Copilot CLI (`runtime_backend: copilot`)                                      |
 | Want to use the Pi coding agent through JSON mode                       | Pi CLI (`runtime_backend: pi`)                                                |
 | Want to use the GJC coding agent through RPC mode                       | GJC (`runtime_backend: gjc`)                                                 |
+| Want to use Z.ai's ZCode desktop coding agent                           | Zcode (`runtime_backend: zcode`)                                             |
 | Want to use Anthropic's Claude models                                  | Claude Code or Copilot CLI (Claude models exposed via Copilot subscription)   |
 | Want to use Google's Gemini models                                     | Gemini CLI                                                                   |
 | Want to use OpenAI's GPT models                                        | Codex CLI or Copilot CLI                                                      |
