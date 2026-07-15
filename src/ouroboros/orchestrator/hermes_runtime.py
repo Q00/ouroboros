@@ -512,7 +512,13 @@ class HermesCliRuntime(AgentRuntime):
             )
             return
 
-        clean_content, session_id = _parse_quiet_output(output)
+        clean_content, stdout_session_id = _parse_quiet_output(output)
+        # Hermes 0.11 keeps quiet-mode stdout machine-readable and writes its
+        # resumable session marker to stderr.  Older versions emitted the same
+        # marker on stdout, so accept either stream without mixing successful
+        # stderr diagnostics into user-facing content.
+        _, stderr_session_id = _parse_quiet_output(error)
+        session_id = stdout_session_id or stderr_session_id
 
         new_handle = self._build_runtime_handle(session_id, handle)
 

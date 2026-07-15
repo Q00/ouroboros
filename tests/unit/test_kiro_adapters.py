@@ -1050,6 +1050,7 @@ class TestKiroCapabilities:
     def test_claude_declares_full_capabilities(self) -> None:
         from dataclasses import replace
 
+        from ouroboros.core.session_signal import SessionSignalCapabilities
         from ouroboros.orchestrator.adapter import (
             CLAUDE_REASONING_EFFORT_LEVELS,
             FULL_CAPABILITIES,
@@ -1066,6 +1067,11 @@ class TestKiroCapabilities:
             reasoning_effort_support=ParamSupport.NATIVE,
             enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
             model_override_support=ParamSupport.NATIVE,
+            session_signals=SessionSignalCapabilities(
+                inform_delivery=True,
+                background_reply=True,
+                after_turn_delivery=True,
+            ),
         )
         assert caps.reasoning_effort_support is ParamSupport.NATIVE
         assert caps.model_override_support is ParamSupport.NATIVE

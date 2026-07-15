@@ -33,6 +33,7 @@ from typing import Any
 
 from ouroboros.config import get_opencode_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
@@ -269,6 +270,11 @@ class OpenCodeRuntime:
             system_prompt_support=ParamSupport.TRANSLATED,
             tool_restriction_support=ParamSupport.TRANSLATED,
             permission_mode_support=ParamSupport.TRANSLATED,
+            session_signals=SessionSignalCapabilities(
+                inform_delivery=True,
+                background_reply=True,
+                after_turn_delivery=True,
+            ),
             # OpenCode's host bridge spawns a native sub-agent out-of-band via the
             # ``_subagent`` envelope (ouroboros does NOT drive the child directly) —
             # the HOST_BRIDGE mode, eligible for plugin dispatch when the bridge is

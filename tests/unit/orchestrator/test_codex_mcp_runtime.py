@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ouroboros.core.types import Result
@@ -82,6 +84,11 @@ class TestRuntimeWiring:
         # worker), unlike the disk-persisted codex exec / claude --resume backends.
         rt = build_codex_mcp_worker_runtime(cwd="/tmp")
         assert rt.capabilities.targeted_resume is False
+
+    def test_normalizes_path_cwd(self, tmp_path: Path) -> None:
+        rt = build_codex_mcp_worker_runtime(cwd=tmp_path)
+
+        assert rt.working_directory == str(tmp_path)
 
     def test_resume_controls_are_declared_ignored(self) -> None:
         """codex-reply cannot retarget either model or reasoning effort."""

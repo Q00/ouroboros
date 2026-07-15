@@ -34,6 +34,57 @@ def test_capabilities_report_prompt_only_tool_restrictions_as_translated() -> No
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
 
 
+def test_capabilities_enable_after_turn_synapse_delivery() -> None:
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    assert runtime.capabilities.targeted_resume is True
+    assert runtime.capabilities.session_signals.after_turn_delivery is True
+    assert runtime.capabilities.session_signals.checkpoint_redirect is False
+
+
+def test_codex_config_fingerprint_ignores_automatic_project_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    original = runtime._codex_config_fingerprint
+
+    config_path.write_text(
+        'model = "gpt-test"\n\n[projects."/tmp/project"]\ntrust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+
+    assert runtime._fingerprint_codex_config_files() == original
+
+
+def test_codex_config_fingerprint_still_detects_project_runtime_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    config_path.write_text(
+        (
+            'model = "gpt-test"\n\n[projects."/tmp/project"]\n'
+            'trust_level = "trusted"\nmodel = "different-model"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
 class TestComposePromptDirectiveFencing:
     """System instructions and tooling must be fenced as binding directives."""
 

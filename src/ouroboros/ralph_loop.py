@@ -14,6 +14,7 @@ import json
 import time
 from typing import Any, Protocol
 
+from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -60,6 +61,9 @@ class RalphLoopConfig:
     execution_id: str | None = None
     checkpoint_commits: tuple[dict[str, Any], ...] = ()
     checkpoint_attempted_ac_ids: tuple[str, ...] = ()
+    conductor_directive: ConductorDirective | None = None
+    conductor_decision_id: str | None = None
+    predecessor_execution_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +203,10 @@ class RalphLoopRunner:
                 arguments["checkpoint_commits"] = checkpoint_commits
             if checkpoint_attempted_ac_ids:
                 arguments["checkpoint_attempted_ac_ids"] = checkpoint_attempted_ac_ids
+            if iteration_index == 1 and config.conductor_directive is not None:
+                arguments["conductor_directive"] = config.conductor_directive.to_event_data()
+                arguments["conductor_decision_id"] = config.conductor_decision_id
+                arguments["predecessor_execution_id"] = config.predecessor_execution_id
 
             iteration_timed_out = False
             try:

@@ -90,6 +90,12 @@ class HookKind(StrEnum):
     #: by the caller.
     AFTER_TOOL_CALL = "after_tool_call"
 
+    #: Harness-level lineage rewind observation hook. Promoted only for
+    #: schema v0.6; archived schemas continue rejecting the name. The source
+    #: rewind is already committed before this hook runs, so it is strictly
+    #: fail-open and carries no veto, retry, checkout, or mutation authority.
+    ON_REWIND = "on_rewind"
+
 
 class DeferredHookKind(StrEnum):
     """Hook names deferred to follow-up RFC slices.
@@ -155,7 +161,6 @@ class ExcludedHookKind(StrEnum):
     BEFORE_STATE_COMMIT = "before_state_commit"
     AFTER_STATE_COMMIT = "after_state_commit"
     ON_EVENT = "on_event"
-    ON_REWIND = "on_rewind"
 
 
 class HookFailurePolicy(StrEnum):
@@ -271,6 +276,15 @@ HOOK_TOOL_CALL_AUDIT_EVENTS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Required permission for observing committed lineage rewinds. The scope
+#: must appear in both ``hooks[].permissions`` and top-level permissions with
+#: ``required=true`` before the lockfile-backed dispatcher may launch it.
+HOOK_REWIND_OBSERVE_SCOPE: Final[str] = "plugin:rewind:observe"
+
+#: Frozen v0.6 rewind hook family used by manifest and runtime dispatch.
+REWIND_HOOK_KINDS: Final[frozenset[HookKind]] = frozenset({HookKind.ON_REWIND})
+REWIND_HOOK_NAMES: Final[frozenset[str]] = frozenset(hook.value for hook in REWIND_HOOK_KINDS)
+
 
 def is_v1_hook_kind(value: str) -> bool:
     """Return True iff ``value`` names a hook included in v1.
@@ -366,6 +380,7 @@ __all__ = [
     "HOOK_LIFECYCLE_SCOPES",
     "HOOK_OUTCOME_AUDIT_EVENTS",
     "HOOK_RUNTIME_AUDIT_EVENTS",
+    "HOOK_REWIND_OBSERVE_SCOPE",
     "HOOK_TOOL_CALL_AUDIT_EVENTS",
     "HOOK_TOOL_CALL_SCOPES",
     "HOOK_TOOL_INTERCEPT_BLOCKED_EVENT",
@@ -374,6 +389,8 @@ __all__ = [
     "HOOK_TOOL_INTERCEPT_SCOPE",
     "HOOK_TOOL_OBSERVE_RECORDED_EVENT",
     "HOOK_TOOL_OBSERVE_SCOPE",
+    "REWIND_HOOK_KINDS",
+    "REWIND_HOOK_NAMES",
     "TERMINAL_DEFERRED_HOOK_KINDS",
     "TERMINAL_DEFERRED_HOOK_NAMES",
     "TERMINAL_OBSERVABILITY_HOOK_KINDS",

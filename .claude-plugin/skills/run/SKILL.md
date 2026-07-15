@@ -72,12 +72,22 @@ fallback instead of retrying the failing call.
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
+   Before a fresh start, when no efficiency choice is already known, ask in
+   user-outcome language: **Efficient execution** maps to
+   `efficiency_mode="adaptive"` plus `frugality_assurance="observe"`;
+   **Quality-first execution** maps to `efficiency_mode="quality_first"` plus
+   `frugality_assurance="off"`. `strict` assurance is a separate explicit
+   opt-in because proof may cost extra. Do not ask or override these values on
+   resume; the server restores the persisted contract.
+
 3. **Start background execution** with `ouroboros_start_execute_seed`:
    ```
    Tool: ouroboros_start_execute_seed
    Arguments:
      seed_content: <the seed YAML>
      model_tier: "medium"  (or as specified by user)
+     efficiency_mode: <adaptive or quality_first>
+     frugality_assurance: <observe, off, or explicit strict>
      max_iterations: 10    (or as specified by user)
    ```
    This returns immediately with a `job_id`, `session_id`, and `execution_id`.
@@ -90,7 +100,7 @@ fallback instead of retrying the failing call.
      session_id: <existing session ID>
    ```
 
-5. **Recommended monitoring stance: relay compact progress in the main session.**
+5. **Recommended monitoring stance: delegate one exclusive observer.**
 
    After IDs are returned, print only this short handoff:
 
@@ -99,17 +109,33 @@ fallback instead of retrying the failing call.
    Job ID: <job_id>
    Session ID: <session_id>
    Execution ID: <execution_id>
+   Live view: <response.meta.dashboard_url, or `ouroboros tui open`>
+   Runtime/harness: <response.meta.runtime_backend>
+   LLM backend: <response.meta.llm_backend>
+   Efficiency: <response.meta.efficiency_mode>
+   Frugality assurance: <response.meta.frugality_assurance>
 
-   I will wait in low-token relay mode and report only meaningful state changes.
+   A read-only observer will report meaningful progress, attention, and terminal
+   events here. This conversation remains available for requirement refinement,
+   read-only review, explicit control, or unrelated work in an isolated worktree.
    For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
-   Rationale: the main chat session must wait for MCP calls. Frequent full-tree
-   polling burns context without improving execution. The user usually wants
-   "what is it doing now?" rather than the whole tree, so use compact job
-   read-model snapshots and narrate them like a brief live relay.
+   When `response.meta.job_observer` is present and an independent Task/Agent
+   child is available, spawn exactly one read-only observer and pass the contract
+   unchanged. It exclusively owns job wait/result and the cursor. The main
+   session must not poll the same job. Before writing to the active workspace,
+   check worker overlap or use an isolated worktree.
+   Do not claim an observer exists until Task/Agent returns a live child handle.
+   If creation fails, do not promise live proactive relays. The detached worker
+   survives the stdio turn; catch up from durable events on the next parent turn
+   or explicit status request. Keep the turn open only for explicit live watching.
 
-6. **Low-token relay loop with `ouroboros_job_wait` (recommended default).**
+6. **Fallback low-token relay loop with `ouroboros_job_wait`.**
+
+   Use this only when no independent observer session exists and the user asked
+   for live watching in this turn; otherwise catch up on the next parent turn.
+   Never run both.
 
    Use `ouroboros_job_wait`, not repeated `ouroboros_ac_tree_hud`, for routine
    monitoring. Keep the latest cursor and previous progress counters from the
@@ -138,6 +164,8 @@ fallback instead of retrying the failing call.
        cursor: <cursor>
        timeout_seconds: 180
        view: "summary"
+       stream: "linked"
+       wait_for: "attention_or_ac_change"
 
      cursor = response.meta.cursor
 
@@ -200,8 +228,48 @@ fallback instead of retrying the failing call.
    - Never include raw JSON, raw meta dumps, or repeated unchanged cursor lines.
    - Terminal statuses must be explicit: completed, failed, cancelled, or interrupted.
 
+   Interpret `meta.relay_events` as structured user-facing facts:
+   - `run_configuration`: current runtime/harness, starting model or tier when
+     known, efficiency mode, and frugality assurance.
+   - `execution_plan`: total ACs and dependency/parallel levels, whether work is
+     parallelizable, and the first scheduled AC summaries.
+   - `discovery_summary`: bounded targets and purpose, never raw commands or
+     reasoning.
+   - `level_started` / `level_completed`, `ac_routing`, `harness_changed`, and
+     `ac_verified`: report only meaningful transitions. Say "currently running
+     with" because routes can escalate.
+   - `attention_required`: surface immediately and follow the verified menu.
+   - Synapse `queued`/`delivering` is not application;
+     `applied`/`completed` is runtime-proven and may contain a bounded AC reply.
+
+   Phrase the English canonical guidance naturally in the user's current
+   conversation language.
+
    Do not paste the full raw tool output unless the user asks for raw status.
    Do not add speculative ETA unless the tool provides one.
+
+   **Synapse intent refinement:** For additive user intent during a live run,
+   reload deferred schemas with
+   `tool discovery query: "+ouroboros session signal"`, call
+   `ouroboros_session_signal_targets` with the observed `execution_id`, and
+   semantically match the user's meaning to `ac_content` and current activity.
+   Never ask the user for internal IDs. Use the selected exact target with
+   `ouroboros_session_signal(mode="redirect", fallback_mode="after_turn",
+   contract_effect="additive", source="user")`, copying the exact execution,
+   scope, attempt, and contract-version guards plus a stable idempotency key.
+   Use `mode="inform"` for a read-only AC question or assurance request, omit
+   `fallback_mode` entirely in that mode, and relay the bounded completed reply.
+   Ask only when multiple candidates remain genuinely tied. Distinguish durable
+   `queued` from runtime-proven `applied`/`completed`, never change the approved
+   Seed contract, and render delivery state in the user's conversation language.
+
+   For `attention_required`, use at most one short-lived read-only verifier.
+   Without a verifier primitive, surface the evidence and do not ACT. Otherwise
+   VERIFY → DECIDE from `recommended_host_actions` → LOG `selected` with
+   `ouroboros_record_conductor_decision` → ACT only a menu-listed registered tool
+   → LOG `completed`, `failed`, or `declined`. Run-mode specification changes
+   require explicit user approval and a shared successor contract; never inject
+   them into one live AC.
 
 7. **Use `ouroboros_ac_tree_hud` only for manual drill-down or anomaly checks.**
 

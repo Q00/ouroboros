@@ -17,6 +17,8 @@ This first step keeps the membership minimal:
 * ``control`` — the :class:`ControlBus` introduced alongside this
   context; ``None`` while #474's migration is in progress so existing
   callers compile unchanged.
+* ``synapse`` — the exact-attempt SessionSignal hub shared by MCP admission and
+  active worker dispatch; optional so non-MCP runners remain unchanged.
 
 Subsequent issues (#474, #475) wire concrete handlers to consume the
 context. This module deliberately does *not* import any handler-side
@@ -31,6 +33,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ouroboros.mcp.bridge.bridge import MCPBridge
     from ouroboros.orchestrator.control_bus import ControlBus
+    from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
 
 
@@ -43,3 +46,4 @@ class AgentRuntimeContext:
     llm_backend: str | None = None
     mcp_bridge: MCPBridge | None = None
     control: ControlBus | None = None
+    synapse: SessionSignalHub | None = None

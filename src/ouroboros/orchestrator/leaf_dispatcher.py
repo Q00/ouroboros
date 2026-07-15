@@ -109,6 +109,7 @@ class LeafDispatcher:
         sub_ac_index: int | None,
         node_identity: ExecutionNodeIdentity | None,
         retry_attempt: int,
+        semantic_ac_key: str,
         label: str,
         indent: str,
         execution_counters: dict[str, int] | None,
@@ -207,6 +208,14 @@ class LeafDispatcher:
                     last_heartbeat = now
 
                 projected = project_runtime_message(message)
+                await executor._event_emitter.observe_ac_activity(
+                    runtime_identity=runtime_identity,
+                    execution_id=execution_context_id,
+                    session_id=session_id,
+                    semantic_ac_key=semantic_ac_key,
+                    projected=projected,
+                    is_final=message.is_final,
+                )
 
                 persisted_session_id = executor._runtime_resume_session_id(state.runtime_handle)
                 if not lifecycle_emitted and persisted_session_id:

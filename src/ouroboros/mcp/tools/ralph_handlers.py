@@ -15,7 +15,10 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
-from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
+from ouroboros.mcp.tools.evolution_handlers import (
+    EvolveStepHandler,
+    _resolve_conductor_directive,
+)
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
@@ -230,6 +233,24 @@ class RalphHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="conductor_decision_id",
+                    type=ToolInputType.STRING,
+                    description="Selected conductor decision authorizing one successor generation.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="predecessor_execution_id",
+                    type=ToolInputType.STRING,
+                    description="Execution or generation that this successor follows.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="conductor_directive",
+                    type=ToolInputType.OBJECT,
+                    description="Deterministic non-relaxing directive for one successor generation.",
+                    required=False,
+                ),
             ),
         )
 
@@ -266,6 +287,24 @@ class RalphHandler:
             return Result.err(
                 MCPToolError(
                     f"max_generations must be between 1 and {MAX_RALPH_GENERATIONS}",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+
+        directive_result = await _resolve_conductor_directive(
+            arguments=arguments,
+            event_store=self._event_store,
+            target_type="lineage",
+            target_id=lineage_id,
+            tool_name="ouroboros_ralph",
+        )
+        if directive_result.is_err:
+            return Result.err(directive_result.error)
+        conductor_directive = directive_result.value
+        if conductor_directive is not None and max_generations != 1:
+            return Result.err(
+                MCPToolError(
+                    "A conductor-created Ralph successor is bounded to max_generations=1",
                     tool_name="ouroboros_ralph",
                 )
             )
@@ -411,6 +450,9 @@ class RalphHandler:
                 for item in (arguments.get("checkpoint_attempted_ac_ids") or [])
                 if isinstance(item, str)
             ),
+            conductor_directive=conductor_directive,
+            conductor_decision_id=arguments.get("conductor_decision_id"),
+            predecessor_execution_id=arguments.get("predecessor_execution_id"),
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -437,6 +479,13 @@ class RalphHandler:
                 execution_id=config.execution_id,
                 checkpoint_commits=config.checkpoint_commits,
                 checkpoint_attempted_ac_ids=config.checkpoint_attempted_ac_ids,
+                conductor_directive=(
+                    config.conductor_directive.to_event_data()
+                    if config.conductor_directive is not None
+                    else None
+                ),
+                conductor_decision_id=config.conductor_decision_id,
+                predecessor_execution_id=config.predecessor_execution_id,
             )
             return await dispatch_plugin_terminal(
                 self._event_store,
@@ -468,6 +517,10 @@ class RalphHandler:
             links=JobLinks(lineage_id=config.lineage_id),
             work_fn=_run_loop,
             cancelled_text="Ralph loop cancelled before restart work began.",
+            detached_tool_name="ouroboros_ralph",
+            detached_arguments=arguments,
+            runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
         )
 
         text = (
@@ -478,21 +531,23 @@ class RalphHandler:
             "Use ouroboros_job_status, ouroboros_job_wait, ouroboros_job_result, "
             "or ouroboros_cancel_job to monitor it."
         )
+        meta = {
+            "job_id": snapshot.job_id,
+            "lineage_id": config.lineage_id,
+            "status": snapshot.status.value,
+            "cursor": snapshot.cursor,
+            "max_generations": config.max_generations,
+            "job_observer": build_job_observer_contract(
+                job_id=snapshot.job_id,
+                cursor=snapshot.cursor,
+            ),
+        }
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=False,
-                meta={
-                    "job_id": snapshot.job_id,
-                    "lineage_id": config.lineage_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
-                    "max_generations": config.max_generations,
-                    "job_observer": build_job_observer_contract(
-                        job_id=snapshot.job_id,
-                        cursor=snapshot.cursor,
-                    ),
-                },
+                meta=meta,
+                structured_content=dict(meta),
             )
         )
 

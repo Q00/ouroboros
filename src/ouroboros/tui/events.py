@@ -23,6 +23,10 @@ from typing import TYPE_CHECKING, Any
 
 from textual.message import Message
 
+from ouroboros.observability.frugality_retrospective import (
+    project_frugality_retrospective,
+)
+
 if TYPE_CHECKING:
     from ouroboros.events.base import BaseEvent
 
@@ -629,6 +633,15 @@ class FrugalityProofEvaluated(Message):
         self.reason = reason
 
 
+class FrugalityRetrospectiveReported(Message):
+    """Neutral execution-finalized frugality evidence summary."""
+
+    def __init__(self, execution_id: str, summary: dict[str, Any]) -> None:
+        super().__init__()
+        self.execution_id = execution_id
+        self.summary = dict(summary)
+
+
 # =============================================================================
 # Event Subscription State
 # =============================================================================
@@ -693,6 +706,8 @@ class TUIState:
     tokens_by_node: dict[str, float] = field(default_factory=dict)
     run_total_tokens: float = 0.0
     frugality_summary: str | None = None
+    frugality_retrospective: dict[str, Any] | None = None
+    frugality_retrospective_summary: str | None = None
 
     # P1: Tool/thinking tracking for dashboard
     active_tools: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -1036,6 +1051,20 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             reason=data.get("reason") if isinstance(data.get("reason"), str) else "",
         )
 
+    elif event_type == "execution.frugality_retrospective.reported":
+        summary = project_frugality_retrospective(data)
+        if summary is None:
+            return None
+        execution_id = data.get("execution_id")
+        return FrugalityRetrospectiveReported(
+            execution_id=(
+                execution_id
+                if isinstance(execution_id, str) and execution_id
+                else event.aggregate_id
+            ),
+            summary=summary,
+        )
+
     # Return None for unhandled event types
     return None
 
@@ -1069,6 +1098,33 @@ def format_frugality_summary(
     return f"⚖ {label}"
 
 
+def _format_evidence_tokens(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "0 tok"
+    tokens = float(value)
+    if tokens >= 1000:
+        return f"{tokens / 1000:.1f}".rstrip("0").rstrip(".") + "k tok"
+    return f"{tokens:.0f} tok"
+
+
+def format_frugality_retrospective_summary(summary: dict[str, Any]) -> str:
+    """Return one neutral evidence line for the execution-finalized report."""
+    parts: list[str] = []
+    if summary.get("retry_associated_attempts"):
+        parts.append(
+            "retry-associated " + _format_evidence_tokens(summary.get("retry_associated_tokens"))
+        )
+    if summary.get("unaccepted_attempts"):
+        parts.append("unaccepted " + _format_evidence_tokens(summary.get("unaccepted_tokens")))
+    parts.append(
+        "coverage "
+        f"{summary.get('measured_attempts', 0)} measured/"
+        f"{summary.get('unknown_attempts', 0)} unknown/"
+        f"{summary.get('invalid_attempts', 0)} invalid"
+    )
+    return "Evidence: " + " | ".join(parts)
+
+
 __all__ = [
     "ACModelRouted",
     "ACTokenAttribution",
@@ -1078,6 +1134,7 @@ __all__ = [
     "DriftUpdated",
     "ExecutionUpdated",
     "FrugalityProofEvaluated",
+    "FrugalityRetrospectiveReported",
     "GenerationSelected",
     "LineageSelected",
     "LogMessage",
@@ -1092,5 +1149,6 @@ __all__ = [
     "ToolCallStarted",
     "WorkflowProgressUpdated",
     "create_message_from_event",
+    "format_frugality_retrospective_summary",
     "format_frugality_summary",
 ]

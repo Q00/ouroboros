@@ -72,3 +72,12 @@ Seed execution forces `bypassPermissions` on both fresh and resumed Hermes turns
 ### Output Parsing
 
 Ouroboros parses the Hermes CLI output to extract the final response and session metadata. It automatically strips reasoning blocks and banners when running in programmatic mode.
+
+## Active Conductor and Synapse
+
+The installed Hermes probe emitted a session marker but could not resume that
+session from its store. Ouroboros therefore advertises no Synapse delivery for
+Hermes: `inform`, `after_turn`, checkpoint `redirect`, and hard `replace` fail
+closed instead of pretending that a CLI flag proves continuity. Ordinary Hermes
+execution and observer progress still work, and the main host explains the
+unsupported delivery honestly in the user's conversation language.

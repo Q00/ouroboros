@@ -160,12 +160,14 @@ Then run `ooo setup` inside a Claude Code session.
 ```bash
 pip install ouroboros-ai                # base
 pip install ouroboros-ai[claude]        # + Claude Code deps; pair with [mcp] for the MCP server
-pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
+pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider; Python 3.12-3.13
 pip install ouroboros-ai[mcp]           # + MCP server/client support
 pip install ouroboros-ai[tui]           # + Textual terminal UI
-pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui)
+pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui); Python 3.12-3.13
 ouroboros setup                         # configure runtime
 ```
+
+Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--all-extras`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 
@@ -184,7 +186,7 @@ Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNIN
 
 </details>
 
-> **Python >= 3.12 required.** See [pyproject.toml](./pyproject.toml) for the full dependency list.
+> **Python >= 3.12 required.** LiteLLM-bearing profiles support Python 3.12-3.13. See [Platform Support](./docs/platform-support.md#python-profile-matrix) and [pyproject.toml](./pyproject.toml).
 
 ---
 
@@ -474,7 +476,8 @@ Two mathematical gates, one philosophy: **do not build until you are clear (Ambi
 ```bash
 git clone https://github.com/Q00/ouroboros
 cd ouroboros
-uv sync --all-groups && uv run pytest
+uv sync --python 3.13 --all-groups
+uv run --python 3.13 --no-sync pytest
 ```
 
 [Issues](https://github.com/Q00/ouroboros/issues) · [Discussions](https://github.com/Q00/ouroboros/discussions) · [Contributing Guide](./CONTRIBUTING.md)

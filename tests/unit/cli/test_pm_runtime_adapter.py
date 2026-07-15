@@ -217,8 +217,48 @@ def test_pm_command_formats_missing_litellm_dependency() -> None:
         else:
             raise AssertionError("Expected typer.Exit for missing optional litellm dependency")
 
-    mock_error.assert_called_once_with(
-        "PM interviews require the optional LiteLLM dependency. "
-        "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
-        "`uv tool install --force --with litellm ouroboros-ai`."
-    )
+    message = mock_error.call_args.args[0]
+    assert "PM interviews require the optional LiteLLM dependency." in message
+    assert "pip install 'ouroboros-ai[litellm]'" in message
+
+
+def test_pm_command_formats_missing_litellm_on_python_314_with_supported_range() -> None:
+    """Command-level error formatting should preserve the Python 3.13 remediation."""
+    ctx = SimpleNamespace(invoked_subcommand=None)
+
+    with (
+        patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="litellm"),
+        patch(
+            "ouroboros.cli.commands.pm.get_clarification_model",
+            side_effect=lambda backend=None: "litellm-model" if backend else "generic-default",
+        ),
+        patch("ouroboros.cli.commands.pm.resolve_llm_backend", return_value="litellm"),
+        patch(
+            "ouroboros.cli.commands.pm.resolve_llm_permission_mode",
+            return_value="default",
+        ),
+        patch(
+            "ouroboros.cli.commands.pm.create_llm_adapter",
+            side_effect=ModuleNotFoundError("No module named 'litellm'"),
+        ),
+        patch("ouroboros.cli.commands.pm.print_error") as mock_error,
+        patch("ouroboros.providers.factory.sys.version_info", (3, 14, 0, "final", 0)),
+    ):
+        try:
+            pm_command(
+                ctx=ctx,
+                resume=None,
+                output=None,
+                model=None,
+                debug=False,
+            )
+        except typer.Exit as exc:
+            assert exc.exit_code == 1
+        else:
+            raise AssertionError("Expected typer.Exit for missing optional litellm dependency")
+
+    message = mock_error.call_args.args[0]
+    assert "Python >=3.12,<3.14" in message
+    assert "Python 3.13" in message
+    assert "python3.13 -m pip install 'ouroboros-ai[litellm]'" in message
+    assert "python3.14" not in message.lower()

@@ -79,6 +79,27 @@ async def _wait_for_job_status(
 class TestJobManager:
     """Test background job lifecycle behavior."""
 
+    async def test_forced_inline_job_id_is_one_shot_recursion_boundary(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(
+            store,
+            durable_jobs=True,
+            forced_inline_job_id="job_parent_accepted",
+        )
+        try:
+            first = await manager.allocate_job_id()
+            second = await manager.allocate_job_id()
+
+            assert first == "job_parent_accepted"
+            assert manager.claim_forced_inline_allocation(first) is True
+            assert manager.claim_forced_inline_allocation(first) is False
+            assert second.startswith("job_")
+            assert second != first
+            assert manager.claim_forced_inline_allocation(second) is False
+            assert manager.durable_jobs_enabled is True
+        finally:
+            await store.close()
+
     async def test_status_message_reports_generation_watchdog_decision(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -3773,6 +3794,94 @@ class TestJobManager:
             assert result.value.text_content.startswith(
                 "job_wait_ac_change | running | Implement | AC 1/4 | cursor "
             )
+        finally:
+            await task
+            await store.close()
+
+    async def test_job_wait_attention_mode_wakes_for_linked_synapse_event(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        snapshot = JobSnapshot(
+            job_id="job_wait_synapse_attention",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(
+                session_id="orch_wait_synapse_attention",
+                execution_id="exec_wait_synapse_attention",
+            ),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 0
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        async def append_events() -> None:
+            await asyncio.sleep(0.05)
+            await store.append(
+                BaseEvent(
+                    type="execution.output",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait_synapse_attention",
+                    data={"message": "raw backend event"},
+                )
+            )
+            await asyncio.sleep(0.65)
+            await store.append(
+                BaseEvent(
+                    type="control.session.signal.applied",
+                    aggregate_type="session_signal",
+                    aggregate_id="sig_wait_synapse_attention",
+                    data={
+                        "execution_id": "exec_wait_synapse_attention",
+                        "state": "applied",
+                        "effective_mode": "after_turn",
+                        "detail": "Intent was applied to the resumed AC session.",
+                    },
+                )
+            )
+
+        task = asyncio.create_task(append_events())
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            started_at = asyncio.get_running_loop().time()
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_synapse_attention",
+                    "cursor": 0,
+                    "timeout_seconds": 2,
+                    "view": "compact",
+                    "stream": "linked",
+                    "wait_for": "attention_or_ac_change",
+                }
+            )
+            elapsed = asyncio.get_running_loop().time() - started_at
+
+            assert result.is_ok
+            assert elapsed >= 0.5
+            assert result.value.meta["changed"] is True
+            assert result.value.meta["stream"] == "linked"
+            assert result.value.meta["wait_for"] == "attention_or_ac_change"
+            signal_events = [
+                event
+                for event in result.value.meta["stream_events"]
+                if event["type"] == "control.session.signal.applied"
+            ]
+            assert len(signal_events) == 1
+            assert signal_events[0]["scope"] == ("session_signal:sig_wait_synapse_attention")
+            assert signal_events[0]["detail"] == ("Intent was applied to the resumed AC session.")
         finally:
             await task
             await store.close()
