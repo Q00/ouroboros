@@ -173,6 +173,36 @@ class TestPMInterviewWithDBBrownfield:
         assert "Existing Codebase Context" not in ctx
 
     @pytest.mark.asyncio
+    async def test_start_redirects_repos_to_snapshot_worktrees(self, tmp_path: Path) -> None:
+        """start_interview refreshes snapshot worktrees and explores them, not the source."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+
+        def _fake_refresh(repos: list[dict[str, str]]) -> list[dict[str, str]]:
+            return [{**r, "path": f"/snap{r['path']}", "source_path": r["path"]} for r in repos]
+
+        with (
+            patch(
+                "ouroboros.bigbang.pm_interview.refresh_pm_snapshot_worktrees",
+                side_effect=_fake_refresh,
+            ) as mock_refresh,
+            patch.object(
+                engine, "explore_codebases", new_callable=AsyncMock, return_value=""
+            ) as mock_explore,
+        ):
+            result = await engine.ask_opening_and_start(
+                user_response="Enhance existing project",
+                brownfield_repos=[{"path": "/home/user/project", "name": "project"}],
+            )
+
+        assert result.is_ok
+        mock_refresh.assert_called_once()
+        explored_repos = mock_explore.call_args[0][0]
+        assert explored_repos[0]["path"] == "/snap/home/user/project"
+        assert explored_repos[0]["source_path"] == "/home/user/project"
+        assert engine._selected_brownfield_repos == explored_repos
+
+    @pytest.mark.asyncio
     async def test_opening_and_start_with_db_brownfield_repos(self, tmp_path: Path) -> None:
         """ask_opening_and_start forwards brownfield_repos and explores them."""
         adapter = _make_adapter()

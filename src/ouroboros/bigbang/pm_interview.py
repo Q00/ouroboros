@@ -16,6 +16,7 @@ questions for classification and collects PM-specific metadata.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
@@ -45,6 +46,7 @@ from ouroboros.bigbang.question_classifier import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -402,8 +404,15 @@ class PMInterviewEngine:
         self.classifications = []
         self._reframe_map = {}
 
-        # Explore codebases if brownfield repos are provided
+        # Explore codebases if brownfield repos are provided.
+        # Redirect exploration to persistent snapshot worktrees pinned to
+        # the remote default branch (created once, then fetch + hard-reset)
+        # so a stale local checkout never leaks into PRD context. This hook
+        # covers every engine-driven entry point (MCP in-process and CLI).
         if brownfield_repos:
+            brownfield_repos = await asyncio.to_thread(
+                refresh_pm_snapshot_worktrees, list(brownfield_repos)
+            )
             self._selected_brownfield_repos = list(brownfield_repos)
             await self.explore_codebases(brownfield_repos)
 

@@ -71,6 +71,25 @@ log = structlog.get_logger()
 _DATA_DIR = Path.home() / ".ouroboros" / "data"
 
 
+def _refresh_plugin_repo_paths(paths: list[Any]) -> list[Any]:
+    """Swap plugin-mode repo path strings for refreshed snapshot worktrees.
+
+    Plugin dispatch forwards ``selected_repos`` (path strings) to a child
+    session that reads them directly, so the snapshot redirection must
+    happen before the paths are persisted and handed to the subagent.
+    Non-string entries and repos that cannot be snapshotted (not a git
+    repo, git failure) pass through unchanged.
+    """
+    result: list[Any] = []
+    for path in paths:
+        if not isinstance(path, str):
+            result.append(path)
+            continue
+        refreshed = refresh_pm_snapshot_worktrees([{"path": path}])
+        result.append(refreshed[0]["path"])
+    return result
+
+
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
     """Return the path to the pm_meta JSON file for a session."""
     base = data_dir or _DATA_DIR
@@ -478,8 +497,17 @@ class PMInterviewHandler:
                 # the caller's selected_repos so later resume/generate turns
                 # can restore them.  Fall back to cwd-derived codebase_paths
                 # when no explicit repos provided.
+                #
+                # Selected repos are redirected to refreshed snapshot
+                # worktrees before persistence so the child session reads
+                # remote-main state instead of a stale local checkout. The
+                # cwd-derived fallback is deliberately NOT redirected: cwd is
+                # the user's live working repo and may hold intentional WIP.
                 persisted_repos: list[Any] = []
                 if selected_repos is not None:
+                    selected_repos = await asyncio.to_thread(
+                        _refresh_plugin_repo_paths, selected_repos
+                    )
                     persisted_repos = selected_repos
                 elif state.codebase_paths:
                     persisted_repos = [
@@ -518,7 +546,10 @@ class PMInterviewHandler:
                             tool_name="ouroboros_pm_interview",
                         )
                     )
-                # Update pm_meta with selected repos and mark interview_started
+                # Redirect selected repos to refreshed snapshot worktrees so
+                # the child session explores remote-main state, then update
+                # pm_meta with them and mark interview_started.
+                selected_repos = await asyncio.to_thread(_refresh_plugin_repo_paths, selected_repos)
                 meta["brownfield_repos"] = selected_repos
                 meta["status"] = "interview_started"
                 _save_pm_meta(
@@ -759,13 +790,9 @@ class PMInterviewHandler:
                 count=len(resolved),
                 paths=[r.path for r in resolved],
             )
-            # Redirect exploration to persistent snapshot worktrees pinned to
-            # the remote default branch (created once, then fetch + hard-reset
-            # per start) so a stale local checkout never leaks into PRD context.
-            brownfield_repos = await asyncio.to_thread(
-                refresh_pm_snapshot_worktrees, brownfield_repos
-            )
 
+        # Snapshot-worktree redirection happens inside
+        # engine.ask_opening_and_start so CLI and MCP share one hook.
         result = await engine.ask_opening_and_start(
             user_response=initial_context,
             interview_id=interview_id,
