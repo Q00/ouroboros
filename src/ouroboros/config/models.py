@@ -137,6 +137,7 @@ class LLMConfig(BaseModel, frozen=True):
         "pi",
         "ourocode",
         "gjc",
+        "zcode",
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
