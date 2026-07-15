@@ -1,0 +1,67 @@
+{
+  "assumptions": [
+    "Completion requires an observable check that demonstrates the requested behavior and a negative or edge-path check where the implementation surface supports one.",
+    "Assume the primary actor is the user or automation agent described by the goal; do not introduce additional actor classes.",
+    "Use only inputs already present in the goal, repository state, or explicit interview answers; do not require new external data.",
+    "Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects.",
+    "Produce the smallest observable artifact, state change, or response needed to satisfy the goal and make verification possible.",
+    "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target.",
+    "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly."
+  ],
+  "auto_session_id": "auto_5c866c86a1f4",
+  "blocker": "Seed QA did not pass after 5 attempt(s): revise (score 0.68); differences: Acceptance criteria are mostly generic and do not concretely verify the core habit-tracker behaviors: add, list, check off, and JSON persistence.; The Seed does not define the CLI surface: command name, documented arguments, habit identifiers or names, check-off semantics, and expected stdout are underspecified.; Persistence is underspecified: the JSON filename/location, minimal schema, behavior with an existing file, and whether writes should preserve prior habits are not defined.; suggestions: Add concrete acceptance criteria for adding a habit, listing it, checking it off, and confirming the JSON file contains the expected persisted state across separate invocations.; Specify the CLI contract directly in the Seed, including command name or entry point, subcommands such as add/list/check, required arguments, output format, and how a habit is selected for checking off.; Define the persistence contract: exact JSON file path in the working directory, minimal data shape, behavior when the file already exists, and preservation of existing records.",
+  "counts": {
+    "ambiguity": 0,
+    "decisions": 10,
+    "flags": 2,
+    "gated": 7,
+    "lateral": 1,
+    "promoted": 10,
+    "questions": 1,
+    "rejected": 0
+  },
+  "degraded": false,
+  "gate_findings": [],
+  "grade": "A",
+  "interview_closure_mode": null,
+  "interview_session_id": null,
+  "non_goals": [],
+  "open_gaps": [],
+  "phase": "blocked",
+  "provenance_histogram": {
+    "maintainer_policy": 2,
+    "timeout_default": 7,
+    "user_confirmed": 1
+  },
+  "qa": {
+    "differences": [
+      "Acceptance criteria are mostly generic and do not concretely verify the core habit-tracker behaviors: add, list, check off, and JSON persistence.",
+      "The Seed does not define the CLI surface: command name, documented arguments, habit identifiers or names, check-off semantics, and expected stdout are underspecified.",
+      "Persistence is underspecified: the JSON filename/location, minimal schema, behavior with an existing file, and whether writes should preserve prior habits are not defined.",
+      "The fourth acceptance criterion is malformed/generic and reads like copied diagnostic prose rather than an executable criterion.",
+      "Applicable document-level edge cases are only partially covered: invalid arguments are mentioned, but empty habit names, duplicate names, missing habit targets, corrupt existing JSON, and avoiding clobbering unrelated working-directory files are not addressed."
+    ],
+    "passed": false,
+    "score": 0.68,
+    "suggestions": [
+      "Add concrete acceptance criteria for adding a habit, listing it, checking it off, and confirming the JSON file contains the expected persisted state across separate invocations.",
+      "Specify the CLI contract directly in the Seed, including command name or entry point, subcommands such as add/list/check, required arguments, output format, and how a habit is selected for checking off.",
+      "Define the persistence contract: exact JSON file path in the working directory, minimal data shape, behavior when the file already exists, and preservation of existing records.",
+      "Replace the fourth acceptance criterion with a specific observable check, for example a smoke test sequence that runs add, list, check, list again, and an invalid command.",
+      "Add edge-path criteria for empty names, unknown habit targets, invalid arguments, malformed existing JSON handling, and ensuring only the intended habit JSON file is created or modified."
+    ],
+    "verdict": "revise"
+  },
+  "run_id": "auto_5c866c86a1f4",
+  "seed_decision_provenance": {
+    "maintainer_policy": 2,
+    "timeout_default": 7,
+    "user_confirmed": 1
+  },
+  "seed_id": "seed_176fe15441ee",
+  "seed_origin": "auto_pipeline",
+  "seed_path": "/Users/jaegyu.lee/.ouroboros/seeds/seed_176fe15441ee.yaml",
+  "status": "blocked",
+  "stop_reason_code": null,
+  "unverified_provenance_findings": []
+}

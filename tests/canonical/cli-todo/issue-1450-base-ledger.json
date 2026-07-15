@@ -4,7 +4,7 @@
   "scenario": "cli-todo",
   "capture_kind": "current_main_deterministic_backend_reproduction",
   "capture_commit": "c4beb2276b125b52852816aa185da26f6cc549c5",
-  "source_tree_hash": "dfd84ee406215bf1156fc1da43c2fdb7bb4acd42",
+  "source_tree_hash": "fbf81aec9f68e1a2359f15b0dc0ea4e9412fe617",
   "goal_blob_hash": "620332b67fc7ba87dd92f69d9f2d9b229b94665e",
   "expected_blob_hash": "8ae66d5b4d6327a4b44ece75a9473227b943cc31",
   "ledger_sha256": "bd515172d9c2810d07682bc42b5f39947fea8ad4990f97f135f69b423d75ba1e",

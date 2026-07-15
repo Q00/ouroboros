@@ -140,6 +140,8 @@ does not isolate metadata causality. It only measures whether the two
 proposal-content strategies produce a reproducible product-smoke
 difference for the frozen canonical `cli-todo` fixture.
 
+Latest committed live evidence: [2026-07-15 paired run](evidence/issue-1450-20260715-162447-736593/REPORT.md). The run completed three pairs and returned `inconclusive` because neither arm produced the required state-consistent terminal trace; the report records the provider/model, ledgers, raw outputs, reproduction command, cost tracking gap, and production decision.
+
 ## Scenario directory shape
 
 Each `tests/canonical/<slug>/` directory contains:
