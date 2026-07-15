@@ -3190,6 +3190,7 @@ class ParallelACExecutor:
                     node_identity=node_identity,
                     ac_spec=ac_spec,
                     start_time=start_time,
+                    semantic_ac_key=semantic_ac_key,
                 )
                 if bounce_decision is not None:
                     node_decision = bounce_decision
@@ -4309,6 +4310,7 @@ Respond with either ATOMIC or the structured JSON object only.
             self._adapter,
             router=self._model_router,
             is_decomposed_child=is_sub_ac,
+            decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=0,
             suggested_tier=suggested_tier,
         )

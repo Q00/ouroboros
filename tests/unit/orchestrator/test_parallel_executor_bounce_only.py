@@ -127,6 +127,39 @@ async def test_model_failure_keeps_existing_recovery_without_decomposition() -> 
 
 
 @pytest.mark.asyncio
+async def test_abandoned_stall_runs_bounce_recovery_without_losing_semantic_key() -> None:
+    executor = _executor()
+    executor._execute_atomic_ac = AsyncMock(
+        side_effect=lambda **kwargs: ACExecutionResult(
+            ac_index=kwargs["ac_index"],
+            ac_content=kwargs["ac_content"],
+            success=False,
+            error="__STALL_DETECTED__",
+            retry_attempt=kwargs["retry_attempt"],
+            depth=kwargs["depth"],
+        )
+    )
+    executor._request_bounce_classification = AsyncMock(
+        return_value=(BounceCause.UNKNOWN, "No decomposition evidence.", (), False)
+    )
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Parent work",
+        session_id="session-stall",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="goal",
+        execution_id="exec-stall",
+    )
+
+    assert result.success is False
+    assert result.error.startswith("Stalled (no activity for ")
+    executor._request_bounce_classification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("same_runtime_budget_exhausted", [False, True])
 async def test_evidence_backed_too_big_bounce_dispatches_trusted_children(
     same_runtime_budget_exhausted: bool,
