@@ -70,6 +70,8 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
             ('"+ouroboros execute"', "ouroboros_job_wait"),
             ('"+ouroboros execute"', "ouroboros_job_result"),
             ('"+ouroboros execute"', "ouroboros_ac_tree_hud"),
+            ('"+ouroboros session signal"', "ouroboros_session_signal_targets"),
+            ('"+ouroboros session signal"', "ouroboros_session_signal"),
         ],
     }
 
@@ -122,14 +124,102 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     """Run/auto should free the main session when native child sessions exist."""
     repo_root = Path(__file__).resolve().parents[3]
 
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("run", "auto", "ralph"):
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            normalized = text.lower()
+            compact = " ".join(text.split())
+            compact = " ".join(normalized.split())
+            assert "response.meta.job_observer" in normalized
+            assert "exactly one" in normalized
+            assert "read-only" in normalized
+            assert "main session must not poll the same job" in compact
+            assert "attention_required" in normalized
+            assert "isolated worktree" in compact
+            assert "tui open" in normalized
+            assert "conversation" in normalized and "available" in normalized
+
     for skill in ("run", "auto", "ralph"):
         text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
         normalized = text.lower()
-        assert "response.meta.job_observer" in normalized
-        assert "exactly one" in normalized
-        assert "read-only" in normalized
-        assert "main session must not poll the same job" in normalized
-        assert "attention_required" in normalized
-        assert "isolated worktree" in normalized
-        assert "tui open" in normalized
-        assert "conversation" in normalized and "available" in normalized
+        assert "spawn_agent" in text
+        assert "run_observer" in text
+        assert "wait" in normalized and "not a spawn" in normalized
+        assert "stdio" in normalized
+        assert "detached worker" in normalized
+        assert "survive" in normalized or "continues" in normalized
+
+
+def test_run_and_auto_route_human_intent_without_exposing_internal_ids() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("run", "auto"):
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            normalized = text.lower()
+            compact = " ".join(text.split())
+            assert "ouroboros_session_signal_targets" in text
+            assert "ouroboros_session_signal" in text
+            assert "+ouroboros session signal" in text
+            assert "never ask" in normalized and "id" in normalized
+            assert "genuine" in normalized and ("tie" in normalized or "tied" in normalized)
+            assert "omit `fallback_mode`" in compact
+
+
+def test_active_conductor_skill_copies_cover_start_and_progress_briefing() -> None:
+    """Every supported host gets the same user-facing control-surface facts."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("run", "auto"):
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            normalized = text.lower()
+            compact = " ".join(normalized.split())
+            assert "efficient execution" in compact
+            assert "quality-first execution" in compact
+            assert "adaptive" in normalized and "quality_first" in normalized
+            assert "observe" in normalized and "off" in normalized
+            assert "strict" in normalized and "explicit" in normalized
+            assert "run_configuration" in normalized
+            assert "execution_plan" in normalized
+            assert "discovery_summary" in normalized
+            assert "parallel" in normalized
+            assert "first scheduled ac" in compact
+            assert "runtime" in normalized and "harness" in normalized
+
+
+def test_active_conductor_skill_copies_cover_synapse_and_audited_action_order() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("run", "auto", "ralph"):
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            normalized = text.lower()
+            assert "ouroboros_session_signal_targets" in text
+            assert "ouroboros_session_signal" in text
+            assert 'mode="inform"' in text
+            assert "queued" in normalized and "applied" in normalized
+            assert "verify" in normalized
+            assert "decide" in normalized
+            assert "log" in normalized
+            assert "act" in normalized
+            assert "recommended_host_actions" in text
+            assert "ouroboros_record_conductor_decision" in text
+
+
+def test_active_conductor_guidance_is_english_canonical_without_locale_catalogs() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    paths = [
+        root / skill / "SKILL.md"
+        for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills")
+        for skill in ("run", "auto", "ralph")
+    ] + [repo_root / "src" / "ouroboros" / "codex" / "ouroboros.md"]
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        normalized = text.lower()
+        assert "english" in normalized and "canonical" in normalized
+        assert "conversation language" in normalized
+        assert "centralized" not in normalized
+        assert "locale catalog" not in normalized
+        assert "translation catalog" not in normalized

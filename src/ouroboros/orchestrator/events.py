@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.capabilities import CapabilityDescriptor, CapabilityGraph
@@ -42,6 +43,7 @@ _GUIDANCE_REF_ALLOWED_KEYS = frozenset(
         "size_bytes",
     }
 )
+FRUGALITY_RETROSPECTIVE_EVENT_TYPE = "execution.frugality_retrospective.reported"
 
 
 def create_session_started_event(
@@ -82,6 +84,7 @@ def create_guidance_injected_event(
     fragment_hash: str,
     fragment_size_bytes: int,
     delivery_mode: str,
+    injection_key: str = "start",
 ) -> BaseEvent:
     """Create bounded audit metadata for injected implementation guidance.
 
@@ -102,6 +105,7 @@ def create_guidance_injected_event(
             "stage": "execute",
             "role": "implementation",
             "delivery_mode": delivery_mode.strip()[:_MAX_GUIDANCE_REF_VALUE_LENGTH],
+            "injection_key": injection_key.strip()[:_MAX_GUIDANCE_REF_VALUE_LENGTH],
             "provenance_scope": "ouroboros_declared_guidance_only",
             "injected_at": datetime.now(UTC).isoformat(),
         },
@@ -745,10 +749,30 @@ def create_execution_terminal_event(
     )
 
 
+def create_frugality_retrospective_event(
+    execution_id: str,
+    data: dict[str, Any],
+) -> BaseEvent:
+    """Create the deterministic v1 execution-finalized frugality evidence event."""
+    event_id = uuid5(
+        NAMESPACE_URL,
+        f"ouroboros:{FRUGALITY_RETROSPECTIVE_EVENT_TYPE}:v1:{execution_id}",
+    )
+    return BaseEvent(
+        id=str(event_id),
+        type=FRUGALITY_RETROSPECTIVE_EVENT_TYPE,
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data=data,
+    )
+
+
 __all__ = [
+    "FRUGALITY_RETROSPECTIVE_EVENT_TYPE",
     "create_ac_stall_detected_event",
     "create_drift_measured_event",
     "create_execution_terminal_event",
+    "create_frugality_retrospective_event",
     "create_heartbeat_event",
     "create_mcp_tools_loaded_event",
     "create_policy_capabilities_evaluated_event",

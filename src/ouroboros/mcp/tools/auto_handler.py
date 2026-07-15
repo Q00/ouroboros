@@ -71,6 +71,7 @@ from ouroboros.auto.state import (
 )
 from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
 from ouroboros.config import get_opencode_mode
+from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -101,6 +102,7 @@ from ouroboros.mcp.types import (
 from ouroboros.orchestrator import resolve_agent_runtime_backend
 from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.providers.factory import resolve_llm_backend
 from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
 
@@ -226,6 +228,27 @@ class AutoHandler:
                     required=False,
                 ),
                 MCPToolParameter(
+                    "efficiency_mode",
+                    ToolInputType.STRING,
+                    (
+                        "Execution efficiency policy: adaptive may use lower-cost child "
+                        "tiers with recovery escalation; quality_first keeps child ACs "
+                        "at the parent starting tier. Default: adaptive."
+                    ),
+                    required=False,
+                    enum=("adaptive", "quality_first"),
+                ),
+                MCPToolParameter(
+                    "frugality_assurance",
+                    ToolInputType.STRING,
+                    (
+                        "Frugality assurance: off, observe, or explicitly authorized "
+                        "strict. Defaults from efficiency_mode and is immutable on resume."
+                    ),
+                    required=False,
+                    enum=("off", "observe", "strict"),
+                ),
+                MCPToolParameter(
                     "complete_product",
                     ToolInputType.BOOLEAN,
                     (
@@ -339,6 +362,8 @@ class AutoHandler:
         attach_source = _optional_text_arg(arguments, "attach_source")
         reconcile_run = bool(arguments.get("reconcile_run", False))
         reconcile_source = _optional_text_arg(arguments, "reconcile_source")
+        requested_efficiency_mode = _optional_text_arg(arguments, "efficiency_mode")
+        requested_frugality_assurance = _optional_text_arg(arguments, "frugality_assurance")
         attach_requested = any((attach_execution, attach_job, attach_session))
         if attach_requested and not (isinstance(resume, str) and resume):
             raise ValueError("attach_* arguments require resume")
@@ -363,6 +388,11 @@ class AutoHandler:
         )
         supplied_user_preferences: dict[str, str | None] = {}
         if isinstance(resume, str) and resume:
+            if requested_efficiency_mode is not None or requested_frugality_assurance is not None:
+                raise ValueError(
+                    "efficiency_mode and frugality_assurance cannot be changed on resume; "
+                    "start a new successor execution for an intentional change"
+                )
             state = store.load(resume)
             _apply_requested_domain_and_policies(state, arguments, detect_profile=False)
             cwd = state.cwd
@@ -420,6 +450,13 @@ class AutoHandler:
             skip_run = requested_skip_run
             goal_text = goal.strip()
             state = AutoPipelineState(goal=goal_text, cwd=cwd)
+            preferences = resolve_execution_preferences(
+                requested_efficiency_mode,
+                requested_frugality_assurance,
+            )
+            state.efficiency_mode = preferences.efficiency_mode.value
+            state.frugality_assurance = preferences.frugality_assurance.value
+            state.frugality_assurance_explicit = preferences.frugality_assurance_explicit
             _apply_requested_domain_and_policies(state, arguments)
             state.user_preferences = _merge_goal_user_preferences(
                 goal_text, supplied_user_preferences
@@ -582,6 +619,9 @@ class AutoHandler:
                 start_execute,
                 cwd=state.cwd,
                 use_worktree=auto_workspace is None,
+                efficiency_mode=state.efficiency_mode,
+                frugality_assurance=state.frugality_assurance,
+                frugality_assurance_explicit=state.frugality_assurance_explicit,
             ),
             store=store,
             repairer=SeedRepairer(max_repair_rounds=max_repair_rounds),
@@ -705,6 +745,8 @@ class StartAutoHandler:
                 for field_name in ("attach_execution", "attach_job", "attach_session")
             )
             requested_pipeline_timeout = _optional_pipeline_timeout(arguments)
+            requested_efficiency_mode = _optional_text_arg(arguments, "efficiency_mode")
+            requested_frugality_assurance = _optional_text_arg(arguments, "frugality_assurance")
             validate_complete_product_timeout(
                 complete_product=bool(arguments.get("complete_product", False)) and not has_resume,
                 pipeline_timeout_seconds=requested_pipeline_timeout,
@@ -733,6 +775,16 @@ class StartAutoHandler:
                     tool_name="ouroboros_start_auto",
                 )
             )
+        if has_resume and (
+            requested_efficiency_mode is not None or requested_frugality_assurance is not None
+        ):
+            return Result.err(
+                MCPToolError(
+                    "efficiency_mode and frugality_assurance cannot be changed on resume; "
+                    "start a new successor execution for an intentional change",
+                    tool_name="ouroboros_start_auto",
+                )
+            )
 
         runner_arguments = dict(arguments)
         if has_resume:
@@ -742,6 +794,8 @@ class StartAutoHandler:
             except ValueError as exc:
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_auto"))
             runner_arguments["resume"] = auto_session_id
+            runner_arguments.pop("efficiency_mode", None)
+            runner_arguments.pop("frugality_assurance", None)
         else:
             try:
                 state = self._preallocate_state(
@@ -762,6 +816,8 @@ class StartAutoHandler:
             # which would drop goal-derived sections and make start_auto
             # diverge from the synchronous auto path.
             runner_arguments.pop("user_preferences", None)
+            runner_arguments.pop("efficiency_mode", None)
+            runner_arguments.pop("frugality_assurance", None)
 
         already_running = await self._active_session_error(auto_session_id)
         if already_running is not None:
@@ -781,6 +837,11 @@ class StartAutoHandler:
         if lease_error is not None:
             return Result.err(lease_error)
         runner_arguments["_start_auto_lease_token"] = lease_token
+        start_briefing = _start_auto_briefing(
+            state,
+            fallback_runtime_backend=self.agent_runtime_backend,
+            configured_llm_backend=self.llm_backend,
+        )
 
         if plugin_dispatch:
             payload = _build_auto_subagent(runner_arguments, auto_session_id=auto_session_id)
@@ -826,6 +887,7 @@ class StartAutoHandler:
                     "session_id": auto_session_id,
                     "status": DELEGATED_TO_PLUGIN,
                     "dispatch_mode": "plugin",
+                    **start_briefing,
                 },
             )
 
@@ -859,6 +921,16 @@ class StartAutoHandler:
         async def _on_enqueue_failure(_exc: BaseException) -> None:
             _release_start_lease(self._store, auto_session_id, token=lease_token)
 
+        async def _on_detaching() -> None:
+            # The accepting MCP process owns the short pending lease, but the
+            # detached worker must become the durable owner and claim its own
+            # token. Release only at the transfer boundary; the forced-inline
+            # call inside the worker does not run this hook.
+            _release_start_lease(self._store, auto_session_id, token=lease_token)
+
+        detached_arguments = dict(runner_arguments)
+        detached_arguments.pop("_start_auto_lease_token", None)
+
         try:
             snapshot = await start_background_tool_job(
                 job_manager=self._job_manager,
@@ -870,9 +942,17 @@ class StartAutoHandler:
                 links=JobLinks(session_id=auto_session_id),
                 work_fn=_runner,
                 cancelled_text="Auto session cancelled before work began.",
+                detached_tool_name="ouroboros_start_auto",
+                detached_arguments=detached_arguments,
+                runtime_backend=self.agent_runtime_backend,
+                llm_backend=self.llm_backend,
+                opencode_mode=self.opencode_mode,
+                on_detaching=_on_detaching,
                 on_started=_on_started,
                 on_enqueue_failure=_on_enqueue_failure,
             )
+        except MCPToolError as exc:
+            return Result.err(exc)
         except Exception as exc:
             return Result.err(
                 MCPToolError(
@@ -893,35 +973,44 @@ class StartAutoHandler:
             "Status: queued\n"
             f"job_id: {snapshot.job_id}\n"
             f"auto_session_id: {auto_session_id}\n"
+            f"Runtime Backend: {start_briefing['runtime_backend']}\n"
+            f"LLM Backend: {start_briefing['llm_backend']}\n"
+            f"Efficiency Mode: {start_briefing['efficiency_mode']}\n"
+            f"Frugality Assurance: {start_briefing['frugality_assurance']}\n"
             f"{dashboard_line}\n"
+            "The exact active model and first parallel level will be reported "
+            "from run configuration and execution plan events.\n"
             "Track with ouroboros_job_wait / ouroboros_job_status until terminal, "
             "then fetch ouroboros_job_result."
         )
+        meta = {
+            "job_id": snapshot.job_id,
+            "auto_session_id": auto_session_id,
+            "session_id": auto_session_id,
+            **({"dashboard_url": dashboard_url} if dashboard_url else {}),
+            "status": "queued",
+            "dispatch_mode": "job",
+            **start_briefing,
+            "status_tool": "ouroboros_job_status",
+            "wait_tool": "ouroboros_job_wait",
+            "result_tool": "ouroboros_job_result",
+            "job_observer": build_job_observer_contract(
+                job_id=snapshot.job_id,
+                cursor=getattr(snapshot, "cursor", 0),
+                session_id=auto_session_id,
+                follow_result_job_keys=(
+                    "job_id",
+                    "ralph_job_id",
+                    "chained_evaluate_job_id",
+                ),
+            ),
+        }
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=False,
-                meta={
-                    "job_id": snapshot.job_id,
-                    "auto_session_id": auto_session_id,
-                    "session_id": auto_session_id,
-                    **({"dashboard_url": dashboard_url} if dashboard_url else {}),
-                    "status": "queued",
-                    "dispatch_mode": "job",
-                    "status_tool": "ouroboros_job_status",
-                    "wait_tool": "ouroboros_job_wait",
-                    "result_tool": "ouroboros_job_result",
-                    "job_observer": build_job_observer_contract(
-                        job_id=snapshot.job_id,
-                        cursor=getattr(snapshot, "cursor", 0),
-                        session_id=auto_session_id,
-                        follow_result_job_keys=(
-                            "job_id",
-                            "ralph_job_id",
-                            "chained_evaluate_job_id",
-                        ),
-                    ),
-                },
+                meta=meta,
+                structured_content=dict(meta),
             )
         )
 
@@ -935,6 +1024,13 @@ class StartAutoHandler:
         """Persist a new auto session before the background job starts."""
         cwd = str(_resolve_cwd(arguments.get("cwd")))
         state = AutoPipelineState(goal=goal, cwd=cwd)
+        preferences = resolve_execution_preferences(
+            _optional_text_arg(arguments, "efficiency_mode"),
+            _optional_text_arg(arguments, "frugality_assurance"),
+        )
+        state.efficiency_mode = preferences.efficiency_mode.value
+        state.frugality_assurance = preferences.frugality_assurance.value
+        state.frugality_assurance_explicit = preferences.frugality_assurance_explicit
         _apply_requested_domain_and_policies(state, arguments)
         state.max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 50)
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
@@ -1166,6 +1262,37 @@ def _state_dispatches_via_plugin(
         runtime_plan.execute.opencode_mode,
     )
     return interview_dispatch or execute_dispatch
+
+
+def _start_auto_briefing(
+    state: AutoPipelineState,
+    *,
+    fallback_runtime_backend: str | None,
+    configured_llm_backend: str | None,
+) -> dict[str, str]:
+    """Resolve truthful start-time labels without guessing an active model.
+
+    Auto may route later stages to different runtimes and models.  The start
+    receipt therefore exposes the persisted primary runtime and configured LLM
+    backend only; the exact active model and per-AC harness remain owned by the
+    later run-configuration and routing events.
+    """
+    try:
+        runtime_backend = resolve_agent_runtime_backend(
+            state.runtime_backend or fallback_runtime_backend
+        )
+    except Exception:  # noqa: BLE001 - malformed legacy config is reported truthfully.
+        runtime_backend = "unknown"
+    try:
+        llm_backend = resolve_llm_backend(configured_llm_backend)
+    except Exception:  # noqa: BLE001 - start metadata must not invent a backend.
+        llm_backend = "unknown"
+    return {
+        "runtime_backend": runtime_backend,
+        "llm_backend": llm_backend,
+        "efficiency_mode": state.efficiency_mode,
+        "frugality_assurance": state.frugality_assurance,
+    }
 
 
 def _start_auto_lease_token_from_arguments(arguments: dict[str, Any]) -> str | None:
@@ -1446,6 +1573,8 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "execution_id": result.execution_id,
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
+        "efficiency_mode": result.efficiency_mode,
+        "frugality_assurance": result.frugality_assurance,
     }
     if result.artifact_state is not None:
         meta["artifact_state"] = result.artifact_state

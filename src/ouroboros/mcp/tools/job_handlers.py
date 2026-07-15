@@ -26,6 +26,10 @@ from ouroboros.mcp.tools.ac_tree_hud_handler import (
     format_subtask_progress_summary,
     summarize_subtask_events,
 )
+from ouroboros.mcp.tools.attention_relay import (
+    RELAY_SOURCE_EVENT_TYPES,
+    classify_relay_events,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -48,6 +52,7 @@ _JOB_PROGRESS_EVENT_TYPES = {
     "execution.node.updated",
     "execution.subtask.updated",
 }
+_JOB_ATTENTION_EVENT_TYPES = RELAY_SOURCE_EVENT_TYPES
 _JOB_VIEW_ALIASES = {
     "compact": "compact",
     "brief": "compact",
@@ -79,6 +84,8 @@ _JOB_WAIT_FOR_ALIASES = {
     "ac_change": "ac_change",
     "progress": "ac_change",
     "meaningful": "ac_change",
+    "attention": "attention_or_ac_change",
+    "attention_or_ac_change": "attention_or_ac_change",
     "phase": "phase_change",
     "phase_change": "phase_change",
     "terminal": "terminal",
@@ -262,7 +269,7 @@ def _job_wait_progress_changed(
     """Return true when progress satisfies a filtered job_wait wakeup."""
     if wait_for == "phase_change":
         return before.get("current_phase") != after.get("current_phase")
-    if wait_for == "ac_change":
+    if wait_for in {"ac_change", "attention_or_ac_change"}:
         return any(
             before.get(key) != after.get(key)
             for key in ("ac_completed", "sub_ac_completed", "current_phase")
@@ -284,6 +291,9 @@ def _compact_event_detail(event: BaseEvent) -> str:
         "content",
         "phase",
         "status",
+        "detail",
+        "state",
+        "effective_mode",
         "reason",
         "tool_name",
     ):
@@ -424,6 +434,60 @@ async def _query_linked_stream_events(
     # the next poll strictly advances.
     boundary = min(saturated)
     return merge(await gather(None, boundary)), boundary, True
+
+
+async def _query_linked_history_events(
+    event_store: EventStore,
+    snapshot: JobSnapshot,
+    *,
+    after_cursor: int = 0,
+    max_row_id: int | None = None,
+) -> list[BaseEvent]:
+    """Read complete linked history for classification, never for raw relay text."""
+    streams: list[tuple[list[BaseEvent], int]] = [
+        await event_store.get_events_after(
+            "job",
+            snapshot.job_id,
+            after_cursor,
+            limit=None,
+            max_row_id=max_row_id,
+        )
+    ]
+    if snapshot.links.execution_id:
+        streams.append(
+            await event_store.get_events_after(
+                "execution",
+                snapshot.links.execution_id,
+                after_cursor,
+                limit=None,
+                max_row_id=max_row_id,
+            )
+        )
+    if snapshot.links.session_id:
+        streams.append(
+            await event_store.query_session_related_events_after(
+                session_id=snapshot.links.session_id,
+                execution_id=snapshot.links.execution_id,
+                last_row_id=after_cursor,
+                limit=None,
+                max_row_id=max_row_id,
+            )
+        )
+    if snapshot.links.lineage_id:
+        streams.append(
+            await event_store.get_events_after(
+                "lineage",
+                snapshot.links.lineage_id,
+                after_cursor,
+                limit=None,
+                max_row_id=max_row_id,
+            )
+        )
+    unique: dict[str, BaseEvent] = {}
+    for events, _cursor in streams:
+        for event in events:
+            unique[event.id] = event
+    return sorted(unique.values(), key=lambda event: (event.timestamp, event.id))
 
 
 @dataclass
@@ -1002,6 +1066,7 @@ class JobWaitHandler:
 
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    available_conductor_tools: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -1063,7 +1128,8 @@ class JobWaitHandler:
                     description=(
                         "'raw' (default) returns on any job event, preserving existing "
                         "behavior; 'ac_change' waits for AC/Sub-AC/phase progress or "
-                        "terminal status; 'phase_change' waits for phase transitions "
+                        "terminal status; 'attention_or_ac_change' additionally wakes "
+                        "for Synapse delivery status; 'phase_change' waits for phase transitions "
                         "or terminal status; 'terminal' waits only for terminal status."
                     ),
                     required=False,
@@ -1197,6 +1263,49 @@ class JobWaitHandler:
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
         stream_items = [_event_stream_item(event) for event in stream_events]
+        relay_events: list[dict[str, object]] = []
+        if stream == "linked" and (stream_events or snapshot.is_terminal):
+            history_max_row_id = None if snapshot.is_terminal else snapshot.cursor
+            history_events = await _query_linked_history_events(
+                self._event_store,
+                snapshot,
+                max_row_id=history_max_row_id,
+            )
+            if snapshot.is_terminal:
+                unseen_events = await _query_linked_history_events(
+                    self._event_store,
+                    snapshot,
+                    after_cursor=cursor,
+                )
+                new_event_ids = {event.id for event in unseen_events}
+            else:
+                new_event_ids = {event.id for event in stream_events}
+            relay_events = classify_relay_events(
+                history_events,
+                new_event_ids=new_event_ids,
+                job_id=snapshot.job_id,
+                available_tools=self.available_conductor_tools,
+            )
+            if snapshot.is_terminal:
+                relay_events.append(
+                    {
+                        "id": f"terminal_{snapshot.job_id}_{snapshot.status.value}",
+                        "kind": "terminal",
+                        "subtype": "job_terminal",
+                        "scope": {
+                            "job_id": snapshot.job_id,
+                            "execution_id": snapshot.links.execution_id,
+                            "session_id": snapshot.links.session_id,
+                            "lineage_id": snapshot.links.lineage_id,
+                            "semantic_ac_key": None,
+                        },
+                        "evidence": {
+                            "status": snapshot.status.value,
+                            "message": snapshot.message[:320],
+                            "is_error": _job_is_error(snapshot),
+                        },
+                    }
+                )
         if stream_items:
             text += "\n\n### Stream Events"
             for item in stream_items[-_JOB_STREAM_EVENT_LIMIT:]:
@@ -1215,7 +1324,9 @@ class JobWaitHandler:
             )
         )
         stream_changed = bool(stream_items)
-        response_changed = changed or execution_progress_changed or stream_changed
+        response_changed = (
+            changed or execution_progress_changed or stream_changed or bool(relay_events)
+        )
         if not changed:
             if (
                 view in {"compact", "summary"}
@@ -1263,6 +1374,7 @@ class JobWaitHandler:
                     "stream": stream,
                     "wait_for": wait_for,
                     "stream_events": stream_items,
+                    "relay_events": relay_events,
                     "stream_has_more": stream_has_more,
                     **progress,
                 },
@@ -1348,6 +1460,7 @@ class JobWaitHandler:
                 cursor,
             )
             progress_changed = False
+            attention_changed = any(event.type in _JOB_ATTENTION_EVENT_TYPES for event in events)
             if wait_for != "raw" and wait_for != "terminal" and snapshot.links.execution_id:
                 if baseline_progress is None:
                     baseline_progress, _baseline_cursor = await _query_execution_progress_at_cursor(
@@ -1369,7 +1482,14 @@ class JobWaitHandler:
                 )
             if (
                 (wait_for == "raw" and (changed or events))
-                or (wait_for != "raw" and (snapshot.is_terminal or progress_changed))
+                or (
+                    wait_for != "raw"
+                    and (
+                        snapshot.is_terminal
+                        or progress_changed
+                        or (wait_for == "attention_or_ac_change" and attention_changed)
+                    )
+                )
                 or snapshot.is_terminal
                 or asyncio.get_running_loop().time() >= deadline
             ):
@@ -1389,6 +1509,7 @@ class JobResultHandler:
 
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    available_conductor_tools: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -1466,6 +1587,21 @@ class JobResultHandler:
             if snapshot.result_payload is not None
             else {}
         )
+        relay_events: list[dict[str, object]] = []
+        if snapshot.is_terminal:
+            history_events = await _query_linked_history_events(
+                self._event_store,
+                snapshot,
+            )
+            relay_events = [
+                relay
+                for relay in classify_relay_events(
+                    history_events,
+                    job_id=snapshot.job_id,
+                    available_tools=self.available_conductor_tools,
+                )
+                if relay.get("kind") == "attention_required"
+            ]
         return Result.ok(
             MCPToolResult(
                 content=content,
@@ -1474,6 +1610,7 @@ class JobResultHandler:
                     **_job_snapshot_meta(snapshot),
                     **result_payload_meta,
                     **snapshot.result_meta,
+                    "relay_events": relay_events,
                 },
             )
         )

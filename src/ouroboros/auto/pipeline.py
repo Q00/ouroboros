@@ -342,6 +342,8 @@ class AutoPipelineResult:
     stop_reason_code: str | None = None
     runtime_backend: str | None = None
     opencode_mode: str | None = None
+    efficiency_mode: str = "adaptive"
+    frugality_assurance: str = "observe"
     invoked_by: str = "direct"
     provenance: dict[str, Any] | None = None
     last_authoring_backend: str | None = None
@@ -2882,6 +2884,21 @@ class AutoPipeline:
                 details.append("differences: " + "; ".join(qa_result.differences[:3]))
             if qa_result.suggestions:
                 details.append("suggestions: " + "; ".join(qa_result.suggestions[:3]))
+            await self._emit_runtime_event(
+                "auto.seed_qa.blocked",
+                state.auto_session_id,
+                {
+                    "schema_version": 1,
+                    "auto_session_id": state.auto_session_id,
+                    "seed_id": current_seed.metadata.seed_id,
+                    "attempts": attempt,
+                    "verdict": str(qa_result.verdict)[:80],
+                    "score": float(qa_result.score),
+                    "differences": [str(item)[:320] for item in qa_result.differences[:5]],
+                    "suggestions": [str(item)[:320] for item in qa_result.suggestions[:5]],
+                    "reason": "repair_budget_exhausted",
+                },
+            )
             state.mark_blocked("; ".join(details), tool_name="seed_qa")
             self._save(state)
             return (
@@ -4354,6 +4371,8 @@ class AutoPipeline:
             stop_reason_code=state.last_error_code,
             runtime_backend=state.runtime_backend,
             opencode_mode=state.opencode_mode,
+            efficiency_mode=state.efficiency_mode,
+            frugality_assurance=state.frugality_assurance,
             invoked_by=state.invoked_by(),
             provenance=dict(state.provenance) if state.provenance else None,
             last_authoring_backend=state.last_authoring_backend,

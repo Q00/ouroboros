@@ -324,10 +324,30 @@ class JobManager:
     """Owns background MCP jobs and persists their state as events."""
 
     def __init__(
-        self, event_store: EventStore | None = None, checkpoint_store: CheckpointStore | None = None
+        self,
+        event_store: EventStore | None = None,
+        checkpoint_store: CheckpointStore | None = None,
+        *,
+        durable_jobs: bool = False,
+        forced_inline_job_id: str | None = None,
     ) -> None:
         self._event_store = event_store or EventStore()
         self._checkpoint_store = checkpoint_store
+        # MCP stdio servers are intentionally short-lived: one Codex/Claude
+        # turn may tear the process down while an execution is still active.
+        # Production composition enables ``durable_jobs`` so Start* handlers
+        # transfer ownership to a detached worker process instead of keeping
+        # the runner on this event loop.  Directly-constructed managers keep
+        # the historical in-process default, which is useful for embedding and
+        # deterministic unit tests.
+        self._durable_jobs = durable_jobs
+        # A detached worker re-enters the exact same Start* handler.  Its first
+        # background allocation must use the job id accepted by the parent and
+        # run inline in the worker; nested jobs (auto -> run, run -> evaluate)
+        # remain durable and are detached again.  This one-shot id is that
+        # recursion boundary.
+        self._forced_inline_job_id = forced_inline_job_id
+        self._forced_inline_allocations: set[str] = set()
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
@@ -350,6 +370,15 @@ class JobManager:
     async def allocate_job_id(self) -> str:
         """Reserve a fresh job ID before constructing a job runner."""
         await self._ensure_initialized()
+        if self._forced_inline_job_id is not None:
+            job_id = self._forced_inline_job_id
+            self._forced_inline_job_id = None
+            if job_id in self._known_job_ids or await self._job_exists(job_id):
+                raise ValueError(f"Job already exists: {job_id}")
+            self._known_job_ids.add(job_id)
+            self._reserved_job_ids.add(job_id)
+            self._forced_inline_allocations.add(job_id)
+            return job_id
         while True:
             job_id = f"job_{uuid4().hex[:12]}"
             if job_id in self._known_job_ids:
@@ -359,6 +388,29 @@ class JobManager:
             self._known_job_ids.add(job_id)
             self._reserved_job_ids.add(job_id)
             return job_id
+
+    @property
+    def durable_jobs_enabled(self) -> bool:
+        """Whether Start* jobs should be owned by detached worker processes."""
+        return self._durable_jobs
+
+    def claim_forced_inline_allocation(self, job_id: str) -> bool:
+        """Consume the worker's one-shot inline allocation marker.
+
+        Returns ``True`` only in the detached worker that was launched for
+        ``job_id``.  All later allocations in that worker are ordinary durable
+        jobs and therefore detach into their own owners.
+        """
+        if job_id not in self._forced_inline_allocations:
+            return False
+        self._forced_inline_allocations.remove(job_id)
+        return True
+
+    def abandon_reserved_job_id(self, job_id: str) -> None:
+        """Release a reservation when detached process launch was not accepted."""
+        self._reserved_job_ids.discard(job_id)
+        self._forced_inline_allocations.discard(job_id)
+        self._known_job_ids.discard(job_id)
 
     async def start_job(
         self,
@@ -713,6 +765,19 @@ class JobManager:
             await asyncio.sleep(interval)
             snapshot = await self.get_snapshot(job_id)
             if snapshot.is_terminal:
+                return
+
+            # ``ouroboros_cancel_job`` may be called from a later MCP process
+            # than the detached worker that owns this runner.  That controller
+            # can persist CANCEL_REQUESTED and the durable AgentProcess marker,
+            # but it has no in-memory Task to cancel.  The owning monitor is
+            # therefore the cross-process delivery boundary: observe the
+            # persisted request and cancel the local runner so _run_job writes
+            # the authoritative CANCELLED terminal event.
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                runner = self._runner_tasks.get(job_id)
+                if runner is not None and not runner.done():
+                    runner.cancel()
                 return
 
             if snapshot.status != JobStatus.CANCEL_REQUESTED:

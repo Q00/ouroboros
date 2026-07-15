@@ -21,7 +21,16 @@ import yaml
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import get_auto_evaluate_enabled, get_max_parallel_workers
+from ouroboros.core.conductor import (
+    ConductorDirective,
+    validate_conductor_successor_authorization,
+)
 from ouroboros.core.errors import ConfigError, ValidationError
+from ouroboros.core.execution_preferences import (
+    ResolvedExecutionPreferences,
+    execution_preferences_from_contract,
+    resolve_execution_preferences,
+)
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed, ac_texts
@@ -67,7 +76,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.model_routing import tier_from_model_tier_arg
 from ouroboros.orchestrator.runner import OrchestratorRunner
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
@@ -111,6 +120,148 @@ def _resolve_model_tier_request(
         effective,
         tier_from_model_tier_arg(effective) if should_override else None,
         effective if should_override else None,
+    )
+
+
+def _resolve_execution_preferences_request(
+    arguments: Mapping[str, Any],
+    *,
+    is_resume: bool,
+) -> tuple[ResolvedExecutionPreferences, str | None, str | None]:
+    """Resolve public preferences while preserving resume immutability.
+
+    Fresh runs apply the documented adaptive/observe or quality-first/off
+    default mapping. A resume restores the persisted execution contract; an
+    intentional preference change must start a successor execution instead of
+    mutating the active or historical run.
+    """
+    raw_efficiency_value = arguments.get("efficiency_mode")
+    raw_assurance_value = arguments.get("frugality_assurance")
+    efficiency_supplied = raw_efficiency_value is not None and raw_efficiency_value != ""
+    assurance_supplied = raw_assurance_value is not None and raw_assurance_value != ""
+    if is_resume and (efficiency_supplied or assurance_supplied):
+        raise ValueError(
+            "efficiency_mode and frugality_assurance cannot be changed on resume; "
+            "start a new successor execution for an intentional change"
+        )
+    raw_efficiency = raw_efficiency_value if efficiency_supplied else None
+    raw_assurance = raw_assurance_value if assurance_supplied else None
+    if raw_efficiency is not None and not isinstance(raw_efficiency, str):
+        raise ValueError("efficiency_mode must be adaptive or quality_first")
+    if raw_assurance is not None and not isinstance(raw_assurance, str):
+        raise ValueError("frugality_assurance must be off, observe, or strict")
+    preferences = resolve_execution_preferences(raw_efficiency, raw_assurance)
+    return (
+        preferences,
+        raw_efficiency if isinstance(raw_efficiency, str) else None,
+        raw_assurance if isinstance(raw_assurance, str) else None,
+    )
+
+
+def _persisted_execution_preferences(progress: Mapping[str, Any]) -> ResolvedExecutionPreferences:
+    """Read the immutable preference contract used by a resumed session."""
+    raw_contract = progress.get("execution_contract")
+    if raw_contract is None:
+        return resolve_execution_preferences(None, None)
+    if not isinstance(raw_contract, Mapping):
+        raise ValueError("Persisted execution_contract is invalid")
+    raw_preferences = raw_contract.get("execution_preferences")
+    preferences = execution_preferences_from_contract(raw_preferences)
+    if preferences is None:
+        if raw_preferences is None:
+            return resolve_execution_preferences(None, None)
+        raise ValueError("Persisted execution preferences are invalid")
+    return preferences
+
+
+async def _prepare_conductor_successor_seed(
+    *,
+    arguments: Mapping[str, Any],
+    seed_content: str,
+    event_store: EventStore | None,
+    tool_name: str,
+    is_resume: bool,
+) -> Result[str, MCPToolError]:
+    """Validate an audited successor receipt and embed its bounded directive."""
+    try:
+        parsed = yaml.safe_load(seed_content)
+    except yaml.YAMLError as exc:
+        return Result.err(MCPToolError(f"Failed to parse seed YAML: {exc}", tool_name=tool_name))
+    if not isinstance(parsed, dict):
+        return Result.err(MCPToolError("Seed YAML must be a mapping", tool_name=tool_name))
+
+    raw_argument_directive = arguments.get("conductor_directive")
+    raw_seed_directive = parsed.get("conductor_directive")
+    raw_directive = (
+        raw_argument_directive if raw_argument_directive is not None else raw_seed_directive
+    )
+    if raw_directive is None:
+        return Result.ok(seed_content)
+    if is_resume:
+        return Result.err(
+            MCPToolError(
+                "conductor_directive starts a successor execution and cannot be injected on resume",
+                tool_name=tool_name,
+            )
+        )
+    if not isinstance(raw_directive, Mapping):
+        return Result.err(
+            MCPToolError("conductor_directive must be an object", tool_name=tool_name)
+        )
+
+    decision_id = arguments.get("conductor_decision_id")
+    predecessor_execution_id = arguments.get("predecessor_execution_id")
+    if not isinstance(decision_id, str) or not decision_id.strip():
+        return Result.err(
+            MCPToolError(
+                "conductor_decision_id is required for a successor directive",
+                tool_name=tool_name,
+            )
+        )
+    if not isinstance(predecessor_execution_id, str) or not predecessor_execution_id.strip():
+        return Result.err(
+            MCPToolError(
+                "predecessor_execution_id is required for a successor directive",
+                tool_name=tool_name,
+            )
+        )
+    try:
+        directive = ConductorDirective.from_mapping(raw_directive)
+    except (TypeError, ValueError) as exc:
+        return Result.err(MCPToolError(str(exc), tool_name=tool_name))
+
+    store = event_store or EventStore()
+    owns_store = event_store is None
+    try:
+        await store.initialize()
+        events = await store.replay("conductor_decision", decision_id.strip())
+    finally:
+        if owns_store:
+            await store.close()
+    selected = next(
+        (event for event in events if event.type == "conductor.decision.selected"), None
+    )
+    if selected is None:
+        return Result.err(
+            MCPToolError(
+                "No selected conductor decision receipt matches conductor_decision_id",
+                tool_name=tool_name,
+            )
+        )
+    try:
+        validate_conductor_successor_authorization(
+            selected.data,
+            directive=directive,
+            predecessor_execution_id=predecessor_execution_id.strip(),
+        )
+    except (TypeError, ValueError) as exc:
+        return Result.err(MCPToolError(str(exc), tool_name=tool_name))
+
+    parsed["conductor_directive"] = directive.to_event_data()
+    parsed["conductor_decision_id"] = decision_id.strip()
+    parsed["predecessor_execution_id"] = predecessor_execution_id.strip()
+    return Result.ok(
+        yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False, default_flow_style=False)
     )
 
 
@@ -236,38 +387,52 @@ async def _validate_plugin_resume_acceptance_contract(
                     tool_name=tool_name,
                 )
             )
-        persisted_fat_harness_mode = tracker_result.value.progress.get("fat_harness_mode")
-        if persisted_fat_harness_mode is True:
-            return Result.err(
-                MCPToolError(
-                    "OpenCode plugin dispatch cannot resume sessions created with "
-                    "fat_harness_mode=True because the child task cannot enforce typed "
-                    "evidence plus verifier PASS acceptance. Resume without plugin dispatch.",
-                    tool_name=tool_name,
-                )
-            )
-        if execution_mode == "fat_harness" and not isinstance(persisted_fat_harness_mode, bool):
-            return Result.err(
-                MCPToolError(
-                    "OpenCode plugin dispatch cannot resume sessions whose seed requests "
-                    "execution_mode='fat_harness' without a persisted fat_harness_mode "
-                    "contract because the child task cannot enforce typed evidence plus "
-                    "verifier PASS acceptance. Resume without plugin dispatch.",
-                    tool_name=tool_name,
-                )
-            )
-        return Result.err(
-            MCPToolError(
-                "OpenCode plugin dispatch cannot safely resume an existing execute_seed "
-                "session because the delegated child cannot restore and verify the "
-                "session's immutable execution contract (Seed, backend, workspace, and "
-                "model routing). Resume without plugin dispatch or start a new session.",
-                tool_name=tool_name,
-            )
+        return _validate_plugin_resume_tracker_acceptance_contract(
+            tracker=tracker_result.value,
+            execution_mode=execution_mode,
+            tool_name=tool_name,
         )
     finally:
         if owns_store:
             await store.close()
+
+
+def _validate_plugin_resume_tracker_acceptance_contract(
+    *,
+    tracker: SessionTracker,
+    execution_mode: Any,
+    tool_name: str,
+) -> Result[None, MCPToolError]:
+    """Apply the plugin-resume acceptance gate to an already reconstructed session."""
+    persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
+    if persisted_fat_harness_mode is True:
+        return Result.err(
+            MCPToolError(
+                "OpenCode plugin dispatch cannot resume sessions created with "
+                "fat_harness_mode=True because the child task cannot enforce typed "
+                "evidence plus verifier PASS acceptance. Resume without plugin dispatch.",
+                tool_name=tool_name,
+            )
+        )
+    if execution_mode == "fat_harness" and not isinstance(persisted_fat_harness_mode, bool):
+        return Result.err(
+            MCPToolError(
+                "OpenCode plugin dispatch cannot resume sessions whose seed requests "
+                "execution_mode='fat_harness' without a persisted fat_harness_mode "
+                "contract because the child task cannot enforce typed evidence plus "
+                "verifier PASS acceptance. Resume without plugin dispatch.",
+                tool_name=tool_name,
+            )
+        )
+    return Result.err(
+        MCPToolError(
+            "OpenCode plugin dispatch cannot safely resume an existing execute_seed "
+            "session because the delegated child cannot restore and verify the "
+            "session's immutable execution contract (Seed, backend, workspace, and "
+            "model routing). Resume without plugin dispatch or start a new session.",
+            tool_name=tool_name,
+        )
+    )
 
 
 def _pause_metadata_from_progress(progress: dict[str, Any]) -> dict[str, Any]:
@@ -506,6 +671,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    session_signal_hub: Any | None = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -548,6 +714,28 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     required=False,
                 ),
                 MCPToolParameter(
+                    name="efficiency_mode",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Execution efficiency policy. adaptive may start decomposed ACs "
+                        "on lower-cost tiers and escalate on recovery; quality_first keeps "
+                        "children at the parent starting tier. Default: adaptive."
+                    ),
+                    required=False,
+                    enum=("adaptive", "quality_first"),
+                ),
+                MCPToolParameter(
+                    name="frugality_assurance",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Frugality assurance: off, lightweight observe, or explicit strict "
+                        "baseline eligibility. Defaults from efficiency_mode; strict is "
+                        "never enabled implicitly."
+                    ),
+                    required=False,
+                    enum=("off", "observe", "strict"),
+                ),
+                MCPToolParameter(
                     name="model_tier",
                     type=ToolInputType.STRING,
                     description=(
@@ -579,6 +767,29 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         "Override execution.auto_evaluate for this call. When true, "
                         "a successful background execute_seed run enqueues formal "
                         "3-stage evaluation as a separate bounded background job."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="conductor_decision_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Selected conductor decision receipt authorizing a fresh successor."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="predecessor_execution_id",
+                    type=ToolInputType.STRING,
+                    description="Execution ID that the new successor follows.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="conductor_directive",
+                    type=ToolInputType.OBJECT,
+                    description=(
+                        "Bounded corrective context copied exactly from the selected "
+                        "conductor decision. Fresh successor executions only."
                     ),
                     required=False,
                 ),
@@ -624,10 +835,27 @@ class ExecuteSeedHandler(BridgeAwareMixin):
 
         session_id = arguments.get("session_id")
         is_resume = bool(session_id)
+        successor_seed = await _prepare_conductor_successor_seed(
+            arguments=arguments,
+            seed_content=seed_content,
+            event_store=self.event_store,
+            tool_name="ouroboros_execute_seed",
+            is_resume=is_resume,
+        )
+        if successor_seed.is_err:
+            return Result.err(successor_seed.error)
+        seed_content = successor_seed.value
+        arguments = {**arguments, "seed_content": seed_content}
         session_id = session_id or session_id_override
         model_tier, base_model_tier_override, delegated_model_tier = _resolve_model_tier_request(
             arguments, is_resume=is_resume
         )
+        try:
+            execution_preferences, raw_efficiency_mode, raw_frugality_assurance = (
+                _resolve_execution_preferences_request(arguments, is_resume=is_resume)
+            )
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_execute_seed"))
         # ``medium`` is the public response/default value, not an explicit resume
         # override. Preserve a session's resolved routing contract unless the
         # caller actually supplied model_tier on this invocation.
@@ -712,6 +940,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 skip_qa=arguments.get("skip_qa", False),
                 auto_evaluate=auto_evaluate,
                 model_tier=delegated_model_tier,
+                efficiency_mode=execution_preferences.efficiency_mode.value,
+                frugality_assurance=execution_preferences.frugality_assurance.value,
+                frugality_assurance_explicit=(execution_preferences.frugality_assurance_explicit),
                 max_parallel_workers=max_parallel_workers,
             )
             # Preserve public response shape (#442): consumers expect
@@ -726,6 +957,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
                     "model_tier": model_tier,
+                    "efficiency_mode": execution_preferences.efficiency_mode.value,
+                    "frugality_assurance": execution_preferences.frugality_assurance.value,
                     **({} if is_resume else _plugin_fat_harness_downgrade_meta(execution_mode)),
                     **_plugin_verification_meta(
                         session_id,
@@ -781,6 +1014,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             )
                         )
                     tracker = tracker_result.value
+                    try:
+                        execution_preferences = _persisted_execution_preferences(tracker.progress)
+                    except ValueError as exc:
+                        return Result.err(
+                            MCPToolError(str(exc), tool_name="ouroboros_execute_seed")
+                        )
                     if tracker.status in (
                         SessionStatus.COMPLETED,
                         SessionStatus.CANCELLED,
@@ -887,6 +1126,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # Drive model-tier routing from the MCP model_tier arg
                     # (small/medium/large → frugal/standard/frontier top-level tier).
                     base_model_tier=base_model_tier_override,
+                    efficiency_mode=raw_efficiency_mode,
+                    frugality_assurance=raw_frugality_assurance,
+                    session_signal_hub=self.session_signal_hub,
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
@@ -1064,6 +1306,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     f"Status: {status_label}\n"
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
+                    f"Efficiency Mode: {execution_preferences.efficiency_mode.value}\n"
+                    "Frugality Assurance: "
+                    f"{execution_preferences.frugality_assurance.value}\n"
                 )
                 message += _run_only_verification_text(tracker.session_id)
                 # Best-effort live dashboard URL (singleton daemon, reused across
@@ -1103,6 +1348,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     "status": status_label,
                     "runtime_backend": effective_runtime_backend,
                     "llm_backend": resolved_llm_backend,
+                    "efficiency_mode": execution_preferences.efficiency_mode.value,
+                    "frugality_assurance": (execution_preferences.frugality_assurance.value),
                     "resume_requested": is_resume,
                     **({"dashboard_url": dashboard_url} if dashboard_url else {}),
                     **_run_only_verification_meta(tracker.session_id),
@@ -1592,6 +1839,57 @@ class StartExecuteSeedHandler:
         arguments = {**arguments, "seed_content": seed_content}
 
         is_resume = bool(arguments.get("session_id"))
+        successor_seed = await _prepare_conductor_successor_seed(
+            arguments=arguments,
+            seed_content=seed_content,
+            event_store=self._event_store,
+            tool_name="ouroboros_start_execute_seed",
+            is_resume=is_resume,
+        )
+        if successor_seed.is_err:
+            return Result.err(successor_seed.error)
+        seed_content = successor_seed.value
+        arguments = {**arguments, "seed_content": seed_content}
+        try:
+            execution_preferences, _raw_efficiency_mode, _raw_frugality_assurance = (
+                _resolve_execution_preferences_request(arguments, is_resume=is_resume)
+            )
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_execute_seed"))
+        resumed_tracker: SessionTracker | None = None
+        if is_resume:
+            await self._event_store.initialize()
+            session_id = arguments.get("session_id")
+            assert isinstance(session_id, str) and session_id
+            session_result = await SessionRepository(self._event_store).reconstruct_session(
+                session_id
+            )
+            if session_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Session resume failed: {session_result.error.message}",
+                        tool_name="ouroboros_start_execute_seed",
+                    )
+                )
+            resumed_tracker = session_result.value
+            if resumed_tracker.status in (
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            ):
+                return Result.err(
+                    MCPToolError(
+                        (
+                            f"Session {resumed_tracker.session_id} is already "
+                            f"{resumed_tracker.status.value} and cannot be resumed"
+                        ),
+                        tool_name="ouroboros_start_execute_seed",
+                    )
+                )
+            try:
+                execution_preferences = _persisted_execution_preferences(resumed_tracker.progress)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_execute_seed"))
         seed_parse = _parse_seed_yaml_for_execution_mode(
             seed_content,
             tool_name="ouroboros_start_execute_seed",
@@ -1622,10 +1920,10 @@ class StartExecuteSeedHandler:
         # StartExecuteSeedHandler delegates to ExecuteSeedHandler internally.
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             if is_resume:
-                plugin_mode_result = await _validate_plugin_resume_acceptance_contract(
-                    event_store=self.event_store,
+                assert resumed_tracker is not None
+                plugin_mode_result = _validate_plugin_resume_tracker_acceptance_contract(
+                    tracker=resumed_tracker,
                     execution_mode=execution_mode,
-                    session_id=arguments.get("session_id"),
                     tool_name="ouroboros_start_execute_seed",
                 )
             else:
@@ -1660,6 +1958,9 @@ class StartExecuteSeedHandler:
                 skip_qa=arguments.get("skip_qa", False),
                 auto_evaluate=auto_evaluate,
                 model_tier=delegated_model_tier,
+                efficiency_mode=execution_preferences.efficiency_mode.value,
+                frugality_assurance=execution_preferences.frugality_assurance.value,
+                frugality_assurance_explicit=(execution_preferences.frugality_assurance_explicit),
                 max_parallel_workers=max_parallel_workers,
             )
 
@@ -1676,6 +1977,8 @@ class StartExecuteSeedHandler:
                 "status": DELEGATED_TO_PLUGIN,
                 "dispatch_mode": "plugin",
                 "runtime_backend": self.agent_runtime_backend,
+                "efficiency_mode": execution_preferences.efficiency_mode.value,
+                "frugality_assurance": execution_preferences.frugality_assurance.value,
                 **({} if is_resume else _plugin_fat_harness_downgrade_meta(execution_mode)),
                 **_plugin_verification_meta(
                     plugin_session_id,
@@ -1713,31 +2016,8 @@ class StartExecuteSeedHandler:
         execution_id: str | None = None
         new_session_id: str | None = None
         if session_id:
-            repo = SessionRepository(self._event_store)
-            session_result = await repo.reconstruct_session(session_id)
-            if session_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        f"Session resume failed: {session_result.error.message}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-            tracker = session_result.value
-            if tracker.status in (
-                SessionStatus.COMPLETED,
-                SessionStatus.CANCELLED,
-                SessionStatus.FAILED,
-            ):
-                return Result.err(
-                    MCPToolError(
-                        (
-                            f"Session {tracker.session_id} is already "
-                            f"{tracker.status.value} and cannot be resumed"
-                        ),
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-            execution_id = tracker.execution_id
+            assert resumed_tracker is not None
+            execution_id = resumed_tracker.execution_id
         else:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
@@ -1788,6 +2068,11 @@ class StartExecuteSeedHandler:
             ),
             work_fn=_runner,
             cancelled_text="Seed execution cancelled before restart work began.",
+            detached_tool_name="ouroboros_start_execute_seed",
+            detached_arguments=arguments,
+            runtime_backend=self.agent_runtime_backend,
+            llm_backend=self._execute_handler.llm_backend,
+            opencode_mode=self.opencode_mode,
         )
 
         from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
@@ -1815,6 +2100,9 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n"
+            f"Efficiency Mode: {execution_preferences.efficiency_mode.value}\n"
+            "Frugality Assurance: "
+            f"{execution_preferences.frugality_assurance.value}\n"
             f"{dashboard_line}\n"
             f"{_run_only_verification_text(snapshot.links.session_id)}\n"
             "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
@@ -1829,6 +2117,8 @@ class StartExecuteSeedHandler:
             "cursor": snapshot.cursor,
             "runtime_backend": runtime_backend,
             "llm_backend": llm_backend,
+            "efficiency_mode": execution_preferences.efficiency_mode.value,
+            "frugality_assurance": execution_preferences.frugality_assurance.value,
             "job_observer": build_job_observer_contract(
                 job_id=snapshot.job_id,
                 cursor=snapshot.cursor,
@@ -1845,5 +2135,6 @@ class StartExecuteSeedHandler:
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=False,
                 meta=meta,
+                structured_content=dict(meta),
             )
         )

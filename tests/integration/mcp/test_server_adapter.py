@@ -6,7 +6,7 @@ registration, resource handling, and the full server lifecycle.
 
 import asyncio
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -94,6 +94,31 @@ class TestMCPServerAdapterToolRegistration:
         assert server.info.capabilities.tools is True
         assert len(server.info.tools) == 1
         assert server.info.tools[0].name == "echo"
+
+    @pytest.mark.asyncio
+    async def test_call_tool_preserves_structured_mcp_error_details(
+        self,
+        echo_handler: EchoToolHandler,
+    ) -> None:
+        """Recovery receipts must survive the server adapter unchanged."""
+        server = MCPServerAdapter()
+        server.register_tool(echo_handler)
+        expected = MCPToolError(
+            "Detached worker acceptance is pending",
+            tool_name="echo",
+            error_code="detached_job_acceptance_pending",
+            details={"job_id": "job_1", "status": "acceptance_pending"},
+        )
+        echo_handler.handle = AsyncMock(side_effect=expected)  # type: ignore[method-assign]
+
+        result = await server.call_tool("echo", {})
+
+        assert result.is_err
+        assert result.error is expected
+        assert result.error.details == {
+            "job_id": "job_1",
+            "status": "acceptance_pending",
+        }
 
     def test_register_multiple_tools(
         self,
@@ -509,7 +534,10 @@ class TestCreateOuroborosServer:
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_ralph",
+        "ouroboros_record_conductor_decision",
         "ouroboros_session_status",
+        "ouroboros_session_signal",
+        "ouroboros_session_signal_targets",
         "ouroboros_start_auto",
         "ouroboros_start_evaluate",
         "ouroboros_start_evolve_step",
@@ -525,6 +553,29 @@ class TestCreateOuroborosServer:
         assert server.info.version == "1.0.0"
         tool_names = {tool.name for tool in server.info.tools}
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
+
+    def test_synapse_tools_and_execute_paths_share_one_composition_root_hub(self) -> None:
+        """Public admission and active execution must use the same live queue."""
+        from ouroboros.mcp.tools.execution_handlers import (
+            ExecuteSeedHandler,
+            StartExecuteSeedHandler,
+        )
+        from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler
+
+        server = create_ouroboros_server()
+        runtime_context = server._runtime_context
+        execute = server._tool_handlers["ouroboros_execute_seed"]
+        start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
+        signal = server._tool_handlers["ouroboros_session_signal"]
+
+        assert runtime_context is not None
+        assert runtime_context.synapse is not None
+        assert isinstance(execute, ExecuteSeedHandler)
+        assert isinstance(start_execute, StartExecuteSeedHandler)
+        assert isinstance(signal, SynapseSignalHandler)
+        assert execute.session_signal_hub is runtime_context.synapse
+        assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
+        assert signal.mailbox.delivery_queue is runtime_context.synapse
 
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""

@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shlex
 import tempfile
+import tomllib
 from typing import Any
 
 from ouroboros.codex.cli_policy import (
@@ -31,6 +32,7 @@ from ouroboros.codex_permissions import (
 )
 from ouroboros.config import get_codex_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
@@ -273,6 +275,14 @@ class CodexCliRuntime:
             # reuse/continue a Codex thread but cannot orchestrate Codex children;
             # sub-agent fan-out stays in-process. See SubagentOrchestration.
             subagent_orchestration=SubagentOrchestration.INTERNAL,
+            # ``codex exec resume <thread-id>`` re-enters one exact persisted
+            # thread. Synapse only drains signals after the current turn has
+            # completed, so this capability does not claim live interruption.
+            session_signals=SessionSignalCapabilities(
+                inform_delivery=True,
+                background_reply=True,
+                after_turn_delivery=True,
+            ),
         )
 
     @property
@@ -427,13 +437,53 @@ class CodexCliRuntime:
                 digest.update(f"non-file:{stat_result.st_mode}\0".encode("ascii"))
                 continue
             try:
-                with path.open("rb") as config_file:
-                    while chunk := config_file.read(64 * 1024):
-                        digest.update(chunk)
+                contents = path.read_bytes()
             except OSError as exc:
                 raise RuntimeError("Cannot read Codex profile configuration") from exc
+            if name == "config.toml":
+                contents = self._stable_global_codex_config_bytes(contents)
+            digest.update(contents)
             digest.update(b"\0")
         return digest.hexdigest()
+
+    @staticmethod
+    def _stable_global_codex_config_bytes(contents: bytes) -> bytes:
+        """Ignore Codex's automatic per-cwd trust bookkeeping in drift checks.
+
+        ``codex exec`` adds ``projects.<cwd>.trust_level`` on first use. That
+        mutation cannot retarget a model/profile and must not invalidate the
+        thread handle created by the same command. Any other project-scoped key
+        remains fingerprinted, as do all non-project settings.
+        """
+        try:
+            parsed = tomllib.loads(contents.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return contents
+
+        projects = parsed.get("projects")
+        if isinstance(projects, dict):
+            retained_projects: dict[str, object] = {}
+            for project_path, raw_settings in projects.items():
+                if not isinstance(raw_settings, dict):
+                    retained_projects[str(project_path)] = raw_settings
+                    continue
+                retained_settings = {
+                    str(key): value for key, value in raw_settings.items() if key != "trust_level"
+                }
+                if retained_settings:
+                    retained_projects[str(project_path)] = retained_settings
+            if retained_projects:
+                parsed["projects"] = retained_projects
+            else:
+                parsed.pop("projects", None)
+
+        return json.dumps(
+            parsed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
 
     def _assert_codex_config_files_unchanged(self) -> None:
         if self._runtime_backend != "codex":

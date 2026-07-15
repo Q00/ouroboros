@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from ouroboros.core.lineage import LineageStatus
+from ouroboros.core.types import Result
+from ouroboros.evolution.rewind import CommittedRewindResult
 from ouroboros.mcp.tools.definitions import EvolveRewindHandler
 from ouroboros.mcp.types import ToolInputType
 
@@ -64,3 +69,52 @@ class TestEvolveRewindHandlerErrors:
         result = await handler.handle({"lineage_id": "lin_test", "to_generation": 1})
         assert result.is_err
         assert "EvolutionaryLoop not configured" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_success_metadata_uses_committed_event_identity(monkeypatch) -> None:
+    from tests.unit.tui.test_lineage_viewer import make_lineage
+
+    lineage = make_lineage()
+    rewound = lineage.rewind_to(1).with_status(LineageStatus.ACTIVE)
+    occurred_at = datetime(2026, 7, 13, 6, 0, tzinfo=UTC)
+    committed = CommittedRewindResult(
+        lineage=rewound,
+        lineage_id=lineage.lineage_id,
+        from_generation=2,
+        to_generation=1,
+        rewind_event_id="rewind-event-1",
+        rewind_occurred_at=occurred_at,
+    )
+
+    class _Store:
+        async def initialize(self) -> None:
+            return None
+
+        async def replay_lineage(self, lineage_id: str):  # noqa: ARG002
+            return [object()]
+
+    class _Loop:
+        def __init__(self) -> None:
+            self.event_store = _Store()
+
+        async def rewind_to(self, current, target):  # noqa: ARG002
+            return Result.ok(committed)
+
+    class _Projector:
+        def project(self, events):  # noqa: ARG002
+            return lineage
+
+    monkeypatch.setattr("ouroboros.evolution.projector.LineageProjector", _Projector)
+    handler = EvolveRewindHandler(evolutionary_loop=_Loop())
+
+    result = await handler.handle({"lineage_id": lineage.lineage_id, "to_generation": 1})
+
+    assert result.is_ok
+    assert result.value.meta == {
+        "lineage_id": lineage.lineage_id,
+        "from_generation": 2,
+        "to_generation": 1,
+        "rewind_event_id": "rewind-event-1",
+        "rewind_occurred_at": "2026-07-13T06:00:00Z",
+    }

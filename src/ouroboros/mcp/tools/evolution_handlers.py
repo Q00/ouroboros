@@ -18,6 +18,10 @@ import yaml
 from ouroboros.auto.checkpoint_commits import checkpoint_passed_ac
 from ouroboros.auto.state import AutoCommitPolicy, AutoPipelineState
 from ouroboros.config import get_runtime_controls_config
+from ouroboros.core.conductor import (
+    ConductorDirective,
+    validate_conductor_successor_authorization,
+)
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
@@ -30,6 +34,7 @@ from ouroboros.core.worktree import (
     release_lock,
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
+from ouroboros.events.conductor import create_conductor_directive_attached_event
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
@@ -53,6 +58,76 @@ from ouroboros.mcp.types import (
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
+
+
+async def _resolve_conductor_directive(
+    *,
+    arguments: dict[str, Any],
+    event_store: EventStore | None,
+    target_type: str,
+    target_id: str,
+    tool_name: str,
+) -> Result[ConductorDirective | None, MCPToolError]:
+    raw_directive = arguments.get("conductor_directive")
+    if raw_directive is None:
+        return Result.ok(None)
+    if not isinstance(raw_directive, dict):
+        return Result.err(
+            MCPToolError("conductor_directive must be an object", tool_name=tool_name)
+        )
+    decision_id = arguments.get("conductor_decision_id")
+    predecessor_execution_id = arguments.get("predecessor_execution_id")
+    if not isinstance(decision_id, str) or not decision_id.strip():
+        return Result.err(MCPToolError("conductor_decision_id is required", tool_name=tool_name))
+    if not isinstance(predecessor_execution_id, str) or not predecessor_execution_id.strip():
+        return Result.err(MCPToolError("predecessor_execution_id is required", tool_name=tool_name))
+    if event_store is None:
+        return Result.err(
+            MCPToolError(
+                "EventStore is required for conductor successor audit", tool_name=tool_name
+            )
+        )
+    try:
+        directive = ConductorDirective.from_mapping(raw_directive)
+        await event_store.initialize()
+        decision_events = await event_store.replay("conductor_decision", decision_id.strip())
+        selected = next(
+            (event for event in decision_events if event.type == "conductor.decision.selected"),
+            None,
+        )
+        if selected is None:
+            raise ValueError("No selected conductor decision receipt matches conductor_decision_id")
+        validate_conductor_successor_authorization(
+            selected.data,
+            directive=directive,
+            predecessor_execution_id=predecessor_execution_id.strip(),
+        )
+        target_events = await event_store.replay(target_type, target_id)
+        attached = next(
+            (
+                event
+                for event in target_events
+                if event.type == "conductor.directive.attached"
+                and event.data.get("decision_id") == decision_id.strip()
+            ),
+            None,
+        )
+        if attached is not None:
+            if attached.data.get("conductor_directive_digest") != directive.digest:
+                raise ValueError("The successor target already has a different directive receipt")
+        else:
+            await event_store.append(
+                create_conductor_directive_attached_event(
+                    decision_id=decision_id.strip(),
+                    target_type=target_type,
+                    target_id=target_id,
+                    predecessor_execution_id=predecessor_execution_id.strip(),
+                    directive=directive,
+                )
+            )
+    except (TypeError, ValueError) as exc:
+        return Result.err(MCPToolError(str(exc), tool_name=tool_name))
+    return Result.ok(directive)
 
 
 def _resolve_verification_working_dir(
@@ -270,6 +345,24 @@ class EvolveStepHandler(BridgeAwareMixin):
                     description="Acceptance criteria already considered for checkpoint commits.",
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="conductor_decision_id",
+                    type=ToolInputType.STRING,
+                    description="Selected conductor decision authorizing this successor generation.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="predecessor_execution_id",
+                    type=ToolInputType.STRING,
+                    description="Execution or generation that this successor follows.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="conductor_directive",
+                    type=ToolInputType.OBJECT,
+                    description="Bounded corrective context for this successor generation.",
+                    required=False,
+                ),
             ),
         )
 
@@ -287,6 +380,17 @@ class EvolveStepHandler(BridgeAwareMixin):
                 )
             )
 
+        directive_result = await _resolve_conductor_directive(
+            arguments=arguments,
+            event_store=self.event_store or getattr(self.evolutionary_loop, "event_store", None),
+            target_type="lineage",
+            target_id=lineage_id,
+            tool_name="ouroboros_evolve_step",
+        )
+        if directive_result.is_err:
+            return Result.err(directive_result.error)
+        conductor_directive = directive_result.value
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # Parity with qa / execute_seed / lateral / evaluate handlers. When
         # the opencode bridge plugin is active we emit a `_subagent`
@@ -298,6 +402,11 @@ class EvolveStepHandler(BridgeAwareMixin):
             parallel=arguments.get("parallel", True),
             skip_qa=arguments.get("skip_qa", False),
             project_dir=arguments.get("project_dir"),
+            conductor_directive=(
+                conductor_directive.to_event_data() if conductor_directive is not None else None
+            ),
+            conductor_decision_id=arguments.get("conductor_decision_id"),
+            predecessor_execution_id=arguments.get("predecessor_execution_id"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             return await dispatch_plugin_terminal(
@@ -366,8 +475,13 @@ class EvolveStepHandler(BridgeAwareMixin):
             # Ensure event store is initialized before evolve_step accesses it
             # (evolve_step calls replay_lineage/append before executor/evaluator)
             await self.evolutionary_loop.event_store.initialize()
+            evolve_kwargs: dict[str, Any] = {"execute": execute, "parallel": parallel}
+            if conductor_directive is not None:
+                evolve_kwargs["conductor_directive"] = conductor_directive
             result = await self.evolutionary_loop.evolve_step(
-                lineage_id, initial_seed, execute=execute, parallel=parallel
+                lineage_id,
+                initial_seed,
+                **evolve_kwargs,
             )
             if result.is_ok:
                 step = result.value
@@ -725,7 +839,8 @@ class EvolveRewindHandler:
                 )
             )
 
-        rewound_lineage = result.value
+        committed = result.value
+        rewound_lineage = committed.lineage
 
         # Get seed_json from the target generation if available
         target_gen = None
@@ -741,8 +856,8 @@ class EvolveRewindHandler:
         text = (
             f"## Rewind Complete\n\n"
             f"**Lineage**: {lineage_id}\n"
-            f"**From generation**: {from_gen}\n"
-            f"**To generation**: {to_generation}\n"
+            f"**From generation**: {committed.from_generation}\n"
+            f"**To generation**: {committed.to_generation}\n"
             f"**Status**: {rewound_lineage.status.value}\n"
             f"**Git tag**: `ooo/{lineage_id}/gen_{to_generation}`\n\n"
             f"Generations {to_generation + 1}–{from_gen} have been truncated.\n"
@@ -756,8 +871,12 @@ class EvolveRewindHandler:
                 is_error=False,
                 meta={
                     "lineage_id": lineage_id,
-                    "from_generation": from_gen,
-                    "to_generation": to_generation,
+                    "from_generation": committed.from_generation,
+                    "to_generation": committed.to_generation,
+                    "rewind_event_id": committed.rewind_event_id,
+                    "rewind_occurred_at": committed.rewind_occurred_at.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
                 },
             )
         )
@@ -965,6 +1084,17 @@ class StartEvolveStepHandler:
                 )
             )
 
+        directive_result = await _resolve_conductor_directive(
+            arguments=arguments,
+            event_store=self._event_store,
+            target_type="lineage",
+            target_id=lineage_id,
+            tool_name="ouroboros_start_evolve_step",
+        )
+        if directive_result.is_err:
+            return Result.err(directive_result.error)
+        conductor_directive = directive_result.value
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # Own-gate parity with StartExecuteSeedHandler. Plugin mode is
         # terminal: return envelope, skip background-job enqueue entirely.
@@ -975,6 +1105,11 @@ class StartEvolveStepHandler:
             parallel=arguments.get("parallel", True),
             skip_qa=arguments.get("skip_qa", False),
             project_dir=arguments.get("project_dir"),
+            conductor_directive=(
+                conductor_directive.to_event_data() if conductor_directive is not None else None
+            ),
+            conductor_decision_id=arguments.get("conductor_decision_id"),
+            predecessor_execution_id=arguments.get("predecessor_execution_id"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             # Plugin mode: work runs in the OpenCode child session (Task
@@ -1012,6 +1147,10 @@ class StartEvolveStepHandler:
             links=JobLinks(lineage_id=lineage_id),
             work_fn=_runner,
             cancelled_text="evolve_step cancelled before restart work began.",
+            detached_tool_name="ouroboros_start_evolve_step",
+            detached_arguments=arguments,
+            runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
         )
 
         text = (
@@ -1020,19 +1159,21 @@ class StartEvolveStepHandler:
             f"Lineage ID: {lineage_id}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
         )
+        meta = {
+            "job_id": snapshot.job_id,
+            "lineage_id": lineage_id,
+            "status": snapshot.status.value,
+            "cursor": snapshot.cursor,
+            "job_observer": build_job_observer_contract(
+                job_id=snapshot.job_id,
+                cursor=snapshot.cursor,
+            ),
+        }
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
                 is_error=False,
-                meta={
-                    "job_id": snapshot.job_id,
-                    "lineage_id": lineage_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
-                    "job_observer": build_job_observer_contract(
-                        job_id=snapshot.job_id,
-                        cursor=snapshot.cursor,
-                    ),
-                },
+                meta=meta,
+                structured_content=dict(meta),
             )
         )

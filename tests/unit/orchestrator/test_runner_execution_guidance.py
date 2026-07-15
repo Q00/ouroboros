@@ -50,6 +50,7 @@ def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[Orchestrato
 
     event_store = AsyncMock()
     event_store.append = AsyncMock()
+    event_store.replay = AsyncMock(return_value=[])
     config = get_default_config()
     execution = config.execution.model_copy(update={"project_guidance": guidance_ids})
     config = config.model_copy(update={"execution": execution})
@@ -193,8 +194,33 @@ async def test_records_bounded_guidance_injection_event(tmp_path: Path) -> None:
     event = event_store.append.await_args.args[0]
     assert event.type == "orchestrator.guidance.injected"
     assert event.data["delivery_mode"] == "native"
+    assert event.data["injection_key"] == "start"
     assert event.data["guidance_refs"][0]["stable_id"] == "guidance:project:team"
     assert "content" not in event.data["guidance_refs"][0]
+
+
+@pytest.mark.asyncio
+async def test_guidance_injection_replay_deduplicates_same_attempt(tmp_path: Path) -> None:
+    _write_guidance(tmp_path, "team", "Use the project conventions.\n")
+    runner, event_store = _runner(tmp_path, ("team",))
+    runner._build_execution_contract(seed=_seed())
+
+    await runner._record_execution_guidance_injection(
+        session_id="sess-guidance",
+        execution_id="exec-guidance",
+        injection_key="resume:3",
+    )
+    persisted = event_store.append.await_args.args[0]
+    event_store.append.reset_mock()
+    event_store.replay.return_value = [persisted]
+
+    await runner._record_execution_guidance_injection(
+        session_id="sess-guidance",
+        execution_id="exec-guidance",
+        injection_key="resume:3",
+    )
+
+    event_store.append.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -214,7 +240,7 @@ async def test_guidance_provenance_persistence_is_fail_closed(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_execute_seed_does_not_call_runtime_that_ignores_guidance(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
-    runner, _store = _runner(tmp_path, ("team",))
+    runner, event_store = _runner(tmp_path, ("team",))
     runner._adapter.capabilities = replace(
         FULL_CAPABILITIES,
         system_prompt_support=ParamSupport.IGNORED,
@@ -236,16 +262,23 @@ async def test_execute_seed_does_not_call_runtime_that_ignores_guidance(tmp_path
 async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path: Path) -> None:
     sentinel = "GUIDANCE_SENTINEL_FRESH"
     _write_guidance(tmp_path, "team", f"Follow project conventions. {sentinel}\n")
-    runner, _store = _runner(tmp_path, ("team",))
+    runner, event_store = _runner(tmp_path, ("team",))
     tracker = SessionTracker.create(
         "exec-guidance-fresh",
         _seed().metadata.seed_id,
         session_id="sess-guidance-fresh",
     )
     captured: dict[str, Any] = {}
+    call_order: list[str] = []
+
+    async def append_event(event: Any) -> None:
+        call_order.append(event.type)
+
+    event_store.append.side_effect = append_event
 
     async def execute_task(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
         del args
+        call_order.append("runtime.execute_task")
         captured.update(kwargs)
         yield AgentMessage(
             type="result",
@@ -282,6 +315,9 @@ async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path:
         result = await runner.execute_seed(_seed(), parallel=False)
 
     assert result.is_ok
+    assert call_order.index("orchestrator.guidance.injected") < call_order.index(
+        "runtime.execute_task"
+    )
     assert sentinel in captured["system_prompt"]
     assert "The Seed and its Acceptance Criteria take precedence" in captured["system_prompt"]
 
@@ -467,3 +503,10 @@ async def test_resume_delivers_persisted_guidance_to_adapter_system_prompt(tmp_p
     assert result.is_ok
     assert resumed._project_guidance_ids == ()
     assert sentinel in captured["system_prompt"]
+    guidance_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args[0].type == "orchestrator.guidance.injected"
+    ]
+    assert len(guidance_events) == 1
+    assert guidance_events[0].data["injection_key"] == "resume:0"

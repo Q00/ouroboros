@@ -11,6 +11,8 @@ mcp_args:
   skip_run: "$skip_run"
   complete_product: "$complete_product"
   pipeline_timeout_seconds: "$pipeline_timeout_seconds"
+  efficiency_mode: "$efficiency_mode"
+  frugality_assurance: "$frugality_assurance"
 ---
 
 # /ouroboros:auto
@@ -67,11 +69,20 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 | `--max-interview-rounds N` | `max_interview_rounds=N` | integer |
 | `--max-repair-rounds N` | `max_repair_rounds=N` | integer |
 | `--pipeline-timeout-seconds X` | `pipeline_timeout_seconds=X` | number |
+| `--efficiency-mode adaptive\|quality_first` | `efficiency_mode=<value>` | string |
+| `--frugality-assurance off\|observe\|strict` | `frugality_assurance=<value>` | string |
 | `--resume <id>` | `resume=<id>` | string |
 
 `--max-generations` is **not** a flag for `ooo auto`; it belongs to `ooo ralph`. When `complete_product=true`, the chained Ralph uses its built-in default (10 generations) bounded by `pipeline_timeout_seconds` or Ralph's own per-iteration / wall-clock budgets.
 
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
+
+Before a fresh Auto start, if the user did not already choose an efficiency
+policy, ask in outcome language: **Efficient execution** maps to
+`adaptive/observe`; **Quality-first execution** maps to `quality_first/off`.
+`strict` assurance is a separate explicit opt-in because it may spend extra
+work on proof. Never infer strict from the efficiency choice. On resume, do not
+ask or send either argument; Auto restores the persisted contract.
 
 ## Behavior
 
@@ -93,6 +104,10 @@ When an auto start response includes `response.meta.job_id`:
    observer will post meaningful progress/attention/completion events here and
    that this conversation remains available for requirement refinement,
    read-only inspection/review, explicit control, or unrelated isolated work.
+   Include the resolved `runtime_backend`, `llm_backend`, `efficiency_mode`, and
+   `frugality_assurance` when present. Say that the exact active model and first
+   parallel level will be announced from the first configuration/plan events
+   rather than guessing them.
 2. If `response.meta.job_observer` is present and the host supports independent
    child sessions, spawn exactly one read-only observer and pass the contract
    unchanged. Codex uses explicit native subagent delegation; Claude Code uses
@@ -100,6 +115,13 @@ When an auto start response includes `response.meta.job_id`:
    fetches the result, and follows downstream IDs named by
    `follow_result_job_keys`. It must not edit files, control execution, or spawn
    implementation workers. The main session must not poll the same job.
+   On Codex, call `spawn_agent` exactly once with `task_name="run_observer"`;
+   a `wait` call is not a spawn, and the handoff may claim an observer only after
+   the spawn result returns a live child ID/path. If spawn fails, do not promise
+   live proactive relays. The detached worker continues after the stdio turn;
+   say that durable progress will be caught up on the next parent turn or an
+   explicit status request. Keep the current turn open only when the user asked
+   for live watching.
 3. If child-to-parent progress messages are supported, the observer relays only
    meaningful `phase_changed`, `progress_advanced`, `attention_required`, and
    `terminal` events in at most 1-2 lines. During interview, it may use
@@ -108,10 +130,17 @@ When an auto start response includes `response.meta.job_id`:
    available and use on-demand status only when the user asks. Surface
    `attention_required` immediately when a blocker needs human judgment.
    Suppress unchanged heartbeats and raw tool output.
+   Interpret execution relays explicitly: `run_configuration` reports current
+   runtime/harness/model policy; `execution_plan` reports total ACs, total
+   dependency/parallel levels, and first scheduled ACs; `discovery_summary`
+   reports bounded targets and purpose; level/routing/harness/verified subtypes
+   report only material changes. Never relay raw commands or reasoning.
    Before the main session writes to the active auto workspace, check for overlap
    with worker files or move the unrelated work to an isolated worktree.
-4. When no independent child session exists, enter the fallback low-noise loop:
-   - `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=120, view="summary")`
+4. When no independent child session exists and the user explicitly asks to
+   keep watching in this turn, enter the fallback low-noise loop. Otherwise end
+   the turn safely and resume from the durable cursor on the next interaction:
+   - `ouroboros_job_wait(job_id=<job_id>, cursor=<cursor>, timeout_seconds=120, view="summary", stream="linked", wait_for="attention_or_ac_change")`
    - update `cursor = response.meta.cursor` after every wait/status response
    - treat `response.meta` as the source of truth; use response text only as a
      human-readable hint
@@ -119,6 +148,24 @@ When an auto start response includes `response.meta.job_id`:
    execution/session/lineage handles, progress counters, blocker/error text, or
    a terminal state. If `response.meta.changed is false`, continue silently
    unless the user asked for heartbeat updates.
+   Synapse delivery events are meaningful: distinguish `queued`/`delivering` from
+   `applied`/`completed`, and surface `rejected`/`delivery_uncertain`
+   immediately. Render the relay in the user's current conversation language;
+   preserve raw event codes only when exact diagnostics help.
+   When the user adds implementation intent during an executing auto run, the
+   main session first reloads Synapse schemas with
+   `tool discovery query: "+ouroboros session signal"`, then calls
+   `ouroboros_session_signal_targets` with the observed
+   `execution_id`, selects the semantically matching AC from `ac_content` and
+   current activity, then sends `ouroboros_session_signal` with that target's
+   exact IDs. Never ask the user for internal IDs. Ask a short clarification only
+   when multiple live ACs remain genuinely tied, and never route shared goal/AC/
+   constraint changes to one worker.
+   Send additive implementation refinements with exact target guards,
+   `contract_effect="additive"`, `source="user"`, `mode="redirect"`, and explicit
+   `fallback_mode="after_turn"`. Use `mode="inform"` for a read-only AC question
+   or assurance request, omit `fallback_mode` entirely in that mode, and relay
+   the bounded reply from the completed event.
 6. **During the interview phase, surface the live Q&A — not just the round
    counter.** Whenever the relayed phase is `interview` (e.g. progress reads
    `interview round N/50`), call
@@ -148,6 +195,24 @@ When an auto start response includes `response.meta.job_id`:
 
 Use short progress relays; the goal is “I am still watching this for you,” not a
 wall of logs.
+
+## Active Conductor decision policy
+
+English is the canonical instruction language; render facts naturally in the
+user's current conversation language.
+
+For `attention_required`, treat `recommended_host_actions` as authoritative:
+
+1. VERIFY with at most one short-lived read-only host child. If unavailable,
+   surface the evidence and stop before mutation.
+2. DECIDE from the ordered menu only after engine ownership is `closed`.
+3. LOG `selected` with `ouroboros_record_conductor_decision` before ACT.
+4. ACT only a menu-listed registered tool. Auto may start at most one bounded
+   deterministic, non-relaxing successor for that attention event and must pass
+   the audited directive/decision/predecessor receipts exactly.
+5. LOG exactly one terminal `completed`, `failed`, or `declined` result. Do not
+   silently retry. Any specification-changing proposal is escalated to the user;
+   Auto never relaxes the approved goal, ACs, constraints, or non-goals itself.
 
 ### Canonical stop_reason_code taxonomy
 

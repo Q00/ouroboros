@@ -11,6 +11,8 @@ mcp_args:
   skip_run: "$skip_run"
   complete_product: "$complete_product"
   pipeline_timeout_seconds: "$pipeline_timeout_seconds"
+  efficiency_mode: "$efficiency_mode"
+  frugality_assurance: "$frugality_assurance"
 ---
 
 # /ouroboros:auto
@@ -52,11 +54,19 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 | `--max-interview-rounds N` | `max_interview_rounds=N` | integer |
 | `--max-repair-rounds N` | `max_repair_rounds=N` | integer |
 | `--pipeline-timeout-seconds X` | `pipeline_timeout_seconds=X` | number |
+| `--efficiency-mode adaptive\|quality_first` | `efficiency_mode=<value>` | string |
+| `--frugality-assurance off\|observe\|strict` | `frugality_assurance=<value>` | string |
 | `--resume <id>` | `resume=<id>` | string |
 
 `--max-generations` is **not** a flag for `ooo auto`; it belongs to `ooo ralph`. When `complete_product=true`, the chained Ralph uses its built-in default (10 generations) bounded by `pipeline_timeout_seconds` or Ralph's own per-iteration / wall-clock budgets.
 
 `--pipeline-timeout-seconds` is accepted only when starting a session. Passing it with `--resume` is rejected because the original deadline is preserved across process restarts.
+
+Before a fresh start with no user choice, ask in outcome language: **Efficient
+execution** maps to `adaptive/observe`; **Quality-first execution** maps to
+`quality_first/off`. `strict` assurance is separate explicit consent because it
+may spend extra work on proof. Do not send these arguments on resume; the server
+restores the persisted contract.
 
 ## Behavior
 
@@ -66,6 +76,65 @@ When the user types `ooo auto` with CLI-style flags inside chat, translate to MC
 4. Reviews and repairs until A-grade or blocked.
 5. Starts execution only after A-grade.
 6. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+
+During an executing auto run, additive human intent is routed by the main
+session: reload deferred schemas with
+`tool discovery query: "+ouroboros session signal"`, call
+`ouroboros_session_signal_targets` with the observed execution ID,
+match the intent to live AC content, and send the selected exact target through
+`ouroboros_session_signal`. Never ask the human for internal IDs. Ask only when
+multiple candidates remain genuinely tied, and do not route shared contract
+changes to one AC.
+
+## Active Conductor host UX
+
+After a start response, show `dashboard_url` when present or mention
+`ouroboros tui open` once. Include the returned runtime/LLM backends, efficiency
+mode, and frugality assurance. Say that the exact active model and execution
+plan will arrive from configuration/routing events rather than guessing.
+
+When `response.meta.job_observer` is present and a Task/Agent child exists,
+spawn exactly one read-only observer and pass the contract unchanged. It owns
+job wait/result and the cursor exclusively; the main session must not poll the
+same job. Keep the conversation available for requirement refinement, read-only
+review, explicit control, or unrelated work in an isolated worktree. Check
+active-worker overlap before writing to the Auto workspace. Without a child,
+use the declared linked `ouroboros_job_wait` fallback and never run both owners.
+Do not claim an observer until Task/Agent returns a live child handle. If child
+creation fails, do not promise live proactive relays. The detached worker
+survives the stdio turn; catch up from durable events on the next parent turn or
+explicit status request. Keep the turn open only for explicit live watching.
+
+Relay only structured changes:
+
+- `run_configuration`: current runtime/harness, starting model/tier when known,
+  efficiency mode, and frugality assurance.
+- `execution_plan`: total ACs, total dependency/parallel levels, parallelism, and
+  first scheduled AC summaries.
+- `discovery_summary`: bounded targets and purpose, never raw commands or
+  reasoning.
+- level/routing/harness/verified changes: report once when material.
+- `attention_required`: surface immediately.
+- Synapse `queued`/`delivering` is pending, not applied;
+  `applied`/`completed` is runtime-proven and may carry a bounded AC reply;
+  rejected/uncertain delivery is surfaced immediately.
+
+For additive refinements send exact guards with `contract_effect="additive"`,
+`source="user"`, `mode="redirect"`, and explicit `fallback_mode="after_turn"`.
+Use `mode="inform"` for a read-only AC question or assurance request and omit
+`fallback_mode` entirely in that mode. Never ask for internal IDs; semantically
+choose the relevant target and ask only on a genuine tie.
+
+For conductor attention, use at most one short-lived read-only verifier. If the
+host cannot verify, do not ACT. Otherwise VERIFY → DECIDE from the ordered
+`recommended_host_actions` → LOG `selected` with
+`ouroboros_record_conductor_decision` → ACT only a menu-listed registered tool →
+LOG `completed`, `failed`, or `declined`. Auto may run only one bounded
+deterministic non-relaxing successor and never changes the approved shared
+contract itself.
+
+These are English canonical instructions. Phrase them naturally in the user's
+current conversation language.
 
 ### Canonical stop_reason_code taxonomy
 

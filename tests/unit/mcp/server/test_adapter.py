@@ -734,12 +734,17 @@ class TestMCPServerAdapterTools:
         result = MCPToolResult(
             content=(MCPContentItem(type=ContentType.TEXT, text="Success"),),
             meta={"internal_reasoning": ["phase: start"]},
+            structured_content={"job_id": "job_123", "session_id": "orch_123"},
         )
 
         converted = _to_fastmcp_tool_result(result)
 
         assert converted.content[0].text == "Success"
         assert converted.meta == {"internal_reasoning": ["phase: start"]}
+        assert converted.structuredContent == {
+            "job_id": "job_123",
+            "session_id": "orch_123",
+        }
 
     async def test_call_tool_scopes_io_journal_recorder_from_runtime_context(self) -> None:
         """MCP tool calls provide per-call journal identity to shared adapters."""

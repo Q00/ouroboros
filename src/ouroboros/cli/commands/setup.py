@@ -3269,6 +3269,108 @@ def setup(
     console.print("  ouroboros run workflow seed.yaml\n")
 
 
+# ── Artifact refresh subcommand ──────────────────────────────────
+
+
+def _opencode_bridge_dest() -> Path:
+    plugin_dir = opencode_config_dir()
+    for part in _BRIDGE_PLUGIN_SUBDIR:
+        plugin_dir = plugin_dir / part
+    return plugin_dir / _BRIDGE_PLUGIN_FILENAME
+
+
+@app.command("refresh")
+def refresh_artifacts() -> None:
+    """Refresh installed Ouroboros artifacts for every detected runtime.
+
+    Rewrites rules, skills, bridges, and instruction guides that a previous
+    setup already installed — without changing MCP registrations, the runtime
+    selection, or ~/.ouroboros/config.yaml. Codex follows ``ouroboros codex
+    refresh`` semantics and refreshes whenever Codex is present; every other
+    artifact refreshes only when it already exists, so a deliberately removed
+    integration (e.g. OpenCode subprocess mode) is never resurrected.
+    """
+    from ouroboros.hermes.artifacts import HERMES_SKILL_CATEGORY, HERMES_SKILL_NAME
+    from ouroboros.runtime_instruction_artifacts import (
+        copilot_instruction_path,
+        gemini_instruction_path,
+        gjc_agent_dir,
+        gjc_instruction_path,
+        has_managed_section,
+        kiro_instruction_path,
+        opencode_instruction_path,
+    )
+
+    refreshed: list[str] = []
+
+    codex_dir = Path.home() / ".codex"
+    if codex_dir.exists() or shutil.which("codex"):
+        from ouroboros.codex import install_codex_artifacts
+
+        try:
+            result = install_codex_artifacts(codex_dir=codex_dir, prune=False)
+        except OSError as exc:
+            # One runtime failing must not leave the remaining ones stale.
+            print_warning(f"Could not refresh Codex artifacts: {exc}")
+        else:
+            print_success(f"Installed Codex rules → {result.rules_path}")
+            print_success(
+                f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}"
+            )
+            refreshed.append("codex")
+
+    hermes_skill_dir = Path.home() / ".hermes" / "skills" / HERMES_SKILL_CATEGORY
+    if (hermes_skill_dir / HERMES_SKILL_NAME).exists():
+        try:
+            _install_hermes_artifacts()
+        except OSError as exc:
+            print_warning(f"Could not refresh Hermes artifacts: {exc}")
+        else:
+            refreshed.append("hermes")
+
+    opencode_dir = opencode_config_dir()
+    opencode_touched = False
+    if _opencode_bridge_dest().exists():
+        opencode_touched = _install_opencode_bridge_plugin()
+    if has_managed_section(opencode_instruction_path(opencode_dir)):
+        _install_runtime_instruction_artifact("opencode", config_dir=opencode_dir)
+        opencode_touched = True
+    if opencode_touched:
+        refreshed.append("opencode")
+
+    if has_managed_section(gemini_instruction_path()):
+        _install_runtime_instruction_artifact("gemini")
+        refreshed.append("gemini")
+
+    if kiro_instruction_path().exists():
+        _install_runtime_instruction_artifact("kiro")
+        refreshed.append("kiro")
+
+    if copilot_instruction_path().exists():
+        _install_runtime_instruction_artifact("copilot")
+        refreshed.append("copilot")
+
+    pi_bridge = Path.home() / ".pi" / "agent" / "extensions" / _PI_OOO_BRIDGE_FILENAME
+    if pi_bridge.exists():
+        if _install_pi_ooo_bridge():
+            refreshed.append("pi")
+
+    gjc_touched = False
+    gjc_bridge = gjc_agent_dir() / "extensions" / _GJC_OOO_BRIDGE_SUBDIR / _GJC_OOO_BRIDGE_FILENAME
+    if gjc_bridge.exists():
+        gjc_touched = _install_gjc_ooo_bridge()
+    if gjc_instruction_path().exists():
+        _install_runtime_instruction_artifact("gjc")
+        gjc_touched = True
+    if gjc_touched:
+        refreshed.append("gjc")
+
+    if refreshed:
+        print_success(f"Refreshed runtime artifacts: {', '.join(refreshed)}")
+    else:
+        print_info("No installed runtime artifacts found to refresh.")
+
+
 # ── Brownfield subcommands ───────────────────────────────────────
 
 

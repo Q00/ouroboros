@@ -276,7 +276,7 @@ class CodexMcpWorkerTransport:
 def build_codex_mcp_worker_runtime(
     *,
     cli_path: str | None = None,
-    cwd: str | None = None,
+    cwd: str | os.PathLike[str] | None = None,
     permission_mode: str | None = None,
     model: str | None = None,
     llm_backend: str | None = None,
@@ -292,11 +292,12 @@ def build_codex_mcp_worker_runtime(
     (wired through :func:`runtime_factory.create_agent_runtime`) when you
     specifically want to open a worker in the Codex app. See codex_session_index.
     """
+    normalized_cwd = os.fspath(cwd) if cwd is not None else None
     return LeaderDrivenWorkerRuntime(
         transport=CodexMcpWorkerTransport(cli_path=cli_path, index_sessions=index_sessions),
         runtime_backend="codex_mcp",
         llm_backend=llm_backend or "codex",
-        cwd=cwd,
+        cwd=normalized_cwd,
         permission_mode=permission_mode,
         model=model,
         # A fresh ``codex`` call accepts model_reasoning_effort, but the warm

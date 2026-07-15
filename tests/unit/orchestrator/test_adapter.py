@@ -1199,6 +1199,24 @@ class TestClaudeAgentAdapter:
         assert options_sink and "model" not in options_sink[0]
 
     @pytest.mark.asyncio
+    async def test_explicit_empty_tools_reaches_sdk_as_no_tools(self) -> None:
+        """An explicit empty list must not expand back to DEFAULT_TOOLS."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+        options_sink: list[dict[str, Any]] = []
+
+        async def mock_query(*, prompt: str, options: Any):
+            yield _create_mock_sdk_message("ResultMessage", result="ok", subtype="success")
+
+        sdk_modules = _build_mock_claude_agent_sdk(
+            query_impl=mock_query,
+            options_sink=options_sink,
+        )
+        with patch.dict("sys.modules", sdk_modules):
+            _ = [message async for message in adapter.execute_task("hi", tools=[])]
+
+        assert options_sink and options_sink[0]["allowed_tools"] == []
+
+    @pytest.mark.asyncio
     async def test_execute_task_to_result_failure(self) -> None:
         """Failure aggregation should preserve existing ProviderError details."""
         adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
