@@ -323,6 +323,8 @@ class TestRequiredArguments:
             event_store=event_store,
             job_manager=job_manager,
             store=store,
+            agent_runtime_backend="claude",
+            llm_backend="claude_code",
         )
         inner = MagicMock(spec=AutoHandler)
         inner.handle = AsyncMock(
@@ -548,6 +550,8 @@ class TestBackgroundJobPath:
             event_store=event_store,
             job_manager=job_manager,
             store=store,
+            agent_runtime_backend="claude",
+            llm_backend="claude_code",
         )
         handler._inner_auto = inner
 
