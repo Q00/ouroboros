@@ -238,6 +238,7 @@ def test_build_command_plain_cjs_uses_system_node_without_electron_env(
 ) -> None:
     cli_path = tmp_path / "zcode.cjs"
     cli_path.write_text("// standalone zcode", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_RUNTIME", "zcode")
     monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
     monkeypatch.setenv("NODE_OPTIONS", "--require ./evil.js")
     runtime = ZcodeCLIRuntime(cli_path=cli_path, permission_mode="acceptEdits")
@@ -246,6 +247,7 @@ def test_build_command_plain_cjs_uses_system_node_without_electron_env(
 
     assert cmd[:2] == ["node", str(cli_path)]
     child_env = runtime._build_child_env()
+    assert "OUROBOROS_RUNTIME" not in child_env
     assert "ELECTRON_RUN_AS_NODE" not in child_env
     assert "NODE_OPTIONS" not in child_env
 

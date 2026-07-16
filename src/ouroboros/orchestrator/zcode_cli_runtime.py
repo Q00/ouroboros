@@ -78,11 +78,14 @@ _MAX_OUROBOROS_DEPTH = 5
 # codex/copilot/kiro) — preserve that divergence. ELECTRON_RUN_AS_NODE is
 # rebuilt only for an app-bundle electron-node launch so a parent Electron
 # process cannot accidentally change PATH-wrapper or standalone-script
-# behavior. NODE_OPTIONS can preload arbitrary JavaScript before zcode starts,
-# so never inherit it into either the bundled Electron or system Node launch.
+# behavior. ``OUROBOROS_RUNTIME`` is a legacy selector that can route nested
+# ouroboros commands back into zcode, so strip it alongside the LLM selector.
+# NODE_OPTIONS can preload arbitrary JavaScript before zcode starts, so never
+# inherit it into either the bundled Electron or system Node launch.
 _CHILD_ENV_STRIP_KEYS = (
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_LLM_BACKEND",
+    "OUROBOROS_RUNTIME",
     "ELECTRON_RUN_AS_NODE",
     "NODE_OPTIONS",
 )
