@@ -4013,6 +4013,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 typed_evidence_validation=typed_validation,
                 typed_evidence_error=typed_error,
                 atomic_verifier_verdict=verifier_verdict,
+                verify_gate_outcome=verify_gate_outcome,
                 error=fat_harness_error,
             )
 
@@ -4411,8 +4412,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         ):
             return result
 
-        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-        outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+        cached_outcome = result.verify_gate_outcome
+        if isinstance(cached_outcome, _VerifyGateOutcome):
+            outcome = cached_outcome
+        else:
+            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
         if outcome.passed:
             if not result.success and not result.is_blocked and not result.is_invalid:
                 from ouroboros.events.base import BaseEvent
@@ -4450,6 +4455,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     error=None,
                     final_message=(result.final_message or recovery_message),
                     outcome=ACExecutionOutcome.SUCCEEDED,
+                    verify_gate_outcome=outcome,
                 )
             return result
         if not result.success:
@@ -4499,6 +4505,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             final_message=detail,
             outcome=ACExecutionOutcome.FAILED,
             atomic_verifier_verdict=verdict,
+            verify_gate_outcome=outcome,
         )
 
     async def _emit_ac_outcome_finalized(
@@ -4604,7 +4611,6 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         if not self._run_verify_commands:
             return frozenset()
         gated_out: set[int] = set()
-        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         for result in level_results:
             if result.success or result.outcome != ACExecutionOutcome.FAILED:
                 continue
@@ -4616,7 +4622,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 spec.verify_command or spec.expected_artifacts
             ):
                 continue
-            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+            cached_outcome = result.verify_gate_outcome
+            if isinstance(cached_outcome, _VerifyGateOutcome):
+                outcome = cached_outcome
+            else:
+                cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+                outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
             if not outcome.passed:
                 gated_out.add(ac_idx)
         return frozenset(gated_out)

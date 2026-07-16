@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
@@ -62,6 +62,9 @@ class ACExecutionResult:
             completion, if any.
         atomic_verifier_verdict: Separate verifier pass verdict for the
             parsed typed evidence at atomic completion, when available.
+        verify_gate_outcome: Cached seed-level verify gate result from an
+            earlier layer. The executor treats this as opaque to avoid a model
+            import cycle.
     """
 
     ac_index: int
@@ -83,6 +86,7 @@ class ACExecutionResult:
     typed_evidence_validation: ValidationResult | None = None
     typed_evidence_error: str | None = None
     atomic_verifier_verdict: VerifierVerdict | None = None
+    verify_gate_outcome: Any | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""

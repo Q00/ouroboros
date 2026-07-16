@@ -7581,6 +7581,81 @@ class TestParallelACExecutor:
         assert evidence_event.data["verify_gate_active"] is True
 
     @pytest.mark.asyncio
+    async def test_contract_verify_gate_is_single_shot_across_atomic_and_final_gate(
+        self, tmp_path: Any
+    ) -> None:
+        """A cached atomic verify outcome prevents duplicate shell side effects."""
+        (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
+        counter = tmp_path / "verify-count.txt"
+        command = (
+            "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
+            "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+            'raise SystemExit(0 if n == 0 else 7)"'
+        )
+        seed = Seed.from_dict(
+            {
+                "goal": "Create output.txt",
+                "task_type": "artifact",
+                "acceptance_criteria": [
+                    {
+                        "description": "Create output.txt with the smoke marker.",
+                        "expected_artifacts": ["output.txt"],
+                        "verify_command": command,
+                    }
+                ],
+                "ontology_schema": {
+                    "name": "SmokeArtifact",
+                    "description": "Smoke artifact contract.",
+                    "fields": [],
+                },
+                "metadata": {
+                    "ambiguity_score": 0.0,
+                    "generation_mode": "test",
+                },
+            }
+        )
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                'Done.\n```json\n{"files_touched":["output.txt"]}\n```',
+                native_session_id="opencode-session-single-shot-contract",
+                cwd=str(tmp_path),
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("artifact"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create output.txt with the smoke marker.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the artifact",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=seed.acceptance_criteria[0],
+        )
+        assert result.success is True
+        assert result.verify_gate_outcome is not None
+        assert counter.read_text(encoding="utf-8") == "1"
+
+        finalized = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=result,
+            session_id="orch_123",
+            execution_id="exec_123",
+        )
+
+        assert finalized.success is True
+        assert counter.read_text(encoding="utf-8") == "1"
+
+    @pytest.mark.asyncio
     async def test_verify_gate_recovers_failed_artifact_result_when_contract_passes(
         self, tmp_path: Any
     ) -> None:
