@@ -141,9 +141,49 @@ class AnalysisStrategy:
         }
 
 
+class ArtifactStrategy:
+    """Strategy for document, presentation, and other file-artifact tasks."""
+
+    def get_tools(self) -> list[str]:
+        return ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+
+    def get_system_prompt_fragment(self) -> str:
+        return (
+            "You are an artifact execution agent. Work directly on the requested "
+            "document, presentation, spreadsheet, markdown, or other file artifacts. "
+            "Treat the Seed acceptance criteria and declared verify_command entries "
+            "as the execution contract. Preserve the existing artifact structure "
+            "unless the Seed explicitly asks for a rewrite. Do not substitute code "
+            "unit-test evidence for artifact verification; use file inspection, "
+            "render/build commands, and the Seed's artifact-shaped checks."
+        )
+
+    def get_task_prompt_suffix(self) -> str:
+        return (
+            "Please update the requested artifacts against each criterion. "
+            "Run the declared artifact verification commands when present, "
+            "record any rebuild/render outcome explicitly, and report which "
+            "artifact paths changed or remain unverified."
+        )
+
+    def get_activity_map(self) -> dict[str, ActivityType]:
+        return {
+            "Read": ActivityType.EXPLORING,
+            "Glob": ActivityType.EXPLORING,
+            "Grep": ActivityType.EXPLORING,
+            "Edit": ActivityType.BUILDING,
+            "Write": ActivityType.BUILDING,
+            "Bash": ActivityType.TESTING,
+        }
+
+
 # Strategy registry
 _STRATEGY_REGISTRY: dict[str, ExecutionStrategy] = {
+    "artifact": ArtifactStrategy(),
     "code": CodeStrategy(),
+    "document": ArtifactStrategy(),
+    "documentation": ArtifactStrategy(),
+    "presentation": ArtifactStrategy(),
     "research": ResearchStrategy(),
     "analysis": AnalysisStrategy(),
 }
@@ -153,7 +193,8 @@ def get_strategy(task_type: str = "code") -> ExecutionStrategy:
     """Get execution strategy for a task type.
 
     Args:
-        task_type: Type of task ("code", "research", "analysis").
+        task_type: Type of task ("code", "research", "analysis",
+            "artifact", "document", "documentation", or "presentation").
 
     Returns:
         ExecutionStrategy instance.
@@ -181,6 +222,7 @@ def register_strategy(task_type: str, strategy: ExecutionStrategy) -> None:
 
 __all__ = [
     "AnalysisStrategy",
+    "ArtifactStrategy",
     "CodeStrategy",
     "ExecutionStrategy",
     "ResearchStrategy",

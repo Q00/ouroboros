@@ -3812,13 +3812,13 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # A contract-carrying AC (declares verify_command) delegates its
-            # tests_passed check to the orchestrator's authoritative
-            # _run_ac_verify_gate. When it also declares expected_artifacts,
-            # files_touched is delegated to that gate's filesystem oracle too
-            # (see _effective_evidence_schema_for_ac).
+            # A contract-carrying AC (declares verify_command or expected
+            # artifacts) delegates checks to the orchestrator's authoritative
+            # _run_ac_verify_gate. For artifact-style tasks this gate is the
+            # durable success oracle: the worker may create the file without
+            # emitting profile-shaped typed evidence.
             has_success_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
-                ac_spec.verify_command
+                ac_spec.verify_command or ac_spec.expected_artifacts
             )
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
@@ -3828,6 +3828,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             # when run_verify_commands is disabled, so with the gate off we must
             # retain the transcript-backed evidence rather than drop it.
             verify_gate_active = self._run_verify_commands
+            verify_gate_outcome: _VerifyGateOutcome | None = None
+            if success and verify_gate_active and has_success_contract:
+                cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+                verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
@@ -3853,6 +3858,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 typed_validation=typed_validation,
                 typed_error=typed_error,
                 verifier_verdict=verifier_verdict,
+                verify_gate_outcome=verify_gate_outcome,
             )
             result_final_message = final_message
             if fat_harness_error is not None:
@@ -4390,11 +4396,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         The contract gate applies when the spec carries a ``verify_command`` OR
         non-empty ``expected_artifacts``. Contract-less ACs and ACs that already
-        failed are returned untouched, so contract-less behavior — and the
-        single fat-harness failure event for an already-failed AC — is
-        preserved (no double-fail for one root cause).
+        failed are recovered only when the same contract passes independently,
+        so contract-less behavior — and the single fat-harness failure event
+        for an already-failed AC without a passing contract — is preserved
+        (no double-fail for one root cause).
         """
-        if not self._run_verify_commands or not result.success:
+        if not self._run_verify_commands:
             return result
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
@@ -4407,6 +4414,45 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
         if outcome.passed:
+            if not result.success and not result.is_blocked and not result.is_invalid:
+                from ouroboros.events.base import BaseEvent
+
+                recovery_message = (
+                    "Runtime reported failure, but the AC success contract passed: "
+                    "expected_artifacts/verify_command satisfied."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.recovered",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": ac_index,
+                            "ac_content": ac_text(spec),
+                            "verify_command": spec.verify_command,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "prior_error": result.error,
+                            "output_tail": outcome.output_tail,
+                        },
+                    )
+                )
+                log.info(
+                    "parallel_executor.ac.verify_gate_recovered",
+                    session_id=session_id,
+                    ac_index=ac_index,
+                    prior_error=result.error,
+                )
+                return replace(
+                    result,
+                    success=True,
+                    error=None,
+                    final_message=(result.final_message or recovery_message),
+                    outcome=ACExecutionOutcome.SUCCEEDED,
+                )
+            return result
+        if not result.success:
             return result
 
         from ouroboros.events.base import BaseEvent
@@ -4980,10 +5026,21 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         typed_validation: ValidationResult | None,
         typed_error: str | None,
         verifier_verdict: VerifierVerdict | None,
+        verify_gate_outcome: _VerifyGateOutcome | None = None,
     ) -> str | None:
         """Return the fat-harness rejection reason for an atomic leaf."""
         if not self._fat_harness_mode or not runtime_success:
             return None
+        if verify_gate_outcome is not None:
+            if not verify_gate_outcome.passed:
+                return f"Verify gate failed: {verify_gate_outcome.reason}"
+            if (
+                self._execution_profile is None
+                or typed_evidence is None
+                or typed_validation is None
+                or not typed_validation.ok
+            ):
+                return None
         if self._execution_profile is None:
             return "Fat-harness mode requires a loaded execution profile."
         if typed_evidence is None:
@@ -5144,6 +5201,9 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             "enforced": self._fat_harness_mode,
             "fat_harness_mode": self._fat_harness_mode,
             "enforcement_error": enforcement_error,
+            "has_success_contract": has_success_contract,
+            "has_expected_artifacts": has_expected_artifacts,
+            "verify_gate_active": verify_gate_active,
             "typed_evidence_present": typed_evidence is not None,
             "typed_evidence_valid": typed_validation.ok if typed_validation is not None else False,
             "typed_evidence_error": typed_error,

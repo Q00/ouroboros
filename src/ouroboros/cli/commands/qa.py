@@ -77,6 +77,10 @@ def qa_command(
     ] = None,
 ) -> None:
     """Run a QA verdict using the same implementation as the MCP tool."""
+    from ouroboros.cli.commands.mcp import _ensure_shell_env
+
+    _ensure_shell_env()
+
     args: dict[str, object] = {
         "artifact": _read_text_or_literal(artifact),
         "quality_bar": quality_bar,

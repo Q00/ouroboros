@@ -403,7 +403,10 @@ class Seed(BaseModel, frozen=True):
     goal: str = Field(..., min_length=1, description="Primary objective of the workflow")
     task_type: str = Field(
         default="code",
-        description="Type of task execution: 'code', 'research', or 'analysis'",
+        description=(
+            "Type of task execution: 'code', 'research', 'analysis', "
+            "'artifact', 'document', 'documentation', or 'presentation'"
+        ),
     )
     brownfield_context: BrownfieldContext = Field(
         default_factory=BrownfieldContext,
