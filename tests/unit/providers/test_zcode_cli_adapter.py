@@ -7,8 +7,10 @@ single-JSON-summary response parsing (``response`` / ``usage`` / ``sessionId``).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+import plistlib
 from typing import Any
 from unittest.mock import patch
 
@@ -66,13 +68,51 @@ class _FakeProcess:
         pass
 
 
+class _HangingProcess(_FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(returncode=0)
+        self.returncode = None
+        self.terminated = False
+
+    async def communicate(self, _input: bytes | None = None) -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
 def _make_adapter(**kwargs: Any) -> ZcodeCliLLMAdapter:
     """Build an adapter with the zcode CLI path pinned to a .cjs script."""
     return ZcodeCliLLMAdapter(
-        cli_path="/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        cli_path="/tmp/zcode.cjs",
         cwd="/tmp",
         **kwargs,
     )
+
+
+def _fake_electron_node_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    contents = tmp_path / "ZCode.app" / "Contents"
+    cli_path = contents / "Resources" / "glm" / "zcode.cjs"
+    electron_node = contents / "MacOS" / "ZCode"
+    cli_path.parent.mkdir(parents=True)
+    electron_node.parent.mkdir(parents=True)
+    cli_path.write_text("// zcode", encoding="utf-8")
+    cli_path.with_name(".node-bundle-meta.json").write_text(
+        json.dumps(
+            {
+                "runtime": "electron-node",
+                "entry": "zcode.cjs",
+                "platform": "darwin-arm64",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with (contents / "Info.plist").open("wb") as stream:
+        plistlib.dump({"CFBundleExecutable": "ZCode"}, stream)
+    electron_node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    electron_node.chmod(0o755)
+    return cli_path, electron_node
 
 
 def _patch_subprocess(process: _FakeProcess):
@@ -115,7 +155,7 @@ def test_build_command_uses_zcode_flags_not_codex() -> None:
     )
     # .cjs script → `node <script>` prefix
     assert cmd[0] == "node"
-    assert cmd[1] == "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+    assert cmd[1] == "/tmp/zcode.cjs"
     # Real zcode flags present
     assert "--json" in cmd
     assert "--prompt" in cmd
@@ -146,6 +186,73 @@ def test_build_command_path_executable_no_node_prefix() -> None:
     # PATH executable invoked directly, not via `node`
     assert cmd[0] == "/usr/local/bin/zcode"
     assert "node" not in cmd
+
+
+def test_build_command_app_bundle_uses_bundled_electron_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path, electron_node = _fake_electron_node_bundle(tmp_path)
+    monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--require ./evil.js")
+    adapter = ZcodeCliLLMAdapter(cli_path=cli_path, cwd="/tmp")
+
+    cmd = adapter._build_command(
+        output_last_message_path="",
+        output_schema_path=None,
+        model=None,
+        profile=None,
+        prompt="hi",
+    )
+
+    assert cmd[:2] == [str(electron_node), str(cli_path)]
+    assert cmd[2:7] == ["--json", "--prompt", "hi", "--mode", "edit"]
+    env = adapter._build_child_env()
+    assert env["ELECTRON_RUN_AS_NODE"] == "1"
+    assert "NODE_OPTIONS" not in env
+
+
+def test_build_command_standalone_script_uses_node_with_clean_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--require ./evil.js")
+    adapter = _make_adapter()
+
+    cmd = adapter._build_command(
+        output_last_message_path="",
+        output_schema_path=None,
+        model=None,
+        profile=None,
+        prompt="hi",
+    )
+    env = adapter._build_child_env()
+
+    assert adapter._electron_node_path is None
+    assert cmd[:2] == ["node", "/tmp/zcode.cjs"]
+    assert "ELECTRON_RUN_AS_NODE" not in env
+    assert "NODE_OPTIONS" not in env
+
+
+@pytest.mark.asyncio
+async def test_complete_path_app_bundle_invokes_bundled_electron_node(
+    tmp_path: Path,
+) -> None:
+    cli_path, electron_node = _fake_electron_node_bundle(tmp_path)
+    process = _FakeProcess(
+        stdout=json.dumps({"sessionId": "sess_bundle", "response": "OK"}).encode("utf-8"),
+        returncode=0,
+    )
+    adapter = ZcodeCliLLMAdapter(cli_path=Path(cli_path), cwd="/tmp")
+
+    with _patch_subprocess(process) as create_process:
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="say OK")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_ok
+    assert list(create_process.call_args.args[:2]) == [str(electron_node), str(cli_path)]
 
 
 def test_build_command_permission_mode_to_flag() -> None:
@@ -212,13 +319,18 @@ def test_build_child_env_strips_legacy_runtime_selector(monkeypatch: pytest.Monk
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "zcode")
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "zcode")
     monkeypatch.setenv("OUROBOROS_RUNTIME", "zcode")
+    monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--require ./evil.js")
     monkeypatch.setenv("CLAUDECODE", "1")
 
     env = _make_adapter()._build_child_env()
 
+    assert _make_adapter()._electron_node_path is None
     assert "OUROBOROS_AGENT_RUNTIME" not in env
     assert "OUROBOROS_LLM_BACKEND" not in env
     assert "OUROBOROS_RUNTIME" not in env
+    assert "ELECTRON_RUN_AS_NODE" not in env
+    assert "NODE_OPTIONS" not in env
     assert env["CLAUDECODE"] == "1"
 
 
@@ -380,6 +492,24 @@ async def test_complete_nonzero_returncode_returns_error() -> None:
     assert result.is_err
     assert "Unknown option" in result.error.message
     assert result.error.details["returncode"] == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_timeout_terminates_process() -> None:
+    process = _HangingProcess()
+    adapter = _make_adapter(timeout=0.01, max_retries=1)
+
+    with _patch_subprocess(process):
+        result = await adapter.complete(
+            [Message(role=MessageRole.USER, content="x")],
+            CompletionConfig(model="default"),
+        )
+
+    assert result.is_err
+    assert "timed out" in result.error.message
+    assert result.error.provider == "zcode_cli"
+    assert result.error.details["timed_out"] is True
+    assert process.terminated is True
 
 
 @pytest.mark.asyncio

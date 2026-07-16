@@ -49,6 +49,10 @@ from ouroboros.providers.base import (
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.runtime.child_env import build_child_env
+from ouroboros.zcode_cli_launcher import (
+    build_zcode_command_prefix,
+    resolve_zcode_electron_node_path,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -71,11 +75,14 @@ _MAX_OUROBOROS_DEPTH = 5
 # are removed. ``OUROBOROS_LLM_BACKEND`` MUST be stripped so the zcode child
 # does not inherit an LLM-backend override; ``OUROBOROS_RUNTIME`` is the legacy
 # selector honored by both runtime and LLM resolution. Leaking either can route
-# nested ouroboros calls back into zcode (recursion). Matches ``ZcodeCLIRuntime``.
+# nested ouroboros calls back into zcode (recursion). Electron/Node launch vars
+# are stripped and rebuilt only for official app-bundle launches.
 _CHILD_ENV_STRIP_KEYS = (
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_LLM_BACKEND",
     "OUROBOROS_RUNTIME",
+    "ELECTRON_RUN_AS_NODE",
+    "NODE_OPTIONS",
 )
 
 
@@ -102,6 +109,11 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
     # caller that doesn't explicitly disable it, killing healthy long runs as
     # "produced no stdout". Disable at the class level (matches ZcodeCLIRuntime).
     _startup_output_timeout_seconds = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize and cache the official app-bundle launch runtime."""
+        super().__init__(**kwargs)
+        self._electron_node_path = resolve_zcode_electron_node_path(self._cli_path)
 
     def _stream_provider_name(self) -> str:
         return "zcode_cli"
@@ -177,13 +189,16 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
 
     def _build_child_env(self) -> dict[str, str]:
         """Build child env with the recursion guard (matches ZcodeCLIRuntime)."""
-        return build_child_env(
+        env = build_child_env(
             strip_keys=_CHILD_ENV_STRIP_KEYS,
             max_depth=_MAX_OUROBOROS_DEPTH,
             depth_error_factory=lambda _depth, max_depth: RuntimeError(
                 f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
             ),
         )
+        if self._electron_node_path is not None:
+            env["ELECTRON_RUN_AS_NODE"] = "1"
+        return env
 
     # -- Command construction --------------------------------------------
 
@@ -207,14 +222,14 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
         ``--skip-git-repo-check`` — all Codex artifacts. The shared signature
         is honored but the Codex-only args are ignored.
 
-        Two install shapes both work (matches ZcodeCLIRuntime):
+        Three install shapes work (matches ZcodeCLIRuntime):
 
-        - **App-bundle script** — ``zcode.cjs`` invoked as ``node <cli_path> …``.
-        - **PATH executable** — invoked directly (``node <executable>`` would
-          parse the binary as JS and fail before zcode runs).
+        - **App-bundle script** — use ZCode's bundled Electron/Node runtime
+          with ``ELECTRON_RUN_AS_NODE=1`` when bundle metadata declares it.
+        - **Standalone script** — invoked as ``node <cli_path>``.
+        - **PATH executable** — invoked directly.
 
-        Distinguished by extension: ``.cjs``/``.js``/``.mjs`` get the ``node``
-        prefix; everything else is invoked straight.
+        The app-bundle check runs before the extension fallback.
         """
         del output_last_message_path, output_schema_path, model, profile
 
@@ -229,9 +244,7 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
                 "(set OUROBOROS_ZCODE_CLI_PATH or orchestrator.zcode_cli_path)"
             )
             raise RuntimeError(msg)
-        prefix: list[str] = (
-            ["node", cli_path] if cli_path.endswith((".cjs", ".js", ".mjs")) else [cli_path]
-        )
+        prefix = build_zcode_command_prefix(cli_path, self._electron_node_path)
         command = prefix + [
             "--json",
             "--prompt",
