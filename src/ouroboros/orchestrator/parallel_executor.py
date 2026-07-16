@@ -4336,12 +4336,16 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         command = spec.verify_command
         if not command:
             return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        subprocess_kwargs: dict[str, Any] = {}
+        if os.name != "nt":
+            subprocess_kwargs["start_new_session"] = True
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                **subprocess_kwargs,
             )
         except Exception as exc:  # pragma: no cover - spawn failure is environmental
             return _VerifyGateOutcome(
@@ -4355,8 +4359,14 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 timeout=self._verify_command_timeout_seconds,
             )
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+            if os.name != "nt":
+                import signal
+
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
             return _VerifyGateOutcome(
