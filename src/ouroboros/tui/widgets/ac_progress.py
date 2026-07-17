@@ -34,6 +34,14 @@ STATUS_STYLES = {
     "failed": "red",
 }
 
+# Width-aware label truncation (was a fixed 45-char slice regardless of
+# terminal width). ``_DEFAULT_CONTENT_WIDTH`` is only the FALLBACK used when
+# the widget isn't mounted yet (no real size to read).
+_DEFAULT_CONTENT_WIDTH = 45
+_MIN_CONTENT_WIDTH = 20
+# Reserved for the status icon, index prefix ("N. "), and elapsed-time suffix.
+_CONTENT_WIDTH_RESERVED_CHARS = 20
+
 
 @dataclass
 class ACProgressItem:
@@ -199,11 +207,31 @@ class ACProgressWidget(Widget):
             )
             yield Static(remaining_text, classes="progress-footer")
 
-    def _render_ac_item(self, ac: ACProgressItem) -> Static:
+    def _content_max_width(self, *, default: int = _DEFAULT_CONTENT_WIDTH) -> int:
+        """Return the available content width, from the widget's ACTUAL
+        rendered size when it is known (mounted with a real layout).
+
+        Falls back to ``default`` when the widget has no size yet (not
+        mounted, or a zero-size layout pass) — that fallback only, not a
+        hand-picked constant every item is forced through.
+        """
+        try:
+            width = self.size.width
+        except Exception:
+            width = 0
+        if width and width > 0:
+            return max(_MIN_CONTENT_WIDTH, width - _CONTENT_WIDTH_RESERVED_CHARS)
+        return default
+
+    def _render_ac_item(self, ac: ACProgressItem, *, max_width: int | None = None) -> Static:
         """Render a single AC item.
 
         Args:
             ac: AC progress item to render.
+            max_width: Explicit content-width override, mainly for tests
+                (proving truncation is width-aware, not a fixed constant).
+                Live callers omit this and get the widget's actual rendered
+                width via :meth:`_content_max_width`.
 
         Returns:
             Static widget with formatted AC line.
@@ -211,8 +239,10 @@ class ACProgressWidget(Widget):
         icon = STATUS_ICONS.get(ac.status, "○")
         style = STATUS_STYLES.get(ac.status, "dim")
 
-        # Truncate content
-        content = ac.content[:45] + "..." if len(ac.content) > 45 else ac.content
+        # Truncate content, sized to the widget's actual available width
+        # instead of a fixed character count.
+        width = max_width if max_width is not None else self._content_max_width()
+        content = ac.content[:width] + "..." if len(ac.content) > width else ac.content
 
         # Build label
         label = f" [{style}]{icon}[/{style}]  {ac.index}. {content}"

@@ -144,6 +144,31 @@ class TestACTreeWidget:
         assert widget.tree_data == tree_data
         assert widget.current_ac_id == "ac_123"
 
+    def test_compose_root_label_truncates_with_ellipsis(self) -> None:
+        """The root Tree label truncation must append '...' when it actually
+        truncates (previously a silent hard cut with no visual indicator)."""
+        long_content = "R" * 100
+        tree_data = {
+            "root_id": "ac_root",
+            "nodes": {
+                "ac_root": {
+                    "id": "ac_root",
+                    "content": long_content,
+                    "depth": 0,
+                    "status": "pending",
+                    "is_atomic": False,
+                    "children_ids": [],
+                },
+            },
+        }
+        widget = ACTreeWidget(tree_data=tree_data)
+
+        widgets = list(widget.compose())
+        tree = next(w for w in widgets if hasattr(w, "root"))
+
+        assert str(tree.root.label).endswith("...")
+        assert long_content[:30] in str(tree.root.label)
+
     def test_update_tree(self) -> None:
         """Test updating tree data."""
         widget = ACTreeWidget()
@@ -380,6 +405,34 @@ class TestACTreeWidget:
         assert "..." in label
         assert long_content[:50] in label
 
+    def test_format_node_label_is_width_aware_not_a_fixed_constant(self) -> None:
+        """Truncation must scale with the available width, not a hard-coded
+        50-char slice: a wider budget keeps more content, a narrower one
+        keeps less — proving the label-building function is no longer a
+        fixed constant."""
+        widget = ACTreeWidget()
+        long_content = "B" * 100
+        node_data = {
+            "status": "pending",
+            "content": long_content,
+            "is_atomic": False,
+        }
+
+        narrow_label = widget._format_node_label(node_data, max_width=15)
+        wide_label = widget._format_node_label(node_data, max_width=80)
+
+        assert long_content[:15] in narrow_label
+        assert long_content[:80] in wide_label
+        assert narrow_label != wide_label
+        assert len(wide_label) > len(narrow_label)
+
+    def test_label_max_width_falls_back_when_unmounted(self) -> None:
+        """A widget with no real rendered size yet falls back to the default
+        budget rather than crashing or truncating to zero."""
+        widget = ACTreeWidget()
+
+        assert widget._label_max_width() == 50
+
     def test_mark_node_atomic(self) -> None:
         """Test marking a node as atomic."""
         tree_data = {
@@ -547,3 +600,25 @@ class TestACProgressWidget:
 
         assert widget.completed_count == 1
         assert widget.total_count == 3  # Unchanged
+
+    def test_render_ac_item_truncation_is_width_aware_not_a_fixed_constant(self) -> None:
+        """Truncation must scale with the available width, not a hard-coded
+        45-char slice: a wider budget keeps more content, a narrower one
+        keeps less."""
+        widget = ACProgressWidget()
+        long_content = "C" * 100
+        item = ACProgressItem(index=1, content=long_content, status="pending")
+
+        narrow = widget._render_ac_item(item, max_width=15)
+        wide = widget._render_ac_item(item, max_width=80)
+
+        assert long_content[:15] in str(narrow.render())
+        assert long_content[:80] in str(wide.render())
+        assert str(narrow.render()) != str(wide.render())
+
+    def test_content_max_width_falls_back_when_unmounted(self) -> None:
+        """A widget with no real rendered size yet falls back to the default
+        budget rather than crashing or truncating to zero."""
+        widget = ACProgressWidget()
+
+        assert widget._content_max_width() == 45

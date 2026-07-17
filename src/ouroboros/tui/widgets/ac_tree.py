@@ -27,6 +27,17 @@ STATUS_ICONS = {
     "failed": "[red][X][/red]",
 }
 
+# Width-aware label truncation (was a fixed 50/30-char slice regardless of
+# terminal width). ``_DEFAULT_LABEL_WIDTH``/``_DEFAULT_ROOT_LABEL_WIDTH`` are
+# only the FALLBACK used when the widget isn't mounted yet (no real size to
+# read) — once mounted, the actual available width always wins.
+_DEFAULT_LABEL_WIDTH = 50
+_DEFAULT_ROOT_LABEL_WIDTH = 30
+_MIN_LABEL_WIDTH = 20
+# Reserved for the tree's guide lines/indentation and the status icon prefix
+# (e.g. "[green][OK][/green] "), which don't count toward the content budget.
+_LABEL_WIDTH_RESERVED_CHARS = 20
+
 
 class ACTreeWidget(Widget):
     """Widget displaying the AC decomposition tree.
@@ -119,6 +130,22 @@ class ACTreeWidget(Widget):
         self.tree_data = tree_data or {}
         self.current_ac_id = current_ac_id
 
+    def _label_max_width(self, *, default: int = _DEFAULT_LABEL_WIDTH) -> int:
+        """Return the available content width for a label, from the widget's
+        ACTUAL rendered size when it is known (mounted with a real layout).
+
+        Falls back to ``default`` when the widget has no size yet (not
+        mounted, or a zero-size layout pass) — this is a fallback for that
+        case only, not a hand-picked constant every label is forced through.
+        """
+        try:
+            width = self.size.width
+        except Exception:
+            width = 0
+        if width and width > 0:
+            return max(_MIN_LABEL_WIDTH, width - _LABEL_WIDTH_RESERVED_CHARS)
+        return default
+
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
         yield Label("AC Decomposition Tree", classes="header")
@@ -131,7 +158,13 @@ class ACTreeWidget(Widget):
             root_id = self.tree_data.get("root_id")
             root_label = "AC Tree"
             if root_id and root_id in nodes:
-                root_label = nodes[root_id].get("content", "AC Tree")[:30]
+                root_content = nodes[root_id].get("content", "AC Tree")
+                root_width = self._label_max_width(default=_DEFAULT_ROOT_LABEL_WIDTH)
+                root_label = (
+                    root_content[:root_width] + "..."
+                    if len(root_content) > root_width
+                    else root_content
+                )
 
             tree: Tree[str] = Tree(root_label)
             tree.show_root = True
@@ -169,12 +202,18 @@ class ACTreeWidget(Widget):
         self,
         node_data: dict[str, Any],
         is_current: bool = False,
+        *,
+        max_width: int | None = None,
     ) -> str:
         """Format display label for a tree node.
 
         Args:
             node_data: Data for the node.
             is_current: Whether this is the currently executing AC.
+            max_width: Explicit content-width override, mainly for tests
+                (proving truncation is width-aware, not a fixed constant).
+                Live callers omit this and get the widget's actual rendered
+                width via :meth:`_label_max_width`.
 
         Returns:
             Formatted label with status icon and content.
@@ -183,8 +222,10 @@ class ACTreeWidget(Widget):
         content = node_data.get("content", "Unknown")
         is_atomic = node_data.get("is_atomic", False)
 
-        # Truncate content for display
-        display_content = content[:50] + "..." if len(content) > 50 else content
+        # Truncate content for display, sized to the widget's actual
+        # available width instead of a fixed character count.
+        width = max_width if max_width is not None else self._label_max_width()
+        display_content = content[:width] + "..." if len(content) > width else content
 
         # Build label with status icon
         status_icon = STATUS_ICONS.get(status, "[ ]")

@@ -91,6 +91,14 @@ function colorFor(p) {
   return providerColor[p];
 }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+// Truncate the RAW string (before escaping, so a multi-byte HTML entity from
+// esc() is never cut in half) and append an ellipsis ONLY when truncation
+// actually happened — a plain hard cut with no visual indicator reads as the
+// whole title, which is confusing.
+function truncate(s, n) {
+  const str = s==null ? "" : String(s);
+  return str.length > n ? str.slice(0, n) + "…" : str;
+}
 // Model-tier badge glyphs/colors. Unknown tiers fall back to a neutral dot.
 const TIER_SYMBOL = { frugal: "⚡", standard: "•", frontier: "▲" };
 const TIER_COLOR  = { frugal: "#2ea043", standard: "#6e7681", frontier: "#d29922" };
@@ -168,7 +176,7 @@ function cardHtml(c) {
     : "";
   const indent = c.depth ? `style="margin-left:${Math.min(c.depth,4)*10}px"` : "";
   return `<div class="card st-${esc(c.status)}" ${indent}>
-    <div class="title">${esc(c.title).slice(0,160)}</div>
+    <div class="title">${esc(truncate(c.title, 160))}</div>
     <div class="sub">${prov}${tier}${trust}${parked}${ac}${tokHtml}${tool}</div></div>`;
 }
 
