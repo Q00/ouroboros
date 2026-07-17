@@ -1578,9 +1578,7 @@ def test_codex_recovery_validates_seed_file_against_state_receipt(tmp_path) -> N
         ontology_schema=OntologySchema(
             name="CliTask",
             description="CLI task ontology",
-            fields=(
-                OntologyField(name="command", field_type="string", description="Command"),
-            ),
+            fields=(OntologyField(name="command", field_type="string", description="Command"),),
         ),
         evaluation_principles=(
             EvaluationPrinciple(name="testability", description="Observable behavior"),
