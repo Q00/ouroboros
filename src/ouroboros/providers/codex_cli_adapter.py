@@ -131,6 +131,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         ephemeral: bool = True,
         timeout: float | None = None,
         runtime_profile: str | None = None,
+        strict_mcp_config: bool = False,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -142,6 +143,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         self._ephemeral = ephemeral
         self._timeout = timeout if timeout and timeout > 0 else None
         self._runtime_profile = runtime_profile
+        self._strict_mcp_config = bool(strict_mcp_config)
         self._codex_profile = resolve_codex_profile(
             runtime_profile,
             logger=log,
@@ -430,6 +432,9 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         )
 
         command.extend(self._build_permission_args())
+
+        if self._strict_mcp_config:
+            command.extend(["-c", "mcp_servers.ouroboros.enabled=false"])
 
         if self._ephemeral:
             command.append("--ephemeral")

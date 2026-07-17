@@ -305,6 +305,21 @@ class TestCodexCliLLMAdapter:
 
         assert "--sandbox" in command
         assert "read-only" in command
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
+    def test_build_command_disables_ouroboros_mcp_when_strict(self) -> None:
+        """Strict internal LLM child exec disables only Ouroboros MCP transiently."""
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "-c" in command
+        assert "mcp_servers.ouroboros.enabled=false" in command
+        assert command.index("-c") < command.index("--ephemeral")
 
     def test_build_command_prefers_profile_over_model(self) -> None:
         """Codex task profiles use --profile and avoid a conflicting --model."""

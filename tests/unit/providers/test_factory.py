@@ -151,6 +151,19 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._strict_mcp_config is False
 
+    def test_codex_explicit_strict_mcp_config_is_forwarded(self) -> None:
+        """Nested MCP interview isolation reaches the Codex LLM adapter."""
+        adapter = create_llm_adapter(
+            backend="codex",
+            cli_path="codex",
+            use_case="interview",
+            allowed_tools=[],
+            strict_mcp_config=True,
+        )
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._strict_mcp_config is True
+
     def test_creates_pi_adapter(self) -> None:
         """Pi backend returns PiLLMAdapter."""
         adapter = create_llm_adapter(backend="pi", cli_path="/tmp/pi")

@@ -1022,8 +1022,56 @@ class TestCodexSetup:
         assert "consensus_judge" not in config_dict["llm_role_profiles"]
         assert "ontology_analysis" not in config_dict["llm_role_profiles"]
 
-    def test_setup_codex_preserves_pinned_legacy_default_model(self, tmp_path: Path) -> None:
-        """Presence of a legacy model key should count as an explicit user override."""
+    def test_setup_codex_rewrites_fresh_shipped_defaults_to_default(self, tmp_path: Path) -> None:
+        """Fresh/default Codex setup should not retain Claude-looking defaults."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"backend": "claude_code"},
+                    "clarification": {"default_model": DEFAULT_OPUS_MODEL},
+                    "evaluation": {"semantic_model": DEFAULT_OPUS_MODEL},
+                    "resilience": {"wonder_model": DEFAULT_OPUS_MODEL},
+                    "consensus": {
+                        "advocate_model": "openrouter/anthropic/claude-opus-4.8",
+                        "models": [
+                            "openrouter/openai/gpt-4o",
+                            "openrouter/anthropic/claude-opus-4.8",
+                            "openrouter/google/gemini-2.5-pro",
+                        ],
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert config_dict["llm"]["backend"] == "codex"
+        assert config_dict["llm"]["qa_model"] == "default"
+        assert config_dict["clarification"]["default_model"] == "default"
+        assert config_dict["evaluation"]["semantic_model"] == "default"
+        assert config_dict["resilience"]["wonder_model"] == "default"
+        assert config_dict["consensus"]["advocate_model"] == "default"
+        assert config_dict["consensus"]["models"] == ["default", "default", "default"]
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+        assert config_dict["llm_role_profiles"]["clarification"] == "frontier"
+
+    def test_setup_codex_rewrites_legacy_shipped_default_model(self, tmp_path: Path) -> None:
+        """Legacy shipped defaults are setup defaults, not explicit choices."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -1046,14 +1094,16 @@ class TestCodexSetup:
             patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
             patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
         assert config_dict["llm"]["backend"] == "codex"
-        assert config_dict["llm"]["qa_model"] == "claude-sonnet-4-20250514"
-        assert "qa" not in config_dict["llm_role_profiles"]
+        assert config_dict["llm"]["qa_model"] == "default"
+        assert config_dict["clarification"]["default_model"] == "default"
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
 
     def test_setup_codex_merges_codex_mapping_into_existing_profiles(self, tmp_path: Path) -> None:
         """Existing same-name profiles should be made safe before role mappings target them."""

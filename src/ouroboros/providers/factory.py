@@ -170,6 +170,7 @@ def _create_codex_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
         timeout=request.timeout,
         max_retries=request.max_retries,
         runtime_profile=get_runtime_profile(),
+        strict_mcp_config=request.strict_mcp_config,
     )
 
 

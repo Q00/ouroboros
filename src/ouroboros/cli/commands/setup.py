@@ -405,6 +405,26 @@ _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], obje
     "semantic_evaluation": ((("evaluation", "semantic_model"), DEFAULT_OPUS_MODEL),),
     "wonder": ((("resilience", "wonder_model"), DEFAULT_OPUS_MODEL),),
 }
+_CODEX_DEFAULT_MODEL_SENTINEL = "default"
+
+_CODEX_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("llm", "qa_model", DEFAULT_SONNET_MODEL),
+    ("llm", "dependency_analysis_model", DEFAULT_SONNET_MODEL),
+    ("llm", "ontology_analysis_model", DEFAULT_SONNET_MODEL),
+    ("llm", "context_compression_model", "gpt-4"),
+    ("clarification", "default_model", DEFAULT_OPUS_MODEL),
+    ("evaluation", "semantic_model", DEFAULT_OPUS_MODEL),
+    ("evaluation", "assertion_extraction_model", DEFAULT_SONNET_MODEL),
+    ("resilience", "wonder_model", DEFAULT_OPUS_MODEL),
+    ("resilience", "reflect_model", DEFAULT_OPUS_MODEL),
+    ("consensus", "advocate_model", DEFAULT_CONSENSUS_OPUS_MODEL),
+    ("consensus", "devil_model", "openrouter/openai/gpt-4o"),
+    ("consensus", "judge_model", "openrouter/google/gemini-2.5-pro"),
+)
+
+_CODEX_DEFAULT_MODEL_LIST_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("consensus", "models", _DEFAULT_CONSENSUS_MODELS),
+)
 
 
 def _normalize_codex_mcp_mode(value: str) -> CodexMcpMode:
@@ -1122,11 +1142,73 @@ def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
 
 def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
     """Return True when an existing model setting should beat setup defaults."""
-    for path, _default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
+    for path, shipped_default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
         value = _get_nested_value(config_dict, path)
-        if value is not _MISSING:
+        if value is _MISSING:
+            continue
+        if _is_codex_setup_shipped_default_value(value, shipped_default):
+            continue
+        if value == _CODEX_DEFAULT_MODEL_SENTINEL:
+            continue
+        if isinstance(value, list | tuple) and _is_codex_setup_shipped_default_roster(
+            value, shipped_default
+        ):
+            continue
+        if (
+            isinstance(value, list | tuple)
+            and value
+            and all(item == _CODEX_DEFAULT_MODEL_SENTINEL for item in value)
+        ):
+            continue
+        if value is not None:
             return True
     return False
+
+
+def _is_codex_setup_shipped_default_value(value: object, shipped_default: object) -> bool:
+    """Return whether a scalar value is a current or legacy shipped default."""
+    if not isinstance(value, str) or not isinstance(shipped_default, str):
+        return False
+    return value in recognized_shipped_defaults(shipped_default)
+
+
+def _is_codex_setup_shipped_default_roster(
+    value: list | tuple,
+    shipped_default: object,
+) -> bool:
+    """Return whether a model roster is the current or legacy shipped roster."""
+    if not isinstance(shipped_default, tuple):
+        return False
+    current = tuple(value)
+    if len(current) != len(shipped_default):
+        return False
+    return all(
+        isinstance(candidate, str)
+        and isinstance(default, str)
+        and candidate in recognized_shipped_defaults(default)
+        for candidate, default in zip(current, shipped_default, strict=True)
+    )
+
+
+def _apply_codex_default_model_sentinel(config_dict: dict) -> None:
+    """Persist Codex-safe defaults while preserving explicit user choices."""
+    for section_name, key, shipped_default in _CODEX_DEFAULT_MODEL_TARGETS:
+        section = _ensure_mapping_section(config_dict, section_name)
+        current = section.get(key)
+        if current is None or current == _CODEX_DEFAULT_MODEL_SENTINEL:
+            section[key] = _CODEX_DEFAULT_MODEL_SENTINEL
+        elif _is_codex_setup_shipped_default_value(current, shipped_default):
+            section[key] = _CODEX_DEFAULT_MODEL_SENTINEL
+
+    for section_name, key, shipped_roster in _CODEX_DEFAULT_MODEL_LIST_TARGETS:
+        section = _ensure_mapping_section(config_dict, section_name)
+        current = section.get(key)
+        if current is None:
+            section[key] = [_CODEX_DEFAULT_MODEL_SENTINEL] * len(shipped_roster)
+        elif isinstance(current, list | tuple) and _is_codex_setup_shipped_default_roster(
+            current, shipped_roster
+        ):
+            section[key] = [_CODEX_DEFAULT_MODEL_SENTINEL] * len(shipped_roster)
 
 
 def _install_codex_default_llm_profiles(
@@ -1219,6 +1301,7 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
         llm_config = _ensure_mapping_section(config_dict, "llm")
         llm_config["backend"] = "codex"
 
+        _apply_codex_default_model_sentinel(config_dict)
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict
         )
