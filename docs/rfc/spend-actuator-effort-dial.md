@@ -40,10 +40,11 @@ The executor emits three related events:
 
 ## Assessment-controlled effort
 
-Only complete low/low, high-confidence, declared or measured inputs may lower the
-configured base effort by one notch. Missing, inferred, or low-confidence inputs
-preserve the base. Any high difficulty/stakes axis imposes at least high effort.
-Retry escalation is applied afterward.
+Only complete low/low, high-confidence, measured inputs may lower the configured
+base effort by one notch. Declared, missing, inferred, absent, or low-confidence
+inputs preserve the base; declared metadata may still impose a higher floor. Any
+high difficulty/stakes axis imposes at least high effort. Retry escalation is
+applied afterward.
 
 The policy is dormant when no base effort is configured. Assessment telemetry is
 still emitted so the absence of an actuator is visible rather than inferred.

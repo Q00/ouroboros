@@ -352,9 +352,11 @@ acceptance_criteria:
 
 `difficulty` and `stakes` accept `low`, `medium`, or `high`. `provenance`
 accepts `declared`, `measured`, `inferred`, or `absent`; `confidence` accepts
-`low`, `medium`, or `high` and defaults to `low`. Missing, inferred, or
-low-confidence metadata cannot authorize cheaper execution. See the
-[investment assessment RFC](../rfc/spend-estimator.md) for policy precedence.
+`low`, `medium`, or `high` and defaults to `low`. Only complete, high-confidence
+`measured` low/low metadata can authorize cheaper execution. `declared`, missing,
+inferred, absent, or low-confidence metadata preserves the base effort, though a
+high axis may still raise its floor. See the [investment assessment
+RFC](../rfc/spend-estimator.md) for policy precedence.
 
 Any Seed containing investment metadata executes through the per-AC executor,
 including single-criterion and explicit sequential runs. Whole-session resume is

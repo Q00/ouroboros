@@ -53,11 +53,13 @@ The v1 vocabulary is intentionally bounded:
 Legacy string ACs and structured ACs without `investment` remain valid and keep
 their persisted representation unchanged.
 
-`declared` means an authorized Seed/profile producer chose the value. `measured`
-means an upstream producer asserts that the value came from concrete repository
-or runtime evidence; that producer must retain the evidence reference and must
-not relabel inference as measurement. In v1, both are explicit authority.
-`inferred` and `absent` are never lowering authority.
+`declared` means a Seed/profile producer chose the value without independent
+measurement. It is valid metadata for observability and effort floors, but it is
+not lowering authority. `measured` means an upstream producer asserts that the
+value came from concrete repository or runtime evidence; that producer must
+retain the evidence reference and must not relabel inference as measurement.
+Only `measured` provenance can authorize lower effort in v1. `declared`,
+`inferred`, and `absent` never authorize cheapening.
 
 ## Normalized assessment
 
@@ -86,11 +88,10 @@ as advised and receives no unsupported effort parameter.
 
 1. Missing difficulty or stakes becomes `unknown` and cannot authorize lower
    effort.
-2. `inferred` and `absent` provenance are observe-only or raise-only. They never
-   authorize cheapening.
-3. Only complete `low` difficulty + `low` stakes with `declared` or `measured`
-   provenance and `high` confidence may lower configured effort, by exactly one
-   notch.
+2. `declared`, `inferred`, and `absent` provenance are observe-only or
+   raise-only. They never authorize cheapening.
+3. Only complete `low` difficulty + `low` stakes with `measured` provenance and
+   `high` confidence may lower configured effort, by exactly one notch.
 4. Any `high` axis imposes a minimum effort of `high` when a base effort is
    configured.
 5. Retry escalation is applied after the assessment. Runtime failures may raise
