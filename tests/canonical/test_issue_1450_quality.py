@@ -32,6 +32,7 @@ from ouroboros.auto.ledger_seed import synthesize_seed_from_ledger
 from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.config.loader import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.types import Result
 
 from .conftest import CanonicalScenario
 
@@ -522,12 +523,79 @@ def _evaluate_smoke(scenario: CanonicalScenario, workdir: Path) -> dict[str, Any
         for path in scenario.declared_output_paths
         if not _resolve_workdir_path(workdir, path).exists()
     ]
+    state_checks = _evaluate_product_state(scenario, workdir)
     return {
-        "passed": all(record.get("passed", False) for record in records) and not missing_outputs,
+        "passed": (
+            all(record.get("passed", False) for record in records)
+            and not missing_outputs
+            and all(check.get("passed", False) for check in state_checks)
+        ),
         "failure_class": "product",
         "commands": records,
         "missing_declared_outputs": missing_outputs,
+        "state_checks": state_checks,
     }
+
+
+def _evaluate_product_state(
+    scenario: CanonicalScenario,
+    workdir: Path,
+) -> list[dict[str, Any]]:
+    """Verify scenario-specific persisted product state after smoke commands."""
+    if scenario.slug != "cli-todo":
+        return []
+
+    done_names: list[str] = []
+    for command in _smoke_commands(scenario):
+        argv = list(command["argv"])
+        if "done" not in argv:
+            continue
+        done_index = argv.index("done")
+        name = " ".join(argv[done_index + 1 :]).strip()
+        if name:
+            done_names.append(name)
+
+    habits_path = _resolve_workdir_path(workdir, "habits.json")
+    try:
+        habits = json.loads(habits_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [
+            {
+                "kind": "cli_todo_done_persistence",
+                "path": "habits.json",
+                "expected_done_names": done_names,
+                "passed": False,
+                "error": repr(exc),
+            }
+        ]
+
+    if not isinstance(habits, list):
+        return [
+            {
+                "kind": "cli_todo_done_persistence",
+                "path": "habits.json",
+                "expected_done_names": done_names,
+                "passed": False,
+                "error": "habits.json must contain a list",
+            }
+        ]
+
+    completed_names = {
+        str(item.get("name"))
+        for item in habits
+        if isinstance(item, dict) and item.get("done") is True
+    }
+    missing_done_names = [name for name in done_names if name not in completed_names]
+    return [
+        {
+            "kind": "cli_todo_done_persistence",
+            "path": "habits.json",
+            "expected_done_names": done_names,
+            "completed_names": sorted(completed_names),
+            "missing_done_names": missing_done_names,
+            "passed": bool(done_names) and not missing_done_names,
+        }
+    ]
 
 
 def _failure_class(envelope: Mapping[str, Any], smoke: Mapping[str, Any]) -> str | None:
@@ -812,13 +880,18 @@ def test_issue_1450_verdict_classifier(outcomes: list[str], expected: str) -> No
     assert _decide(outcomes) == expected
 
 
+@pytest.mark.parametrize(
+    ("persist_done", "expected_oracle_pass"),
+    [(True, True), (False, False)],
+    ids=("persists-done-state", "stdout-only-done-is-rejected"),
+)
 @pytest.mark.asyncio
 async def test_issue_1450_arm_runner_requires_product_and_trace_evidence(
     canonical_scenarios: tuple[CanonicalScenario, ...],
     tmp_path: Path,
+    persist_done: bool,
+    expected_oracle_pass: bool,
 ) -> None:
-    from ouroboros.core.types import Result
-
     class _FakeHandler:
         def __init__(self, store: AutoStore) -> None:
             self.store = store
@@ -833,23 +906,30 @@ async def test_issue_1450_arm_runner_requires_product_and_trace_evidence(
             state.transition(AutoPhase.COMPLETE, "fake product verified")
             self.store.save(state)
             (workdir / "habit_tracker.py").write_text(
-                """
+                f"""
 import json
 import sys
 from pathlib import Path
 
+PERSIST_DONE = {persist_done!r}
 store = Path("habits.json")
 habits = json.loads(store.read_text()) if store.exists() else []
 command = sys.argv[1] if len(sys.argv) > 1 else ""
 name = " ".join(sys.argv[2:])
 if command == "add" and name:
-    habits.append({"name": name, "done": False})
+    habits.append({{"name": name, "done": False}})
     store.write_text(json.dumps(habits))
     print(name)
 elif command == "list":
     for item in habits:
         print(item["name"])
 elif command == "done" and name:
+    matches = [item for item in habits if item.get("name") == name]
+    if not matches:
+        raise SystemExit(1)
+    if PERSIST_DONE:
+        matches[0]["done"] = True
+        store.write_text(json.dumps(habits))
     print(name)
 else:
     raise SystemExit(2)
@@ -885,10 +965,17 @@ else:
         handler_factory=_FakeHandler,
     )
 
-    assert record["oracle_pass"] is True
-    assert record["failure_class"] is None
+    assert record["oracle_pass"] is expected_oracle_pass
     assert record["evidence_complete"] is True
-    assert record["smoke"]["passed"] is True
+    assert record["smoke"]["passed"] is expected_oracle_pass
+    state_check = record["smoke"]["state_checks"][0]
+    assert state_check["passed"] is expected_oracle_pass
+    if expected_oracle_pass:
+        assert record["failure_class"] is None
+        assert state_check["missing_done_names"] == []
+    else:
+        assert record["failure_class"] == "product"
+        assert state_check["missing_done_names"] == ["drink water"]
 
 
 @pytest.mark.asyncio
