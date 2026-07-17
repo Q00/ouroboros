@@ -14,6 +14,7 @@ from ouroboros.cli.commands.init import (
     _interview_hitl_response,
     _run_interview_loop,
 )
+from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_requested_event
 
@@ -113,6 +114,43 @@ async def test_get_init_event_store_failure_continues_without_store(
     assert result is None
     event_store.close.assert_awaited_once()
     assert warnings == ["HITL telemetry is unavailable; continuing without it: db unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_question_generation_failure_declined_retry_persists_aborted_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declining retry must not leave a reusable zero-round in-progress session."""
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.saved: list[InterviewState] = []
+
+        async def ask_next_question(self, state: InterviewState):
+            return Result.err(
+                ProviderError(
+                    "Claude Code returned an error result: success",
+                    provider="claude_code",
+                )
+            )
+
+        async def save_state(self, state: InterviewState):
+            self.saved.append(state.model_copy(deep=True))
+            return Result.ok(None)
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.init.Confirm.ask",
+        lambda *_args, **_kwargs: False,
+    )
+
+    state = InterviewState(interview_id="interview_question_failure")
+    engine = FakeEngine()
+
+    final_state = await _run_interview_loop(engine, state)
+
+    assert final_state.status == InterviewStatus.ABORTED
+    assert final_state.rounds == []
+    assert engine.saved[-1].status == InterviewStatus.ABORTED
 
 
 @pytest.mark.asyncio

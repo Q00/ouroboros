@@ -298,6 +298,14 @@ async def _run_interview_loop(
             print_error(f"Failed to generate question: {question_result.error.message}")
             should_retry = Confirm.ask("Retry?", default=True)
             if not should_retry:
+                state.status = InterviewStatus.ABORTED
+                state.mark_updated()
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    print_error(
+                        "Warning: Failed to save aborted interview state: "
+                        f"{save_result.error.message}"
+                    )
                 break
             continue
 
@@ -364,6 +372,18 @@ async def _run_interview_loop(
     return state
 
 
+def _raise_for_aborted_interview(state: InterviewState) -> None:
+    """Stop the CLI before an aborted interview can be resumed or finalized."""
+    if state.status != InterviewStatus.ABORTED:
+        return
+    print_error(
+        "Interview stopped before completion after question generation failed. "
+        f"Session {state.interview_id} is saved with status 'aborted'; start a new "
+        "interview instead of resuming this session."
+    )
+    raise typer.Exit(code=1)
+
+
 async def _run_interview(
     initial_context: str,
     resume_id: str | None = None,
@@ -412,6 +432,8 @@ async def _run_interview(
             raise typer.Exit(code=1)
         state = state_result.value
 
+    _raise_for_aborted_interview(state)
+
     console.print()
     console.print(f"[bold cyan]Interview Session: {state.interview_id}[/]")
     console.print("[muted]No round limit - you decide when to stop[/]")
@@ -429,6 +451,10 @@ async def _run_interview(
             event_store=loop_event_store,
             disabled_event_stores=disabled_event_stores,
         )
+
+        if state.status == InterviewStatus.ABORTED:
+            console.print()
+            _raise_for_aborted_interview(state)
 
         # Outer loop for retry on high ambiguity
         while True:
@@ -973,6 +999,8 @@ def start(
                 llm_backend.value if llm_backend else None,
             )
         )
+    except typer.Exit:
+        raise
     except KeyboardInterrupt:
         console.print()
         print_info("Interview interrupted. Progress has been saved.")

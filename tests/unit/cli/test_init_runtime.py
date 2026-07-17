@@ -4,15 +4,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
-from ouroboros.bigbang.interview import InterviewState
+from ouroboros.bigbang.interview import InterviewState, InterviewStatus
 from ouroboros.cli.commands.init import (
     SeedGenerationResult,
     _generate_seed_from_interview,
     _get_adapter,
     _resolve_init_llm_backend,
+    _run_interview,
     _start_workflow,
 )
 from ouroboros.cli.main import app
@@ -42,6 +44,91 @@ class TestInitWorkflowRuntimeHandoff:
 
         mock_run_orchestrator.assert_awaited_once()
         assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "codex"
+
+    @pytest.mark.asyncio
+    async def test_aborted_interview_does_not_report_completion_or_generate_seed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A declined question retry exits before the completion/Seed flow."""
+        initial_state = InterviewState(
+            interview_id="interview_question_failure",
+            initial_context="Build a CLI",
+        )
+        aborted_state = InterviewState(
+            interview_id="interview_question_failure",
+            initial_context="Build a CLI",
+            status=InterviewStatus.ABORTED,
+        )
+        engine = MagicMock()
+        engine.start_interview = AsyncMock(return_value=Result.ok(initial_state))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        with (
+            patch("ouroboros.cli.commands.init._get_adapter", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
+            patch(
+                "ouroboros.cli.commands.init._run_interview_loop",
+                new=AsyncMock(return_value=aborted_state),
+            ),
+            patch(
+                "ouroboros.cli.commands.init._get_init_event_store",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("ouroboros.cli.commands.init.print_success") as mock_print_success,
+            patch(
+                "ouroboros.cli.commands.init._generate_seed_from_interview",
+                new=AsyncMock(),
+            ) as mock_generate_seed,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                await _run_interview(
+                    "Build a CLI",
+                    state_dir=tmp_path,
+                    use_orchestrator=True,
+                    workflow_runtime_backend="codex",
+                )
+
+        assert exc_info.value.exit_code == 1
+        mock_print_success.assert_not_called()
+        mock_generate_seed.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_aborted_interview_cannot_be_resumed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A persisted aborted zero-round session is terminal, not silently reusable."""
+        state = InterviewState(
+            interview_id="interview_question_failure",
+            initial_context="Build a CLI",
+            status=InterviewStatus.ABORTED,
+        )
+        engine = MagicMock()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        run_loop = AsyncMock()
+
+        with (
+            patch("ouroboros.cli.commands.init._get_adapter", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
+            patch("ouroboros.cli.commands.init._run_interview_loop", new=run_loop),
+            patch(
+                "ouroboros.cli.commands.init._generate_seed_from_interview",
+                new=AsyncMock(),
+            ) as mock_generate_seed,
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                await _run_interview(
+                    "",
+                    resume_id=state.interview_id,
+                    state_dir=tmp_path,
+                    use_orchestrator=True,
+                    workflow_runtime_backend="codex",
+                )
+
+        assert exc_info.value.exit_code == 1
+        run_loop.assert_not_awaited()
+        mock_generate_seed.assert_not_awaited()
 
     def test_cli_forwards_llm_backend_to_interview_flow(self) -> None:
         """CLI wiring forwards the explicit LLM backend into the interview coroutine."""
