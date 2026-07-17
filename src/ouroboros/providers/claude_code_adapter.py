@@ -302,6 +302,16 @@ class ClaudeCodeAdapter:
         if self._is_retryable_error(error.message):
             return True
 
+        api_error_status = error.status_code
+        if api_error_status is None:
+            raw_status = error.details.get("api_error_status")
+            if isinstance(raw_status, int) and not isinstance(raw_status, bool):
+                api_error_status = raw_status
+        if api_error_status in {408, 409, 425, 429} or (
+            api_error_status is not None and 500 <= api_error_status <= 599
+        ):
+            return True
+
         error_type = str(error.details.get("error_type", ""))
         stderr = str(error.details.get("stderr", "") or "").strip()
         if stderr:
@@ -1074,6 +1084,13 @@ class ClaudeCodeAdapter:
                         subtype = getattr(sdk_message, "subtype", None)
                         stop_reason = getattr(sdk_message, "stop_reason", None)
                         errors = getattr(sdk_message, "errors", None)
+                        raw_api_error_status = getattr(sdk_message, "api_error_status", None)
+                        api_error_status = (
+                            raw_api_error_status
+                            if isinstance(raw_api_error_status, int)
+                            and not isinstance(raw_api_error_status, bool)
+                            else None
+                        )
                         if subtype == "error_max_turns" and self._is_usable_max_turns_partial(
                             content,
                             stop_reason=stop_reason,
@@ -1103,10 +1120,18 @@ class ClaudeCodeAdapter:
                                 error_result = None
                             continue
 
-                        error_msg = (
-                            getattr(sdk_message, "result", "")
-                            or "Unknown error from Claude Agent SDK"
+                        error_items = errors if isinstance(errors, list) else []
+                        joined_errors = "; ".join(
+                            str(item).strip() for item in error_items if str(item).strip()
                         )
+                        result_text = str(getattr(sdk_message, "result", "") or "").strip()
+                        error_msg = result_text or joined_errors
+                        if not error_msg:
+                            error_msg = (
+                                f"Claude Code API request failed with HTTP {api_error_status}"
+                                if api_error_status is not None
+                                else "Unknown error from Claude Agent SDK"
+                            )
                         partial_content = content.strip() if subtype == "error_max_turns" else ""
                         if subtype == "error_max_turns" and partial_content:
                             error_msg = (
@@ -1125,7 +1150,10 @@ class ClaudeCodeAdapter:
                             continue
                         error_result = ProviderError(
                             message=error_msg,
+                            provider="claude_code",
+                            status_code=api_error_status,
                             details={
+                                "error_type": "ClaudeResultError",
                                 "session_id": session_id,
                                 "stderr": "\n".join(stderr_lines[-20:]) if stderr_lines else "",
                                 "claudecode_present": claudecode_present,
@@ -1133,6 +1161,7 @@ class ClaudeCodeAdapter:
                                 "subtype": subtype,
                                 "stop_reason": stop_reason,
                                 "errors": errors,
+                                "api_error_status": api_error_status,
                                 "partial_content": partial_content or None,
                                 "partial_rejected": bool(partial_content),
                                 "configured_cli_path": (
@@ -1144,6 +1173,19 @@ class ClaudeCodeAdapter:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if error_result is not None and str(exc).startswith(
+                "Claude Code returned an error result:"
+            ):
+                log.warning(
+                    "claude_code_adapter.structured_error_preserved",
+                    error=error_result.message,
+                    error_type=error_result.details.get("error_type"),
+                    subtype=error_result.details.get("subtype"),
+                    api_error_status=error_result.status_code,
+                    trailing_error_type=type(exc).__name__,
+                )
+                return Result.err(error_result)
+
             stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
             traceback_text = traceback.format_exc()
             error_message = f"Claude Agent SDK request failed: {exc}"
@@ -1161,6 +1203,7 @@ class ClaudeCodeAdapter:
             return Result.err(
                 ProviderError(
                     message=error_message,
+                    provider="claude_code",
                     details={
                         "error_type": type(exc).__name__,
                         "session_id": session_id,

@@ -95,7 +95,6 @@ _SUGGESTED_INTERVIEW_ID_RE = re.compile(r"^interview_[a-f0-9]{16}$")
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
 _QUESTION_GENERATION_ENVELOPE_VIOLATION = "ToolUseBlockViolation"
 _QUESTION_GENERATION_ENVELOPE_REASON_CODE = "question_generation_envelope_violation"
-_CLAUDE_SUCCESS_ERROR_RESULT_SIGNATURE = "claude code returned an error result: success"
 
 REQUIRED_CLIENT_GATES: tuple[str, ...] = (
     # TODO(#1008): derive required gate names from the interview skill /
@@ -836,13 +835,7 @@ def _is_question_generation_envelope_violation(error: Any) -> bool:
     provider_error_type = _provider_error_type(error)
     if provider_error_type == _QUESTION_GENERATION_ENVELOPE_VIOLATION:
         return True
-    error_text = str(error)
-    if _QUESTION_GENERATION_ENVELOPE_VIOLATION in error_text:
-        return True
-    provider = getattr(error, "provider", None)
-    if provider == "claude_code" and _CLAUDE_SUCCESS_ERROR_RESULT_SIGNATURE in error_text.lower():
-        return True
-    return False
+    return _QUESTION_GENERATION_ENVELOPE_VIOLATION in str(error)
 
 
 def _interview_reasoning_meta(

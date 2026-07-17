@@ -174,19 +174,12 @@ async def test_tool_envelope_question_failure_hands_off_to_parent_session(
 
 
 @pytest.mark.asyncio
-async def test_claude_success_error_result_hands_off_first_question(
+async def test_claude_success_error_text_is_not_treated_as_envelope_violation(
     tmp_path: Path,
 ) -> None:
-    """Claude Code 2.1.211 can report an error result whose text is ``success``.
-
-    Under the sealed question-generation envelope this is the same practical
-    failure as the explicit ToolUseBlockViolation path: the nested agentic CLI
-    failed to produce text before question 1. Route it to the parent-question
-    fallback rather than persisting a misleading recoverable zero-round failure.
-    """
+    """An SDK diagnostic string alone must not masquerade as an envelope violation."""
     provider_error = ProviderError(
         "Claude Agent SDK request failed: Claude Code returned an error result: success",
-        provider="claude_code",
         details={"error_type": "Exception", "session_id": "claude-session-1"},
     )
     engine = _FakeInterviewEngine(state_dir=tmp_path, question_error=provider_error)
@@ -204,20 +197,13 @@ async def test_claude_success_error_result_hands_off_first_question(
 
     assert outcome.is_ok
     mcp_result = outcome.value
-    assert mcp_result.is_error is False
+    assert mcp_result.is_error is True
     meta = mcp_result.meta or {}
-    assert meta["status"] == "parent_question_required"
     assert meta["recoverable"] is True
-    assert meta["retry_mcp"] is False
-    assert meta["ask_user_directly"] is True
-    assert meta["last_question_required"] is True
-    assert meta["reason_code"] == "question_generation_envelope_violation"
-    assert meta["question_source"] == "parent_session"
-    assert meta["provider_error_type"] == "Exception"
-
-    response_text = mcp_result.content[0].text
-    assert "Ask the user exactly one natural Socratic clarification question" in response_text
-    assert "last_question=<the exact question you asked>" in response_text
+    assert meta.get("status") != "parent_question_required"
+    assert "ask_user_directly" not in meta
+    assert "reason_code" not in meta
+    assert "Question generation failed" in mcp_result.content[0].text
 
     session_id = meta["session_id"]
     persisted_state = engine.states[session_id]
@@ -225,8 +211,8 @@ async def test_claude_success_error_result_hands_off_first_question(
     assert persisted_state.status == InterviewStatus.IN_PROGRESS
 
     event_types = [call.args[0].type for call in mock_store.append.await_args_list]
-    assert "interview.question_generation.parent_handoff" in event_types
-    assert "interview.failed" not in event_types
+    assert "interview.question_generation.parent_handoff" not in event_types
+    assert "interview.failed" in event_types
 
 
 @pytest.mark.asyncio

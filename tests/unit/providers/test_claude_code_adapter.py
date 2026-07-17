@@ -1484,6 +1484,151 @@ class TestErrorDiagnostics:
     """Tests for error diagnostic paths in _execute_single_request."""
 
     @pytest.mark.asyncio
+    async def test_trailing_sdk_exit_preserves_structured_error_result(self) -> None:
+        """The CLI result payload outranks the SDK's misleading trailing exception.
+
+        claude-agent-sdk 0.2.110 summarizes an error result with an empty
+        ``errors`` list and protocol subtype ``success`` as
+        ``Claude Code returned an error result: success``. The same result
+        payload already carries the actionable text and HTTP status, so keep
+        that structured error when the subprocess then exits non-zero.
+        """
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+        mock_options_cls = MagicMock()
+
+        async def error_result_then_exit(*args, **kwargs):
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = (
+                "There's an issue with the selected model (missing-model). "
+                "It may not exist or you may not have access to it."
+            )
+            result_msg.is_error = True
+            result_msg.subtype = "success"
+            result_msg.stop_reason = None
+            result_msg.errors = []
+            result_msg.api_error_status = 404
+            yield result_msg
+            raise RuntimeError("Claude Code returned an error result: success")
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls,
+            MagicMock(side_effect=error_result_then_exit),
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        error = result.error
+        assert error.provider == "claude_code"
+        assert error.status_code == 404
+        assert "missing-model" in error.message
+        assert "error result: success" not in error.message
+        assert error.details["error_type"] == "ClaudeResultError"
+        assert error.details["subtype"] == "success"
+        assert error.details["api_error_status"] == 404
+
+    @pytest.mark.asyncio
+    async def test_unrelated_trailing_exception_overrides_prior_error_result(self) -> None:
+        """Only the SDK's known error-result wrapper may reuse the prior payload."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+        mock_options_cls = MagicMock()
+
+        async def error_result_then_parser_failure(*args, **kwargs):
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = "Rate limit exceeded"
+            result_msg.is_error = True
+            result_msg.subtype = "success"
+            result_msg.stop_reason = None
+            result_msg.errors = []
+            result_msg.api_error_status = 429
+            yield result_msg
+            raise RuntimeError("message stream parser crashed")
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls,
+            MagicMock(side_effect=error_result_then_parser_failure),
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert result.error.provider == "claude_code"
+        assert result.error.status_code is None
+        assert "message stream parser crashed" in result.error.message
+        assert result.error.details["error_type"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_api_error_status_retries_only_transient_failures(self) -> None:
+        """HTTP status metadata drives retry even when the message is generic."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+        overloaded = ProviderError(
+            message="Claude Code API request failed",
+            provider="claude_code",
+            details={"error_type": "ClaudeResultError", "api_error_status": 529},
+        )
+        adapter._execute_single_request = AsyncMock(
+            side_effect=[
+                Result.err(overloaded),
+                _ok_completion_result("What outcome should the workflow produce?"),
+            ]
+        )
+
+        with patch("ouroboros.providers.claude_code_adapter.asyncio.sleep", new=AsyncMock()):
+            result = await adapter._complete_with_transient_retry(
+                "test prompt",
+                config,
+                system_prompt=None,
+            )
+
+        assert result.is_ok
+        assert result.value.content == "What outcome should the workflow produce?"
+        assert adapter._execute_single_request.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_non_transient_api_error_status_is_not_retried(self) -> None:
+        """A model/configuration 404 must surface immediately for correction."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+        not_found = ProviderError(
+            message="The selected model does not exist",
+            provider="claude_code",
+            status_code=404,
+            details={"error_type": "ClaudeResultError", "api_error_status": 404},
+        )
+        adapter._execute_single_request = AsyncMock(return_value=Result.err(not_found))
+
+        result = await adapter._complete_with_transient_retry(
+            "test prompt",
+            config,
+            system_prompt=None,
+        )
+
+        assert result.is_err
+        assert result.error is not_found
+        adapter._execute_single_request.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_empty_stderr_cli_process_exit_is_retried(self) -> None:
         """Transient Claude CLI exits without stderr are retried by the shared adapter."""
         adapter = ClaudeCodeAdapter()
