@@ -299,17 +299,18 @@ class ClaudeCodeAdapter:
         first extraction attempt while still avoiding retries for actionable
         stderr-bearing failures such as auth or configuration errors.
         """
-        if self._is_retryable_error(error.message):
-            return True
-
-        api_error_status = error.status_code
+        raw_status = error.status_code
+        api_error_status = (
+            raw_status if isinstance(raw_status, int) and not isinstance(raw_status, bool) else None
+        )
         if api_error_status is None:
-            raw_status = error.details.get("api_error_status")
-            if isinstance(raw_status, int) and not isinstance(raw_status, bool):
-                api_error_status = raw_status
-        if api_error_status in {408, 409, 425, 429} or (
-            api_error_status is not None and 500 <= api_error_status <= 599
-        ):
+            raw_detail_status = error.details.get("api_error_status")
+            if isinstance(raw_detail_status, int) and not isinstance(raw_detail_status, bool):
+                api_error_status = raw_detail_status
+        if api_error_status is not None:
+            return api_error_status in {408, 409, 425, 429} or 500 <= api_error_status <= 599
+
+        if self._is_retryable_error(error.message):
             return True
 
         error_type = str(error.details.get("error_type", ""))

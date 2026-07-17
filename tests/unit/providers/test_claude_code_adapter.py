@@ -1605,13 +1605,59 @@ class TestErrorDiagnostics:
         assert result.value.content == "What outcome should the workflow produce?"
         assert adapter._execute_single_request.await_count == 2
 
+    @pytest.mark.parametrize(
+        ("status_code", "expected_retry"),
+        [
+            (400, False),
+            (408, True),
+            (409, True),
+            (425, True),
+            (429, True),
+            (499, False),
+            (500, True),
+            (599, True),
+            (600, False),
+        ],
+    )
+    def test_structured_api_status_retry_boundaries(
+        self,
+        status_code: int,
+        expected_retry: bool,
+    ) -> None:
+        """Structured HTTP status outranks ambiguous provider message text."""
+        adapter = ClaudeCodeAdapter()
+        error = ProviderError(
+            message="Connection timed out while checking the selected model",
+            provider="claude_code",
+            status_code=status_code,
+            details={"error_type": "ClaudeResultError", "api_error_status": status_code},
+        )
+
+        assert adapter._is_retryable_provider_error(error) is expected_retry
+
+    @pytest.mark.parametrize("malformed_status", [True, "429"])
+    def test_malformed_api_status_metadata_is_ignored(
+        self,
+        malformed_status: object,
+    ) -> None:
+        """Boolean and string status metadata must not enter numeric retry checks."""
+        adapter = ClaudeCodeAdapter()
+        error = ProviderError(
+            message="The selected model does not exist",
+            provider="claude_code",
+            status_code=malformed_status,  # type: ignore[arg-type]
+            details={"error_type": "ClaudeResultError", "api_error_status": malformed_status},
+        )
+
+        assert adapter._is_retryable_provider_error(error) is False
+
     @pytest.mark.asyncio
     async def test_non_transient_api_error_status_is_not_retried(self) -> None:
         """A model/configuration 404 must surface immediately for correction."""
         adapter = ClaudeCodeAdapter()
         config = CompletionConfig(model="claude-sonnet-4-6")
         not_found = ProviderError(
-            message="The selected model does not exist",
+            message="Connection timed out while checking whether the selected model exists",
             provider="claude_code",
             status_code=404,
             details={"error_type": "ClaudeResultError", "api_error_status": 404},

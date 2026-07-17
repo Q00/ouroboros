@@ -209,6 +209,8 @@ async def test_claude_success_error_text_is_not_treated_as_envelope_violation(
     persisted_state = engine.states[session_id]
     assert persisted_state.rounds == []
     assert persisted_state.status == InterviewStatus.IN_PROGRESS
+    assert (tmp_path / f"interview_{session_id}.json").exists()
+    assert engine.saved_states
 
     event_types = [call.args[0].type for call in mock_store.append.await_args_list]
     assert "interview.question_generation.parent_handoff" not in event_types
