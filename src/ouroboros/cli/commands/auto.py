@@ -67,6 +67,12 @@ from ouroboros.cli.formatters.panels import (
     print_warning,
 )
 from ouroboros.config import get_opencode_mode
+from ouroboros.core.execution_preferences import (
+    EfficiencyMode,
+    FrugalityAssurance,
+    resolve_execution_preferences,
+)
+from ouroboros.core.seed import Seed
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
@@ -178,6 +184,22 @@ def auto_command(
     skip_run: Annotated[
         bool, typer.Option("--skip-run", help="Stop after A-grade Seed creation.")
     ] = False,
+    efficiency_mode: Annotated[
+        EfficiencyMode | None,
+        typer.Option(
+            "--efficiency-mode",
+            help="Execution policy: adaptive or quality_first. Immutable on resume.",
+            case_sensitive=False,
+        ),
+    ] = None,
+    frugality_assurance: Annotated[
+        FrugalityAssurance | None,
+        typer.Option(
+            "--frugality-assurance",
+            help="Cost/grounding assurance: off, observe, or strict. Immutable on resume.",
+            case_sensitive=False,
+        ),
+    ] = None,
     no_wait: Annotated[
         bool,
         typer.Option(
@@ -189,6 +211,16 @@ def auto_command(
                 "NOT survive process exit unless a persistent owner (e.g. a running "
                 "'ouroboros mcp serve') holds it. Default off: auto waits for the run "
                 "job to reach a terminal state and reports the verdict."
+            ),
+        ),
+    ] = False,
+    codex_static_tool_recovery: Annotated[
+        bool,
+        typer.Option(
+            "--codex-recovery",
+            help=(
+                "Fail-closed foreground recovery for a Codex thread whose static "
+                "MCP tool snapshot omitted Auto tools."
             ),
         ),
     ] = False,
@@ -298,6 +330,38 @@ def auto_command(
     in-process job manager dies with the process and would otherwise cancel the
     run on exit. Pass ``--no-wait`` to restore fire-and-forget behaviour.
     """
+    if codex_static_tool_recovery and no_wait:
+        print_error("--codex-recovery cannot be combined with --no-wait")
+        raise typer.Exit(1)
+    if codex_static_tool_recovery and resume:
+        try:
+            _validate_codex_recovery_resume_arguments(
+                goal=goal,
+                runtime=runtime,
+                max_interview_rounds=max_interview_rounds,
+                max_repair_rounds=max_repair_rounds,
+                skip_run=skip_run,
+                efficiency_mode=efficiency_mode,
+                frugality_assurance=frugality_assurance,
+                attach_execution=attach_execution,
+                attach_job=attach_job,
+                attach_session=attach_session,
+                attach_source=attach_source,
+                reconcile_run=reconcile_run,
+                reconcile_source=reconcile_source,
+                pipeline_timeout_seconds=timeout,
+                complete_product=complete_product,
+                domain=domain,
+                commit_policy=commit_policy,
+                worktree_policy=worktree_policy,
+            )
+        except ValueError as exc:
+            print_error(str(exc))
+            raise typer.Exit(1) from exc
+    if codex_static_tool_recovery and not resume and runtime is not AgentRuntimeBackend.CODEX:
+        print_error("--codex-recovery requires --runtime codex on a fresh start")
+        raise typer.Exit(1)
+
     if status:
         if not resume:
             print_error("--status requires --resume auto_<id>")
@@ -320,35 +384,56 @@ def auto_command(
             f"{MAX_PIPELINE_TIMEOUT_SECONDS:g} seconds"
         )
         raise typer.Exit(1)
+    resume_lock = AutoStore().session_lock(resume) if resume else contextlib.nullcontext()
     try:
-        result = asyncio.run(
-            _run_auto(
-                goal=goal,
-                resume=resume,
-                runtime=runtime.value if runtime else None,
-                max_interview_rounds=max_interview_rounds,
-                max_repair_rounds=max_repair_rounds,
-                skip_run=skip_run,
-                attach_execution=attach_execution,
-                attach_job=attach_job,
-                attach_session=attach_session,
-                attach_source=attach_source,
-                reconcile_run=reconcile_run,
-                reconcile_source=reconcile_source,
-                pipeline_timeout_seconds=timeout,
-                complete_product=complete_product,
-                domain=domain,
-                commit_policy=commit_policy,
-                worktree_policy=worktree_policy,
-                progress_callback=_make_progress_renderer(quiet=quiet),
-                wait=not no_wait,
+        with resume_lock:
+            result = asyncio.run(
+                _run_auto(
+                    goal=goal,
+                    resume=resume,
+                    runtime=runtime.value if runtime else None,
+                    max_interview_rounds=max_interview_rounds,
+                    max_repair_rounds=max_repair_rounds,
+                    skip_run=skip_run,
+                    efficiency_mode=(efficiency_mode.value if efficiency_mode else None),
+                    frugality_assurance=(
+                        frugality_assurance.value if frugality_assurance else None
+                    ),
+                    attach_execution=attach_execution,
+                    attach_job=attach_job,
+                    attach_session=attach_session,
+                    attach_source=attach_source,
+                    reconcile_run=reconcile_run,
+                    reconcile_source=reconcile_source,
+                    pipeline_timeout_seconds=timeout,
+                    complete_product=complete_product,
+                    domain=domain,
+                    commit_policy=commit_policy,
+                    worktree_policy=worktree_policy,
+                    progress_callback=_make_progress_renderer(quiet=quiet),
+                    wait=not no_wait,
+                    codex_recovery=codex_static_tool_recovery,
+                )
             )
-        )
     except typer.Exit:
         raise
     except Exception as exc:
         print_error(f"Auto pipeline failed: {exc}")
         raise typer.Exit(1) from exc
+
+    recovery_unverified = codex_static_tool_recovery and not (
+        _codex_recovery_result_has_terminal_proof(result)
+    )
+    if recovery_unverified:
+        blocker = result.blocker or (
+            "Codex recovery did not prove terminal completion; persisted or "
+            "returned execution evidence is missing, pending, or contradictory"
+        )
+        _print_result(
+            replace(result, status="blocked", blocker=blocker),
+            show_ledger=show_ledger,
+        )
+        raise typer.Exit(1)
 
     _print_result(result, show_ledger=show_ledger)
     if no_wait and _is_run_handoff_only_completion(result) and result.job_id:
@@ -365,8 +450,6 @@ def auto_command(
 def _safe_default_cwd() -> Path:
     """Return a safe default cwd without silently retargeting projects."""
     cwd = Path.cwd()
-    if cwd == Path("/"):
-        return Path.home()
     if not os.access(cwd, os.W_OK | os.X_OK):
         msg = f"current working directory is not writable/searchable: {cwd}"
         raise ValueError(msg)
@@ -377,6 +460,151 @@ _DEFAULT_MAX_INTERVIEW_ROUNDS = 50
 _DEFAULT_MAX_REPAIR_ROUNDS = 5
 
 
+def _validate_codex_recovery_resume_arguments(
+    *,
+    goal: str | None,
+    runtime: object | None,
+    max_interview_rounds: int | None,
+    max_repair_rounds: int | None,
+    skip_run: bool,
+    efficiency_mode: object | None,
+    frugality_assurance: object | None,
+    attach_execution: str | None,
+    attach_job: str | None,
+    attach_session: str | None,
+    attach_source: str | None,
+    reconcile_run: bool,
+    reconcile_source: str | None,
+    pipeline_timeout_seconds: float | None,
+    complete_product: bool,
+    domain: str | None,
+    commit_policy: str | None,
+    worktree_policy: str | None,
+) -> None:
+    """Reject every mutating option on a fail-closed recovery resume."""
+    supplied = {
+        "goal": bool(goal and goal.strip()),
+        "runtime": runtime is not None,
+        "max_interview_rounds": max_interview_rounds is not None,
+        "max_repair_rounds": max_repair_rounds is not None,
+        "skip_run": skip_run,
+        "efficiency_mode": efficiency_mode is not None,
+        "frugality_assurance": frugality_assurance is not None,
+        "attach_execution": attach_execution is not None,
+        "attach_job": attach_job is not None,
+        "attach_session": attach_session is not None,
+        "attach_source": attach_source is not None,
+        "reconcile_run": reconcile_run,
+        "reconcile_source": reconcile_source is not None,
+        "timeout": pipeline_timeout_seconds is not None,
+        "complete_product": complete_product,
+        "domain": domain is not None,
+        "commit_policy": commit_policy is not None,
+        "worktree_policy": worktree_policy is not None,
+    }
+    invalid = [name for name, present in supplied.items() if present]
+    if invalid:
+        raise ValueError(
+            "--codex-recovery --resume is immutable; remove fresh-start or "
+            f"mutation arguments: {', '.join(invalid)}"
+        )
+
+
+def _codex_recovery_state_has_terminal_proof(state: AutoPipelineState) -> bool:
+    """Return whether a persisted COMPLETE state is safe to replay as success."""
+    if state.phase is not AutoPhase.COMPLETE or state.last_error:
+        return False
+    handles = any((state.job_id, state.execution_id, state.run_session_id))
+    ralph_handles = any((state.ralph_job_id, state.ralph_lineage_id))
+    if state.skip_run:
+        return bool(
+            not handles
+            and not ralph_handles
+            and _codex_recovery_grade_meets_required(state.last_grade, state.required_grade)
+            and _codex_recovery_seed_receipt_is_valid(state)
+        )
+    if state.run_handoff_status == "completed":
+        return bool(
+            handles
+            and state.run_terminal_job_status == "completed"
+            and state.run_terminal_status == "completed"
+            and state.run_terminal_success is True
+        )
+    ralph_verified = (
+        state.complete_product
+        and state.ralph_dispatch_mode != "plugin"
+        and (
+            state.last_qa_passed is True
+            or (state.ralph_job_status == "completed" and state.ralph_stop_reason == "qa passed")
+        )
+    )
+    return bool(ralph_verified)
+
+
+def _codex_recovery_grade_meets_required(actual: str | None, required: str) -> bool:
+    """Return whether ``actual`` satisfies the persisted recovery grade floor."""
+    rank = {"A": 0, "B": 1, "C": 2}
+    return actual in rank and required in rank and rank[actual] <= rank[required]
+
+
+def _codex_recovery_seed_receipt_is_valid(state: AutoPipelineState) -> bool:
+    """Validate that state and the durable Seed file describe the same Seed."""
+    if not state.seed_path or not state.seed_artifact:
+        return False
+    try:
+        state_seed = Seed.from_dict(state.seed_artifact)
+        disk_seed = load_seed(state.seed_path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return disk_seed.to_dict() == state_seed.to_dict()
+
+
+def _codex_recovery_state_result_has_terminal_proof(
+    state: AutoPipelineState,
+    result: AutoPipelineResult,
+) -> bool:
+    """Validate one terminal against both durable state and result envelope."""
+    if not _codex_recovery_state_has_terminal_proof(state):
+        return False
+    if (
+        result.status != "complete"
+        or result.blocker
+        or result.partial_product
+        or result.artifact_state in {"complete_unverified", "partial_artifact_generated"}
+    ):
+        return False
+
+    result_handles = any((result.job_id, result.execution_id, result.run_session_id))
+    result_ralph_handles = any((result.ralph_job_id, result.ralph_lineage_id))
+    if state.skip_run:
+        return bool(
+            result.skip_run
+            and not result_handles
+            and not result_ralph_handles
+            and result.seed_path == state.seed_path
+            and _codex_recovery_grade_meets_required(result.grade, state.required_grade)
+            and _codex_recovery_seed_receipt_is_valid(state)
+        )
+
+    if state.run_handoff_status == "completed":
+        return bool(
+            result_handles
+            and result.job_id == state.job_id
+            and result.execution_id == state.execution_id
+            and result.run_session_id == state.run_session_id
+            and result.run_handoff_status == "completed"
+            and result.execution_job_status == "completed"
+            and result.execution_run_status == "completed"
+            and result.execution_run_success is True
+        )
+    return bool(_is_completed_ralph_product(result))
+
+
+def _codex_recovery_result_has_terminal_proof(result: AutoPipelineResult) -> bool:
+    """Accept only proof issued by ``_run_auto`` from state plus result."""
+    return result.recovery_terminal_proof is True
+
+
 async def _run_auto(
     *,
     goal: str | None,
@@ -385,6 +613,8 @@ async def _run_auto(
     max_interview_rounds: int | None,
     max_repair_rounds: int | None,
     skip_run: bool,
+    efficiency_mode: str | None = None,
+    frugality_assurance: str | None = None,
     attach_execution: str | None = None,
     attach_job: str | None = None,
     attach_session: str | None = None,
@@ -398,6 +628,7 @@ async def _run_auto(
     worktree_policy: str | None = None,
     progress_callback: AutoProgressCallback | None = None,
     wait: bool = True,
+    codex_recovery: bool = False,
 ) -> AutoPipelineResult:
     store = AutoStore()
     runtime_override = runtime
@@ -410,18 +641,53 @@ async def _run_auto(
         raise ValueError("--attach-execution/--attach-job/--attach-session require --resume")
     if reconcile_run and not resume:
         raise ValueError("--reconcile-run requires --resume")
+    if codex_recovery and resume:
+        _validate_codex_recovery_resume_arguments(
+            goal=goal,
+            runtime=runtime,
+            max_interview_rounds=max_interview_rounds,
+            max_repair_rounds=max_repair_rounds,
+            skip_run=skip_run,
+            efficiency_mode=efficiency_mode,
+            frugality_assurance=frugality_assurance,
+            attach_execution=attach_execution,
+            attach_job=attach_job,
+            attach_session=attach_session,
+            attach_source=attach_source,
+            reconcile_run=reconcile_run,
+            reconcile_source=reconcile_source,
+            pipeline_timeout_seconds=pipeline_timeout_seconds,
+            complete_product=complete_product,
+            domain=domain,
+            commit_policy=commit_policy,
+            worktree_policy=worktree_policy,
+        )
     validate_complete_product_timeout(
         complete_product=complete_product and not bool(resume),
         pipeline_timeout_seconds=pipeline_timeout_seconds,
         option_name="--timeout",
     )
     if resume:
+        if efficiency_mode is not None or frugality_assurance is not None:
+            raise ValueError(
+                "efficiency_mode and frugality_assurance cannot be changed on resume; "
+                "start a new successor execution for an intentional change"
+            )
         if pipeline_timeout_seconds is not None:
             raise ValueError(
                 "--timeout cannot be changed on resume; the original deadline "
                 "is preserved across process restarts"
             )
         state = store.load(resume)
+        if (
+            codex_recovery
+            and state.phase is AutoPhase.COMPLETE
+            and not _codex_recovery_state_has_terminal_proof(state)
+        ):
+            raise ValueError(
+                "Codex recovery refused an unverified persisted COMPLETE state; "
+                "terminal execution proof is missing or contradictory"
+            )
         persisted_runtime = state.runtime_backend
         if persisted_runtime is None and state.opencode_mode is not None:
             persisted_runtime = "opencode"
@@ -479,6 +745,13 @@ async def _run_auto(
         if max_repair_rounds is None:
             max_repair_rounds = _DEFAULT_MAX_REPAIR_ROUNDS
         state = AutoPipelineState(goal=goal.strip(), cwd=str(_safe_default_cwd()))
+        preferences = resolve_execution_preferences(
+            efficiency_mode,
+            frugality_assurance,
+        )
+        state.efficiency_mode = preferences.efficiency_mode.value
+        state.frugality_assurance = preferences.frugality_assurance.value
+        state.frugality_assurance_explicit = preferences.frugality_assurance_explicit
         state.runtime_backend = runtime
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
@@ -558,6 +831,12 @@ async def _run_auto(
             )
             raise ValueError(msg)
         state.provenance = incoming_provenance
+
+    if not resume:
+        # Publish the recovery handle before any long-running model/runtime
+        # construction. This line is intentionally machine-parseable.
+        store.save(state)
+        console.print(f"auto_session_id={state.auto_session_id}")
 
     auto_workspace = ensure_auto_worktree(state)
 
@@ -678,6 +957,8 @@ async def _run_auto(
         ralph_starter=ralph_starter,
         ralph_resumer=ralph_resumer,
         complete_product=complete_product,
+        foreground_run_wait=wait,
+        defer_final_checkpoint=codex_recovery,
         seed_qa_evaluator=HandlerSeedQAEvaluator(seed_qa),
         lateral_thinker=lateral_thinker,
         progress_callback=progress_callback,
@@ -711,6 +992,23 @@ async def _run_auto(
                 state=state,
                 store=store,
             )
+        if codex_recovery:
+            receipt_validated = bool(
+                state.skip_run and _codex_recovery_seed_receipt_is_valid(state)
+            )
+            terminal_proof = _codex_recovery_state_result_has_terminal_proof(state, result)
+            result = replace(
+                result,
+                required_grade=state.required_grade,
+                skip_run=state.skip_run,
+                seed_receipt_validated=receipt_validated,
+                recovery_terminal_proof=terminal_proof,
+            )
+            if terminal_proof:
+                # The pipeline deferred FINAL_ONLY specifically so this side
+                # effect occurs only after the same state+result proof used by
+                # the CLI renderer.
+                pipeline._checkpoint_final_commit(state)  # noqa: SLF001
     finally:
         release_auto_worktree(auto_workspace)
         await watchdog_event_store.close()
@@ -800,6 +1098,9 @@ def _print_status(state: AutoPipelineState) -> None:
     authoring, run_label = _format_runtime_labels(state.runtime_backend, state.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
+    assurance_suffix = " (explicit)" if state.frugality_assurance_explicit else ""
+    console.print(f"Efficiency mode: [bold]{state.efficiency_mode}[/]")
+    console.print(f"Frugality assurance: [bold]{state.frugality_assurance}[/]{assurance_suffix}")
     invoked_by = state.invoked_by()
     if invoked_by != "direct":
         source = (state.provenance or {}).get("source", "unknown")
@@ -878,7 +1179,7 @@ def _is_run_handoff_only_completion(result: AutoPipelineResult) -> bool:
     starts on resume, but it is not verified product completion yet.
     """
     return (
-        result.status == "complete"
+        result.status in {"complete", AutoPhase.RUN.value}
         and result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
         and result.execution_job_status != "completed"
         and not result.ralph_job_id
@@ -969,6 +1270,8 @@ async def _linked_execution_completed_result(
         blocker=None,
         resume_capability=AutoResumeCapability.NONE,
         execution_job_status=JobStatus.COMPLETED.value,
+        execution_run_status="completed",
+        execution_run_success=True,
         execution_job_error=None,
         execution_job_message=message,
         run_handoff_status="completed",
@@ -982,17 +1285,13 @@ def _run_meta_verdict(snapshot: JobSnapshot) -> tuple[str, bool | None]:
     result meta (``_classify_synchronous_execution_status``): a PAUSED
     execution — e.g. a usage-limit pause — completes the JOB with
     ``result_meta={"status": "paused", "success": None}``. The job lifecycle
-    status alone is therefore not a run verdict. Mirrors the meta fallback of
-    ``auto/adapters._wait_for_job_terminal`` (``status`` defaults to the job's
-    own terminal status when the inner result did not provide one).
+    status alone is therefore not a run verdict. Missing or malformed execution
+    metadata stays unknown and cannot inherit the job's ``completed`` status.
     """
-    meta = snapshot.result_meta or {}
+    raw_meta = snapshot.result_meta
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
     raw_status = meta.get("status")
-    status = (
-        raw_status.strip().lower()
-        if isinstance(raw_status, str) and raw_status.strip()
-        else snapshot.status.value
-    )
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
     raw_success = meta.get("success")
     success = raw_success if isinstance(raw_success, bool) else None
     return status, success
@@ -1007,8 +1306,9 @@ def _reconcile_run_handoff_result(
     the job lifecycle, and the complete-product resume gate in
     ``auto/pipeline.py`` (persisted-handle branch) for the execution-level
     verdict carried in ``result_meta``: a COMPLETED job is only a successful
-    run when its meta confirms terminal success; ``status == "paused"`` keeps
-    the session resumable and never reports complete.
+    run when its meta confirms both ``status == "completed"`` and
+    ``success is True``; ``status == "paused"`` keeps the session resumable and
+    never reports complete.
 
     TODO(Q00/ouroboros#1590): extract a shared job→auto-result reconciliation
     helper with ``mcp/tools/auto_handler._reconcile_execution_job_snapshot``
@@ -1025,6 +1325,8 @@ def _reconcile_run_handoff_result(
     # the incoming COMPLETE->NONE, while genuine success stays NONE and genuine
     # failure keeps NONE.
     resume_capability = result.resume_capability
+    run_status = ""
+    run_success: bool | None = None
     if snapshot.status is JobStatus.COMPLETED:
         run_status, run_success = _run_meta_verdict(snapshot)
         if run_status == "paused":
@@ -1045,7 +1347,7 @@ def _reconcile_run_handoff_result(
             )
             status = "failed"
             resume_capability = AutoResumeCapability.NONE
-        elif run_success is not True and run_status != "completed":
+        elif not (run_status == "completed" and run_success is True):
             # Allowlist gate (pipeline parity): terminal job metadata without
             # an explicit success signal is NOT evidence of run success.
             status = "blocked"
@@ -1076,18 +1378,29 @@ def _reconcile_run_handoff_result(
             status = "blocked"
             resume_capability = AutoResumeCapability.RESUME
     else:
-        # Non-terminal snapshot (should not happen after a terminal wait): keep
-        # the handoff-only result intact and only surface the live status.
-        return replace(result, execution_job_status=snapshot.status.value)
+        return replace(
+            result,
+            status="blocked",
+            blocker=(
+                "foreground run wait ended before a terminal execution verdict "
+                f"(job {snapshot.job_id}, status={snapshot.status.value}); resume "
+                f"with: ouroboros auto --resume {result.auto_session_id}"
+            ),
+            resume_capability=AutoResumeCapability.RESUME,
+            execution_job_status=snapshot.status.value,
+        )
     return replace(
         result,
         status=status,
         phase="complete" if status == "complete" else result.phase,
         blocker=blocker,
         resume_capability=resume_capability,
+        run_handoff_status=("completed" if status == "complete" else result.run_handoff_status),
         execution_job_status=snapshot.status.value,
         execution_job_error=snapshot.error,
         execution_job_message=snapshot.message,
+        execution_run_status=run_status or None,
+        execution_run_success=run_success,
     )
 
 
@@ -1176,12 +1489,30 @@ def _persist_resumable_run_verdict(
     """
     if state is None:
         return result
+    if result.status == "complete":
+        if state.phase is AutoPhase.RUN:
+            state.run_handoff_status = "completed"
+            state.run_handoff_guidance = None
+            state.run_terminal_job_status = result.execution_job_status
+            state.run_terminal_status = result.execution_run_status
+            state.run_terminal_success = result.execution_run_success
+            state.transition(AutoPhase.COMPLETE, "foreground execution reached terminal success")
+            if store is not None:
+                store.save(state)
+        return result
     if result.status == "blocked":
         reopened = state.reopen_completed_run_handoff_to_run(
             result.blocker or "run handoff started but not verified complete"
         )
         if not reopened:
-            return result
+            if state.phase is not AutoPhase.RUN:
+                return result
+            # The pipeline now persists foreground handoffs in RUN already.
+            # Preserve the structured transport/nonterminal blocker without
+            # converting the durable session to a false terminal phase.
+            state.last_error = result.blocker
+            state.last_tool_name = "run_starter"
+            state.run_handoff_guidance = result.blocker
         if store is not None:
             store.save(state)
         return replace(result, resume_capability=state.resume_capability())
@@ -1189,12 +1520,12 @@ def _persist_resumable_run_verdict(
         # Genuine failure: persist a durable FAILED terminal so --resume/--status
         # never report success, but do NOT reopen to RUN and do NOT advertise
         # resume — the reconciled NONE capability is authoritative for failures.
-        if (
-            state.close_completed_run_handoff_as_failed(
-                result.blocker or "run execution finished unsuccessfully"
-            )
-            and store is not None
-        ):
+        message = result.blocker or "run execution finished unsuccessfully"
+        changed = state.close_completed_run_handoff_as_failed(message)
+        if state.phase is AutoPhase.RUN:
+            state.mark_failed(message)
+            changed = True
+        if changed and store is not None:
             store.save(state)
         return result
     return result
@@ -1234,14 +1565,52 @@ async def _await_run_handoff_terminal(
     product-complete.
     """
     job_id = result.job_id
-    if not job_id or job_manager is None or event_store is None:
-        return result
+    if not job_id:
+        blocked = replace(
+            result,
+            status="blocked",
+            blocker=(
+                "foreground run handoff returned no durable job handle; "
+                "refusing to claim completion"
+            ),
+            resume_capability=AutoResumeCapability.NONE,
+        )
+        return _persist_resumable_run_verdict(blocked, state, store)
+    if job_manager is None or event_store is None:
+        blocked = replace(
+            result,
+            status="blocked",
+            blocker=(
+                f"foreground run job {job_id} has no owning manager/event store; "
+                f"resume with: ouroboros auto --resume {result.auto_session_id}"
+            ),
+            resume_capability=AutoResumeCapability.RESUME,
+        )
+        return _persist_resumable_run_verdict(blocked, state, store)
     try:
         snapshot = await job_manager.get_snapshot(job_id)
     except ValueError:
-        # Job handle not owned by this manager (e.g. plugin-mode dispatch):
-        # honestly leave the handoff-only result as-is for the caller to render.
-        return result
+        blocked = replace(
+            result,
+            status="blocked",
+            blocker=(
+                f"foreground run job {job_id} is not owned by this manager; "
+                f"resume with: ouroboros auto --resume {result.auto_session_id}"
+            ),
+            resume_capability=AutoResumeCapability.RESUME,
+        )
+        return _persist_resumable_run_verdict(blocked, state, store)
+    except Exception as exc:
+        blocked = replace(
+            result,
+            status="blocked",
+            blocker=(
+                f"foreground run transport failed while loading job {job_id}: {exc}; "
+                f"resume with: ouroboros auto --resume {result.auto_session_id}"
+            ),
+            resume_capability=AutoResumeCapability.RESUME,
+        )
+        return _persist_resumable_run_verdict(blocked, state, store)
 
     deadline = (
         deadline_at
@@ -1287,7 +1656,16 @@ async def _await_run_handoff_terminal(
                 # Poll window clipped by the deadline; loop re-checks it.
                 continue
             if wait_result.is_err:
-                break
+                blocked = replace(
+                    result,
+                    status="blocked",
+                    blocker=(
+                        f"foreground run waiter failed for job {job_id}; resume with: "
+                        f"ouroboros auto --resume {result.auto_session_id}"
+                    ),
+                    resume_capability=AutoResumeCapability.RESUME,
+                )
+                return _persist_resumable_run_verdict(blocked, state, store)
             value = wait_result.value
             meta = value.meta or {}
             with contextlib.suppress(TypeError, ValueError):
@@ -1325,17 +1703,40 @@ async def _await_run_handoff_terminal(
             f"Resume with: ouroboros auto --resume {result.auto_session_id}"
         )
         raise
+    except Exception as exc:
+        blocked = replace(
+            result,
+            status="blocked",
+            blocker=(
+                f"foreground run transport failed while waiting for job {job_id}: {exc}; "
+                f"resume with: ouroboros auto --resume {result.auto_session_id}"
+            ),
+            resume_capability=AutoResumeCapability.RESUME,
+        )
+        return _persist_resumable_run_verdict(blocked, state, store)
 
-    linked_completed = await _linked_execution_completed_result(result, event_store)
-    if linked_completed is not None:
-        return _persist_resumable_run_verdict(linked_completed, state, store)
+    try:
+        linked_completed = await _linked_execution_completed_result(result, event_store)
+        if linked_completed is not None:
+            return _persist_resumable_run_verdict(linked_completed, state, store)
 
-    snapshot = await job_manager.get_snapshot(job_id)
-    if not quiet:
-        result_handler = JobResultHandler(job_manager=job_manager, event_store=event_store)
-        receipt = await result_handler.handle({"job_id": job_id})
-        if receipt.is_ok and receipt.value.text_content:
-            console.print(receipt.value.text_content)
+        snapshot = await job_manager.get_snapshot(job_id)
+        if not quiet:
+            result_handler = JobResultHandler(job_manager=job_manager, event_store=event_store)
+            receipt = await result_handler.handle({"job_id": job_id})
+            if receipt.is_ok and receipt.value.text_content:
+                console.print(receipt.value.text_content)
+    except Exception as exc:
+        blocked = replace(
+            result,
+            status="blocked",
+            blocker=(
+                f"foreground run transport failed while reconciling job {job_id}: {exc}; "
+                f"resume with: ouroboros auto --resume {result.auto_session_id}"
+            ),
+            resume_capability=AutoResumeCapability.RESUME,
+        )
+        return _persist_resumable_run_verdict(blocked, state, store)
     reconciled = _reconcile_run_handoff_result(result, snapshot)
     return _persist_resumable_run_verdict(reconciled, state, store)
 
@@ -1396,6 +1797,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
+    console.print(f"Efficiency mode: [bold]{result.efficiency_mode}[/]")
+    console.print(f"Frugality assurance: [bold]{result.frugality_assurance}[/]")
     if result.invoked_by != "direct":
         source = (result.provenance or {}).get("source", "unknown")
         console.print(f"Invoked by: [bold]{result.invoked_by}[/] (source={_rich_escape(source)})")

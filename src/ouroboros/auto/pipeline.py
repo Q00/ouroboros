@@ -291,6 +291,8 @@ class AutoPipelineResult:
     auto_session_id: str
     phase: str
     grade: str | None = None
+    required_grade: str = "A"
+    skip_run: bool = False
     seed_path: str | None = None
     seed_origin: str = SeedOrigin.NONE.value
     interview_session_id: str | None = None
@@ -300,6 +302,8 @@ class AutoPipelineResult:
     execution_job_status: str | None = None
     execution_job_error: str | None = None
     execution_job_message: str | None = None
+    execution_run_status: str | None = None
+    execution_run_success: bool | None = None
     run_subagent: dict[str, Any] | None = None
     current_round: int = 0
     pending_question: str | None = None
@@ -394,6 +398,11 @@ class AutoPipelineResult:
     # not mistaken for verified completion. Values are intentionally stringly
     # typed for stable CLI/MCP wire compatibility.
     artifact_state: str | None = None
+    # Issued only by the direct CLI after it validates the result together
+    # with the persisted state.  Consumers must not infer recovery success
+    # from a handleless result shape.
+    seed_receipt_validated: bool = False
+    recovery_terminal_proof: bool = False
 
 
 @dataclass(slots=True)
@@ -436,6 +445,14 @@ class AutoPipeline:
     # the legacy guidance-only behavior.
     ralph_resumer: RalphStarter | None = None
     complete_product: bool = False
+    # Direct foreground CLI owns the in-process execute job and must keep the
+    # durable Auto state non-terminal until its waiter proves the execution
+    # reached terminal success. MCP/background callers keep the historical
+    # handoff-completes-pipeline behavior by leaving this disabled.
+    foreground_run_wait: bool = False
+    # Codex foreground recovery applies its proof gate outside the pipeline.
+    # Defer FINAL_ONLY checkpointing until that gate accepts the envelope.
+    defer_final_checkpoint: bool = False
     # RFC #809 Phase 2.1 — when set AND ``complete_product`` is True, the
     # pipeline inserts an EVALUATE phase between the Ralph terminal verdict
     # and the COMPLETE transition. The evaluator grades the Ralph artifact
@@ -1377,6 +1394,7 @@ class AutoPipeline:
                             )
                         run_status_resume = _optional_str(terminal_run_meta.get("status"))
                         run_success_resume = terminal_run_meta.get("success")
+                        run_job_status_resume = _optional_str(terminal_run_meta.get("_job_status"))
                         failed_run_statuses = {"failed", "cancelled", "interrupted"}
                         if run_success_resume is False or (
                             run_status_resume in failed_run_statuses
@@ -1437,7 +1455,11 @@ class AutoPipeline:
                         # handoff just like the unreconcilable cases
                         # above so a malformed or unfamiliar snapshot
                         # cannot pass the gate by omission.
-                        if run_success_resume is not True and run_status_resume != "completed":
+                        if not (
+                            run_job_status_resume == "completed"
+                            and run_status_resume == "completed"
+                            and run_success_resume is True
+                        ):
                             state.mark_blocked(
                                 "Cannot resume complete-product Ralph handoff: "
                                 "owned run job snapshot did not confirm terminal "
@@ -1455,6 +1477,9 @@ class AutoPipeline:
                                 blocker=state.last_error,
                                 run_subagent=None,
                             )
+                        state.run_terminal_job_status = run_job_status_resume
+                        state.run_terminal_status = run_status_resume
+                        state.run_terminal_success = True
                     else:
                         # Synchronous starters
                         # (``HandlerSynchronousRunStarter``) return
@@ -1520,12 +1545,21 @@ class AutoPipeline:
                         ),
                     )
                     if state.job_id
-                    else None
+                    else {
+                        "status": "unowned",
+                        "success": None,
+                        "error": (
+                            "persisted execution/session handle has no owned job snapshot channel"
+                        ),
+                    }
                 )
                 blocked = self._block_resume_if_run_not_successful(state, run_verdict)
                 if blocked is not None:
                     self._save(state)
                     return self._result(state, ledger, review=review, blocker=state.last_error)
+                state.run_terminal_job_status = _optional_str(run_verdict.get("_job_status"))
+                state.run_terminal_status = _optional_str(run_verdict.get("status"))
+                state.run_terminal_success = True
                 state.transition(
                     AutoPhase.COMPLETE, "execution already started; using persisted run handle"
                 )
@@ -1734,11 +1768,28 @@ class AutoPipeline:
                     state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
                     state.run_handoff_guidance = None
                     run_success = run_meta.get("success")
-                    if (
-                        self.complete_product
-                        and bool(getattr(self.run_starter, "synchronous_execution", False))
-                        and run_success is True
+                    run_status = _optional_str(run_meta.get("status"))
+                    synchronous_complete_product = self.complete_product and bool(
+                        getattr(self.run_starter, "synchronous_execution", False)
+                    )
+                    if synchronous_complete_product and not (
+                        run_status == "completed" and run_success is True
                     ):
+                        state.mark_blocked(
+                            "synchronous complete-product execution did not confirm "
+                            "terminal success "
+                            f"(status={run_status!r}, success={run_success!r})",
+                            tool_name="run_starter",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            blocker=state.last_error,
+                            run_subagent=run_subagent,
+                        )
+                    if synchronous_complete_product:
                         if state.is_deadline_expired() and not (
                             _allows_synchronous_completion_grace(run_meta)
                             and _within_synchronous_completion_grace(state)
@@ -1753,6 +1804,9 @@ class AutoPipeline:
                                 )
                         state.run_handoff_status = "completed"
                         state.run_handoff_guidance = None
+                        state.run_terminal_job_status = "completed"
+                        state.run_terminal_status = run_status
+                        state.run_terminal_success = True
                         # RFC #1256 §I4 (#1254): emit the typed
                         # ``auto.product.emitted`` terminal for the synchronous
                         # complete-product success path — the branch
@@ -1798,6 +1852,18 @@ class AutoPipeline:
                             )
                         return await self._handoff_to_ralph(
                             state, ledger, seed, review, run_subagent
+                        )
+                    if self.foreground_run_wait:
+                        # The execute job is only dispatched, not completed.
+                        # Persist RUN + the stable handles before returning to
+                        # the foreground waiter so SIGKILL/power loss cannot
+                        # leave a handoff-only session as durable COMPLETE.
+                        self._save(state)
+                        return self._result(
+                            state,
+                            ledger,
+                            review=review,
+                            run_subagent=run_subagent,
                         )
                     state.transition(
                         AutoPhase.COMPLETE,
@@ -1891,23 +1957,15 @@ class AutoPipeline:
         BLOCKED (the run did not reach terminal success), or ``None`` to let the
         caller proceed to COMPLETE.
 
-        Conservative on ambiguity: ``None`` verdict (unpollable / pruned /
-        plain-function starter) or a non-terminal ``running``/``queued`` status
-        preserves the historical "trust the persisted handle" behavior, so
-        genuinely-complete and legacy sessions are unaffected. Only an
-        *observed* non-success terminal (paused / failed / cancelled /
-        interrupted / unknown) blocks — resumably, via ``run_starter`` — so a
-        later ``--resume`` re-reconciles instead of returning stale COMPLETE.
+        Fail closed on ambiguity. A persisted handle proves dispatch only;
+        completion requires an owned snapshot whose execution metadata says
+        both ``status == "completed"`` and ``success is True``.
         """
-        if run_verdict is None:
-            return None
-        status = _optional_str(run_verdict.get("status"))
-        success = run_verdict.get("success")
-        if success is True or status == "completed":
-            return None
-        if status in {"running", "queued", "cancel_requested"}:
-            # Still in flight elsewhere — cannot prove failure; do not cancel or
-            # block a run another owner may still complete.
+        verdict = run_verdict if isinstance(run_verdict, dict) else {}
+        status = _optional_str(verdict.get("status"))
+        success = verdict.get("success")
+        job_status = _optional_str(verdict.get("_job_status"))
+        if job_status == "completed" and status == "completed" and success is True:
             return None
         if status == "paused":
             state.mark_blocked(
@@ -1917,8 +1975,10 @@ class AutoPipeline:
             )
             return True
         detail = status or "unknown"
+        error = _optional_str(verdict.get("error"))
+        suffix = f" ({error})" if error else ""
         state.mark_blocked(
-            f"resumed run execution did not reach terminal success: {detail}",
+            f"resumed run execution did not reach terminal success: {detail}{suffix}",
             tool_name="run_starter",
         )
         return True
@@ -4290,7 +4350,7 @@ class AutoPipeline:
         run_subagent: dict[str, Any] | None = None,
         status_override: str | None = None,
     ) -> AutoPipelineResult:
-        if state.phase == AutoPhase.COMPLETE:
+        if state.phase == AutoPhase.COMPLETE and not self.defer_final_checkpoint:
             self._checkpoint_final_commit(state)
         summary = ledger.summary()
         ledger_provenance = {
@@ -4326,17 +4386,34 @@ class AutoPipeline:
             partial_product=partial_product,
             product_verified=_has_verified_product_completion(state),
         )
+        skip_run_artifact_verified = bool(
+            state.skip_run
+            and state.phase is AutoPhase.COMPLETE
+            and not partial_product
+            and not any((state.execution_id, state.job_id, state.run_session_id))
+            and not any((state.ralph_job_id, state.ralph_lineage_id))
+            and _grade_meets_required(state.last_grade, state.required_grade)
+            and state.seed_path
+            and state.seed_artifact
+        )
+        if skip_run_artifact_verified:
+            artifact_state = "complete_verified"
         return AutoPipelineResult(
             status=result_status,
             auto_session_id=state.auto_session_id,
             phase=state.phase.value,
             grade=review.grade_result.grade.value if review else state.last_grade,
+            required_grade=state.required_grade,
+            skip_run=state.skip_run,
             seed_path=state.seed_path,
             seed_origin=state.seed_origin.value,
             interview_session_id=state.interview_session_id,
             execution_id=state.execution_id,
             job_id=state.job_id,
             run_session_id=state.run_session_id,
+            execution_job_status=state.run_terminal_job_status,
+            execution_run_status=state.run_terminal_status,
+            execution_run_success=state.run_terminal_success,
             run_subagent=run_subagent or state.run_subagent or None,
             current_round=state.current_round,
             pending_question=state.pending_question,
@@ -4596,9 +4673,9 @@ def _artifact_state_for_result(
             return "complete_unverified"
         if product_verified:
             return "complete_verified"
-        if run_handoff_status == RUN_HANDOFF_STARTED_STATUS:
-            return "complete_unverified"
-        return "complete_verified"
+        if run_handoff_status == "completed":
+            return "complete_verified"
+        return "complete_unverified"
     if phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
         return "partial_artifact_generated" if has_generated_artifact else phase.value
     return "artifact_in_progress" if has_generated_artifact else "not_generated"
@@ -5121,23 +5198,43 @@ async def _wait_owned_run_job_terminal(
     job_manager = getattr(handler, "_job_manager", None)
     get_snapshot = getattr(job_manager, "get_snapshot", None)
     if get_snapshot is None:
-        return None
+        return {
+            "status": "unowned",
+            "success": None,
+            "error": "owned run job snapshot API is unavailable",
+        }
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.0, timeout_seconds)
     while True:
         try:
             snapshot = await get_snapshot(job_id)
-        except Exception:
-            return None
+        except Exception as exc:
+            return {
+                "status": "snapshot_error",
+                "success": None,
+                "error": f"run job snapshot failed: {exc}",
+            }
         if getattr(snapshot, "is_terminal", False):
-            meta = dict(getattr(snapshot, "result_meta", None) or {})
-            status = getattr(getattr(snapshot, "status", None), "value", None)
-            if isinstance(status, str):
-                meta.setdefault("status", status)
+            raw_meta = getattr(snapshot, "result_meta", None)
+            if not isinstance(raw_meta, dict):
+                return {
+                    "status": "malformed",
+                    "success": None,
+                    "error": "terminal run job result_meta is not an object",
+                }
+            meta = dict(raw_meta)
+            lifecycle_status = getattr(getattr(snapshot, "status", None), "value", None)
+            if isinstance(lifecycle_status, str):
+                meta["_job_status"] = lifecycle_status
             return meta
         remaining = deadline - loop.time()
         if remaining <= 0:
-            return {"status": "running"}
+            lifecycle_status = getattr(getattr(snapshot, "status", None), "value", None)
+            return {
+                "status": lifecycle_status if isinstance(lifecycle_status, str) else "running",
+                "success": None,
+                "error": "owned run job did not reach terminal success before timeout",
+            }
         await asyncio.sleep(min(0.1, remaining))
 
 

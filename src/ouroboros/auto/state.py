@@ -18,6 +18,43 @@ from ouroboros.auto.recovery_plan import AutoRecoveryPlan
 _LOGGER = logging.getLogger(__name__)
 
 
+def _durable_replace(source: Path, destination: Path) -> None:
+    """Atomically replace ``destination`` with write-through semantics."""
+    if os.name != "nt":
+        source.replace(destination)
+        return
+
+    # Windows cannot fsync a directory handle through ``os.open``. A
+    # MOVEFILE_WRITE_THROUGH rename is the platform-equivalent durability
+    # boundary: the call returns only after the move reaches stable storage.
+    import ctypes
+
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+    move_file_ex.restype = ctypes.c_int
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    if not move_file_ex(
+        str(source),
+        str(destination),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist the containing-directory entry after an atomic replacement."""
+    if os.name == "nt":
+        # ``_durable_replace`` already used MOVEFILE_WRITE_THROUGH. Windows
+        # rejects FlushFileBuffers on ordinary directory handles.
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 class AutoPhase(StrEnum):
     """Closed set of phases for auto-mode resume and stall handling."""
 
@@ -482,6 +519,12 @@ class AutoPipelineState:
     run_start_attempted: bool = False
     run_handoff_status: str | None = None
     run_handoff_guidance: str | None = None
+    # Durable proof written only after the owned execution reaches the exact
+    # lifecycle+execution success conjunction. Legacy sessions default to
+    # unknown and therefore fail closed in Codex recovery.
+    run_terminal_job_status: str | None = None
+    run_terminal_status: str | None = None
+    run_terminal_success: bool | None = None
     attached_run_handle: str | None = None
     attached_run_source: str | None = None
     attached_at: str | None = None
@@ -1056,6 +1099,9 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        payload.setdefault("run_terminal_job_status", None)
+        payload.setdefault("run_terminal_status", None)
+        payload.setdefault("run_terminal_success", None)
         payload.setdefault("attached_run_handle", None)
         payload.setdefault("attached_run_source", None)
         payload.setdefault("attached_at", None)
@@ -1461,6 +1507,8 @@ class AutoPipelineState:
             "run_session_id",
             "run_handoff_status",
             "run_handoff_guidance",
+            "run_terminal_job_status",
+            "run_terminal_status",
             "attached_run_handle",
             "attached_run_source",
             "attached_at",
@@ -1492,6 +1540,10 @@ class AutoPipelineState:
             if not value.strip():
                 msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
+        if self.run_terminal_success is not None and not isinstance(
+            self.run_terminal_success, bool
+        ):
+            raise ValueError("run_terminal_success must be a boolean or null")
         for field_name in (
             "interview_completed",
             "skip_run",
@@ -1544,12 +1596,27 @@ class AutoStore:
         state._validate_loaded()
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(state.auto_session_id)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(
-            json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp_path.replace(path)
+        # A fixed ``.json.tmp`` name lets concurrent processes overwrite or
+        # replace each other's staging file. Unique staging keeps each atomic
+        # write self-contained; session-level read/modify/dispatch operations
+        # are serialized separately by ``session_lock``.
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
+            _durable_replace(tmp_path, path)
+            _fsync_directory(path.parent)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         return path
+
+    def session_lock(self, auto_session_id: str):  # noqa: ANN201
+        """Return an exclusive cross-process lease for one Auto session."""
+        from ouroboros.core.file_lock import file_lock
+
+        return file_lock(self.path_for(auto_session_id), exclusive=True)
 
     def load(self, auto_session_id: str) -> AutoPipelineState:
         """Load a state record or raise an actionable error."""

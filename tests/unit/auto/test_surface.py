@@ -154,18 +154,26 @@ def test_cli_auto_status_requires_resume() -> None:
     assert "--status requires --resume auto_<id>" in result.output
 
 
-def test_auto_skill_frontmatter_dispatches_to_mcp_tool() -> None:
+def test_auto_skill_uses_ordered_dispatch_matrix_instead_of_direct_binding() -> None:
     skill = Path(__file__).parents[3] / "skills" / "auto" / "SKILL.md"
     content = skill.read_text(encoding="utf-8")
 
     assert "name: auto" in content
-    assert "mcp_tool: ouroboros_start_auto" in content
-    assert 'goal: "$goal"' in content
-    assert 'resume: "$resume"' in content
-    assert 'skip_run: "$skip_run"' in content
-    assert 'max_interview_rounds: "$max_interview_rounds"' in content
+    assert "mcp_tool: ouroboros_start_auto" not in content
+    assert "### Required native tool set" in content
+    assert "### Official foreground CLI recovery" in content
     assert "ooo auto --resume" in content
     assert "--show-ledger" in content
+    compact = " ".join(content.split())
+    assert compact.index("Required native tool set") < compact.index("Native MCP branch")
+    assert compact.index("Native MCP branch") < compact.index(
+        "Once `ouroboros_start_auto` has been invoked"
+    )
+    assert compact.index("Once `ouroboros_start_auto` has been invoked") < compact.index(
+        "Official foreground CLI recovery"
+    )
+    assert "absent before any native dispatch attempt" in compact
+    assert "ouroboros auto --resume <auto_session_id> --codex-recovery" in compact
 
 
 def test_auto_handler_schema_contains_hang_safe_options() -> None:
@@ -1115,7 +1123,7 @@ async def test_cli_fresh_auto_uses_safe_default_cwd(monkeypatch, tmp_path) -> No
     )
 
     assert result.status == "complete"
-    assert captured["cwd"] == str(tmp_path)
+    assert captured["cwd"] == str(Path("/"))
     assert captured["runtime"] == "codex"
 
 
@@ -2657,6 +2665,27 @@ def test_auto_artifact_state_preserves_verified_ralph_completion_with_stale_hand
             product_verified=True,
         )
         == "complete_verified"
+    )
+
+
+@pytest.mark.parametrize("handoff_status", [None, "attached", "mystery"])
+def test_auto_artifact_state_defaults_unknown_complete_markers_to_unverified(
+    handoff_status,
+) -> None:
+    from ouroboros.auto.pipeline import _artifact_state_for_result
+
+    assert (
+        _artifact_state_for_result(
+            status="complete",
+            phase=AutoPhase.COMPLETE,
+            seed_path="/tmp/seed.yaml",
+            execution_id="exec_123",
+            job_id="job_123",
+            run_session_id=None,
+            run_handoff_status=handoff_status,
+            partial_product=False,
+        )
+        == "complete_unverified"
     )
 
 

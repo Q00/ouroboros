@@ -565,6 +565,53 @@ async def test_synchronous_complete_product_success_emits_auto_product_emitted_e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("status", "success"),
+    [
+        ("paused", True),
+        ("completed", None),
+        ("completed", False),
+        ("failed", True),
+        (None, True),
+    ],
+)
+async def test_synchronous_complete_product_fails_closed_without_success_conjunction(
+    tmp_path, status, success
+) -> None:
+    """Synchronous complete-product may complete only on completed AND true."""
+    state = _state_at_run_phase(tmp_path)
+
+    class SynchronousRunStarter:
+        synchronous_execution = True
+
+        async def __call__(self, _seed: Seed, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "job_id": None,
+                "session_id": "sync_session_bad",
+                "execution_id": "sync_exec_bad",
+                "status": status,
+                "success": success,
+            }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("unverified synchronous execution must not dispatch Ralph")
+
+    result = await AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=SynchronousRunStarter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    ).run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.ralph_job_id is None
+    assert result.blocker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("remaining_budget", "expected_per_iteration"),
     [
         # Budget far above the standalone 1800s default must NOT be capped at
@@ -1898,6 +1945,107 @@ async def test_run_resume_with_persisted_handle_and_complete_product_dispatches_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "success"),
+    [("completed", None), ("completed", False), ("mystery", True), (None, True)],
+)
+async def test_complete_product_resume_requires_status_and_success_conjunction(
+    tmp_path, status, success
+) -> None:
+    """Neither half of the terminal-success proof is sufficient alone."""
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_unverified"
+    state.execution_id = "execution_unverified"
+    state.complete_product = True
+
+    class Manager:
+        async def get_snapshot(self, _job_id: str):  # noqa: ANN202
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                is_terminal=True,
+                result_meta={"status": status, "success": success},
+                status=JobStatus.COMPLETED,
+            )
+
+    class Handler:
+        _job_manager = Manager()
+
+    class Starter:
+        handler = Handler()
+
+        async def __call__(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not redispatch")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("unverified resumed execution must not dispatch Ralph")
+
+    result = await AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=Starter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    ).run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.ralph_job_id is None
+    assert result.blocker
+
+
+@pytest.mark.asyncio
+async def test_complete_product_resume_rejects_failed_job_lifecycle_with_success_meta(
+    tmp_path,
+) -> None:
+    """Failed job lifecycle dominates contradictory completed/true metadata."""
+    from types import SimpleNamespace
+
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_lifecycle_failed"
+    state.execution_id = "execution_lifecycle_failed"
+    state.complete_product = True
+
+    class Manager:
+        async def get_snapshot(self, _job_id: str):  # noqa: ANN202
+            return SimpleNamespace(
+                is_terminal=True,
+                result_meta={"status": "completed", "success": True},
+                status=JobStatus.FAILED,
+            )
+
+    class Handler:
+        _job_manager = Manager()
+
+    class Starter:
+        handler = Handler()
+
+        async def __call__(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume must not redispatch")
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("failed job lifecycle must not dispatch Ralph")
+
+    result = await AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=Starter(),
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    ).run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.ralph_job_id is None
+
+
+@pytest.mark.asyncio
 async def test_run_resume_with_persisted_handle_blocks_when_owned_job_paused(
     tmp_path,
 ) -> None:
@@ -2053,7 +2201,8 @@ async def test_run_resume_with_stale_persisted_job_id_blocks_instead_of_crashing
     assert result.status == "blocked"
     assert state.phase is AutoPhase.BLOCKED
     assert state.last_tool_name == "run_starter"
-    assert "snapshot is unavailable" in (state.last_error or "")
+    assert "snapshot" in (state.last_error or "")
+    assert "terminal success" in (state.last_error or "")
     assert state.ralph_job_id is None
 
 
@@ -2106,7 +2255,8 @@ async def test_run_resume_with_persisted_job_id_blocks_when_starter_has_no_snaps
     assert result.status == "blocked"
     assert state.phase is AutoPhase.BLOCKED
     assert state.last_tool_name == "run_starter"
-    assert "snapshot is unavailable" in (state.last_error or "")
+    assert "snapshot" in (state.last_error or "")
+    assert "terminal success" in (state.last_error or "")
     assert state.ralph_job_id is None
 
 
@@ -2289,11 +2439,10 @@ async def test_run_resume_with_persisted_handle_blocks_when_owned_job_failed(
 
 
 @pytest.mark.asyncio
-async def test_run_resume_with_persisted_handle_complete_product_off_completes(
+async def test_run_resume_with_unowned_handle_complete_product_off_blocks(
     tmp_path,
 ) -> None:
-    """``complete_product=False`` resume keeps the legacy short-circuit to
-    COMPLETE byte-identical so default-off callers see no behavior change."""
+    """Default mode also requires owned terminal proof before COMPLETE."""
     state = _state_at_run_phase(tmp_path)
     state.run_start_attempted = True
     state.run_handoff_status = "started"
@@ -2314,8 +2463,8 @@ async def test_run_resume_with_persisted_handle_complete_product_off_completes(
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
-    assert state.phase is AutoPhase.COMPLETE
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
     assert state.ralph_job_id is None
 
 

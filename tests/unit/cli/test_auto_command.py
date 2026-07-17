@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.pipeline import AutoPipelineResult
@@ -28,6 +29,156 @@ def test_auto_help_uses_direct_goal_command_shape() -> None:
     assert "Usage: ouroboros auto [OPTIONS] [GOAL]" in output
     assert "COMMAND [ARGS]" not in output
     assert "Goal/task for ooo auto" in output
+    assert "--efficiency-mode" in output
+    assert "--frugality-assurance" in output
+    assert "--codex-recovery" in output
+
+
+def test_auto_cli_forwards_execution_preferences() -> None:
+    """Typer must forward both recovery preference flags unchanged."""
+    captured: dict[str, object] = {}
+
+    async def fake_run_auto(**kwargs: object) -> AutoPipelineResult:
+        captured.update(kwargs)
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_preferences",
+            phase="complete",
+            grade="A",
+        )
+
+    with patch("ouroboros.cli.commands.auto._run_auto", new=fake_run_auto):
+        result = runner.invoke(
+            app,
+            [
+                "auto",
+                "safe preference goal",
+                "--skip-run",
+                "--efficiency-mode",
+                "quality_first",
+                "--frugality-assurance",
+                "strict",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert captured["efficiency_mode"] == "quality_first"
+    assert captured["frugality_assurance"] == "strict"
+
+
+@pytest.mark.parametrize(
+    ("efficiency", "assurance", "expected_efficiency", "expected_assurance", "explicit"),
+    [
+        (None, None, "adaptive", "observe", False),
+        ("adaptive", None, "adaptive", "observe", False),
+        ("quality_first", None, "quality_first", "off", False),
+        ("quality_first", "observe", "quality_first", "observe", True),
+        ("adaptive", "strict", "adaptive", "strict", True),
+    ],
+)
+def test_run_auto_persists_execution_preferences(
+    tmp_path,
+    monkeypatch,
+    efficiency,
+    assurance,
+    expected_efficiency,
+    expected_assurance,
+    explicit,
+) -> None:
+    """Every supported preference combination round-trips through AutoStore."""
+    import asyncio
+
+    from ouroboros.auto.state import AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    monkeypatch.chdir(tmp_path)
+    store = AutoStore(tmp_path / "auto")
+    captured: dict[str, str] = {}
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        captured["id"] = state.auto_session_id
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+            efficiency_mode=state.efficiency_mode,
+            frugality_assurance=state.frugality_assurance,
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+        asyncio.run(
+            _run_auto(
+                goal="safe preference goal",
+                resume=None,
+                runtime="codex",
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+                efficiency_mode=efficiency,
+                frugality_assurance=assurance,
+            )
+        )
+
+    reloaded = store.load(captured["id"])
+    assert reloaded.efficiency_mode == expected_efficiency
+    assert reloaded.frugality_assurance == expected_assurance
+    assert reloaded.frugality_assurance_explicit is explicit
+
+
+def test_resume_preference_override_rejected_without_state_mutation(tmp_path) -> None:
+    """Rejected mutable resume flags must not rewrite the durable session."""
+    import asyncio
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=2, max_repair_rounds=1
+    )
+    path = store.path_for(session_id)
+    before = path.read_bytes()
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+        with pytest.raises(ValueError, match="cannot be changed on resume"):
+            asyncio.run(
+                _run_auto(
+                    goal=None,
+                    resume=session_id,
+                    runtime=None,
+                    max_interview_rounds=None,
+                    max_repair_rounds=None,
+                    skip_run=False,
+                    efficiency_mode="quality_first",
+                )
+            )
+
+    assert path.read_bytes() == before
+    assert store.load(session_id).efficiency_mode == state.efficiency_mode
+
+
+def test_auto_status_prints_execution_preferences(tmp_path) -> None:
+    from ouroboros.auto.state import AutoStore
+
+    state = AutoPipelineState(goal="status", cwd=str(tmp_path))
+    state.efficiency_mode = "quality_first"
+    state.frugality_assurance = "strict"
+    state.frugality_assurance_explicit = True
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+        result = runner.invoke(app, ["auto", "--status", "--resume", state.auto_session_id])
+
+    output = _plain(result.output)
+    assert result.exit_code == 0
+    assert "Efficiency mode: quality_first" in output
+    assert "Frugality assurance: strict (explicit)" in output
 
 
 def test_auto_help_documents_detached_wait_and_retrieve_commands() -> None:
@@ -98,14 +249,16 @@ def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance(
     assert "Attached at:" not in output
     assert "Run reconciled at:" not in output
     assert output == (
-        "╭───────── Info ─────────╮\n"
+        "┌───────── Info ─────────┐\n"
         "│ Auto pipeline detached │\n"
-        "╰────────────────────────╯\n"
+        "└────────────────────────┘\n"
         "Auto session: auto_detached_123\n"
         "Status: detached\n"
         "Product status: not verified complete; background work is still running\n"
         "Authoring backend: in-process (unspecified)\n"
         "Run backend: unspecified\n"
+        "Efficiency mode: adaptive\n"
+        "Frugality assurance: observe\n"
         "Seed grade: A\n"
         "Seed: /tmp/seed.yaml\n"
         "Seed origin: none\n"
@@ -1055,3 +1208,510 @@ def test_print_result_attached_completion_remains_product_complete() -> None:
     assert "Status: complete" in output
     assert "Status: run_handoff_started" not in output
     assert "Product status: not verified complete" not in output
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["changed goal"],
+        ["--runtime", "codex"],
+        ["--max-interview-rounds", "9"],
+        ["--max-repair-rounds", "9"],
+        ["--skip-run"],
+        ["--efficiency-mode", "adaptive"],
+        ["--frugality-assurance", "observe"],
+        ["--timeout", "900"],
+        ["--complete-product"],
+        ["--domain", "coding"],
+        ["--commit-policy", "none"],
+        ["--worktree-policy", "current"],
+        ["--attach-execution", "exec_external"],
+        ["--attach-job", "job_external"],
+        ["--attach-session", "session_external"],
+        ["--attach-source", "operator"],
+        ["--reconcile-run"],
+        ["--reconcile-source", "operator"],
+    ],
+)
+def test_codex_recovery_resume_rejects_mutating_arguments_before_state_change(
+    tmp_path, extra_args
+) -> None:
+    """Recovery resume is an immutable replay command, not a retarget surface."""
+    state, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=2, max_repair_rounds=1
+    )
+    path = store.path_for(session_id)
+    before = path.read_bytes()
+
+    async def must_not_run(**_kwargs):  # noqa: ANN202
+        raise AssertionError("invalid recovery resume reached execution")
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto._run_auto", new=must_not_run),
+    ):
+        store_cls.return_value = store
+        result = runner.invoke(
+            app,
+            ["auto", *extra_args, "--resume", session_id, "--codex-recovery"],
+        )
+
+    assert result.exit_code == 1
+    assert "immutable" in _plain(result.output).lower()
+    assert path.read_bytes() == before
+    assert store.load(session_id).goal == state.goal
+
+
+def test_codex_recovery_flag_is_forwarded_to_run_auto() -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run_auto(**kwargs):  # noqa: ANN202
+        captured.update(kwargs)
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_recovery",
+            phase="complete",
+            grade="A",
+            seed_path="seed.yaml",
+            recovery_terminal_proof=True,
+        )
+
+    with patch("ouroboros.cli.commands.auto._run_auto", new=fake_run_auto):
+        result = runner.invoke(
+            app,
+            [
+                "auto",
+                "safe recovery",
+                "--runtime",
+                "codex",
+                "--codex-recovery",
+                "--skip-run",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert captured["codex_recovery"] is True
+
+
+@pytest.mark.parametrize("handoff_status", ["attached", "started"])
+def test_codex_recovery_rejects_unverified_complete_handoff(tmp_path, handoff_status) -> None:
+    """A COMPLETE phase cannot launder attached/pending work into recovery success."""
+
+    async def fake_run_auto(**_kwargs):  # noqa: ANN202
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_unverified",
+            phase="complete",
+            job_id="job_unverified",
+            execution_id="exec_unverified",
+            run_handoff_status=handoff_status,
+        )
+
+    from ouroboros.auto.state import AutoStore
+
+    store = AutoStore(tmp_path)
+    with (
+        patch("ouroboros.cli.commands.auto._run_auto", new=fake_run_auto),
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=store),
+    ):
+        result = runner.invoke(
+            app,
+            ["auto", "--resume", "auto_unverified", "--codex-recovery"],
+        )
+
+    assert result.exit_code == 1
+    assert "Auto pipeline completed" not in _plain(result.output)
+
+
+def test_codex_recovery_rejects_stale_complete_with_handles_and_blocker(tmp_path) -> None:
+    """Missing handoff proof plus a durable error can never exit recovery zero."""
+
+    async def fake_run_auto(**_kwargs):  # noqa: ANN202
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_stale_complete",
+            phase="complete",
+            job_id="job_unknown",
+            run_handoff_status=None,
+            blocker="snapshot transport failed",
+        )
+
+    from ouroboros.auto.state import AutoStore
+
+    with (
+        patch("ouroboros.cli.commands.auto._run_auto", new=fake_run_auto),
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=AutoStore(tmp_path)),
+    ):
+        result = runner.invoke(
+            app,
+            ["auto", "--resume", "auto_stale_complete", "--codex-recovery"],
+        )
+
+    assert result.exit_code == 1
+    assert "Auto pipeline completed" not in _plain(result.output)
+
+
+@pytest.mark.parametrize("extra_args", [["--attach-job", "job_external"], ["--no-wait"]])
+def test_codex_recovery_status_rejects_mutating_options_before_load(tmp_path, extra_args) -> None:
+    """The read-only status early return cannot bypass immutable recovery parsing."""
+    from ouroboros.auto.state import AutoStore
+
+    state = AutoPipelineState(goal="status guard", cwd=str(tmp_path))
+    store = AutoStore(tmp_path)
+    path = store.save(state)
+    before = path.read_bytes()
+
+    with patch("ouroboros.cli.commands.auto.AutoStore", return_value=store):
+        result = runner.invoke(
+            app,
+            [
+                "auto",
+                "--status",
+                "--resume",
+                state.auto_session_id,
+                "--codex-recovery",
+                *extra_args,
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert path.read_bytes() == before
+    assert (
+        "immutable" in _plain(result.output).lower() or "no-wait" in _plain(result.output).lower()
+    )
+
+
+def test_safe_default_cwd_preserves_root(monkeypatch) -> None:
+    """The resolved host cwd is never silently retargeted to HOME."""
+    from pathlib import Path
+
+    from ouroboros.cli.commands.auto import _safe_default_cwd
+
+    monkeypatch.setattr("ouroboros.cli.commands.auto.Path.cwd", lambda: Path("/"))
+    monkeypatch.setattr("ouroboros.cli.commands.auto.os.access", lambda *_args: True)
+
+    assert _safe_default_cwd() == Path("/")
+
+
+def test_run_auto_rejects_stale_complete_before_checkpoint_or_handler_build(
+    tmp_path,
+) -> None:
+    """Loaded COMPLETE is proof-checked before terminal side effects."""
+    import asyncio
+
+    from ouroboros.auto.state import AutoCommitPolicy, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state = AutoPipelineState(goal="stale complete", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "legacy handoff")
+    state.job_id = "job_unknown"
+    state.run_handoff_status = None
+    state.last_error = "snapshot transport failed"
+    state.commit_policy = AutoCommitPolicy.FINAL_ONLY
+    store = AutoStore(tmp_path)
+    path = store.save(state)
+    before = path.read_bytes()
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=store),
+        patch("ouroboros.auto.pipeline.checkpoint_final_auto") as checkpoint,
+    ):
+        with pytest.raises(ValueError, match="unverified persisted COMPLETE"):
+            asyncio.run(
+                _run_auto(
+                    goal=None,
+                    resume=state.auto_session_id,
+                    runtime=None,
+                    max_interview_rounds=None,
+                    max_repair_rounds=None,
+                    skip_run=False,
+                    codex_recovery=True,
+                )
+            )
+
+    checkpoint.assert_not_called()
+    assert path.read_bytes() == before
+
+
+def test_codex_recovery_rejects_legacy_completed_marker_without_terminal_proof() -> None:
+    """A legacy success label cannot stand in for durable lifecycle evidence."""
+    from ouroboros.cli.commands.auto import _codex_recovery_state_has_terminal_proof
+
+    state = AutoPipelineState(goal="legacy completed marker", cwd=".")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "legacy success")
+    state.job_id = "job_legacy"
+    state.execution_id = "exec_legacy"
+    state.run_handoff_status = "completed"
+
+    assert state.run_terminal_job_status is None
+    assert state.run_terminal_status is None
+    assert state.run_terminal_success is None
+    assert _codex_recovery_state_has_terminal_proof(state) is False
+
+
+def test_codex_recovery_rejects_handleless_partial_product_even_with_seed_shape(
+    monkeypatch,
+) -> None:
+    """A degraded Seed is not an explicit verified skip-run terminal."""
+    from ouroboros.cli.commands.auto import _codex_recovery_state_result_has_terminal_proof
+
+    state = AutoPipelineState(goal="partial recovery", cwd=".")
+    state.skip_run = True
+    state.last_grade = "A"
+    state.seed_path = "seed.yaml"
+    state.seed_artifact = {"validated": "by patched receipt boundary"}
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.COMPLETE, "partial")
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.auto._codex_recovery_seed_receipt_is_valid",
+        lambda _state: True,
+    )
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id=state.auto_session_id,
+        phase="complete",
+        grade="A",
+        required_grade="A",
+        skip_run=True,
+        seed_path=state.seed_path,
+        partial_product=True,
+        artifact_state="complete_unverified",
+    )
+
+    assert _codex_recovery_state_result_has_terminal_proof(state, result) is False
+
+
+def test_codex_recovery_accepts_only_explicit_verified_skip_run(
+    monkeypatch,
+) -> None:
+    """Handleless success is bound to durable state intent and Seed receipt."""
+    from ouroboros.cli.commands.auto import _codex_recovery_state_result_has_terminal_proof
+
+    state = AutoPipelineState(goal="verified seed only", cwd=".")
+    state.skip_run = True
+    state.last_grade = "A"
+    state.seed_path = "seed.yaml"
+    state.seed_artifact = {"validated": "by patched receipt boundary"}
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.COMPLETE, "skip run")
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.auto._codex_recovery_seed_receipt_is_valid",
+        lambda _state: True,
+    )
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id=state.auto_session_id,
+        phase="complete",
+        grade="A",
+        required_grade="A",
+        skip_run=True,
+        seed_path=state.seed_path,
+        artifact_state="complete_verified",
+    )
+
+    assert _codex_recovery_state_result_has_terminal_proof(state, result) is True
+
+
+def test_codex_recovery_rejects_skip_run_below_required_grade(monkeypatch) -> None:
+    """A nonempty grade is not enough when it misses the persisted floor."""
+    from ouroboros.cli.commands.auto import _codex_recovery_state_result_has_terminal_proof
+
+    state = AutoPipelineState(goal="low grade seed", cwd=".")
+    state.skip_run = True
+    state.required_grade = "A"
+    state.last_grade = "C"
+    state.seed_path = "seed.yaml"
+    state.seed_artifact = {"validated": "by patched receipt boundary"}
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.COMPLETE, "skip run")
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.auto._codex_recovery_seed_receipt_is_valid",
+        lambda _state: True,
+    )
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id=state.auto_session_id,
+        phase="complete",
+        grade="C",
+        required_grade="A",
+        skip_run=True,
+        seed_path=state.seed_path,
+        artifact_state="complete_verified",
+    )
+
+    assert _codex_recovery_state_result_has_terminal_proof(state, result) is False
+
+
+def test_codex_recovery_validates_seed_file_against_state_receipt(tmp_path) -> None:
+    """The durable Seed file must parse and exactly match the state artifact."""
+    from pathlib import Path
+
+    from ouroboros.auto.adapters import save_seed
+    from ouroboros.cli.commands.auto import _codex_recovery_seed_receipt_is_valid
+    from ouroboros.core.seed import (
+        EvaluationPrinciple,
+        ExitCondition,
+        OntologyField,
+        OntologySchema,
+        Seed,
+        SeedMetadata,
+    )
+
+    seed = Seed(
+        goal="Build a local CLI",
+        constraints=("Use existing patterns",),
+        acceptance_criteria=("Command prints stable output",),
+        ontology_schema=OntologySchema(
+            name="CliTask",
+            description="CLI task ontology",
+            fields=(
+                OntologyField(name="command", field_type="string", description="Command"),
+            ),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="testability", description="Observable behavior"),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=0.1),
+    )
+    state = AutoPipelineState(goal=seed.goal, cwd=str(tmp_path))
+    state.seed_artifact = seed.to_dict()
+    state.seed_path = save_seed(seed, seeds_dir=tmp_path)
+
+    assert _codex_recovery_seed_receipt_is_valid(state) is True
+
+    Path(state.seed_path).write_text("not: the same seed\n", encoding="utf-8")
+    assert _codex_recovery_seed_receipt_is_valid(state) is False
+
+
+def test_codex_recovery_partial_seed_exits_nonzero_without_completion_message(
+    tmp_path,
+) -> None:
+    """An unverified handleless Seed cannot be rendered as recovery success."""
+
+    async def fake_run_auto(**_kwargs):  # noqa: ANN202
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_partial_seed",
+            phase="complete",
+            grade="A",
+            required_grade="A",
+            skip_run=True,
+            seed_path="seed.yaml",
+            partial_product=True,
+            artifact_state="complete_unverified",
+            recovery_terminal_proof=False,
+        )
+
+    from ouroboros.auto.state import AutoStore
+
+    with (
+        patch("ouroboros.cli.commands.auto._run_auto", new=fake_run_auto),
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=AutoStore(tmp_path)),
+    ):
+        result = runner.invoke(
+            app,
+            ["auto", "--resume", "auto_partial_seed", "--codex-recovery"],
+        )
+
+    assert result.exit_code == 1
+    assert "Auto pipeline completed" not in _plain(result.output)
+
+
+@pytest.mark.parametrize(
+    ("job_status", "run_status", "run_success"),
+    [
+        ("failed", "completed", True),
+        ("completed", "failed", True),
+        ("completed", "completed", False),
+        ("completed", "completed", None),
+    ],
+)
+def test_codex_recovery_rejects_contradictory_execution_envelope(
+    job_status: str,
+    run_status: str,
+    run_success: bool | None,
+) -> None:
+    """Every terminal lifecycle signal must independently prove success."""
+    from ouroboros.cli.commands.auto import _codex_recovery_state_result_has_terminal_proof
+
+    state = AutoPipelineState(goal="contradictory execution", cwd=".")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.transition(AutoPhase.COMPLETE, "execution complete")
+    state.job_id = "job_contradictory"
+    state.execution_id = "exec_contradictory"
+    state.run_handoff_status = "completed"
+    state.run_terminal_job_status = "completed"
+    state.run_terminal_status = "completed"
+    state.run_terminal_success = True
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_contradictory",
+        phase="complete",
+        job_id="job_contradictory",
+        execution_id="exec_contradictory",
+        run_handoff_status="completed",
+        execution_job_status=job_status,
+        execution_run_status=run_status,
+        execution_run_success=run_success,
+        artifact_state="complete_verified",
+    )
+
+    assert _codex_recovery_state_result_has_terminal_proof(state, result) is False
+
+
+def test_codex_recovery_accepts_completed_execution_envelope(tmp_path) -> None:
+    """The exact completed/true snapshot projection exits recovery zero."""
+
+    async def fake_run_auto(**_kwargs):  # noqa: ANN202
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_verified",
+            phase="complete",
+            job_id="job_verified",
+            execution_id="exec_verified",
+            run_handoff_status="completed",
+            execution_job_status="completed",
+            execution_run_status="completed",
+            execution_run_success=True,
+            artifact_state="complete_verified",
+            recovery_terminal_proof=True,
+        )
+
+    from ouroboros.auto.state import AutoStore
+
+    with (
+        patch("ouroboros.cli.commands.auto._run_auto", new=fake_run_auto),
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=AutoStore(tmp_path)),
+    ):
+        result = runner.invoke(
+            app,
+            ["auto", "--resume", "auto_verified", "--codex-recovery"],
+        )
+
+    assert result.exit_code == 0
+    assert "Auto pipeline completed" in _plain(result.output)

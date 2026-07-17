@@ -1,18 +1,6 @@
 ---
 name: auto
 description: "Automatically converge from goal to A-grade Seed and execute it"
-mcp_tool: ouroboros_start_auto
-mcp_args:
-  goal: "$goal"
-  resume: "$resume"
-  cwd: "$CWD"
-  max_interview_rounds: "$max_interview_rounds"
-  max_repair_rounds: "$max_repair_rounds"
-  skip_run: "$skip_run"
-  complete_product: "$complete_product"
-  pipeline_timeout_seconds: "$pipeline_timeout_seconds"
-  efficiency_mode: "$efficiency_mode"
-  frugality_assurance: "$frugality_assurance"
 ---
 
 # /ouroboros:auto
@@ -21,18 +9,55 @@ Run the full-quality auto pipeline from a single task description.
 
 ## Dispatch requirement
 
-This skill must be executed by invoking MCP tool `ouroboros_start_auto`. Do not
-manually inspect repositories, run shell commands, query GitHub, edit files, or
-otherwise emulate the auto pipeline as a substitute. Full auto runs routinely
-exceed interactive MCP tool-call timeouts, so the background starter is the
-supported default: it returns `job_id` and `auto_session_id` quickly. Retain
-both. When `response.meta.job_observer` is present, delegate its read-only
-wait/result contract to exactly one independent child session. The main session
-keeps only start and explicit on-demand status responsibility.
+### Required native tool set
 
-If `ouroboros_start_auto` is unavailable, or if any required job polling/result
-MCP tool is unavailable, stop and report that the required MCP tool is
-unavailable. A manual fallback is not an `ooo auto` run.
+Before dispatch, inspect the current host tool snapshot for the full set:
+`ouroboros_start_auto`, `ouroboros_job_wait`, and `ouroboros_job_result`.
+Discovery must finish before any start attempt. The prohibition is explicit:
+manual repository work is not an `ooo auto` run and must never be used to
+emulate this pipeline.
+
+### Native MCP branch
+
+When the full required native tool set is present, invoke
+`ouroboros_start_auto`. Full auto runs routinely exceed interactive MCP
+tool-call timeouts, so the background starter is the supported default: it
+returns `job_id` and `auto_session_id` quickly. Retain both. When
+`response.meta.job_observer` is present, delegate its read-only wait/result
+contract to exactly one independent child session. The main session keeps only
+start and explicit on-demand status responsibility.
+
+Once `ouroboros_start_auto` has been invoked, CLI fallback is forbidden. This
+includes a timeout, disconnect, or ambiguous transport outcome: reconcile the
+possible native run through its durable handles and native status surfaces.
+Never start a fresh CLI Auto request after an attempted native dispatch.
+
+### Official foreground CLI recovery
+
+Use this branch only when at least one required native tool is demonstrably
+absent before any native dispatch attempt in the current host snapshot. This is
+an official Auto entrypoint, not manual emulation:
+
+1. Verify `ouroboros auto --help` exposes `--runtime`, `--timeout`,
+   `--efficiency-mode`, `--frugality-assurance`, and
+   `--codex-recovery`. Fail closed if any required option is absent.
+2. Resolve the task's working directory explicitly and launch one retained
+   foreground process there. Pass the goal as one argv element; never build a
+   shell-concatenated command string.
+3. For a fresh run, invoke `ouroboros auto <goal> --runtime codex
+   --codex-recovery` and add the translated bounds, `--skip-run`,
+   `--complete-product`, `--timeout`, `--efficiency-mode`, and
+   `--frugality-assurance` arguments that apply; never add `--no-wait`.
+4. Capture the early `auto_session_id=<id>` line. Keep the same foreground
+   process until it returns verified terminal success or a non-zero resumable
+   blocker.
+5. Resume only with `ouroboros auto --resume <auto_session_id>
+   --codex-recovery`. Do not pass goal, runtime, preferences,
+   timeout, bounds, skip/complete, or other fresh-start options on resume.
+
+If foreground recovery returns detached/nonterminal work, loses job ownership,
+or cannot prove execution success, report the resumable blocker and non-zero
+outcome. Do not present it as completion.
 
 If a started auto job later returns `detached`, `blocked`, `failed`, or another
 auto-session status, report that auto-session status and the tool's blocker.
@@ -60,7 +85,9 @@ ooo auto "Build a local-first habit tracker CLI" --complete-product
 
 ## CLI flag → MCP arg translation
 
-When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_start_auto`:
+When the full required native tool set was discovered and the native MCP branch
+was selected, translate CLI-style chat flags to the following
+`ouroboros_start_auto` arguments:
 
 | CLI flag | MCP arg | Type |
 |----------|---------|------|

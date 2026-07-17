@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -130,10 +130,10 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
 
 
 @pytest.mark.asyncio
-async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fallback(
+async def test_packaged_ooo_auto_uses_codex_decision_matrix_without_static_intercept(
     tmp_path: Path,
 ) -> None:
-    """Packaged `ooo auto` must not fall through to Codex when the MCP tool is absent."""
+    """Codex receives Auto so its skill can discover native tools before dispatch."""
     runtime = create_agent_runtime(
         backend="codex",
         cli_path="/tmp/codex",
@@ -145,30 +145,35 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
     assert runtime._skill_dispatcher is not None
     with resolve_packaged_codex_skill_path("auto", skills_dir=runtime._skills_dir) as skill_md_path:
         content = skill_md_path.read_text(encoding="utf-8")
-    assert "mcp_tool: ouroboros_start_auto" in content
+    assert "mcp_tool:" not in content
+    assert "### Required native tool set" in content
+    assert "### Official foreground CLI recovery" in content
 
-    fake_server = AsyncMock()
-    fake_server.call_tool = AsyncMock(
-        side_effect=LookupError("No local handler registered for tool: ouroboros_start_auto")
-    )
+    prompt = "ooo auto Build a CLI"
+
+    async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
+        assert kwargs["cwd"] == str(tmp_path)
+        output_index = command.index("--output-last-message") + 1
+        Path(command[output_index]).write_text(
+            "Codex Auto decision matrix received",
+            encoding="utf-8",
+        )
+        return _FakeProcess(returncode=0)
 
     with (
-        patch("ouroboros.mcp.server.adapter.create_ouroboros_server", return_value=fake_server),
+        patch("ouroboros.mcp.server.adapter.create_ouroboros_server") as mock_create_server,
         patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
         patch(
-            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
         ) as mock_exec,
     ):
-        messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
+        messages = [message async for message in runtime.execute_task(prompt)]
 
-    fake_server.call_tool.assert_awaited_once()
-    assert fake_server.call_tool.await_args.args[0] == "ouroboros_start_auto"
-    mock_exec.assert_not_called()
+    mock_create_server.assert_not_called()
+    mock_exec.assert_called_once()
     mock_warning.assert_called_once()
-    assert mock_warning.call_args.kwargs["fallback"] == "terminal_error"
-    assert len(messages) == 1
-    assert messages[0].is_error is True
-    assert messages[0].content.startswith("Cannot run ooo auto")
-    assert "`ouroboros_start_auto` is unavailable" in messages[0].content
-    assert messages[0].data["error_type"] == "SkillDispatchUnavailable"
-    assert messages[0].data["tool_name"] == "ouroboros_start_auto"
+    assert mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_missing"
+    assert mock_warning.call_args.kwargs["error"] == "missing required frontmatter key: mcp_tool"
+    assert messages[-1].is_error is False
+    assert messages[-1].content == "Codex Auto decision matrix received"

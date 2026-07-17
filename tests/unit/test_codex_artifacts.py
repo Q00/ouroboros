@@ -196,13 +196,33 @@ class TestInstallCodexRules:
         assert not real_workspace.joinpath(".codex", "rules", CODEX_RULE_FILENAME).exists()
 
     def test_packaged_rules_fail_closed_for_ooo_auto(self) -> None:
-        """Codex rules must route ``ooo auto`` to the real MCP tool, not manual work."""
+        """Codex rules expose the ordered native-first recovery state machine."""
         rules = load_packaged_codex_rules()
         compact = " ".join(rules.split())
 
-        assert "| `ooo auto ...` | `ouroboros_start_auto`" in rules
+        assert "| `ooo auto ...` | Use the ordered Auto dispatch decision matrix" in rules
+        assert "When the user types `ooo <command>`, you MUST" not in rules
+        assert "ALWAYS route to the MCP tool" not in rules
+        assert "If a user input starts with `ooo auto`, call `ouroboros_start_auto`" not in rules
+        assert "When the full required native tool set is present" in rules
         assert "Do not emulate it with manual" in rules
-        assert "If that MCP tool is unavailable" in compact
+        discovery = compact.index("Required native tool set")
+        native = compact.index("Native MCP branch")
+        attempted = compact.index("Once `ouroboros_start_auto` has been invoked")
+        recovery = compact.index("Official foreground CLI recovery")
+        assert discovery < native < attempted < recovery
+        assert "`ouroboros_start_auto`, `ouroboros_job_wait`, and `ouroboros_job_result`" in compact
+        assert "absent before any native dispatch attempt" in compact
+        assert "ambiguous transport outcome" in compact
+        assert "CLI fallback is forbidden" in compact
+        assert "--codex-recovery" in compact
+        assert "--runtime codex" in compact
+        assert "--timeout" in compact
+        assert "goal as one argv element" in compact
+        assert "resolved working directory" in compact
+        assert "ouroboros auto --resume <auto_session_id> --codex-recovery" in compact
+        assert "Do not pass goal, runtime, preferences, timeout, bounds" in compact
+        assert "never add `--no-wait`" in compact
         assert "Do not call a `blocked` or `failed` auto-session result a dispatch" in compact
 
     def test_packaged_rules_include_rendered_skill_capability_guide(self) -> None:
@@ -267,15 +287,26 @@ class TestLoadPackagedCodexSkills:
             assert skill_md_path.read_text(encoding="utf-8").startswith("---\nname: run\n")
 
     def test_packaged_auto_skill_forbids_manual_fallback(self) -> None:
-        """The auto skill body must not allow silent manual emulation."""
+        """The auto skill uses the same ordered native-first recovery contract."""
         skill = load_packaged_codex_skill("auto")
 
         compact = " ".join(skill.split())
-        assert "must be executed by invoking MCP tool `ouroboros_start_auto`" in compact
-        assert "manual fallback is not an `ooo auto` run" in compact
+        discovery = compact.index("Required native tool set")
+        native = compact.index("Native MCP branch")
+        attempted = compact.index("Once `ouroboros_start_auto` has been invoked")
+        recovery = compact.index("Official foreground CLI recovery")
+        assert discovery < native < attempted < recovery
+        assert "absent before any native dispatch attempt" in compact
+        assert "CLI fallback is forbidden" in compact
+        assert "manual repository work is not an `ooo auto` run" in compact
+        assert "--codex-recovery" in compact
+        assert "ouroboros auto --resume <auto_session_id> --codex-recovery" in compact
+        assert "never add `--no-wait`" in compact
         assert "Do not label a `blocked` or `failed` outcome as MCP dispatch failure" in compact
         assert "The user should not have to poll the job manually" in compact
         assert "ouroboros_job_result" in compact
+        assert "mcp_tool: ouroboros_start_auto" not in skill
+        assert "before invoking `ouroboros_start_auto`" not in skill
 
     def test_packaged_interview_skill_uses_runtime_capability_terms(self) -> None:
         """Runtime skill instructions should not hardcode Claude-only tool surfaces."""

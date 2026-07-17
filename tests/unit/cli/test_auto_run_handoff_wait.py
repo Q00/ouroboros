@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 
 import pytest
 from typer.testing import CliRunner
@@ -40,6 +41,7 @@ def _plain(text: str) -> str:
 
 
 async def _cancel_manager_tasks(manager: JobManager) -> None:
+    await manager.drain(grace_seconds=1.0)
     tasks = [
         *manager._tasks.values(),  # noqa: SLF001
         *manager._runner_tasks.values(),  # noqa: SLF001
@@ -80,6 +82,22 @@ def _terminal_run_result() -> MCPToolResult:
         content=(MCPContentItem(type=ContentType.TEXT, text="run receipt: 2/2 ACs satisfied"),),
         is_error=False,
         meta={"status": "completed", "success": True},
+    )
+
+
+def _pending_handoff_result(job_id: str) -> AutoPipelineResult:
+    """Foreground CLI handoff that is durable RUN until execution is proven."""
+    return AutoPipelineResult(
+        status=AutoPhase.RUN.value,
+        auto_session_id="auto_wait",
+        phase=AutoPhase.RUN.value,
+        grade="A",
+        seed_path="/tmp/seed.yaml",
+        job_id=job_id,
+        execution_id="exec_wait",
+        run_session_id="orch_wait",
+        run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+        resume_capability=AutoResumeCapability.RESUME,
     )
 
 
@@ -565,6 +583,136 @@ async def test_wait_completed_job_without_success_meta_is_not_complete(tmp_path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {},
+        {"status": "completed"},
+        {"status": "completed", "success": "true"},
+    ],
+)
+async def test_wait_requires_explicit_true_success_for_completed_job(tmp_path, meta) -> None:
+    """A completed job lifecycle is not an authoritative execution success."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    try:
+
+        async def _runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="terminal without proof"),),
+                is_error=False,
+                meta=meta,
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        reconciled = await _await_run_handoff_terminal(
+            _pending_handoff_result(started.job_id),
+            job_manager=manager,
+            event_store=store,
+            quiet=True,
+        )
+
+        assert reconciled.status == "blocked"
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+        assert "without confirming terminal run success" in (reconciled.blocker or "")
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_waiter_error_blocks_and_preserves_resume_handle(tmp_path, monkeypatch) -> None:
+    """A job-wait transport/result error is a resumable non-zero boundary."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(store)
+    started_running = asyncio.Event()
+    try:
+
+        async def _runner() -> MCPToolResult:
+            started_running.set()
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+        class _ErrResult:
+            is_err = True
+
+        async def _fail_wait(_self, _arguments):
+            return _ErrResult()
+
+        monkeypatch.setattr(auto_command.JobWaitHandler, "handle", _fail_wait)
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        await asyncio.wait_for(started_running.wait(), timeout=5)
+
+        reconciled = await _await_run_handoff_terminal(
+            _pending_handoff_result(started.job_id),
+            job_manager=manager,
+            event_store=store,
+            quiet=True,
+        )
+
+        assert reconciled.status == "blocked"
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+        assert "waiter failed" in (reconciled.blocker or "")
+    finally:
+        await _cancel_manager_tasks(manager)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_success_promotes_durable_run_to_complete(tmp_path) -> None:
+    """Foreground RUN becomes durable COMPLETE only after explicit success."""
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    auto_store = AutoStore(tmp_path / "auto")
+    try:
+
+        async def _runner() -> MCPToolResult:
+            return _terminal_run_result()
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_runner()
+        )
+        state = AutoPipelineState(goal="wait", cwd=str(tmp_path))
+        state.transition(AutoPhase.INTERVIEW, "interview")
+        state.transition(AutoPhase.SEED_GENERATION, "seed")
+        state.transition(AutoPhase.REVIEW, "review")
+        state.transition(AutoPhase.RUN, "foreground handoff pending")
+        state.job_id = started.job_id
+        state.execution_id = "exec_wait"
+        state.run_session_id = "orch_wait"
+        state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
+        auto_store.save(state)
+
+        reconciled = await _await_run_handoff_terminal(
+            _pending_handoff_result(started.job_id),
+            job_manager=manager,
+            event_store=jobs,
+            quiet=True,
+            state=state,
+            store=auto_store,
+        )
+
+        reloaded = auto_store.load(state.auto_session_id)
+        assert reconciled.status == "complete"
+        assert reconciled.run_handoff_status == "completed"
+        assert reconciled.execution_job_status == "completed"
+        assert reconciled.execution_run_status == "completed"
+        assert reconciled.execution_run_success is True
+        assert reloaded.phase is AutoPhase.COMPLETE
+        assert reloaded.run_handoff_status == "completed"
+        assert reloaded.run_terminal_job_status == "completed"
+        assert reloaded.run_terminal_status == "completed"
+        assert reloaded.run_terminal_success is True
+    finally:
+        await _cancel_manager_tasks(manager)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
 async def test_wait_prefers_linked_execution_terminal_over_live_wedged_job(
     tmp_path,
 ) -> None:
@@ -629,7 +777,7 @@ async def test_wait_prefers_linked_execution_terminal_over_live_wedged_job(
         assert reconciled.resume_capability is AutoResumeCapability.NONE
 
         snapshot = await manager.get_snapshot(started.job_id)
-        assert snapshot.status is JobStatus.RUNNING
+        assert snapshot.status in {JobStatus.QUEUED, JobStatus.RUNNING}
         events, _cursor = await store.get_events_after("job", started.job_id, 0)
         assert not any(event.type == "mcp.job.cancelled" for event in events)
     finally:
@@ -749,35 +897,38 @@ def test_paused_run_exit_code_reflects_non_complete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wait_is_noop_when_job_not_owned(tmp_path) -> None:
-    """An unknown/plugin-dispatch job handle leaves the result untouched."""
+async def test_wait_blocks_when_job_not_owned(tmp_path) -> None:
+    """Foreground recovery must fail closed when its manager does not own the job."""
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
     manager = JobManager(store)
     try:
-        result = _handoff_only_result("job_not_in_this_manager")
+        result = _pending_handoff_result("job_not_in_this_manager")
         reconciled = await _await_run_handoff_terminal(
             result,
             job_manager=manager,
             event_store=store,
             quiet=True,
         )
-        assert reconciled is result
+        assert reconciled.status == "blocked"
+        assert reconciled.resume_capability is AutoResumeCapability.RESUME
+        assert "not owned" in (reconciled.blocker or "")
     finally:
         await _cancel_manager_tasks(manager)
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_wait_is_noop_without_job_handle(tmp_path) -> None:
-    """No job_id (plugin dispatch) => nothing to wait on, result unchanged."""
+async def test_wait_blocks_without_job_handle(tmp_path) -> None:
+    """Foreground recovery cannot claim completion without an owned job handle."""
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
     manager = JobManager(store)
     try:
         result = AutoPipelineResult(
-            status="complete",
+            status=AutoPhase.RUN.value,
             auto_session_id="auto_wait",
-            phase="complete",
+            phase=AutoPhase.RUN.value,
             run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.RESUME,
         )
         reconciled = await _await_run_handoff_terminal(
             result,
@@ -785,7 +936,8 @@ async def test_wait_is_noop_without_job_handle(tmp_path) -> None:
             event_store=store,
             quiet=True,
         )
-        assert reconciled is result
+        assert reconciled.status == "blocked"
+        assert "no durable job handle" in (reconciled.blocker or "")
     finally:
         await _cancel_manager_tasks(manager)
         await store.close()
@@ -824,3 +976,124 @@ def test_no_wait_flag_detaches_and_prints_honest_notice() -> None:
     output = _plain(result.output)
     assert "will NOT survive process exit" in output
     assert "job_detached" in output
+
+
+def test_foreground_detached_result_exits_nonzero() -> None:
+    """A foreground recovery must never treat detached work as CLI success."""
+
+    async def fake_run_auto(**_kwargs: object) -> AutoPipelineResult:
+        return AutoPipelineResult(
+            status="detached",
+            auto_session_id="auto_detached",
+            phase=AutoPhase.RUN.value,
+            job_id="job_detached",
+            run_handoff_status=RUN_HANDOFF_STARTED_STATUS,
+            resume_capability=AutoResumeCapability.RESUME,
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(auto_command, "_run_auto", fake_run_auto)
+        result = runner.invoke(
+            app,
+            [
+                "auto",
+                "safe foreground goal",
+                "--runtime",
+                "codex",
+                "--codex-recovery",
+            ],
+        )
+
+    assert result.exit_code == 1
+
+
+def test_codex_recovery_rejects_no_wait_before_start() -> None:
+    """The static-tool recovery mode cannot be made fire-and-forget."""
+    result = runner.invoke(
+        app,
+        [
+            "auto",
+            "safe recovery goal",
+            "--runtime",
+            "codex",
+            "--codex-recovery",
+            "--no-wait",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "cannot be combined with --no-wait" in _plain(result.output)
+
+
+def test_run_meta_verdict_rejects_non_mapping_metadata() -> None:
+    """Malformed result_meta must stay unknown instead of crashing or passing."""
+    from types import SimpleNamespace
+
+    assert auto_command._run_meta_verdict(SimpleNamespace(result_meta=["completed", True])) == (
+        "",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["initial_snapshot", "waiter", "event_query"])
+async def test_raised_foreground_transport_errors_are_resumable_and_durable(
+    tmp_path, monkeypatch, failure_point
+) -> None:
+    """Raised transport failures are structured blockers, never top-level crashes."""
+
+    class Snapshot:
+        is_terminal = False
+        status = JobStatus.RUNNING
+        job_id = "job_transport"
+        result_meta = {}
+        error = None
+        result_text = None
+        message = "running"
+
+    class Manager:
+        async def get_snapshot(self, _job_id: str) -> Snapshot:
+            if failure_point == "initial_snapshot":
+                raise ConnectionError("snapshot transport failed")
+            return Snapshot()
+
+    class Events:
+        async def query_events(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            if failure_point == "event_query":
+                raise ConnectionError("event query transport failed")
+            return []
+
+    if failure_point == "waiter":
+
+        async def raise_waiter(_self, _arguments):  # noqa: ANN202
+            raise ConnectionError("wait transport failed")
+
+        monkeypatch.setattr(auto_command.JobWaitHandler, "handle", raise_waiter)
+
+    state = AutoPipelineState(goal="transport", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    state.job_id = "job_transport"
+    state.execution_id = "exec_wait"
+    state.run_session_id = "orch_wait"
+    state.run_handoff_status = RUN_HANDOFF_STARTED_STATUS
+    auto_store = AutoStore(tmp_path / "auto")
+    auto_store.save(state)
+
+    reconciled = await _await_run_handoff_terminal(
+        _pending_handoff_result("job_transport"),
+        job_manager=Manager(),
+        event_store=Events(),
+        quiet=True,
+        state=state,
+        store=auto_store,
+        deadline_at=time.monotonic() + 1,
+    )
+
+    assert reconciled.status == "blocked"
+    assert reconciled.resume_capability is AutoResumeCapability.RESUME
+    assert "transport" in (reconciled.blocker or "").lower()
+    reloaded = auto_store.load(state.auto_session_id)
+    assert reloaded.phase is AutoPhase.RUN

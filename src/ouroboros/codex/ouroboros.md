@@ -4,8 +4,10 @@ Use Ouroboros commands when the user is asking to clarify requirements, generate
 
 ## CRITICAL: MCP Tool Routing
 
-When the user types `ooo <command>`, you MUST call the corresponding MCP tool.
-Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP tool.
+For `ooo` commands other than `ooo auto`, call the corresponding MCP tool.
+`ooo auto` is the explicit exception: route it through the ordered Auto
+dispatch decision matrix below because a static host snapshot may omit one or
+more required native tools. Do not interpret these commands as ordinary prose.
 
 | User Input | MCP Tool to Call |
 |-----------|-----------------|
@@ -13,14 +15,12 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo interview "<answer>"` (follow-up) | `ouroboros_interview` with `answer` and `session_id` |
 | `ooo seed [session_id]` | `ouroboros_generate_seed` |
 | `ooo run <seed.yaml>` | `ouroboros_start_execute_seed` with `seed_path` |
-| `ooo auto ...` | `ouroboros_start_auto` with the resolved `goal` / `resume` / option arguments |
+| `ooo auto ...` | Use the ordered Auto dispatch decision matrix below |
 | `ooo status [session_id]` | `ouroboros_session_status` |
 | `ooo evaluate <session_id>` | `ouroboros_evaluate` |
 | `ooo evolve ...` | `ouroboros_evolve_step` |
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
-
-If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
 
 ## Natural Language Mapping
 
@@ -37,9 +37,18 @@ For natural-language requests, map to the corresponding MCP tool:
 A-grade review/repair, and execution handoff. Do not emulate it with manual
 shell, repository, or GitHub work.
 
-If a user input starts with `ooo auto`, call `ouroboros_start_auto`. Full auto
-runs routinely exceed interactive MCP tool-call timeouts, so the background
-starter is the supported default. It returns `job_id` and `auto_session_id`
+### Required native tool set
+
+Before dispatch, inspect the current host snapshot for
+`ouroboros_start_auto`, `ouroboros_job_wait`, and `ouroboros_job_result`.
+Complete discovery before making any start call.
+
+### Native MCP branch
+
+When the full required native tool set is present before any start attempt,
+call `ouroboros_start_auto`. Full auto runs routinely exceed interactive MCP
+tool-call timeouts, so the background starter is the supported default. It
+returns `job_id` and `auto_session_id`
 quickly; report both briefly, retain the `job_id` plus latest cursor, and keep
 monitoring ownership inside the agent UX. When the response includes
 `meta.job_observer`, explicitly delegate that object to exactly one native Codex
@@ -49,11 +58,34 @@ IDs named by `follow_result_job_keys`. Keep the main session available for the
 user; do not poll the same job from both sessions. The main session may perform
 an on-demand status check only when the user asks. If native subagents are not
 available, use the contract's main-session fallback and relay only meaningful
-changes. Do not hand the user polling instructions as the final UX. If that MCP
-tool is unavailable, or any required job polling/result MCP tool is unavailable,
-stop and report that the MCP dispatch surface is incomplete instead of
-continuing as a normal Codex task. Do not emulate the workflow with ordinary
-shell or coding work.
+changes. Do not hand the user polling instructions as the final UX.
+
+Once `ouroboros_start_auto` has been invoked, CLI fallback is forbidden. A
+timeout, disconnect, or ambiguous transport outcome may hide a successful
+native dispatch, so reconcile that possible native run through durable native
+handles/status instead of starting a second Auto request.
+
+### Official foreground CLI recovery
+
+This branch is allowed only when at least one required native tool is proven
+absent before any native dispatch attempt in the current static host snapshot.
+First verify `ouroboros auto --help` exposes `--runtime`, `--timeout`,
+`--efficiency-mode`, `--frugality-assurance`, and
+`--codex-recovery`; otherwise fail closed. Launch exactly one
+retained foreground process in the resolved working directory and pass the
+goal as one argv element, never through shell-string concatenation.
+
+Fresh template: `ouroboros auto <goal> --runtime codex
+--codex-recovery`, plus the translated max-round, skip/complete,
+`--timeout`, and resolved preference arguments. The MCP
+`pipeline_timeout_seconds` value maps to CLI `--timeout`; never add `--no-wait`.
+Capture the early `auto_session_id=<id>` line and wait for verified terminal
+success or a non-zero resumable blocker.
+
+Resume template: `ouroboros auto --resume <auto_session_id>
+--codex-recovery`. Do not pass goal, runtime, preferences, timeout,
+bounds, skip/complete, or other mutable fresh-start options on resume. Detached,
+nonterminal, unowned, or unproven foreground work is not completion.
 
 For Codex delegation, call the native `spawn_agent` primitive exactly once with
 `task_name="run_observer"` and include `meta.job_observer` unchanged in the child

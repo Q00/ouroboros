@@ -36,6 +36,17 @@ _REQUIRED_CODEX_AUTO_TOOLS = frozenset(
 )
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 _MCP_STDERR_TAIL_BYTES = 8192
+_REQUIRED_AUTO_SKILL_CONTRACT = (
+    "### Required native tool set",
+    "ouroboros_start_auto",
+    "ouroboros_job_wait",
+    "ouroboros_job_result",
+    "### Native MCP branch",
+    "### Official foreground CLI recovery",
+    "`ouroboros auto --help`",
+    "`--codex-recovery`",
+    "CLI fallback is forbidden",
+)
 
 
 class _StdioMcpFramingMismatch(RuntimeError):
@@ -107,8 +118,9 @@ def doctor(
 
     print_success(
         "Codex ooo auto dispatch: OK\n"
-        "- rule maps `ooo auto` to `ouroboros_start_auto`\n"
-        "- auto skill declares MCP dispatch through `ouroboros_start_auto`\n"
+        "- rule maps `ooo auto` to the ordered Auto dispatch matrix\n"
+        "- auto skill discovers the native tool set before choosing native MCP or CLI recovery\n"
+        "- auto skill has no unconditional static `mcp_tool` binding\n"
         "- live MCP auto workflow includes job status/wait/result tools when probed\n"
         "- Codex config contains an `ouroboros` MCP server entry"
         + ("\n- live stdio initialize/list_tools exposes required auto tools" if live_mcp else ""),
@@ -137,8 +149,14 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         failures.append(f"missing auto skill file: {skill_path}")
     else:
         skill = _read_codex_text(skill_path, "auto skill", failures)
-        if skill is not None and "mcp_tool: ouroboros_start_auto" not in skill:
-            failures.append("auto skill does not declare `mcp_tool: ouroboros_start_auto`")
+        if skill is not None and any(
+            line.strip().startswith("mcp_tool:") for line in skill.splitlines()
+        ):
+            failures.append("auto skill must not declare a static `mcp_tool` binding")
+        if skill is not None and any(
+            fragment not in skill for fragment in _REQUIRED_AUTO_SKILL_CONTRACT
+        ):
+            failures.append("auto skill is missing the ordered native/CLI recovery contract")
         if skill is not None and (
             "manual" not in skill.lower() or "unavailable" not in skill.lower()
         ):

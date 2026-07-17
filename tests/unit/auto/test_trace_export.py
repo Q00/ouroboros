@@ -242,7 +242,7 @@ async def test_outcome_surfaces_histogram_and_gate_findings(tmp_path: Path) -> N
         (out_dir / "decisions.jsonl").read_text().splitlines()
     )
     # summary.md mentions the histogram + gate finding.
-    summary = (out_dir / "summary.md").read_text()
+    summary = (out_dir / "summary.md").read_text(encoding="utf-8")
     assert "timeout_default" in summary
     assert "constraints.latency" in summary
 

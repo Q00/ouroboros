@@ -78,9 +78,17 @@ class TestCodexDoctor:
         skill_path.write_text(
             "---\n"
             "name: auto\n"
-            "mcp_tool: ouroboros_start_auto\n"
             "---\n"
-            "Manual fallback is not allowed when the tool is unavailable.\n",
+            "### Required native tool set\n"
+            "Inspect `ouroboros_start_auto`, `ouroboros_job_wait`, and "
+            "`ouroboros_job_result` before dispatch.\n"
+            "### Native MCP branch\n"
+            "When all required tools exist, invoke `ouroboros_start_auto`.\n"
+            "Once `ouroboros_start_auto` has been invoked, CLI fallback is forbidden.\n"
+            "### Official foreground CLI recovery\n"
+            "When a required native tool is unavailable, verify "
+            "`ouroboros auto --help` then use `--codex-recovery`.\n"
+            "Manual repository fallback is unavailable and forbidden.\n",
             encoding="utf-8",
         )
 
@@ -661,8 +669,27 @@ class TestCodexDoctor:
         failures = _check_auto_dispatch_surface(codex_dir)
 
         assert "Codex rules do not map `ooo auto` to `ouroboros_start_auto`" in failures
-        assert "auto skill does not declare `mcp_tool: ouroboros_start_auto`" in failures
+        assert "auto skill is missing the ordered native/CLI recovery contract" in failures
         assert "Codex config does not contain [mcp_servers.ouroboros]" in failures
+
+    def test_check_auto_dispatch_surface_rejects_static_auto_tool_binding(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A static frontmatter binding bypasses required capability discovery."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        skill_path = codex_dir / "skills" / "ouroboros-auto" / "SKILL.md"
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace(
+                "name: auto\n", "name: auto\nmcp_tool: ouroboros_start_auto\n"
+            ),
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert "auto skill must not declare a static `mcp_tool` binding" in failures
 
     def test_doctor_command_exits_nonzero_when_dispatch_surface_is_broken(
         self,

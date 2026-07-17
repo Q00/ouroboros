@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
+import time
 
 import pytest
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult, PartialInterviewStartError
 from ouroboros.auto.grading import GradeFinding, GradeGate, GradeResult, SeedGrade
+from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -2411,6 +2416,125 @@ async def test_pipeline_resumes_completed_interview_without_reanswering(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_foreground_run_handoff_stays_durable_run_until_waiter_verifies(tmp_path) -> None:
+    """Direct foreground CLI must not persist handoff-only work as COMPLETE."""
+
+    async def _unused(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("prepared RUN state must not restart authoring")
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        return {
+            "job_id": "job_foreground",
+            "execution_id": "exec_foreground",
+            "session_id": "orch_foreground",
+        }
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    state.seed_artifact = _seed().to_dict()
+    state.last_grade = "A"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "run")
+    store = AutoStore(tmp_path)
+    driver = AutoInterviewDriver(FunctionInterviewBackend(_unused, _unused), store=store)
+    pipeline = AutoPipeline(
+        driver,
+        _unused,
+        run_starter=run_seed,
+        store=store,
+        foreground_run_wait=True,
+    )
+
+    result = await pipeline.run(state)
+    reloaded = AutoStore(tmp_path).load(state.auto_session_id)
+
+    assert result.status == AutoPhase.RUN.value
+    assert result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
+    assert result.job_id == "job_foreground"
+    assert state.phase is AutoPhase.RUN
+    assert reloaded.phase is AutoPhase.RUN
+
+
+@pytest.mark.asyncio
+async def test_foreground_handoff_reload_reconciles_same_job_without_duplicate(tmp_path) -> None:
+    """A process-boundary reload must reuse the persisted job, never redispatch."""
+    from types import SimpleNamespace
+
+    from ouroboros.mcp.job_manager import JobManager
+    from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+    from ouroboros.persistence.event_store import EventStore
+
+    jobs = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+    manager = JobManager(jobs)
+    store = AutoStore(tmp_path / "auto")
+    try:
+
+        async def _ok_runner() -> MCPToolResult:
+            return MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
+                is_error=False,
+                meta={"status": "completed", "success": True},
+            )
+
+        started = await manager.start_job(
+            job_type="execute", initial_message="queued", runner=_ok_runner()
+        )
+
+        async def _unused(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("restart must not rerun authoring")
+
+        dispatches: list[str] = []
+
+        async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+            dispatches.append(idempotency_key)
+            return {
+                "job_id": started.job_id,
+                "execution_id": "exec_restart",
+                "session_id": "orch_restart",
+            }
+
+        state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+        ledger = SeedDraftLedger.from_goal(state.goal)
+        _fill_ready(ledger)
+        state.ledger = ledger.to_dict()
+        state.seed_artifact = _seed().to_dict()
+        state.last_grade = "A"
+        state.transition(AutoPhase.INTERVIEW, "interview")
+        state.transition(AutoPhase.SEED_GENERATION, "seed")
+        state.transition(AutoPhase.REVIEW, "review")
+        state.transition(AutoPhase.RUN, "run")
+        driver = AutoInterviewDriver(FunctionInterviewBackend(_unused, _unused), store=store)
+        first = await AutoPipeline(
+            driver,
+            _unused,
+            run_starter=run_seed,
+            store=store,
+            foreground_run_wait=True,
+        ).run(state)
+        assert first.status == AutoPhase.RUN.value
+
+        reloaded = store.load(state.auto_session_id)
+        owned_noncallable_starter = SimpleNamespace(handler=SimpleNamespace(_job_manager=manager))
+        resumed = await AutoPipeline(
+            driver,
+            _unused,
+            run_starter=owned_noncallable_starter,
+            store=store,
+        ).run(reloaded)
+
+        assert resumed.status == "complete"
+        assert reloaded.phase is AutoPhase.COMPLETE
+        assert dispatches == [state.auto_session_id]
+    finally:
+        await manager.drain(grace_seconds=1.0)
+        await jobs.close()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_resume_retries_unknown_run_handoff_once(tmp_path) -> None:
     """Resuming a session with an unknown handoff retries the run starter exactly once."""
 
@@ -2484,7 +2608,7 @@ async def test_pipeline_blocks_run_start_without_tracking_handle(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_pipeline_resumes_run_with_persisted_handle_without_restarting(tmp_path) -> None:
+async def test_pipeline_blocks_unowned_persisted_handle_without_restarting(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("run resume should not restart interview")
 
@@ -2512,8 +2636,9 @@ async def test_pipeline_resumes_run_with_persisted_handle_without_restarting(tmp
 
     result = await pipeline.run(state)
 
-    assert result.status == "complete"
+    assert result.status == "blocked"
     assert result.job_id == "job_existing"
+    assert state.phase is AutoPhase.BLOCKED
 
 
 def _run_state_with_handle(tmp_path, job_id: str) -> AutoPipelineState:
@@ -2660,6 +2785,249 @@ async def test_run_resume_completes_when_owned_job_succeeded(tmp_path) -> None:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await jobs.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_meta", "lifecycle_status", "terminal", "should_complete"),
+    [
+        ({}, "completed", True, False),
+        ({"status": "completed"}, "completed", True, False),
+        ({"success": True}, "completed", True, False),
+        ({"status": "completed", "success": False}, "completed", True, False),
+        ({"status": "mystery", "success": True}, "completed", True, False),
+        ({"status": "running", "success": None}, "running", False, False),
+        ({"status": "completed", "success": True}, "completed", True, True),
+        ({"status": "completed", "success": True}, "failed", True, False),
+        ({"status": "completed", "success": True}, "cancelled", True, False),
+        ({"status": "completed", "success": True}, None, True, False),
+    ],
+)
+async def test_run_resume_requires_explicit_terminal_success_conjunction(
+    tmp_path,
+    result_meta,
+    lifecycle_status,
+    terminal,
+    should_complete,
+) -> None:
+    """A persisted handle is dispatch evidence, never completion evidence."""
+    from types import SimpleNamespace
+
+    class Manager:
+        async def get_snapshot(self, _job_id: str):  # noqa: ANN202
+            return SimpleNamespace(
+                is_terminal=terminal,
+                status=SimpleNamespace(value=lifecycle_status),
+                result_meta=result_meta,
+            )
+
+    async def _unused(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("resume must not redispatch")
+
+    state = _run_state_with_handle(tmp_path, "job_matrix")
+    if not terminal:
+        state.timeout_seconds_by_phase = {
+            **state.timeout_seconds_by_phase,
+            AutoPhase.RUN.value: 1,
+        }
+    store = AutoStore(tmp_path)
+    pipeline = AutoPipeline(
+        AutoInterviewDriver(FunctionInterviewBackend(_unused, _unused), store=store),
+        _unused,
+        run_starter=_run_starter_over_manager(Manager()),
+        store=store,
+    )
+
+    result = await pipeline.run(state)
+
+    assert (result.status == "complete") is should_complete
+    assert state.phase is (AutoPhase.COMPLETE if should_complete else AutoPhase.BLOCKED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handle_field", ["job_id", "execution_id", "run_session_id"])
+async def test_run_resume_blocks_when_terminal_proof_channel_is_missing(
+    tmp_path, handle_field
+) -> None:
+    """Missing manager and jobless handles must fail closed without redispatch."""
+    from types import SimpleNamespace
+
+    async def _unused(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("resume must not redispatch")
+
+    state = _run_state_with_handle(tmp_path, "job_unowned")
+    state.job_id = None
+    setattr(state, handle_field, "job_unowned" if handle_field == "job_id" else "handle_only")
+    store = AutoStore(tmp_path)
+    pipeline = AutoPipeline(
+        AutoInterviewDriver(FunctionInterviewBackend(_unused, _unused), store=store),
+        _unused,
+        run_starter=SimpleNamespace(),
+        store=store,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert "terminal success" in (result.blocker or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_run_resume_snapshot_transport_error_blocks(tmp_path) -> None:
+    """Raised snapshot transport errors become durable resumable blockers."""
+
+    class Manager:
+        async def get_snapshot(self, _job_id: str):  # noqa: ANN202
+            raise ConnectionError("snapshot transport unavailable")
+
+    async def _unused(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("resume must not redispatch")
+
+    state = _run_state_with_handle(tmp_path, "job_transport")
+    store = AutoStore(tmp_path)
+    pipeline = AutoPipeline(
+        AutoInterviewDriver(FunctionInterviewBackend(_unused, _unused), store=store),
+        _unused,
+        run_starter=_run_starter_over_manager(Manager()),
+        store=store,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert "snapshot" in (result.blocker or "").lower()
+
+
+def test_auto_store_session_lock_serializes_resume_processes(tmp_path) -> None:
+    """Two OS processes cannot enter one Auto session mutation concurrently."""
+    root = tmp_path / "auto"
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    script = (
+        "import json,sys,time\n"
+        "from pathlib import Path\n"
+        "from ouroboros.auto.state import AutoStore\n"
+        "root,session,out,hold=sys.argv[1:]\n"
+        "with AutoStore(Path(root)).session_lock(session):\n"
+        " p=Path(out); p.write_text(json.dumps({'entered':time.time()}),encoding='utf-8')\n"
+        " time.sleep(float(hold))\n"
+        " p.write_text(json.dumps({'entered':json.loads(p.read_text(encoding='utf-8'))['entered'],'exited':time.time()}),encoding='utf-8')\n"
+    )
+    p1 = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", script, str(root), "auto_lock_test", str(first), "0.5"],
+        cwd=str(tmp_path),
+    )
+    deadline = time.monotonic() + 10
+    while not first.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert first.exists(), "first process never entered the session lock"
+
+    p2 = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", script, str(root), "auto_lock_test", str(second), "0"],
+        cwd=str(tmp_path),
+    )
+    assert p1.wait(timeout=15) == 0
+    assert p2.wait(timeout=15) == 0
+
+    first_times = json.loads(first.read_text(encoding="utf-8"))
+    second_times = json.loads(second.read_text(encoding="utf-8"))
+    assert second_times["entered"] >= first_times["exited"]
+
+
+def test_auto_store_session_lock_recovers_after_process_kill(tmp_path) -> None:
+    """An OS-killed resume owner cannot orphan the per-session lease or state."""
+    root = tmp_path / "auto"
+    store = AutoStore(root)
+    state = AutoPipelineState(goal="kill recovery", cwd=str(tmp_path))
+    path = store.save(state)
+    before = path.read_bytes()
+    entered = tmp_path / "entered"
+    script = (
+        "import sys,time\n"
+        "from pathlib import Path\n"
+        "from ouroboros.auto.state import AutoStore\n"
+        "with AutoStore(Path(sys.argv[1])).session_lock(sys.argv[2]):\n"
+        " Path(sys.argv[3]).write_text('entered',encoding='utf-8')\n"
+        " time.sleep(60)\n"
+    )
+    process = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", script, str(root), state.auto_session_id, str(entered)],
+        cwd=str(tmp_path),
+    )
+    deadline = time.monotonic() + 10
+    while not entered.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert entered.exists(), "child never acquired the session lease"
+
+    process.kill()
+    assert process.wait(timeout=10) != 0
+
+    acquired_at = time.monotonic()
+    with store.session_lock(state.auto_session_id):
+        assert store.load(state.auto_session_id).goal == "kill recovery"
+    assert time.monotonic() - acquired_at < 2
+    assert path.read_bytes() == before
+
+
+def test_concurrent_resume_check_and_dispatch_runs_once(tmp_path) -> None:
+    """The locked read/mark/dispatch boundary admits one idempotency key once."""
+    root = tmp_path / "auto"
+    store = AutoStore(root)
+    state = AutoPipelineState(goal="single dispatch", cwd=str(tmp_path))
+    store.save(state)
+    dispatch_log = tmp_path / "dispatch.log"
+    script = (
+        "import sys,time\n"
+        "from pathlib import Path\n"
+        "from ouroboros.auto.state import AutoStore\n"
+        "root,session,log=sys.argv[1:]\n"
+        "store=AutoStore(Path(root))\n"
+        "with store.session_lock(session):\n"
+        " state=store.load(session)\n"
+        " if not state.run_start_attempted:\n"
+        "  state.run_start_attempted=True; store.save(state)\n"
+        "  with Path(log).open('a',encoding='utf-8') as fh: fh.write(session+'\\n')\n"
+        "  time.sleep(0.2)\n"
+    )
+    processes = [
+        subprocess.Popen(  # noqa: S603
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(root),
+                state.auto_session_id,
+                str(dispatch_log),
+            ],
+            cwd=str(tmp_path),
+        )
+        for _ in range(2)
+    ]
+    assert [process.wait(timeout=15) for process in processes] == [0, 0]
+    assert dispatch_log.read_text(encoding="utf-8").splitlines() == [state.auto_session_id]
+
+
+def test_auto_store_fsyncs_file_and_parent_directory(tmp_path, monkeypatch) -> None:
+    """The dispatch marker survives power loss, not only process death."""
+    from ouroboros.auto import state as state_module
+
+    file_fsyncs: list[int] = []
+    directory_fsyncs: list[object] = []
+    monkeypatch.setattr(state_module.os, "fsync", file_fsyncs.append)
+    monkeypatch.setattr(
+        state_module,
+        "_fsync_directory",
+        directory_fsyncs.append,
+        raising=False,
+    )
+
+    store = AutoStore(tmp_path)
+    store.save(AutoPipelineState(goal="durable", cwd=str(tmp_path)))
+
+    assert file_fsyncs
+    assert directory_fsyncs == [tmp_path]
 
 
 @pytest.mark.asyncio
