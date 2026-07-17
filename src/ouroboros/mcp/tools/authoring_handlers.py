@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -116,6 +117,11 @@ REQUIRED_CLIENT_GATES: tuple[str, ...] = (
 )
 _REQUIRE_CLIENT_GATES_ENV = "OUROBOROS_REQUIRE_CLIENT_GATES"
 _NORMALIZED_TURN_CONTEXT_KEY = "_normalized_interview_turn_context"
+
+
+def _elapsed_ms(started_at: float) -> float:
+    """Return a stable monotonic duration suitable for diagnostic events."""
+    return round((time.perf_counter() - started_at) * 1000, 3)
 
 
 def _normalized_turn_context(arguments: dict[str, Any]) -> InterviewTurnContext | None:
@@ -2548,6 +2554,7 @@ class InterviewHandler:
         initial_context: Any,
         suggested_interview_id: str | None,
     ) -> Result[MCPToolResult, MCPServerError]:
+        turn_started_at = time.perf_counter()
         engine, _ = self._create_interview_engine()
         _interview_id: str | None = None  # Track for error event emission
 
@@ -2593,7 +2600,9 @@ class InterviewHandler:
                 # already skips scoring before MIN_ROUNDS_BEFORE_EARLY_EXIT
                 # (pm_interview.py:889); apply the same optimisation here.
                 live_score = None
+                question_generation_started_at = time.perf_counter()
                 question_result = await engine.ask_next_question(state)
+                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
                 if question_result.is_err:
                     if _is_question_generation_envelope_violation(question_result.error):
                         from ouroboros.events.interview import interview_question_parent_handoff
@@ -2778,6 +2787,7 @@ class InterviewHandler:
                     # would raise on every oversized ``initial_context``.
                     start_meta.update(_length_guard_meta_fields())
                 else:
+                    advisory_build_started_at = time.perf_counter()
                     _attach_question_assist_requests(
                         start_meta,
                         session_id=state.interview_id,
@@ -2791,6 +2801,9 @@ class InterviewHandler:
                         opencode_mode=self.opencode_mode,
                         fanout_registry=self._resolved_fanout_registry(),
                     )
+                    advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+                if is_length_guard:
+                    advisory_build_duration_ms = None
 
                 start_response_text = (
                     f"Interview started. Session ID: {state.interview_id}\n\n{display_question}"
@@ -2809,6 +2822,10 @@ class InterviewHandler:
                         transcript_chars=_compute_transcript_chars(state),
                         ambiguity_prefix_present=start_response_text.startswith("(ambiguity:"),
                         is_length_guard=is_length_guard,
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=None,
+                        question_generation_duration_ms=question_generation_duration_ms,
+                        advisory_build_duration_ms=advisory_build_duration_ms,
                     )
                 )
                 return Result.ok(
@@ -2860,6 +2877,7 @@ class InterviewHandler:
         answer: Any,
         last_question: Any,
     ) -> Result[MCPToolResult, MCPServerError]:
+        turn_started_at = time.perf_counter()
         engine, llm_adapter = self._create_interview_engine()
         _interview_id: str | None = None
 
@@ -3198,6 +3216,7 @@ class InterviewHandler:
             # the latest ambiguity snapshot, closure threshold,
             # and completion-candidate streak.
             answered = _count_answered_rounds(state)
+            ambiguity_scoring_duration_ms: float | None = None
             if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
                 # Scoring must complete before question generation:
                 # _score_interview_state mutates state.ambiguity_score,
@@ -3206,7 +3225,9 @@ class InterviewHandler:
                 # system prompt (closure mode, seed-ready, streak).
                 # Running them in parallel would give the question
                 # generator stale routing context.
+                ambiguity_scoring_started_at = time.perf_counter()
                 live_score = await self._score_interview_state(llm_adapter, state)
+                ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
                 lateral_review_meta = _maybe_record_lateral_review_advisory(
                     state,
                     previous_milestone=previous_milestone,
@@ -3226,10 +3247,14 @@ class InterviewHandler:
                         session_id,
                         live_score,
                     )
+                question_generation_started_at = time.perf_counter()
                 question_result = await engine.ask_next_question(state)
+                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             else:
                 live_score = None
+                question_generation_started_at = time.perf_counter()
                 question_result = await engine.ask_next_question(state)
+                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(
                 engine,
                 state,
@@ -3238,6 +3263,9 @@ class InterviewHandler:
                 live_score=live_score,
                 lateral_review_meta=lateral_review_meta,
                 intent_guard_report=intent_guard_report,
+                turn_started_at=turn_started_at,
+                ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                question_generation_duration_ms=question_generation_duration_ms,
             )
         except Exception as e:
             log.error("mcp.tool.interview.error", error=str(e))
@@ -3269,6 +3297,7 @@ class InterviewHandler:
         answer: Any,
         last_question: Any,
     ) -> Result[MCPToolResult, MCPServerError]:
+        turn_started_at = time.perf_counter()
         engine, _ = self._create_interview_engine()
         _interview_id: str | None = None
 
@@ -3330,6 +3359,7 @@ class InterviewHandler:
                     # summarize prompt as a hard failure.
                     resume_meta.update(_length_guard_meta_fields())
                 else:
+                    advisory_build_started_at = time.perf_counter()
                     _attach_question_assist_requests(
                         resume_meta,
                         session_id=session_id,
@@ -3343,6 +3373,9 @@ class InterviewHandler:
                         opencode_mode=self.opencode_mode,
                         fanout_registry=self._resolved_fanout_registry(),
                     )
+                    advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+                if resume_is_length_guard:
+                    advisory_build_duration_ms = None
 
                 resume_response_text = f"Session {session_id}\n\n{display_question}"
                 # Q00/ouroboros#831 (diagnostics): response-shape event for
@@ -3358,6 +3391,10 @@ class InterviewHandler:
                         transcript_chars=_compute_transcript_chars(state),
                         ambiguity_prefix_present=resume_response_text.startswith("(ambiguity:"),
                         is_length_guard=resume_is_length_guard,
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=None,
+                        question_generation_duration_ms=None,
+                        advisory_build_duration_ms=advisory_build_duration_ms,
                     )
                 )
                 return Result.ok(
@@ -3377,7 +3414,9 @@ class InterviewHandler:
             intent_guard_report: IntentGuardReport | None = None
 
             live_score = _load_state_ambiguity_score(state)
+            question_generation_started_at = time.perf_counter()
             question_result = await engine.ask_next_question(state)
+            question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(
                 engine,
                 state,
@@ -3386,6 +3425,9 @@ class InterviewHandler:
                 live_score=live_score,
                 lateral_review_meta=lateral_review_meta,
                 intent_guard_report=intent_guard_report,
+                turn_started_at=turn_started_at,
+                ambiguity_scoring_duration_ms=None,
+                question_generation_duration_ms=question_generation_duration_ms,
             )
         except Exception as e:
             log.error("mcp.tool.interview.error", error=str(e))
@@ -3419,6 +3461,9 @@ class InterviewHandler:
         live_score: AmbiguityScore | None,
         lateral_review_meta: dict[str, Any] | None,
         intent_guard_report: IntentGuardReport | None,
+        turn_started_at: float,
+        ambiguity_scoring_duration_ms: float | None,
+        question_generation_duration_ms: float,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Shared question-generation and response tail for answer/resume paths."""
         if question_result.is_err:
@@ -3573,6 +3618,7 @@ class InterviewHandler:
             # the auto driver's ``answer()`` path is not raised on.
             answer_meta.update(_length_guard_meta_fields())
         else:
+            advisory_build_started_at = time.perf_counter()
             _attach_question_assist_requests(
                 answer_meta,
                 session_id=session_id,
@@ -3586,6 +3632,9 @@ class InterviewHandler:
                 opencode_mode=self.opencode_mode,
                 fanout_registry=self._resolved_fanout_registry(),
             )
+            advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+        if answer_is_length_guard:
+            advisory_build_duration_ms = None
 
         if lateral_review_dispatch_meta is not None:
             answer_meta.update(lateral_review_dispatch_meta)
@@ -3608,6 +3657,10 @@ class InterviewHandler:
                 transcript_chars=_compute_transcript_chars(state),
                 ambiguity_prefix_present=answer_response_text.startswith("(ambiguity:"),
                 is_length_guard=answer_is_length_guard,
+                total_duration_ms=_elapsed_ms(turn_started_at),
+                ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                question_generation_duration_ms=question_generation_duration_ms,
+                advisory_build_duration_ms=advisory_build_duration_ms,
             )
         )
         return Result.ok(

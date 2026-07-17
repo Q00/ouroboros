@@ -104,6 +104,10 @@ def interview_response_emitted(
     transcript_chars: int,
     ambiguity_prefix_present: bool,
     is_length_guard: bool,
+    total_duration_ms: float | None = None,
+    ambiguity_scoring_duration_ms: float | None = None,
+    question_generation_duration_ms: float | None = None,
+    advisory_build_duration_ms: float | None = None,
 ) -> BaseEvent:
     """Diagnostic event recording the shape of an MCP question-bearing response.
 
@@ -124,6 +128,12 @@ def interview_response_emitted(
             "transcript_chars": transcript_chars,
             "ambiguity_prefix_present": ambiguity_prefix_present,
             "is_length_guard": is_length_guard,
+            "timings_ms": {
+                "total": total_duration_ms,
+                "ambiguity_scoring": ambiguity_scoring_duration_ms,
+                "question_generation": question_generation_duration_ms,
+                "advisory_build": advisory_build_duration_ms,
+            },
         },
     )
 

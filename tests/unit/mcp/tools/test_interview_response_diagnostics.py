@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 from jsonschema import Draft202012Validator
 import pytest
@@ -595,6 +596,10 @@ async def test_start_emits_response_diagnostic_event(tmp_path: Path) -> None:
     assert data["transcript_chars"] >= 0
     assert isinstance(data["ambiguity_prefix_present"], bool)
     assert data["is_length_guard"] is False
+    assert data["timings_ms"]["total"] >= 0
+    assert data["timings_ms"]["ambiguity_scoring"] is None
+    assert data["timings_ms"]["question_generation"] >= 0
+    assert data["timings_ms"]["advisory_build"] >= 0
     assert diagnostic.aggregate_id == "interview_diagnostics00001"
 
 
@@ -676,6 +681,10 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
     assert diagnostic.data["response_kind"] == "resume_pending"
     assert diagnostic.data["round_number"] == 1
     assert diagnostic.data["is_length_guard"] is False
+    assert diagnostic.data["timings_ms"]["total"] >= 0
+    assert diagnostic.data["timings_ms"]["ambiguity_scoring"] is None
+    assert diagnostic.data["timings_ms"]["question_generation"] is None
+    assert diagnostic.data["timings_ms"]["advisory_build"] >= 0
     # Transcript chars must include the pending question text length.
     assert diagnostic.data["transcript_chars"] >= len("What is the main goal?")
 
@@ -781,3 +790,49 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
     )
     assert diagnostic.data["ambiguity_prefix_present"] is False
     assert diagnostic.data["is_length_guard"] is False
+    assert diagnostic.data["timings_ms"]["total"] >= 0
+    assert diagnostic.data["timings_ms"]["ambiguity_scoring"] is None
+    assert diagnostic.data["timings_ms"]["question_generation"] >= 0
+    assert diagnostic.data["timings_ms"]["advisory_build"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_later_answer_reports_scoring_and_question_timings(tmp_path: Path) -> None:
+    """Once early exit is possible, scoring and question generation remain distinct."""
+    state = InterviewState(
+        interview_id="interview_answer00000002",
+        initial_context="ctx",
+        status=InterviewStatus.IN_PROGRESS,
+    )
+    state.rounds.extend(
+        [
+            InterviewRound(round_number=1, question="Goal?", user_response="Reports"),
+            InterviewRound(round_number=2, question="Users?", user_response="Analysts"),
+            InterviewRound(round_number=3, question="Constraint?", user_response=None),
+        ]
+    )
+
+    event_store = _CapturingEventStore()
+    engine = _StubInterviewEngine(
+        state_dir=tmp_path,
+        initial_state=state,
+        next_question="What proves success?",
+    )
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=event_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+    handler._score_interview_state = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    outcome = await handler.handle({"session_id": state.interview_id, "answer": "Runs locally."})
+    assert outcome.is_ok
+    await _drain_bg_tasks(handler)
+
+    diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
+    assert diagnostic is not None
+    assert diagnostic.data["timings_ms"]["ambiguity_scoring"] >= 0
+    assert diagnostic.data["timings_ms"]["question_generation"] >= 0
+    handler._score_interview_state.assert_awaited_once()
