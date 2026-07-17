@@ -7570,6 +7570,106 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
+    async def test_fat_harness_accepts_artifact_contract_without_typed_evidence(
+        self, tmp_path: Any
+    ) -> None:
+        """A passing artifact gate may replace every profile evidence field."""
+        (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[TASK_COMPLETE] artifact created without a JSON evidence block",
+                native_session_id="opencode-session-artifact-no-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("artifact"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create output.txt with the smoke marker.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the artifact",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=AcceptanceCriterionSpec(
+                description="Create output.txt with the smoke marker.",
+                expected_artifacts=("output.txt",),
+                verify_command="test -f output.txt",
+            ),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert result.typed_evidence is None
+        assert result.atomic_verifier_verdict is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == []
+        assert evidence_event.data["typed_evidence_present"] is False
+        assert evidence_event.data["enforcement_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_verify_only_code_contract_still_requires_files_touched_evidence(
+        self, tmp_path: Any
+    ) -> None:
+        """A command gate cannot replace code-profile filesystem evidence."""
+        (tmp_path / "hello.py").write_text("VALUE = 1\n", encoding="utf-8")
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[TASK_COMPLETE] command passed without a JSON evidence block",
+                native_session_id="opencode-session-code-verify-only-no-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement hello.py.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the code",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=AcceptanceCriterionSpec(
+                description="Implement hello.py.",
+                verify_command="test -f hello.py",
+            ),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Evidence is not valid JSON" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["files_touched"]
+        assert evidence_event.data["typed_evidence_present"] is False
+        assert evidence_event.data["enforcement_error"] is not None
+
+    @pytest.mark.asyncio
     async def test_contract_verify_gate_is_single_shot_across_atomic_and_final_gate(
         self, tmp_path: Any
     ) -> None:

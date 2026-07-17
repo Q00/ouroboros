@@ -3881,6 +3881,17 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
+            verify_gate_replaces_all_evidence = bool(
+                verify_gate_outcome is not None
+                and self._execution_profile is not None
+                and not _effective_evidence_schema_for_ac(
+                    self._execution_profile,
+                    ac_content,
+                    has_success_contract=has_success_contract,
+                    has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
+                ).required
+            )
             fat_harness_error = self._fat_harness_acceptance_error(
                 runtime_success=success,
                 typed_evidence=typed_evidence,
@@ -3888,6 +3899,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 typed_error=typed_error,
                 verifier_verdict=verifier_verdict,
                 verify_gate_outcome=verify_gate_outcome,
+                verify_gate_replaces_all_evidence=verify_gate_replaces_all_evidence,
             )
             result_final_message = final_message
             if fat_harness_error is not None:
@@ -5085,6 +5097,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         typed_error: str | None,
         verifier_verdict: VerifierVerdict | None,
         verify_gate_outcome: _VerifyGateOutcome | None = None,
+        verify_gate_replaces_all_evidence: bool = False,
     ) -> str | None:
         """Return the fat-harness rejection reason for an atomic leaf."""
         if not self._fat_harness_mode or not runtime_success:
@@ -5092,12 +5105,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         if verify_gate_outcome is not None:
             if not verify_gate_outcome.passed:
                 return f"Verify gate failed: {verify_gate_outcome.reason}"
-            if (
-                self._execution_profile is None
-                or typed_evidence is None
-                or typed_validation is None
-                or not typed_validation.ok
-            ):
+            if verify_gate_replaces_all_evidence:
                 return None
         if self._execution_profile is None:
             return "Fat-harness mode requires a loaded execution profile."
