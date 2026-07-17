@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import ac_text
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.decomposition_attestation import DecompositionAttestation
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 from ouroboros.orchestrator.events import (
     create_heartbeat_event,
@@ -96,6 +97,36 @@ class ExecutionEventEmitter:
                     "session_id": session_id,
                     "mode": mode,
                     "child_count": len(decision.children),
+                },
+            )
+        )
+
+    async def emit_decomposition_attested(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_identity: ExecutionNodeIdentity,
+        attestation: DecompositionAttestation,
+    ) -> None:
+        """Persist the gate-anchored decomposition trust verdict (Task 1).
+
+        Computed once a decomposition round's siblings have all finished
+        dispatch and the parent's own verify gate has been re-run over the
+        resulting shared workspace. Durable so Kanban/HUD/conductor surfaces
+        (Task 3) and the frugality proof's ``decomposition_trustworthy`` axis
+        can read it without recomputing anything.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.decomposition_attested",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    **node_identity.to_event_metadata(),
+                    **attestation.to_event_data(),
+                    "execution_id": execution_id,
+                    "session_id": session_id,
                 },
             )
         )

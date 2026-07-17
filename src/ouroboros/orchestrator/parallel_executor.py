@@ -66,6 +66,12 @@ from ouroboros.events.session_signal import (
 # partially-initialized ``harness`` during ``orchestrator`` package import. The
 # concrete submodules below import nothing from ``orchestrator``, breaking the cycle.
 from ouroboros.harness.claim_term_guard import strict_deterministic_claim_term_guard
+from ouroboros.harness.decomposition_attestation import (
+    DecompositionAttestation,
+    ParentVerifyOutcome,
+    SiblingVerifyOutcome,
+    attest_decomposition,
+)
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
@@ -996,6 +1002,13 @@ class ParallelACExecutor:
         )
         self._checkpoint_store = checkpoint_store
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
+        # Gate-anchored decomposition trust attestation (Task 1, RLM thesis
+        # hardening): the LATEST attestation computed for a finished
+        # decomposition round, keyed by the round's node id. ``node_id`` is
+        # stable across same-root retries (it does not encode retry_attempt),
+        # so a prior round's untrustworthy verdict keeps conditioning THIS
+        # root AC's next retry even after the executor re-decomposes it.
+        self._decomposition_attestations: dict[str, DecompositionAttestation] = {}
         self._execution_counters_lock = asyncio.Lock()
         self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
         # Param degradations already surfaced this run, keyed by (param, support),
@@ -2447,9 +2460,18 @@ class ParallelACExecutor:
         start_time: datetime,
         semantic_ac_key: str,
         investment_spec: InvestmentSpec | None = None,
+        ac_spec: AcceptanceCriterionSpec | None = None,
     ) -> ACExecutionResult:
         """Dispatch one finalized split through the shared recursive child path."""
         sub_acs = [child.description for child in decision.children]
+        # A prior round's gate-anchored attestation (Task 1) poisons THIS root
+        # AC's future retries: once a decomposition round is proven untrustworthy
+        # by re-running the parent's own verify gate, a fresh (unverified) SPLIT
+        # proposal on the next retry must not re-admit the cheap child tier.
+        prior_attestation = self._decomposition_attestations.get(node_identity.node_id)
+        child_decomposition_trustworthy = decision.trustworthy and (
+            prior_attestation is None or prior_attestation.trustworthy
+        )
         display_label = (
             f"AC {node_identity.display_path}"
             if node_identity.depth == 0
@@ -2506,7 +2528,7 @@ class ParallelACExecutor:
                     sub_ac_index=legacy_sub_ac_index,
                     node_identity=child_node_identity,
                     investment_spec=investment_spec,
-                    decomposition_trustworthy=decision.trustworthy,
+                    decomposition_trustworthy=child_decomposition_trustworthy,
                     semantic_ac_key=semantic_ac_key,
                 )
             except BaseException as exc:
@@ -2551,6 +2573,26 @@ class ParallelACExecutor:
 
         duration = (datetime.now(UTC) - start_time).total_seconds()
         all_success = all(result.success for result in final_sub_results)
+
+        # Task 1 (RLM thesis hardening): right after every sibling of this
+        # decomposition round has finished dispatch, judge whether the round was
+        # actually trustworthy — gate-anchored, not the pre-dispatch JSON-shape
+        # heuristic on ``decision.trustworthy``. The verdict is cached per node id
+        # so the NEXT retry of this same root AC can condition its child-tier
+        # discount on it (see ``child_decomposition_trustworthy`` above).
+        attestation = await self._attest_decomposition_round(
+            node_identity=node_identity,
+            final_sub_results=final_sub_results,
+            ac_spec=ac_spec,
+        )
+        self._decomposition_attestations[node_identity.node_id] = attestation
+        await self._event_emitter.emit_decomposition_attested(
+            execution_id=execution_id,
+            session_id=session_id,
+            node_identity=node_identity,
+            attestation=attestation,
+        )
+
         return ACExecutionResult(
             ac_index=ac_index,
             ac_content=ac_content,
@@ -2579,6 +2621,64 @@ class ParallelACExecutor:
             sub_results=tuple(final_sub_results),
             depth=depth,
             decomposition_decision=decision,
+            decomposition_attestation=attestation,
+        )
+
+    async def _attest_decomposition_round(
+        self,
+        *,
+        node_identity: ExecutionNodeIdentity,
+        final_sub_results: list[ACExecutionResult],
+        ac_spec: AcceptanceCriterionSpec | None,
+    ) -> DecompositionAttestation:
+        """Gate-anchor one finished decomposition round (Task 1).
+
+        Reuses the SAME verify-gate oracle every other AC success/failure
+        decision reuses: :meth:`_run_ac_verify_gate`. Each sibling's own
+        cached gate outcome (populated only when that child carried a
+        ``verify_command``/``expected_artifacts`` contract) stands for
+        "did this sibling pass its own verify gate"; the parent's contract,
+        if any, is RE-RUN here — after every sibling has finished — against
+        the current shared workspace, so a clobbering split fails this check
+        even when every child individually reported success.
+        """
+        siblings = tuple(
+            SiblingVerifyOutcome(
+                sibling_id=str(idx),
+                has_verify_command=isinstance(result.verify_gate_outcome, _VerifyGateOutcome),
+                passed=(
+                    result.verify_gate_outcome.passed
+                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                    else None
+                ),
+                reason=(
+                    (result.verify_gate_outcome.reason or "")
+                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                    else "sibling was dispatched without a structured verify contract"
+                ),
+            )
+            for idx, result in enumerate(final_sub_results)
+        )
+
+        parent_has_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
+            ac_spec.verify_command or ac_spec.expected_artifacts
+        )
+        if parent_has_contract:
+            assert ac_spec is not None  # narrowed by parent_has_contract
+            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+            parent_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+            parent = ParentVerifyOutcome(
+                has_verify_command=True,
+                passed=parent_outcome.passed,
+                reason=parent_outcome.reason or "",
+            )
+        else:
+            parent = ParentVerifyOutcome(has_verify_command=False, passed=None)
+
+        return attest_decomposition(
+            node_id=node_identity.node_id,
+            siblings=siblings,
+            parent=parent,
         )
 
     def _build_decomposition_trace_summary(
@@ -2897,6 +2997,7 @@ class ParallelACExecutor:
                 start_time=start_time,
                 semantic_ac_key=semantic_ac_key,
                 investment_spec=investment_spec,
+                ac_spec=ac_spec,
             )
             return recovered, decision
         return None, decision
@@ -3052,6 +3153,7 @@ class ParallelACExecutor:
                 start_time=start_time,
                 semantic_ac_key=semantic_ac_key,
                 investment_spec=investment_spec,
+                ac_spec=ac_spec,
             )
 
         if (

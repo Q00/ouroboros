@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.harness.decomposition_attestation import DecompositionAttestation
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 
 if TYPE_CHECKING:
@@ -68,6 +69,10 @@ class ACExecutionResult:
             earlier layer. The executor treats this as opaque to avoid a model
             import cycle.
         decomposition_decision: Finalized decomposition decision for this node.
+        decomposition_attestation: Gate-anchored trust attestation computed
+            immediately after this node's decomposition round finished (all
+            siblings dispatched). ``None`` for atomic nodes and for decomposed
+            nodes before the attestation runs.
     """
 
     ac_index: int
@@ -91,6 +96,7 @@ class ACExecutionResult:
     atomic_verifier_verdict: VerifierVerdict | None = None
     verify_gate_outcome: Any | None = None
     decomposition_decision: DecompositionDecisionRecord | None = None
+    decomposition_attestation: DecompositionAttestation | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""
