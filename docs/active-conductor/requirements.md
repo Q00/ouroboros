@@ -94,8 +94,12 @@ Excluded:
 - Unsupported redirect degrades only through a declared fallback and never
   silently claims that an interrupt occurred.
 - Ending the accepting main turn does not interrupt run/auto/evaluate/evolve/
-  Ralph work. A confirmed observer provides live relays; without one, the host
-  says so and catches up from durable events on the next parent turn.
+  Ralph work. For live Codex relays, however, a confirmed observer keeps the
+  parent turn open in an interruptible `wait_agent` loop because child mailbox
+  messages cannot revive an ended parent turn. Without an observer, the host
+  says so and catches up from durable events on the next parent turn. A user may
+  end live observation without cancelling the durable job; observer child exit
+  also falls back to next-turn or explicit-status catch-up.
 
 ## Decisions
 

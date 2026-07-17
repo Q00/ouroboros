@@ -411,7 +411,9 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
         source=SessionSignalSource.USER,
         reason="Expiry boundary test.",
         idempotency_key="expire_boundary_1",
-        expires_at=datetime.now(UTC) + timedelta(milliseconds=20),
+        # Keep the request-time window wide enough for slower CI runners; this
+        # test verifies expiry is rechecked at delivery, not at initial request.
+        expires_at=datetime.now(UTC) + timedelta(milliseconds=500),
     )
     execution_task = asyncio.create_task(
         executor._execute_atomic_ac(
@@ -429,7 +431,7 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
         assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.6)
         runtime.release_first_turn.set()
 
         result = await asyncio.wait_for(execution_task, timeout=5)
