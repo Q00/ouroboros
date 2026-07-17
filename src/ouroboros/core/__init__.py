@@ -88,6 +88,34 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "OntologyConcept": ("ouroboros.core.seed_contract", "OntologyConcept"),
     "OntologyLens": ("ouroboros.core.seed_contract", "OntologyLens"),
     "SeedContract": ("ouroboros.core.seed_contract", "SeedContract"),
+    # Pre-Seed requirement candidate projection
+    "CandidateContentSource": (
+        "ouroboros.core.requirement_candidate",
+        "CandidateContentSource",
+    ),
+    "CandidateResolution": ("ouroboros.core.requirement_candidate", "CandidateResolution"),
+    "ConfirmationAuthority": (
+        "ouroboros.core.requirement_candidate",
+        "ConfirmationAuthority",
+    ),
+    "RequirementCandidate": (
+        "ouroboros.core.requirement_candidate",
+        "RequirementCandidate",
+    ),
+    "RequirementDistillation": (
+        "ouroboros.core.requirement_candidate",
+        "RequirementDistillation",
+    ),
+    "RequirementEvidence": (
+        "ouroboros.core.requirement_candidate",
+        "RequirementEvidence",
+    ),
+    "RequirementEvidenceKind": (
+        "ouroboros.core.requirement_candidate",
+        "RequirementEvidenceKind",
+    ),
+    "RequirementSection": ("ouroboros.core.requirement_candidate", "RequirementSection"),
+    "evaluate_promotion": ("ouroboros.core.requirement_candidate", "evaluate_promotion"),
     # Context management
     "WorkflowContext": ("ouroboros.core.context", "WorkflowContext"),
     "ContextMetrics": ("ouroboros.core.context", "ContextMetrics"),

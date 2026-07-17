@@ -449,12 +449,8 @@ class TestTokenAttribution:
             reasoning_effort="high",
         )
 
-        # The proof fixture supplies explicit trust, authorizing the child discount.
-        await _run_one_ac(
-            executor,
-            is_sub_ac=True,
-            decomposition_trustworthy=True,
-        )
+        # Trusted decomposed child -> frugal tier (standard base dropped one notch).
+        await _run_one_ac(executor, is_sub_ac=True, decomposition_trustworthy=True)
 
         token = _token_events(events)
         assert len(token) == 1

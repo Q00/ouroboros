@@ -46,6 +46,7 @@ its rendered guide or a documented fallback.
 | Grok | No setup-owned capability artifact yet | Known gap: Grok Build (the `grok` binary) can be selected as a runtime, but setup does not yet install a durable grok-owned instruction artifact. Use `render_backend_skill_capability_guide("grok")` when building Grok prompts until a stable artifact surface exists. |
 | Goose | No setup-owned capability artifact yet | Known gap: setup can select Goose as a runtime, but no durable Goose instruction surface or Goose-specific `SkillExecutionCapability` entries are registered yet. Keep skill requirements runtime-neutral and rely on runtime-local operator guidance until a Goose artifact installer exists. |
 | Pi | No setup-owned capability artifact yet | Known gap: Pi has generic rendered capability guidance in the registry, but setup does not yet install it into a durable Pi-owned instruction artifact. Use `render_backend_skill_capability_guide("pi")` when building Pi prompts until a stable artifact surface exists. |
+| Zcode | No setup-owned capability artifact yet | Known gap: Zcode (Z.ai GLM-5 agent, the `zcode` CLI) can be selected as a runtime, but setup does not yet install a durable zcode-owned instruction artifact. Use `render_backend_skill_capability_guide("zcode")` when building Zcode prompts until a stable artifact surface exists. |
 
 ## Seed generation client-gate enforcement
 

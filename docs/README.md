@@ -20,6 +20,7 @@ replayable execution contract on your choice of runtime backend.
 - [Codex CLI](./runtime-guides/codex.md) - Backend-specific configuration and CLI options (see [Getting Started](./getting-started.md) for install/onboarding)
 - [OpenCode](./runtime-guides/opencode.md) - Interactive plugin mode and headless subprocess runtime
 - [Hermes](./runtime-guides/hermes.md) - Hermes Agent runtime setup and `ooo` dispatch
+- [Zcode](./runtime-guides/zcode.md) - Z.ai desktop-agent runtime and measured CLI contract
 - [Runtime Capability Matrix](./runtime-capability-matrix.md) - Feature comparison across runtime backends
 
 ### Architecture

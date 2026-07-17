@@ -314,6 +314,130 @@ class TestOrchestratorResult:
             result.success = False  # type: ignore
 
 
+class TestACExecutionResult:
+    """Tests for AC execution result convenience properties."""
+
+    def test_decomposition_trustworthy_reflects_finalized_decision(self) -> None:
+        """ACExecutionResult exposes trusted split status without callers parsing records."""
+        from ouroboros.orchestrator.decomposition_policy import (
+            DecompositionChild,
+            DecompositionDecisionRecord,
+            DecompositionDisposition,
+            DecompositionSource,
+            SemanticAttestationStatus,
+            StructuralCheckStatus,
+        )
+
+        decision = DecompositionDecisionRecord(
+            node_id="node_abc",
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.SPLIT,
+            children=(
+                DecompositionChild(
+                    description="Implement config field",
+                    coverage_claims=("config",),
+                    verification_hint="unit",
+                ),
+                DecompositionChild(
+                    description="Wire runner field",
+                    coverage_claims=("runner",),
+                    verification_hint="unit",
+                ),
+            ),
+            structural_status=StructuralCheckStatus.PASSED,
+            semantic_status=SemanticAttestationStatus.ESTABLISHED,
+            trustworthy=True,
+        )
+
+        result = ACExecutionResult(
+            ac_index=0,
+            ac_content="Split a trusted task",
+            success=True,
+            decomposition_decision=decision,
+        )
+
+        assert result.decomposition_trustworthy is True
+        assert (
+            ACExecutionResult(
+                ac_index=1, ac_content="Atomic task", success=True
+            ).decomposition_trustworthy
+            is False
+        )
+
+
+class TestExecutionEventEmitter:
+    """Tests for decomposition event helpers used by executor wiring."""
+
+    @pytest.mark.asyncio
+    async def test_emit_decomposition_decision_finalized_persists_bounded_payload(
+        self,
+    ) -> None:
+        from ouroboros.orchestrator.decomposition_policy import (
+            DecompositionDecisionRecord,
+            DecompositionDisposition,
+            DecompositionSource,
+        )
+        from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
+        from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+
+        safe_emit = AsyncMock(return_value=True)
+        emitter = ExecutionEventEmitter(AsyncMock(), safe_emit_event=safe_emit)
+        node = ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0)
+        decision = DecompositionDecisionRecord(
+            node_id=node.node_id,
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.ATOMIC,
+            reasons=("small enough",),
+        )
+
+        await emitter.emit_decomposition_decision_finalized(
+            execution_id="exec_1",
+            session_id="sess_1",
+            mode="preflight",
+            node_identity=node,
+            decision=decision,
+        )
+
+        event = safe_emit.await_args.args[0]
+        assert event.type == "execution.decomposition.decision_finalized"
+        assert event.aggregate_id == "exec_1"
+        assert event.data["node_id"] == node.node_id
+        assert event.data["mode"] == "preflight"
+        assert event.data["disposition"] == "ATOMIC"
+        assert event.data["child_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_emit_bounce_classified_persists_classification_payload(self) -> None:
+        from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
+        from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+
+        safe_emit = AsyncMock(return_value=True)
+        emitter = ExecutionEventEmitter(AsyncMock(), safe_emit_event=safe_emit)
+        node = ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0)
+
+        await emitter.emit_bounce_classified(
+            execution_id="exec_1",
+            session_id="sess_1",
+            node_identity=node,
+            cause="TOO_BIG",
+            rationale="leaf exceeded scope",
+            failure_class="blocked",
+            retry_admission="redispatch",
+            evidence_refs=("event:1",),
+            trace_summary="bounded summary",
+        )
+
+        event = safe_emit.await_args.args[0]
+        assert event.type == "execution.decomposition.bounce_classified"
+        assert event.aggregate_id == "exec_1"
+        assert event.data["node_id"] == node.node_id
+        assert event.data["cause"] == "TOO_BIG"
+        assert event.data["failure_class"] == "blocked"
+        assert event.data["retry_admission"] == "redispatch"
+        assert event.data["evidence_refs"] == ["event:1"]
+        assert event.data["trace_summary"] == "bounded summary"
+
+
 class TestOrchestratorRunner:
     """Tests for OrchestratorRunner."""
 
@@ -370,6 +494,30 @@ class TestOrchestratorRunner:
         notice = mock_console.print.call_args.args[0]
         assert "system_prompt" in notice
         assert "opencode" in notice
+
+    def test_decomposition_mode_override_and_disable_are_resolved_on_runner(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Runner resolves explicit decomposition mode before executor dispatch."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            decomposition_mode="bounce_only",
+        )
+        disabled_runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+            decomposition_mode="preflight",
+        )
+
+        assert runner._decomposition_mode == "bounce_only"
+        assert disabled_runner._decomposition_mode == "off"
 
     @pytest.mark.asyncio
     async def test_route_call_effort_emits_observability_only_event(
@@ -2520,6 +2668,7 @@ class TestOrchestratorRunner:
         assert profile.profile == sample_seed.task_type == "code"
         assert profile.axis == "testable_unit"
         assert captured_init["fat_harness_mode"] is True
+        assert captured_init["decomposition_mode"] == "preflight"
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_fat_harness_mode_to_executor(

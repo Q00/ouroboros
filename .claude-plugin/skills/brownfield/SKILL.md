@@ -33,8 +33,7 @@ Show scanning indicator:
   Scanning for Existing Projects...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Looking for git repositories and worktrees under the scan root directory.
-Linked worktrees reported by discovered normal repo roots may also be registered, even outside the scan root directory.
+Looking for git repositories and worktrees up to two directories below the scan root.
 Local repos and repos with any remote name are eligible.
 This may take a moment...
 ```
@@ -55,7 +54,7 @@ stop with the MCP-not-available message instead of retrying the failing call.
    Tool: ouroboros_brownfield
    Arguments: { "action": "scan" }
    ```
-   This walks `scan_root` for valid seed repos/worktrees and registers them in DB. For each discovered normal repo root with a `.git` directory, Git-reported linked worktrees are also considered, even when they live outside `scan_root`. A linked worktree found under `scan_root` with a `.git` file is registered itself, but it is not used to register its main worktree or sibling worktrees outside `scan_root`. Existing defaults are preserved.
+   This walks `scan_root` (up to two directory levels deep) for valid seed repos/worktrees and registers them in DB. Each repo or worktree found directly by the walk is registered self-only — Git worktree families are not expanded, so worktrees outside the depth-bounded walk (e.g. under `.ouroboros/worktrees`) are not pulled in. Existing defaults are preserved.
 
 The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**
 
@@ -81,51 +80,48 @@ Then stop.
 ### Scan boundaries
 
 - The filesystem walk starts at `scan_root`; when omitted, `scan_root` defaults to the current user's home directory.
-- Repositories are only discovered directly by walking directories inside `scan_root`.
+- Repositories are discovered by walking directories inside `scan_root`, at most two levels deep (so `~/repo` and `~/group/repo` are found; deeper nesting is not).
 - Dot-prefixed directories and known noisy directories such as `node_modules` are not walked as seed locations.
-- Git worktrees are different: once a normal repo root with a `.git` directory is discovered, Ouroboros runs `git worktree list --porcelain` and may register those linked worktrees even if their paths are outside `scan_root`.
-- A linked worktree found inside `scan_root` with a `.git` file is registered itself, but it is not used to register its main worktree or sibling worktrees outside `scan_root`.
+- Both normal repos (`.git` directory) and linked worktrees (`.git` file) are registered when the walk reaches them. Git worktree families are NOT expanded — a worktree is only registered if the walk finds it directly, not because its main repo's Git metadata reports it.
 - Local repos, repos without remotes, and repos whose remotes are not named `origin` are all eligible.
 
 **Step 2: Default Selection**
 
-**IMMEDIATELY after showing the list**, use `AskUserQuestion` with the current default numbers from the scan response.
+**Do NOT use `AskUserQuestion` for this selection.** Assistant text emitted
+between tool calls is not guaranteed to render, so a question dialog fired in
+the same turn can appear without the repo list the user needs to answer it.
+Option `preview` fields cannot hold the list either — the preview box has a
+fixed height and silently truncates long lists.
 
-**If defaults exist**, show them as the recommended option:
+Instead, **end the turn with the repo grid as the final message** and collect
+the selection as a plain chat reply. Immediately below the grid, append:
 
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"},
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"}
-    ],
-    "multiSelect": false
-  }]
-}
+**If defaults exist:**
+```
+Current defaults: <current default names> (numbers <current default numbers>)
+
+Reply with repo numbers to change defaults (e.g. "6, 18, 19"),
+"keep" to keep the current defaults, or "none" to clear them.
 ```
 
-**If no defaults exist**, do NOT show a "(Recommended)" option — offer "None" and "Select repos" instead:
+**If no defaults exist:**
+```
+No defaults set.
 
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"},
-      {"label": "Select repos", "description": "Type repo numbers to set as default"}
-    ],
-    "multiSelect": false
-  }]
-}
+Reply with repo numbers to set defaults (e.g. "6, 18, 19"),
+or "none" to run interviews in greenfield mode.
 ```
 
-The user can select the recommended defaults (if any), choose "None", or type custom numbers.
+Then **end the turn** — no tool calls after the grid.
 
-After the user responds, re-run `tool discovery query: "+ouroboros brownfield"`, then use ONE MCP call to update all defaults at once:
+On the next turn, parse the user's reply:
+
+- Numbers (any separator) → those indices
+- "keep" (defaults exist) → stop; no MCP call needed, confirm defaults unchanged
+- "none" → empty indices (clear all)
+- Anything else → ask again in plain text; do not guess
+
+Then re-run `tool discovery query: "+ouroboros brownfield"` and use ONE MCP call to update all defaults at once:
 
 ```
 Tool: ouroboros_brownfield
@@ -151,6 +147,12 @@ Or if "None" selected:
 ```
 No default repos set. Interviews will run in greenfield mode.
 You can set defaults anytime with: ooo brownfield
+```
+
+Or if "keep" selected:
+```
+Brownfield defaults unchanged.
+Defaults: <current default names>
 ```
 
 ---

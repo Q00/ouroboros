@@ -164,7 +164,7 @@ class ModelRouter:
             this router as absent when the adapter's backend does not match.
         child_tier: The tier decomposed children start at (RLM thesis:
             decomposition makes trusted children cheap enough for the frugal tier;
-            child status alone is insufficient).
+            child status alone is insufficient.
         base_tier: The tier top-level / non-decomposed ACs start at. Defaults to
             one notch above ``child_tier`` so the top keeps today's model.
         escalation_retry_threshold: The ``retry_attempt`` at which tier escalation
@@ -444,7 +444,7 @@ def decide_model(
             flag is not itself a MECE attestation and is insufficient to lower
             the model tier.
         decomposition_trustworthy: Whether the decomposition has an explicit
-            deterministic trust signal. Only exactly ``True`` permits the RLM
+            finalized trust signal. Only exactly ``True`` permits the RLM
             frugality move: unlike effort routing V5 (which does NOT lower a
             child's reasoning depth), a trusted child drops ONE tier cheaper and
             keeps its reasoning depth while the outer success/verifier gate still

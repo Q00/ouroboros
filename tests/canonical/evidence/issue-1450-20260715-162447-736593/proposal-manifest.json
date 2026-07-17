@@ -1,0 +1,67 @@
+{
+  "adapter": "CodexCliLLMAdapter",
+  "completion_model_argument": "",
+  "configured_backend": "codex",
+  "configured_model": "default",
+  "generator": "LLMAnswerRefiner",
+  "records": [
+    {
+      "confidence": 0.5,
+      "generic_value": "Single local user",
+      "proposal": "One actor: a single local terminal user running `habit` from the working directory. Inputs are CLI commands `habit add \"Drink water\"`, `habit list`, and `habit check 1`; outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water`; invalid IDs print `Error: habit not found` to stderr and exit with code `1`.",
+      "question": "Who are the actors, inputs, and outputs for this task?",
+      "section": "actors",
+      "status": "complete"
+    },
+    {
+      "confidence": 0.5,
+      "generic_value": "Explicit command/API arguments derived from the task goal",
+      "proposal": "Inputs are exactly three CLI forms: `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`, run by one local terminal user from the working directory. `habit add \"Drink water\"` creates or updates `./habits.json` and prints `Added habit 1: Drink water`; `habit list` prints `[ ] 1. Drink water`; `habit check 1` marks habit id `1` checked and prints `Checked habit 1: Drink water`. Invalid IDs print `Error: habit not found` to stderr and exit with code `1`.",
+      "question": "Who are the actors, inputs, and outputs for this task?",
+      "section": "inputs",
+      "status": "complete"
+    },
+    {
+      "confidence": 0.5,
+      "generic_value": "Stable text output or generated artifacts suitable for verification",
+      "proposal": "Outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, writes `./habits.json` as `[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water` and updates `./habits.json` to `[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]`. Invalid IDs print `Error: habit not found` to stderr, print nothing to stdout, leave `./habits.json` unchanged, and exit with code `1`.",
+      "question": "Who are the actors, inputs, and outputs for this task?",
+      "section": "outputs",
+      "status": "complete"
+    },
+    {
+      "confidence": 0.5,
+      "generic_value": "For auto MVP scope, cloud sync, paid services, authentication, production deployment are non-goals unless explicitly requested.",
+      "proposal": "Non-goals: no cloud sync, paid services, authentication, production deployment, multi-user support, dates/streaks/reminders, edit/delete commands, custom file paths, config files, sorting/filtering/search, colored output, interactive prompts, or commands beyond `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`. Tests must reject scope expansion by confirming `habit delete 1` exits with code `1`, prints an unsupported-command error to stderr, prints nothing to stdout, and leaves `./habits.json` unchanged.",
+      "question": "What non-goals should explicitly remain out of scope?",
+      "section": "non_goals",
+      "status": "complete"
+    },
+    {
+      "confidence": 0.5,
+      "generic_value": "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion.",
+      "proposal": "Acceptance is verified by this exact shell check in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. `habit add \"Drink water\"` must stdout exactly `Added habit 1: Drink water`, `habit list` must stdout exactly `[ ] 1. Drink water`, and `habit check 1` must stdout exactly `Checked habit 1: Drink water`, each with exit code `0` and empty stderr. `habit check 999` must exit code `1`, stderr exactly `Error: habit not found`, stdout empty, and leave `./habits.json` unchanged. `habit delete 1` must exit code `1`, print an unsupported-command error to stderr, print nothing to stdout, and leave `./habits.json` unchanged.",
+      "question": "Which command output verifies the acceptance criteria?",
+      "section": "acceptance_criteria",
+      "status": "complete"
+    },
+    {
+      "confidence": 0.5,
+      "generic_value": "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable.",
+      "proposal": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`.",
+      "question": "Which command output verifies the acceptance criteria?",
+      "section": "verification_plan",
+      "status": "complete"
+    },
+    {
+      "confidence": 0.5,
+      "generic_value": "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria.",
+      "proposal": "Use Node.js 20+ with a single executable CommonJS file `bin/habit` using only built-in modules `fs` and `path`, no external dependencies, and `package.json` exposing `\"bin\": {\"habit\":\"bin/habit\"}`. Persist to `path.join(process.cwd(), \"habits.json\")` as compact JSON with `JSON.stringify(habits)`, read missing files as `[]`, assign IDs as `max(existing ids)+1`, and print all errors to stderr with exit code `1`. Unsupported commands such as `habit delete 1` must print exactly `Error: unsupported command` to stderr, stdout empty, exit code `1`, and leave `./habits.json` unchanged.",
+      "question": "Which runtime stack, repo, and project patterns should be used?",
+      "section": "runtime_context",
+      "status": "complete"
+    }
+  ],
+  "sha256": "f7aa2e855581714261b291f5897d7fe56551f8972554cc55ee356058b0d4851c",
+  "status": "complete"
+}

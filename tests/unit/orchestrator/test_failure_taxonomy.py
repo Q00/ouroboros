@@ -11,9 +11,11 @@ from ouroboros.orchestrator.evidence_schema import (
     ValidationResult,
 )
 from ouroboros.orchestrator.failure_taxonomy import (
+    BounceCause,
     FailureClass,
     RecoveryAction,
     classify,
+    classify_bounce,
     policy_for,
     policy_for_attempt,
 )
@@ -211,3 +213,81 @@ class TestPolicyForAttempt:
 
         assert policy is not None
         assert policy.action is RecoveryAction.RETRY
+
+
+class TestBounceClassification:
+    def test_blocked_maps_to_environment(self) -> None:
+        decision = classify_bounce(FailureClass.BLOCKED, RetryAdmission.BLOCK)
+
+        assert decision.cause is BounceCause.ENVIRONMENT
+        assert decision.allows_decomposition is False
+
+    def test_fabrication_maps_to_model(self) -> None:
+        decision = classify_bounce(
+            FailureClass.FABRICATION_SUSPECTED,
+            RetryAdmission.ESCALATE_MODEL,
+        )
+
+        assert decision.cause is BounceCause.MODEL
+        assert decision.allows_decomposition is False
+
+    @pytest.mark.parametrize("failure", [FailureClass.SCOPE_CREEP, FailureClass.STALL])
+    def test_ambiguous_redispatch_failure_does_not_imply_too_big(
+        self,
+        failure: FailureClass,
+    ) -> None:
+        decision = classify_bounce(failure, RetryAdmission.REDISPATCH)
+
+        assert decision.cause is BounceCause.UNKNOWN
+        assert decision.allows_decomposition is False
+
+    @pytest.mark.parametrize(
+        ("has_attempt_evidence", "has_remaining_scope"),
+        [(False, False), (True, False), (False, True)],
+    )
+    def test_too_big_fails_closed_without_both_evidence_conditions(
+        self,
+        has_attempt_evidence: bool,
+        has_remaining_scope: bool,
+    ) -> None:
+        decision = classify_bounce(
+            FailureClass.SCOPE_CREEP,
+            RetryAdmission.REDISPATCH,
+            proposed_cause=BounceCause.TOO_BIG,
+            has_attempt_evidence=has_attempt_evidence,
+            has_remaining_scope=has_remaining_scope,
+        )
+
+        assert decision.cause is BounceCause.UNKNOWN
+        assert decision.allows_decomposition is False
+
+    def test_too_big_requires_attempt_evidence_and_remaining_scope(self) -> None:
+        decision = classify_bounce(
+            FailureClass.SCOPE_CREEP,
+            RetryAdmission.REDISPATCH,
+            proposed_cause=BounceCause.TOO_BIG,
+            proposed_reasons=("The attempt completed one deliverable but left two distinct ones.",),
+            evidence_refs=("tool:Edit", "verifier:SCOPE_CREEP"),
+            has_attempt_evidence=True,
+            has_remaining_scope=True,
+        )
+
+        assert decision.cause is BounceCause.TOO_BIG
+        assert decision.allows_decomposition is True
+        assert decision.evidence_refs == ("tool:Edit", "verifier:SCOPE_CREEP")
+
+    def test_bad_spec_requires_explicit_contract_evidence(self) -> None:
+        ungrounded = classify_bounce(
+            None,
+            None,
+            proposed_cause=BounceCause.BAD_SPEC,
+        )
+        grounded = classify_bounce(
+            None,
+            None,
+            proposed_cause=BounceCause.BAD_SPEC,
+            bad_spec_evidence=True,
+        )
+
+        assert ungrounded.cause is BounceCause.UNKNOWN
+        assert grounded.cause is BounceCause.BAD_SPEC

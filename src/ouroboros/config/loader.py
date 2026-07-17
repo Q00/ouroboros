@@ -31,6 +31,7 @@ Functions:
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
     get_hermes_cli_path: Get Hermes CLI path from env var or config
     get_goose_cli_path: Get Goose CLI path from env var or config
+    get_zcode_cli_path: Get zcode CLI path from env var or config
 """
 
 import ast
@@ -86,6 +87,11 @@ _ANTIGRAVITY_LLM_BACKENDS = frozenset({"antigravity", "agy"})
 # Grok models, so generic Claude default ids map to the CLI's own configured
 # default (the "default" sentinel).
 _GROK_LLM_BACKENDS = frozenset({"grok", "grok_cli", "grok_build"})
+# Zcode (Z.ai GLM-5) is runtime-only and Claude-incapable: it runs its own
+# configured default model, so generic Claude default ids map to the CLI's
+# own ``"default"`` sentinel, exactly like antigravity and grok above.
+_ZCODE_LLM_BACKENDS = frozenset({"zcode", "zcode_cli"})
+_ZCODE_SCRIPT_SUFFIXES = frozenset({".cjs", ".js", ".mjs"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _KIRO_DEFAULT_MODEL = "default"
@@ -95,6 +101,7 @@ _PI_DEFAULT_MODEL = "default"
 _GJC_DEFAULT_MODEL = "default"
 _ANTIGRAVITY_DEFAULT_MODEL = "default"
 _GROK_DEFAULT_MODEL = "default"
+_ZCODE_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_MAX_PARALLEL_WORKERS = 3
@@ -149,7 +156,7 @@ def _is_placeholder_api_key(value: str) -> bool:
 # Environment variables that determine HOW Ouroboros executes work. This
 # is the single authoritative trust boundary: a cloned repository's `.env`
 # must not be able to change which binary runs or whether the user's
-# approval gate applies. Three classes, all remote-code-execution sinks
+# approval gate applies. Four classes, all remote-code-execution sinks
 # when sourced from an untrusted location:
 #   1. Explicit CLI path overrides fed straight into a subprocess.
 #   2. Runtime/backend selectors that pick which adapter (and therefore
@@ -158,6 +165,8 @@ def _is_placeholder_api_key(value: str) -> bool:
 #   3. Permission-mode overrides — setting acceptEdits/bypassPermissions
 #      silently removes the human approval gate, letting a malicious repo
 #      auto-approve arbitrary tool calls (effectively RCE).
+#   4. Runtime-native preload hooks such as NODE_OPTIONS, which can execute
+#      attacker-controlled code before a spawned JavaScript CLI starts.
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
 # the project-directory .env that travels with a cloned repo. Trusted .env
@@ -169,6 +178,9 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
     {
         # Search PATH used by shutil.which()/bare executable spawning.
         "PATH",
+        # Node/Electron preload hook. A project .env could otherwise inject a
+        # --require/--import payload before a spawned JavaScript CLI starts.
+        "NODE_OPTIONS",
         # Explicit executable-path overrides.
         "OUROBOROS_CLI_PATH",
         "OUROBOROS_CODEX_CLI_PATH",
@@ -183,6 +195,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_ANTIGRAVITY_CLI_PATH",
         "OUROBOROS_GROK_CLI_PATH",
         "OUROBOROS_OUROCODE_CLI_PATH",
+        "OUROBOROS_ZCODE_CLI_PATH",
         # Bare provider aliases (no OUROBOROS_ prefix) that adapters also
         # honor and then execute. Any new such alias MUST be added here:
         # `opencode_config._configured_opencode_cli_path` reads
@@ -1546,6 +1559,70 @@ def get_grok_cli_path() -> str | None:
     return None
 
 
+def _is_runnable_zcode_cli_path(path: str | Path) -> bool:
+    """Whether *path* matches one of the supported Zcode launch shapes."""
+    candidate = Path(path)
+    if not candidate.is_file():
+        return False
+    if candidate.suffix.lower() in _ZCODE_SCRIPT_SUFFIXES:
+        return os.access(candidate, os.R_OK)
+    return shutil.which(str(candidate.resolve())) is not None
+
+
+def _canonical_zcode_cli_path(path: str | Path) -> str:
+    """Return a stable path that remains valid after the caller changes cwd."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = candidate.resolve()
+    return str(candidate)
+
+
+def get_zcode_cli_path() -> str | None:
+    """Get the zcode CLI path (Z.ai GLM-5 agent) from environment or config.
+
+    Priority:
+        1. OUROBOROS_ZCODE_CLI_PATH environment variable
+        2. config.yaml orchestrator.zcode_cli_path
+        3. macOS app-bundle default (/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs)
+        4. None (resolve from PATH at runtime)
+
+    The returned path may point to the app-bundle ``zcode.cjs`` script or to a
+    directly executable wrapper. Official macOS app bundles declare an
+    ``electron-node`` runtime in sibling metadata; the runtime wrapper then
+    uses ZCode's bundled Electron/Node executable instead of the system Node.
+
+    Stale env var / config values that don't point to a readable JavaScript
+    entry script or a directly executable wrapper are treated as missing, so
+    callers can fall back to PATH discovery instead of persisting an unusable
+    path.
+
+    Returns:
+        Path to the zcode CLI script or None.
+    """
+    env_path = os.environ.get("OUROBOROS_ZCODE_CLI_PATH", "").strip()
+    if env_path:
+        resolved = _canonical_zcode_cli_path(env_path)
+        if _is_runnable_zcode_cli_path(resolved):
+            return resolved
+
+    try:
+        config = load_config()
+        zcode_path = getattr(config.orchestrator, "zcode_cli_path", None)
+        if zcode_path:
+            resolved = _canonical_zcode_cli_path(zcode_path)
+            if _is_runnable_zcode_cli_path(resolved):
+                return resolved
+    except ConfigError:
+        pass
+
+    # macOS app-bundle default
+    macos_bundle_path = Path("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
+    if _is_runnable_zcode_cli_path(macos_bundle_path):
+        return str(macos_bundle_path)
+
+    return None
+
+
 def get_llm_backend() -> str:
     """Get default LLM backend from environment variable or config.
 
@@ -1904,6 +1981,8 @@ def _default_model_for_backend(
         return _ANTIGRAVITY_DEFAULT_MODEL
     if resolved in _GROK_LLM_BACKENDS:
         return _GROK_DEFAULT_MODEL
+    if resolved in _ZCODE_LLM_BACKENDS:
+        return _ZCODE_DEFAULT_MODEL
     return default_model
 
 
@@ -1954,6 +2033,8 @@ def _normalize_configured_model_for_backend(
         return _ANTIGRAVITY_DEFAULT_MODEL
     if resolved in _GROK_LLM_BACKENDS and is_shipped_default:
         return _GROK_DEFAULT_MODEL
+    if resolved in _ZCODE_LLM_BACKENDS and is_shipped_default:
+        return _ZCODE_DEFAULT_MODEL
 
     return candidate
 

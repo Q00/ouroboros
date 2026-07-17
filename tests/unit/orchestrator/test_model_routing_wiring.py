@@ -274,7 +274,32 @@ class TestExecutorModelWiring:
         assert routed[0].data["model_tier"] == "standard"  # drop then raise = base
         assert routed[0].data["model"] == "sonnet-x"
         assert routed[0].data["retry_attempt"] == 2
+        assert routed[0].data["model_escalated"] is True
         assert runtime.received_model == "sonnet-x"
+
+    @pytest.mark.asyncio
+    async def test_retry_below_threshold_is_not_reported_as_escalated(self) -> None:
+        store, events = _capturing_event_store()
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=_claude_router(),
+        )
+
+        await _run_one_ac(
+            executor,
+            is_sub_ac=True,
+            retry_attempt=1,
+            decomposition_trustworthy=True,
+        )
+
+        routed = _model_events(events)
+        assert routed[0].data["model_tier"] == "frugal"
+        assert routed[0].data["model"] == "haiku-x"
+        assert routed[0].data["model_escalated"] is False
 
     @pytest.mark.asyncio
     async def test_advised_runtime_records_advised_without_passing_kwarg(self) -> None:

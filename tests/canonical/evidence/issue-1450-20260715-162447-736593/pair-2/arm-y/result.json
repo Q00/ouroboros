@@ -1,0 +1,532 @@
+{
+  "arm": "y",
+  "envelope": {
+    "content": [
+      {
+        "text": "Auto session: auto_66954e86b8fe\nStatus: detached\nPhase: ralph_handoff\nArtifact state: artifact_in_progress\nProduct status: not verified complete; background work is still running\nSeed grade: A\nSeed: /Users/jaegyu.lee/.ouroboros/seeds/seed_56cbc178d945.yaml\nSeed origin: auto_pipeline\nExecution started:\n  job_id: job_d566771f100e\n  execution_id: exec_1d941b71d023\n  session_id: orch_abd01c930723\nRun handoff status: started\nRalph handoff:\n  dispatch_mode: job\n  job_id: job_c89f09943a67\n  lineage_id: ralph-seed_56cbc178d945-auto_669\nQA verdict: pass (score 0.84)\n  differences:\n  - Malformed input coverage is only partly specified: invalid arguments and missing IDs are covered generally, but empty habit text, nonnumeric IDs, missing operands, and extra operands do not have exact expected stdout/stderr/exit behavior.\n  - Mutation safety is under-specified for existing or corrupted `habits.json`: the Seed defines missing files and normal updates, but not behavior for malformed JSON or partial write/interruption scenarios.\n  suggestions:\n  - Add acceptance criteria for `habit add \"\"`, `habit check abc`, `habit check`, and commands with extra operands, each with exact exit code, stderr, stdout, and unchanged `habits.json` expectations.\n  - Specify how the CLI handles unreadable or malformed `habits.json`, and require writes to avoid leaving partially written JSON, such as write-then-rename or an explicit acceptable failure behavior.\nResume: ooo auto --resume auto_66954e86b8fe",
+        "type": "text"
+      }
+    ],
+    "is_error": false,
+    "is_ok": true,
+    "meta": {
+      "active_task_class": "cli",
+      "artifact_state": "artifact_in_progress",
+      "assumption_only_sections": [
+        "acceptance_criteria",
+        "actors",
+        "constraints",
+        "failure_modes",
+        "inputs",
+        "non_goals",
+        "outputs",
+        "runtime_context",
+        "verification_plan"
+      ],
+      "assumption_sources": [
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "Acceptance is verified by this exact shell check in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. `habit add \"Drink water\"` must stdout exactly `Added habit 1: Drink water`, `habit list` must stdout exactly `[ ] 1. Drink water`, and `habit check 1` must stdout exactly `Checked habit 1: Drink water`, each with exit code `0` and empty stderr. `habit check 999` must exit code `1`, stderr exactly `Error: habit not found`, stdout empty, and leave `./habits.json` unchanged. `habit delete 1` must exit code `1`, print an unsupported-command error to stderr, print nothing to stdout, and leave `./habits.json` unchanged."
+        },
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "One actor: a single local terminal user running `habit` from the working directory. Inputs are CLI commands `habit add \"Drink water\"`, `habit list`, and `habit check 1`; outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water`; invalid IDs print `Error: habit not found` to stderr and exit with code `1`."
+        },
+        {
+          "confidence": 0.82,
+          "source": "conservative_default",
+          "text": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+        },
+        {
+          "confidence": 0.8,
+          "source": "conservative_default",
+          "text": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+        },
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "Inputs are exactly three CLI forms: `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`, run by one local terminal user from the working directory. `habit add \"Drink water\"` creates or updates `./habits.json` and prints `Added habit 1: Drink water`; `habit list` prints `[ ] 1. Drink water`; `habit check 1` marks habit id `1` checked and prints `Checked habit 1: Drink water`. Invalid IDs print `Error: habit not found` to stderr and exit with code `1`."
+        },
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "Non-goals: no cloud sync, paid services, authentication, production deployment, multi-user support, dates/streaks/reminders, edit/delete commands, custom file paths, config files, sorting/filtering/search, colored output, interactive prompts, or commands beyond `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`. Tests must reject scope expansion by confirming `habit delete 1` exits with code `1`, prints an unsupported-command error to stderr, prints nothing to stdout, and leaves `./habits.json` unchanged."
+        },
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "Outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, writes `./habits.json` as `[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water` and updates `./habits.json` to `[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]`. Invalid IDs print `Error: habit not found` to stderr, print nothing to stdout, leave `./habits.json` unchanged, and exit with code `1`."
+        },
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "Use Node.js 20+ with a single executable CommonJS file `bin/habit` using only built-in modules `fs` and `path`, no external dependencies, and `package.json` exposing `\"bin\": {\"habit\":\"bin/habit\"}`. Persist to `path.join(process.cwd(), \"habits.json\")` as compact JSON with `JSON.stringify(habits)`, read missing files as `[]`, assign IDs as `max(existing ids)+1`, and print all errors to stderr with exit code `1`. Unsupported commands such as `habit delete 1` must print exactly `Error: unsupported command` to stderr, stdout empty, exit code `1`, and leave `./habits.json` unchanged."
+        },
+        {
+          "confidence": 0.5,
+          "source": "auto_fill_inference",
+          "text": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`."
+        }
+      ],
+      "auto_session_id": "auto_66954e86b8fe",
+      "blocker": null,
+      "current_round": 0,
+      "defaulted_sections": [
+        "actors",
+        "inputs",
+        "outputs",
+        "constraints",
+        "non_goals",
+        "acceptance_criteria",
+        "verification_plan",
+        "failure_modes",
+        "runtime_context"
+      ],
+      "efficiency_mode": "adaptive",
+      "evidence_backed_sections": [
+        "goal"
+      ],
+      "execution_id": "exec_1d941b71d023",
+      "frugality_assurance": "observe",
+      "grade": "A",
+      "interview_session_id": null,
+      "job_id": "job_d566771f100e",
+      "last_grade": "A",
+      "last_progress_at": "2026-07-15T16:28:14.076228+00:00",
+      "last_progress_message": "background Ralph job is still tracked",
+      "last_qa_differences": [
+        "Malformed input coverage is only partly specified: invalid arguments and missing IDs are covered generally, but empty habit text, nonnumeric IDs, missing operands, and extra operands do not have exact expected stdout/stderr/exit behavior.",
+        "Mutation safety is under-specified for existing or corrupted `habits.json`: the Seed defines missing files and normal updates, but not behavior for malformed JSON or partial write/interruption scenarios."
+      ],
+      "last_qa_score": 0.84,
+      "last_qa_suggestions": [
+        "Add acceptance criteria for `habit add \"\"`, `habit check abc`, `habit check`, and commands with extra operands, each with exact exit code, stderr, stdout, and unchanged `habits.json` expectations.",
+        "Specify how the CLI handles unreadable or malformed `habits.json`, and require writes to avoid leaving partially written JSON, such as write-then-rename or an explicit acceptable failure behavior."
+      ],
+      "last_qa_verdict": "pass",
+      "ledger_provenance": {
+        "auto_fill_inference": [
+          "acceptance_criteria",
+          "actors",
+          "inputs",
+          "non_goals",
+          "outputs",
+          "runtime_context",
+          "verification_plan"
+        ],
+        "conservative_default": [
+          "constraints",
+          "failure_modes"
+        ],
+        "user_goal": [
+          "goal"
+        ]
+      },
+      "phase": "ralph_handoff",
+      "presentation_status": "detached",
+      "product_status": "not_verified_complete",
+      "ralph_dispatch_mode": "job",
+      "ralph_job_id": "job_c89f09943a67",
+      "ralph_lineage_id": "ralph-seed_56cbc178d945-auto_669",
+      "resume_capability": "resume",
+      "resume_command": "ooo auto --resume auto_66954e86b8fe",
+      "run_handoff_status": "started",
+      "run_session_id": "orch_abd01c930723",
+      "runtime_probe_evidence": [],
+      "seed_origin": "auto_pipeline",
+      "seed_path": "/Users/jaegyu.lee/.ouroboros/seeds/seed_56cbc178d945.yaml",
+      "status": "detached"
+    }
+  },
+  "evidence_complete": false,
+  "failure_class": "missing_evidence",
+  "final_state": {
+    "active_domain_profile_name": null,
+    "active_task_class": "cli",
+    "attached_at": null,
+    "attached_run_handle": null,
+    "attached_run_source": null,
+    "auto_answer_log": [],
+    "auto_session_id": "auto_66954e86b8fe",
+    "checkpoint_attempted_ac_ids": [],
+    "checkpoint_commits": [],
+    "commit_policy": "none",
+    "complete_product": true,
+    "created_at": "2026-07-15T16:27:54.182509+00:00",
+    "current_round": 0,
+    "cwd": "/private/tmp/issue-1450-evidence.uGbaNH/issue-1450-20260715-162447-736593/pair-2/arm-y/workdir",
+    "deadline_at": null,
+    "deadline_at_epoch": 1784134674.182521,
+    "efficiency_mode": "adaptive",
+    "evaluate_artifact": null,
+    "evaluate_artifact_hash": null,
+    "evaluate_round": 0,
+    "execution_id": "exec_1d941b71d023",
+    "failure_fingerprints": [],
+    "final_checkpoint_attempted": false,
+    "findings": [],
+    "frugality_assurance": "observe",
+    "frugality_assurance_explicit": false,
+    "goal": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory.",
+    "interview_closure_mode": null,
+    "interview_completed": true,
+    "interview_session_id": null,
+    "job_id": "job_d566771f100e",
+    "last_authoring_backend": null,
+    "last_error": null,
+    "last_error_code": null,
+    "last_grade": "A",
+    "last_lateral_approach_summary": null,
+    "last_lateral_persona": null,
+    "last_lateral_text": null,
+    "last_progress_at": "2026-07-15T16:28:14.076228+00:00",
+    "last_progress_message": "background Ralph job is still tracked",
+    "last_qa_differences": [
+      "Malformed input coverage is only partly specified: invalid arguments and missing IDs are covered generally, but empty habit text, nonnumeric IDs, missing operands, and extra operands do not have exact expected stdout/stderr/exit behavior.",
+      "Mutation safety is under-specified for existing or corrupted `habits.json`: the Seed defines missing files and normal updates, but not behavior for malformed JSON or partial write/interruption scenarios."
+    ],
+    "last_qa_passed": true,
+    "last_qa_score": 0.84,
+    "last_qa_suggestions": [
+      "Add acceptance criteria for `habit add \"\"`, `habit check abc`, `habit check`, and commands with extra operands, each with exact exit code, stderr, stdout, and unchanged `habits.json` expectations.",
+      "Specify how the CLI handles unreadable or malformed `habits.json`, and require writes to avoid leaving partially written JSON, such as write-then-rename or an explicit acceptable failure behavior."
+    ],
+    "last_qa_verdict": "pass",
+    "last_recovery_plan": null,
+    "last_tool_name": "pipeline_deadline",
+    "lateral_input_hash": null,
+    "ledger": {
+      "question_history": [
+        {
+          "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+          "question": "What else should we know?"
+        }
+      ],
+      "sections": {
+        "acceptance_criteria": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "acceptance_criteria.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "Acceptance is verified by this exact shell check in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. `habit add \"Drink water\"` must stdout exactly `Added habit 1: Drink water`, `habit list` must stdout exactly `[ ] 1. Drink water`, and `habit check 1` must stdout exactly `Checked habit 1: Drink water`, each with exit code `0` and empty stderr. `habit check 999` must exit code `1`, stderr exactly `Error: habit not found`, stdout empty, and leave `./habits.json` unchanged. `habit delete 1` must exit code `1`, print an unsupported-command error to stderr, print nothing to stdout, and leave `./habits.json` unchanged."
+            }
+          ],
+          "name": "acceptance_criteria"
+        },
+        "actors": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "actors.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "One actor: a single local terminal user running `habit` from the working directory. Inputs are CLI commands `habit add \"Drink water\"`, `habit list`, and `habit check 1`; outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water`; invalid IDs print `Error: habit not found` to stderr and exit with code `1`."
+            }
+          ],
+          "name": "actors"
+        },
+        "constraints": {
+          "entries": [
+            {
+              "confidence": 0.82,
+              "evidence": [],
+              "key": "constraints.conservative_mvp",
+              "rationale": "Default auto policy favors safe convergence.",
+              "reversible": true,
+              "source": "conservative_default",
+              "status": "defaulted",
+              "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+            }
+          ],
+          "name": "constraints"
+        },
+        "failure_modes": {
+          "entries": [
+            {
+              "confidence": 0.8,
+              "evidence": [],
+              "key": "failure_modes.unverified_or_scope_creep",
+              "rationale": "A-grade Seeds need explicit failure boundaries.",
+              "reversible": true,
+              "source": "conservative_default",
+              "status": "defaulted",
+              "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+            }
+          ],
+          "name": "failure_modes"
+        },
+        "goal": {
+          "entries": [
+            {
+              "confidence": 0.95,
+              "evidence": [],
+              "key": "goal.primary",
+              "rationale": "Initial user-provided auto task.",
+              "reversible": false,
+              "source": "user_goal",
+              "status": "confirmed",
+              "value": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory."
+            }
+          ],
+          "name": "goal"
+        },
+        "inputs": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "inputs.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "Inputs are exactly three CLI forms: `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`, run by one local terminal user from the working directory. `habit add \"Drink water\"` creates or updates `./habits.json` and prints `Added habit 1: Drink water`; `habit list` prints `[ ] 1. Drink water`; `habit check 1` marks habit id `1` checked and prints `Checked habit 1: Drink water`. Invalid IDs print `Error: habit not found` to stderr and exit with code `1`."
+            }
+          ],
+          "name": "inputs"
+        },
+        "non_goals": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "non_goals.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "Non-goals: no cloud sync, paid services, authentication, production deployment, multi-user support, dates/streaks/reminders, edit/delete commands, custom file paths, config files, sorting/filtering/search, colored output, interactive prompts, or commands beyond `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`. Tests must reject scope expansion by confirming `habit delete 1` exits with code `1`, prints an unsupported-command error to stderr, prints nothing to stdout, and leaves `./habits.json` unchanged."
+            }
+          ],
+          "name": "non_goals"
+        },
+        "outputs": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "outputs.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "Outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, writes `./habits.json` as `[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water` and updates `./habits.json` to `[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]`. Invalid IDs print `Error: habit not found` to stderr, print nothing to stdout, leave `./habits.json` unchanged, and exit with code `1`."
+            }
+          ],
+          "name": "outputs"
+        },
+        "runtime_context": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "runtime_context.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "Use Node.js 20+ with a single executable CommonJS file `bin/habit` using only built-in modules `fs` and `path`, no external dependencies, and `package.json` exposing `\"bin\": {\"habit\":\"bin/habit\"}`. Persist to `path.join(process.cwd(), \"habits.json\")` as compact JSON with `JSON.stringify(habits)`, read missing files as `[]`, assign IDs as `max(existing ids)+1`, and print all errors to stderr with exit code `1`. Unsupported commands such as `habit delete 1` must print exactly `Error: unsupported command` to stderr, stdout empty, exit code `1`, and leave `./habits.json` unchanged."
+            }
+          ],
+          "name": "runtime_context"
+        },
+        "verification_plan": {
+          "entries": [
+            {
+              "confidence": 0.5,
+              "evidence": [],
+              "key": "verification_plan.auto_fill_inference",
+              "provenance": "timeout_default",
+              "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+              "reversible": true,
+              "source": "auto_fill_inference",
+              "status": "defaulted",
+              "value": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`."
+            }
+          ],
+          "name": "verification_plan"
+        }
+      }
+    },
+    "managed_worktree": null,
+    "max_interview_rounds": 50,
+    "max_repair_rounds": 5,
+    "opencode_mode": null,
+    "pending_question": null,
+    "personas_invoked": [],
+    "phase": "ralph_handoff",
+    "phase_started_at": "2026-07-15T16:28:13.873202+00:00",
+    "pipeline_timeout_seconds": 1800.0,
+    "policy": "conservative",
+    "provenance": null,
+    "ralph_current_generation": null,
+    "ralph_dispatch_mode": "job",
+    "ralph_job_id": "job_c89f09943a67",
+    "ralph_job_status": "running_async",
+    "ralph_last_event_at": 375295.99787025,
+    "ralph_lineage_id": "ralph-seed_56cbc178d945-auto_669",
+    "ralph_opencode_mode": null,
+    "ralph_stop_reason": "foreground_timeout_elapsed",
+    "recovery_guard_tripped": null,
+    "repair_round": 1,
+    "required_grade": "A",
+    "run_handoff_guidance": null,
+    "run_handoff_status": "started",
+    "run_reconciled_at": null,
+    "run_reconciliation_source": null,
+    "run_reconciliation_status": null,
+    "run_session_id": "orch_abd01c930723",
+    "run_start_attempted": true,
+    "run_subagent": {},
+    "runtime_backend": "codex",
+    "runtime_probe_evidence": [],
+    "seed_artifact": {
+      "acceptance_criteria": [
+        {
+          "description": "Invoking the command with the documented arguments exits with status 0.",
+          "semantic_ac_key": "ac_d1ce98dc87a252ca"
+        },
+        {
+          "description": "Stdout is deterministic for a given input (no embedded timestamps, no random ids).",
+          "semantic_ac_key": "ac_4908fe72f696198b"
+        },
+        {
+          "description": "An invalid argument exits with a non-zero status and prints a human-readable error.",
+          "semantic_ac_key": "ac_a956e603bd65fc9d"
+        },
+        {
+          "description": "A command/API check returns stable observable output or artifacts proving the original requirement for Acceptance verified by this exact shell check in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. `habit add \"Drink water\"` must stdout exactly `Added habit 1: Drink water`, `habit list` must stdout exactly `[ ] 1. Drink water`, and `habit check 1` must stdout exactly `Checked habit 1: Drink water`, each with exit code `0` and empty stderr. `habit check 999` must exit code `1`, stderr exactly `Error: habit not found`, stdout empty, and leave `./habits.json` unchanged. `habit delete 1` must exit code `1`, print an unsupported-command error to stderr, print nothing to stdout, and leave `./habits.json` unchanged.",
+          "semantic_ac_key": "ac_814007601997492f"
+        }
+      ],
+      "brownfield_context": {
+        "context_references": [],
+        "existing_dependencies": [],
+        "existing_patterns": [],
+        "project_type": "greenfield"
+      },
+      "constraints": [
+        "Keep the implementation to the smallest safe MVP that satisfies the task goal",
+        "Non-goal: Non-goals: no cloud sync, paid services, authentication, production deployment, multi-user support, dates/streaks/reminders, edit/delete commands, custom file paths, config files, sorting/filtering/search, colored output, interactive prompts, or commands beyond `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`. Tests must reject scope expansion by confirming `habit delete 1` exits with code `1`, prints an unsupported-command error to stderr, prints nothing to stdout, and leaves `./habits.json` unchanged"
+      ],
+      "evaluation_principles": [
+        {
+          "description": "All required Seed Draft Ledger sections are resolved before execution.",
+          "name": "ledger_completeness",
+          "weight": 0.5
+        },
+        {
+          "description": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`.",
+          "name": "observable_verification",
+          "weight": 0.5
+        }
+      ],
+      "exit_conditions": [
+        {
+          "criteria": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`.",
+          "description": "All acceptance criteria pass under the verification plan.",
+          "name": "acceptance_verified"
+        },
+        {
+          "criteria": "No listed failure mode is observed in verification evidence.",
+          "description": "Known failure modes are absent: Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP.",
+          "name": "failure_modes_absent"
+        }
+      ],
+      "goal": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory.",
+      "metadata": {
+        "ambiguity_score": 0.05,
+        "created_at": "2026-07-15T16:27:54.221884Z",
+        "decision_provenance": {
+          "maintainer_policy": 2,
+          "timeout_default": 7,
+          "user_confirmed": 1
+        },
+        "degraded": false,
+        "generation_mode": "normal",
+        "interview_id": null,
+        "parent_seed_id": "seed_a3ffbb7c48a6",
+        "recovery_reason": null,
+        "seed_id": "seed_56cbc178d945",
+        "unresolved_slots": [],
+        "version": "1.0.0"
+      },
+      "ontology_schema": {
+        "description": "Auto-synthesized ontology from the completed Seed Draft Ledger.",
+        "fields": [
+          {
+            "description": "One actor: a single local terminal user running `habit` from the working directory. Inputs are CLI commands `habit add \"Drink water\"`, `habit list`, and `habit check 1`; outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water`; invalid IDs print `Error: habit not found` to stderr and exit with code `1`.",
+            "name": "actors",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Inputs are exactly three CLI forms: `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`, run by one local terminal user from the working directory. `habit add \"Drink water\"` creates or updates `./habits.json` and prints `Added habit 1: Drink water`; `habit list` prints `[ ] 1. Drink water`; `habit check 1` marks habit id `1` checked and prints `Checked habit 1: Drink water`. Invalid IDs print `Error: habit not found` to stderr and exit with code `1`.",
+            "name": "inputs",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, writes `./habits.json` as `[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water` and updates `./habits.json` to `[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]`. Invalid IDs print `Error: habit not found` to stderr, print nothing to stdout, leave `./habits.json` unchanged, and exit with code `1`.",
+            "name": "outputs",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Use Node.js 20+ with a single executable CommonJS file `bin/habit` using only built-in modules `fs` and `path`, no external dependencies, and `package.json` exposing `\"bin\": {\"habit\":\"bin/habit\"}`. Persist to `path.join(process.cwd(), \"habits.json\")` as compact JSON with `JSON.stringify(habits)`, read missing files as `[]`, assign IDs as `max(existing ids)+1`, and print all errors to stderr with exit code `1`. Unsupported commands such as `habit delete 1` must print exactly `Error: unsupported command` to stderr, stdout empty, exit code `1`, and leave `./habits.json` unchanged.",
+            "name": "runtime_context",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "name": "BuildASmallHabit"
+      },
+      "task_type": "code"
+    },
+    "seed_id": "seed_56cbc178d945",
+    "seed_origin": "auto_pipeline",
+    "seed_path": "/Users/jaegyu.lee/.ouroboros/seeds/seed_56cbc178d945.yaml",
+    "skip_run": false,
+    "timeout_seconds_by_phase": {
+      "evaluate": 90,
+      "interview": 600,
+      "repair": 90,
+      "review": 90,
+      "run": 60,
+      "seed_generation": 300,
+      "unstuck_lateral": 60
+    },
+    "updated_at": "2026-07-15T16:28:14.076228+00:00",
+    "user_preferences": {},
+    "worktree_policy": "current"
+  },
+  "oracle_pass": false,
+  "pair": 2,
+  "smoke": {
+    "commands": [],
+    "failure_class": "pipeline",
+    "passed": false
+  },
+  "state_consistent": false,
+  "trace_dir": "/private/tmp/issue-1450-evidence.uGbaNH/issue-1450-20260715-162447-736593/pair-2/arm-y/workdir/.ouroboros/traces/auto_66954e86b8fe",
+  "trace_files": {
+    "decisions": "/private/tmp/issue-1450-evidence.uGbaNH/issue-1450-20260715-162447-736593/pair-2/arm-y/workdir/.ouroboros/traces/auto_66954e86b8fe/decisions.jsonl",
+    "outcome": "/private/tmp/issue-1450-evidence.uGbaNH/issue-1450-20260715-162447-736593/pair-2/arm-y/workdir/.ouroboros/traces/auto_66954e86b8fe/outcome.json"
+  }
+}

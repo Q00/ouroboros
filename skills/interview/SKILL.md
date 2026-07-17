@@ -143,8 +143,16 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Arguments:
      initial_context: <user's topic or idea>
      cwd: <current working directory>
+     confused_terms: <optional explicit terms the user does not understand>
+     references: <optional [{reference_id, label, origin, url?, excerpt?}]>
    ```
    Returns a session ID and the first question.
+
+   `confused_terms` and `references` are structured adapter context, not
+   requirements. They are queued on the start call and MUST NOT alter the first
+   question. On later turns, glossary help is limited to explicitly confused
+   terms and references are used only for contrast questions. Do not infer these
+   arguments from vocabulary density or fetch referenced URLs/files.
 
 2. **For each question from MCP, apply the routing paths below:**
 
@@ -406,6 +414,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    **When in doubt, use PATH 2.** It's safer to ask the user than to guess.
 
 3. **Send the answer back to MCP**:
+
+   When the user explicitly introduces a new reference or asks what a domain
+   term means, include the matching `references` or `confused_terms` argument on
+   that call. Do not put product decisions into glossary/reference fields; keep
+   those decisions in the user answer.
 
    **Payload format — preserve the user's reasoning, do NOT compress to one line.**
    MCP cannot read code, browse the web, or call tools. The text you send is

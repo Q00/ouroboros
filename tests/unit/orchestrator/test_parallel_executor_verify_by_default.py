@@ -15,6 +15,14 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionChild,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+)
 from ouroboros.orchestrator.model_routing import ModelRouter, decide_model
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
@@ -575,19 +583,25 @@ async def test_retry_top_level_walks_whole_ladder_to_frontier(tmp_path: Any) -> 
 
 
 @pytest.mark.asyncio
-async def test_retry_untrusted_decomposed_child_reaches_retry2_frontier(tmp_path: Any) -> None:
-    """A live decomposed child has no trust issuer and starts at the base tier.
+async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> None:
+    """A decomposed CHILD (routed one tier below top-level) must also walk its
+    whole ladder to ``frontier`` — the finding's expectation.
 
     The batch retry loop carries top-level indices; the child start tier is not a
     loop input but a property of the routing seam (``resolve_execute_model`` /
-    ``decide_model``). Child status alone is insufficient to lower, so the
-    early-stop probe must use the base-tier ladder while issue #1466 has no live
-    deterministic trust producer.
+    ``decide_model`` with ``is_decomposed_child=True``). A decomposed parent
+    re-runs its children — routed one tier cheaper and sharing the parent's retry
+    counter — on every retry, so the early-stop predicate reads ``is_decomposed``
+    off the dispatched result and probes the CHILD ladder for a pending escalation.
+    This mirrors reality by returning a decomposed failing result and computing the
+    child tier the loop's per-attempt ``retry_attempt`` would route to, exactly as
+    the executor does inside ``_execute_single_ac``.
 
     ac_retry_attempts=3, threshold=2, identical failure class every attempt. The
-    live ladder is standard, standard, frontier (retry 0..2). The ladder-truth
-    predicate keeps dispatching through that enforced raise, then resumes
-    early-stop once the frontier ceiling is reached.
+    child ladder is frugal, frugal, standard, frontier (retry 0..3), so reaching
+    ``frontier`` requires a 4th dispatch at retry 3. The ladder-truth predicate
+    keeps dispatching while the next retry resolves to a stronger enforced model
+    and resumes early-stop only once the frontier ceiling is reached.
     """
     executor = _native_escalation_executor(tmp_path, ac_retry_attempts=3)
     router = executor._model_router
@@ -598,9 +612,25 @@ async def test_retry_untrusted_decomposed_child_reaches_retry2_frontier(tmp_path
     routed_tiers: list[str | None] = []
 
     def _decomposed_fail() -> ACExecutionResult:
-        # A decomposed parent whose untrusted children failed.
+        # A decomposed parent whose children (routed one tier cheaper) failed:
+        # the predicate requires both child status and a trusted split record.
         base = _fail(0, "EVIDENCE_MISSING")
-        return replace(base, is_decomposed=True)
+        return replace(
+            base,
+            is_decomposed=True,
+            decomposition_decision=DecompositionDecisionRecord(
+                node_id="trusted-decomposed-parent",
+                source=DecompositionSource.PREFLIGHT,
+                disposition=DecompositionDisposition.SPLIT,
+                children=(
+                    DecompositionChild("child a", ("scope a",), "verify a"),
+                    DecompositionChild("child b", ("scope b",), "verify b"),
+                ),
+                structural_status=StructuralCheckStatus.PASSED,
+                semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                trustworthy=True,
+            ),
+        )
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
         calls.append(list(kwargs["batch_indices"]))
@@ -609,7 +639,7 @@ async def test_retry_untrusted_decomposed_child_reaches_retry2_frontier(tmp_path
                 ParamSupport.NATIVE,
                 router=router,
                 is_decomposed_child=True,
-                decomposition_trustworthy=False,
+                decomposition_trustworthy=True,
                 retry_attempt=kwargs["ac_retry_attempts"][0],
             ).tier
         )
@@ -630,10 +660,9 @@ async def test_retry_untrusted_decomposed_child_reaches_retry2_frontier(tmp_path
         execution_counters=None,
     )
 
-    # The child is re-dispatched through retry 2 so the base ladder reaches the
+    # The child is re-dispatched through retry 3 so its ladder reaches the
     # frontier ceiling despite the repeated failure class.
-    assert calls == [[0], [0], [0]]
-    assert ac_retry_attempts[0] == 2
+    assert calls == [[0], [0], [0], [0]]
     assert routed_tiers[-1] == "frontier"
 
 
@@ -765,6 +794,30 @@ def test_retry_prompt_final_attempt_carries_lateral_directive() -> None:
     assert "Change of Approach" in final
     assert "EVIDENCE_MISSING" in final
     assert "Change of Approach" not in interim
+
+
+def test_retry_prompt_redacts_secret_like_failure_values() -> None:
+    executor = _make_executor()
+    long_secret = "s" * 505
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="build the thing",
+        success=False,
+        error=(
+            f"provider failed with password=hunter2 and API_KEY=secret-value token={long_secret}"
+        ),
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content="build the thing",
+        is_final_attempt=False,
+    )
+
+    assert "hunter2" not in prompt
+    assert "secret-value" not in prompt
+    assert long_secret[-100:] not in prompt
+    assert prompt.count("[REDACTED]") == 3
 
 
 # ---------------------------------------------------------------------------

@@ -355,6 +355,92 @@ _OPENCODE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
     ),
 )
 
+# Zcode (Z.ai GLM desktop CLI) — a complete, measured skill-execution matrix
+# rather than the generic defaults. Each capability below maps onto a Zcode
+# mechanism verified against `zcode --help`, `zcode skills list`, and captured
+# `--prompt --json` summaries. Two generic capabilities are intentionally
+# omitted because the runtime cannot truthfully provide them on the headless
+# `--prompt` path the orchestrator drives:
+#   - ``ask_user``: ``zcode --prompt`` is a headless one-shot with no TTY and
+#     no user turn-taking; the TUI exposes interaction, but the orchestrator
+#     runtime never enters it. Declaring it would overstate the surface.
+#   - ``orchestrate_subagents``: Zcode has no native parallel subagent
+#     primitive (``/expert`` is a sequential workflow); subagent dispatch
+#     resolves to the sequential contract, so it is not declared as a
+#     capability here.
+_ZCODE_SKILL_EXECUTION_CAPABILITIES: tuple[SkillExecutionCapability, ...] = (
+    SkillExecutionCapability(
+        name="inspect_code",
+        guidance=(
+            "Zcode reads files with its built-in tools under the active `--mode` "
+            "(build = read-only, edit = read/write, yolo = full). Prefer its "
+            "local file search/read over inference."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="call_mcp",
+        guidance=(
+            "Zcode exposes MCP via the `/mcp` slash surface and the stdio "
+            "`app-server`; call Ouroboros MCP tools through that surface rather "
+            "than emulating MCP workflows manually."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="run_lateral_review",
+        guidance=(
+            "Within a single `--prompt` turn, run researcher, contrarian, and "
+            "simplifier perspectives before collapsing the result into concise "
+            "choices or a recommended draft."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="web_research",
+        guidance=(
+            "Zcode reports `webFetchRequests`/`webSearchRequests` in its JSON "
+            "summary; use its web capability only when current external facts "
+            "are required, and cite the sources used."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="run_shell",
+        guidance=(
+            "Zcode gates shell execution by `--mode`; destructive commands "
+            "require `yolo`. Avoid destructive commands unless explicitly "
+            "authorized."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="refine_answer",
+        guidance=(
+            "Confirm structured interpretations of free-text decisions before "
+            "forwarding them to workflow state."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="maintain_ledger",
+        guidance=(
+            "Keep ambiguity, gates, and unresolved decisions visible in the "
+            "session; Zcode's `/compact [instructions]` preserves intent across "
+            "compaction."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="run_closure_gate",
+        guidance=(
+            "Audit required client-side gates even when an MCP response says "
+            "the workflow is ready to proceed."
+        ),
+    ),
+    SkillExecutionCapability(
+        name="restate_goal",
+        guidance=(
+            "Zcode holds the session goal natively (`--target`, `/goal`) rather "
+            "than only in prompt text; restating the goal maps onto that held "
+            "goal so Zcode can reference it across the run."
+        ),
+    ),
+)
+
 _CAPABILITIES: tuple[BackendCapability, ...] = (
     BackendCapability(
         name="claude",
@@ -433,6 +519,23 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
         cli_name="gemini",
         cli_config_key="gemini_cli_path",
         skill_execution_capabilities=_GENERIC_SKILL_EXECUTION_CAPABILITIES,
+        soft_tool_enforcement=True,
+    ),
+    BackendCapability(
+        # Zcode (Z.ai GLM-5.x desktop agent) — the app-bundle ``zcode.cjs``
+        # script runs through ZCode's bundled Electron/Node runtime and emits
+        # one JSON summary. Runtime-only: it does not back
+        # structured LLM completions or auto-interview answering (no LLM
+        # adapter factory), matching the antigravity/grok runtime-only contract.
+        name="zcode",
+        aliases=("zcode_cli",),
+        supports_runtime=True,
+        supports_llm=False,
+        supports_interview_driver=False,
+        switchable_runtime=True,
+        cli_name="zcode",
+        cli_config_key="zcode_cli_path",
+        skill_execution_capabilities=_ZCODE_SKILL_EXECUTION_CAPABILITIES,
         soft_tool_enforcement=True,
     ),
     BackendCapability(
