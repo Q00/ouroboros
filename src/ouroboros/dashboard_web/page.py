@@ -154,10 +154,22 @@ function cardHtml(c) {
   const tok = fmtTokens(c.tokens);
   const tokHtml = tok ? `<span class="tok">${tok}</span>` : "";
   const tool = c.tool ? `<span class="tool">⚙ ${esc(c.tool)}</span>` : "";
+  // Task 1: gate-anchored decomposition trust verdict. Only badged when NOT
+  // trustworthy — a trustworthy split is the unremarkable default, so the
+  // badge draws the eye to exactly the case that needs a look.
+  const trust = (c.trust_verdict && c.trustworthy === false)
+    ? `<span class="badge" style="background:#9e2a2b" title="decomposition trust: ${esc(c.trust_verdict)}">⚠ ${esc(c.trust_verdict)}</span>`
+    : "";
+  // Task 2: lateral-escalation parking — this AC never surfaces FAILED, it
+  // keeps retrying at a long backoff, so the badge is the only visible sign
+  // it needs an operator's attention.
+  const parked = (c.escalation_state === "parked")
+    ? `<span class="badge" style="background:#7a5c00" title="parked for operator: all lateral personas exhausted">⏸ parked</span>`
+    : "";
   const indent = c.depth ? `style="margin-left:${Math.min(c.depth,4)*10}px"` : "";
   return `<div class="card st-${esc(c.status)}" ${indent}>
     <div class="title">${esc(c.title).slice(0,160)}</div>
-    <div class="sub">${prov}${tier}${ac}${tokHtml}${tool}</div></div>`;
+    <div class="sub">${prov}${tier}${trust}${parked}${ac}${tokHtml}${tool}</div></div>`;
 }
 
 __BOOTSTRAP__

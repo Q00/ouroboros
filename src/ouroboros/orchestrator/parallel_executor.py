@@ -5865,9 +5865,13 @@ Respond with either ATOMIC or the structured JSON object only.
             self._lateral_escalation_states[ac_idx] = state
 
             if step.just_parked:
+                parked_node_id = ExecutionNodeIdentity.root(
+                    execution_context_id=execution_id, ac_index=ac_idx
+                ).node_id
                 await self._event_emitter.emit_ac_parked_for_operator(
                     execution_id=execution_id,
                     session_id=session_id,
+                    node_id=parked_node_id,
                     root_ac_index=ac_idx,
                     personas_tried=tuple(p.value for p in state.personas_tried),
                     consecutive_terminal_failures=state.consecutive_terminal_failures,

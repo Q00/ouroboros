@@ -1,0 +1,202 @@
+"""Task 3: the HUD surfaces the Task 1/2 trust verdict and escalation state.
+
+``execution.ac.decomposition_attested`` and ``execution.ac.parked_for_operator``
+are folded onto the AC tree nodes so the node label carries a compact badge
+and the footer/summary carries an aggregate count — across all three
+verbosity modes (``compact``, ``summary``, ``tree``).
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+import pytest
+
+from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler, render_ac_tree_hud_markdown
+from ouroboros.persistence.event_store import EventStore
+
+
+@pytest.fixture
+async def memory_event_store() -> AsyncIterator[EventStore]:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    try:
+        yield store
+    finally:
+        await store.close()
+
+
+def _progress_data() -> dict[str, object]:
+    return {
+        "completed_count": 0,
+        "total_count": 2,
+        "acceptance_criteria": [
+            {"node_id": "ac_1", "index": 1, "content": "First criterion", "status": "executing"},
+            {"node_id": "ac_2", "index": 2, "content": "Second criterion", "status": "executing"},
+        ],
+    }
+
+
+class TestRenderMarkdownDirectly:
+    def test_tree_view_badges_untrustworthy_node_and_footer(self) -> None:
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_trust",
+            execution_id="exec_trust",
+            session_status="running",
+            progress_data={
+                **_progress_data(),
+                "ac_tree": {
+                    "root_id": "root",
+                    "nodes": {
+                        "root": {"id": "root", "content": "root", "children_ids": ["ac_1", "ac_2"]},
+                        "ac_1": {
+                            "id": "ac_1",
+                            "content": "First criterion",
+                            "status": "executing",
+                            "index": 1,
+                            "depth": 1,
+                            "children_ids": [],
+                            "trust_verdict": "untrustworthy",
+                            "trustworthy": False,
+                        },
+                        "ac_2": {
+                            "id": "ac_2",
+                            "content": "Second criterion",
+                            "status": "executing",
+                            "index": 2,
+                            "depth": 1,
+                            "children_ids": [],
+                        },
+                    },
+                },
+            },
+            view="tree",
+        )
+
+        assert "[untrusted:untrustworthy]" in markdown
+        assert "Trust/Escalation: 1 untrustworthy split" in markdown
+
+    def test_tree_view_badges_parked_node(self) -> None:
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_parked",
+            execution_id="exec_parked",
+            session_status="running",
+            progress_data={
+                **_progress_data(),
+                "ac_tree": {
+                    "root_id": "root",
+                    "nodes": {
+                        "root": {"id": "root", "content": "root", "children_ids": ["ac_1"]},
+                        "ac_1": {
+                            "id": "ac_1",
+                            "content": "Stubborn criterion",
+                            "status": "executing",
+                            "index": 1,
+                            "depth": 1,
+                            "children_ids": [],
+                            "escalation_state": "parked",
+                        },
+                    },
+                },
+            },
+            view="tree",
+        )
+
+        assert "[parked]" in markdown
+        assert "Trust/Escalation: 1 parked for operator" in markdown
+
+    def test_no_badge_when_absent(self) -> None:
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_clean",
+            execution_id="exec_clean",
+            session_status="running",
+            progress_data=_progress_data(),
+            view="tree",
+        )
+
+        assert "Trust/Escalation" not in markdown
+        assert "[parked]" not in markdown
+        assert "[untrusted" not in markdown
+
+
+class TestHandlerEndToEnd:
+    @pytest.mark.asyncio
+    async def test_parked_event_surfaces_in_all_three_views(
+        self, memory_event_store: EventStore
+    ) -> None:
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_parked_e2e",
+                data={
+                    "execution_id": "exec_parked_e2e",
+                    "seed_id": "seed_parked_e2e",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_parked_e2e",
+                data={
+                    "execution_id": "exec_parked_e2e",
+                    "completed_count": 0,
+                    "total_count": 1,
+                    "acceptance_criteria": [
+                        {
+                            "node_id": "ac_1",
+                            "index": 1,
+                            "content": "Stubborn criterion",
+                            "status": "executing",
+                        },
+                    ],
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec_parked_e2e",
+                data={
+                    "execution_id": "exec_parked_e2e",
+                    "session_id": "sess_parked_e2e",
+                    "node_id": "ac_1",
+                    "root_ac_index": 0,
+                    "personas_tried": [
+                        "hacker",
+                        "researcher",
+                        "simplifier",
+                        "architect",
+                        "contrarian",
+                    ],
+                    "consecutive_terminal_failures": 9,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+
+        handler = ACTreeHUDHandler(event_store=memory_event_store)
+
+        tree_result = await handler.handle(
+            {"session_id": "sess_parked_e2e", "cursor": 0, "view": "tree"}
+        )
+        assert tree_result.is_ok
+        assert "parked" in tree_result.value.text_content.lower()
+
+        summary_result = await handler.handle(
+            {"session_id": "sess_parked_e2e", "cursor": 0, "view": "summary"}
+        )
+        assert summary_result.is_ok
+        assert "parked" in summary_result.value.text_content.lower()
+
+        compact_result = await handler.handle(
+            {"session_id": "sess_parked_e2e", "cursor": 0, "view": "compact"}
+        )
+        assert compact_result.is_ok
+        assert "parked" in compact_result.value.text_content.lower()

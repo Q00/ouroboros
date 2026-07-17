@@ -492,6 +492,16 @@ def _normalize_explicit_tree(value: Mapping[str, Any]) -> dict[str, Any]:
                 fallback_tool_input=raw_node.get("tool_input"),
             )
         )
+        # Task 1/2 badges (see ``_merge_trust_escalation_events_into_snapshot``).
+        # Re-normalizing an already-composed tree (``render_ac_tree_hud_markdown``
+        # calls ``_extract_tree_snapshot`` on the composed payload) must not
+        # silently drop them.
+        trust_verdict = _coerce_non_empty_string(raw_node.get("trust_verdict"))
+        if trust_verdict:
+            node["trust_verdict"] = trust_verdict
+            node["trustworthy"] = bool(raw_node.get("trustworthy"))
+        if raw_node.get("escalation_state") == "parked":
+            node["escalation_state"] = "parked"
         nodes[node_id] = node
 
     root_id = _coerce_non_empty_string(value.get("root_id")) or _ROOT_ID
@@ -816,6 +826,97 @@ def _merge_subtask_events_into_snapshot(
     return {"root_id": root_id, "nodes": nodes}
 
 
+_TRUST_ESCALATION_EVENT_TYPES = frozenset(
+    {"execution.ac.decomposition_attested", "execution.ac.parked_for_operator"}
+)
+
+
+def _merge_trust_escalation_events_into_snapshot(
+    snapshot: Mapping[str, Any],
+    execution_events: list[Any],
+) -> dict[str, Any]:
+    """Annotate existing tree nodes with the Task 1/2 trust and escalation signals.
+
+    Unlike :func:`_merge_subtask_events_into_snapshot`, this never creates a
+    new node — ``execution.ac.decomposition_attested`` /
+    ``execution.ac.parked_for_operator`` are per-node badges layered on a node
+    the tree already knows about, resolved by ``node_id`` (falling back to the
+    legacy ``ac_N`` id via ``root_ac_index`` for older/simpler tree payloads).
+    """
+    raw_nodes = snapshot.get("nodes")
+    root_id = _coerce_non_empty_string(snapshot.get("root_id")) or _ROOT_ID
+    if not isinstance(raw_nodes, Mapping):
+        return {"root_id": root_id, "nodes": {}}
+
+    nodes: dict[str, dict[str, Any]] = {
+        str(node_id): dict(raw_node)
+        for node_id, raw_node in raw_nodes.items()
+        if isinstance(raw_node, Mapping)
+    }
+
+    for event in execution_events:
+        event_type = getattr(event, "type", None)
+        if event_type not in _TRUST_ESCALATION_EVENT_TYPES:
+            continue
+        data = getattr(event, "data", None)
+        if not isinstance(data, Mapping):
+            continue
+
+        target_id = _coerce_non_empty_string(data.get("node_id"))
+        if target_id is None or target_id not in nodes:
+            root_ac_index = _coerce_int(data.get("root_ac_index"), -1)
+            if root_ac_index >= 0:
+                target_id = _find_node_id_for_ac_index(nodes, root_ac_index + 1)
+        if target_id is None or target_id not in nodes:
+            continue
+
+        if event_type == "execution.ac.decomposition_attested":
+            verdict = _coerce_non_empty_string(data.get("verdict"))
+            if verdict:
+                nodes[target_id]["trust_verdict"] = verdict
+                nodes[target_id]["trustworthy"] = bool(data.get("trustworthy"))
+        else:  # execution.ac.parked_for_operator
+            nodes[target_id]["escalation_state"] = "parked"
+
+    return {"root_id": root_id, "nodes": nodes}
+
+
+def _trust_escalation_counts(progress_data: Mapping[str, Any]) -> tuple[int, int]:
+    """Count untrustworthy-decomposition and parked-for-operator nodes.
+
+    Reads straight off the composed ``ac_tree.nodes`` payload, so it works
+    identically across all three HUD verbosity modes without needing its own
+    event scan.
+    """
+    ac_tree = progress_data.get("ac_tree")
+    nodes = ac_tree.get("nodes") if isinstance(ac_tree, Mapping) else None
+    if not isinstance(nodes, Mapping):
+        return (0, 0)
+    untrustworthy = 0
+    parked = 0
+    for node in nodes.values():
+        if not isinstance(node, Mapping):
+            continue
+        if node.get("trust_verdict") and node.get("trustworthy") is False:
+            untrustworthy += 1
+        if node.get("escalation_state") == "parked":
+            parked += 1
+    return (untrustworthy, parked)
+
+
+def _format_trust_escalation_line(progress_data: Mapping[str, Any]) -> str | None:
+    """Format a compact trust/escalation summary, omitted when both are zero."""
+    untrustworthy, parked = _trust_escalation_counts(progress_data)
+    parts: list[str] = []
+    if untrustworthy:
+        parts.append(f"{untrustworthy} untrustworthy split{'s' if untrustworthy != 1 else ''}")
+    if parked:
+        parts.append(f"{parked} parked for operator")
+    if not parts:
+        return None
+    return " · ".join(parts)
+
+
 def _compose_progress_data(
     progress_data: Mapping[str, Any],
     execution_events: list[Any],
@@ -828,8 +929,11 @@ def _compose_progress_data(
     responsive even when only subtask-status events have arrived.
     """
     composed = dict(progress_data)
-    composed["ac_tree"] = _merge_subtask_events_into_snapshot(
-        _extract_tree_snapshot(progress_data),
+    composed["ac_tree"] = _merge_trust_escalation_events_into_snapshot(
+        _merge_subtask_events_into_snapshot(
+            _extract_tree_snapshot(progress_data),
+            execution_events,
+        ),
         execution_events,
     )
     subtask_summary = summarize_subtask_events(execution_events)
@@ -961,6 +1065,20 @@ def _count_descendants(node_id: str, nodes: Mapping[str, Mapping[str, Any]]) -> 
     return total
 
 
+def _format_trust_escalation_badge(node: Mapping[str, Any]) -> str | None:
+    """Format the compact per-node trust/escalation badge, if any (Task 1/2).
+
+    Escalation (parked) takes precedence when both are present — a parked AC
+    is the more actionable signal for an operator scanning the tree.
+    """
+    if node.get("escalation_state") == "parked":
+        return "parked"
+    verdict = node.get("trust_verdict")
+    if verdict and node.get("trustworthy") is False:
+        return f"untrusted:{verdict}"
+    return None
+
+
 def _format_node_label(node: Mapping[str, Any]) -> str:
     """Format a compact node label for HUD output."""
     content = _coerce_non_empty_string(node.get("content")) or node.get("id", "AC")
@@ -969,9 +1087,11 @@ def _format_node_label(node: Mapping[str, Any]) -> str:
 
     index = node.get("index")
     depth = _coerce_int(node.get("depth"), 0)
-    if isinstance(index, int) and index > 0 and depth <= 1:
-        return f"AC {index}: {content}"
-    return content
+    label = (
+        f"AC {index}: {content}" if isinstance(index, int) and index > 0 and depth <= 1 else content
+    )
+    badge = _format_trust_escalation_badge(node)
+    return f"{label} [{badge}]" if badge else label
 
 
 def _render_tree_lines(
@@ -1176,6 +1296,9 @@ def _format_compact_hud(
     ]
     if subtask_total > 0:
         parts.append(f"Sub-AC {subtask_completed}/{subtask_total}")
+    trust_escalation = _format_trust_escalation_line(progress_data)
+    if trust_escalation:
+        parts.append(trust_escalation)
     if cursor is not None:
         parts.append(f"cursor {cursor}")
     return " | ".join(parts) + f"\n{execution_id}"
@@ -1218,6 +1341,10 @@ def _format_summary_hud(
     active_subtasks = _format_active_subtasks(progress_data)
     if active_subtasks:
         lines.append(f"Active: {active_subtasks}")
+
+    trust_escalation = _format_trust_escalation_line(progress_data)
+    if trust_escalation:
+        lines.append(f"Trust/Escalation: {trust_escalation}")
 
     if cursor is not None:
         lines.append(f"Cursor: {cursor}")
@@ -1289,6 +1416,10 @@ def render_ac_tree_hud_markdown(
     footer = _format_footer(progress_data)
     if footer:
         lines.append(f"Metrics: {footer}")
+
+    trust_escalation = _format_trust_escalation_line(progress_data)
+    if trust_escalation:
+        lines.append(f"Trust/Escalation: {trust_escalation}")
 
     lines.append("")
     lines.extend(

@@ -62,6 +62,17 @@ _TELEMETRY_EVENTS = frozenset(
     }
 )
 
+# Decomposition-trust attestation (Task 1) and lateral-escalation parking
+# (Task 2) — both durable, per-node signals folded onto a card so a human
+# reading the board sees the trust verdict / escalation state, not just
+# status. Neither event drives a card's status column.
+_TRUST_ESCALATION_EVENTS = frozenset(
+    {
+        "execution.ac.decomposition_attested",
+        "execution.ac.parked_for_operator",
+    }
+)
+
 
 # Terminal statuses: once an AUTHORITATIVE event sets one, a node is finished
 # and a later coarse snapshot must not drag it backwards.
@@ -409,6 +420,29 @@ def reduce_board(
             # Per-AC model tier/model + runtime token spend — folded through the
             # SAME ledger as provider so batch reduce and any live fold agree.
             fold_telemetry_event(event_type, payload, ledger=ledger)
+
+        elif event_type == "execution.ac.decomposition_attested":
+            # Task 1: the gate-anchored decomposition trust verdict for this
+            # node's decomposition round. Never gates status — it is a badge,
+            # not a lifecycle signal.
+            node_id = payload.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                card = _card(cards, node_id)
+                verdict = payload.get("verdict")
+                if isinstance(verdict, str) and verdict:
+                    card["trust_verdict"] = verdict
+                    card["trustworthy"] = bool(payload.get("trustworthy"))
+
+        elif event_type == "execution.ac.parked_for_operator":
+            # Task 2: this root AC exhausted the lateral-escalation ladder and
+            # is retrying forever at a long backoff instead of failing.
+            node_id = payload.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                card = _card(cards, node_id)
+                card["escalation_state"] = "parked"
+                personas_tried = payload.get("personas_tried")
+                if isinstance(personas_tried, list):
+                    card["escalation_personas_tried"] = len(personas_tried)
 
         elif event_type == "execution.frugality_proof.evaluated":
             # Run-end frugality proof (run-level, not per-node): a compact summary

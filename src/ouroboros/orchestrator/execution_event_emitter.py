@@ -136,6 +136,7 @@ class ExecutionEventEmitter:
         *,
         execution_id: str,
         session_id: str,
+        node_id: str,
         root_ac_index: int,
         personas_tried: tuple[str, ...],
         consecutive_terminal_failures: int,
@@ -150,6 +151,10 @@ class ExecutionEventEmitter:
         at ``backoff_seconds`` cadence — but this durable event is the
         operator-visible signal that it needs a human look, replacing what
         would otherwise be silent infinite identical retries.
+
+        ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
+        .node_id`` every other per-node event for this root AC carries, so
+        Kanban/HUD consumers can key off it exactly like any other event.
         """
         await self._safe_emit_event(
             BaseEvent(
@@ -159,6 +164,7 @@ class ExecutionEventEmitter:
                 data={
                     "execution_id": execution_id,
                     "session_id": session_id,
+                    "node_id": node_id,
                     "root_ac_index": root_ac_index,
                     "personas_tried": list(personas_tried),
                     "consecutive_terminal_failures": consecutive_terminal_failures,

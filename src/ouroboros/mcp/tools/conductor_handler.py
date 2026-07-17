@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ouroboros.core.conductor import (
+    MAX_RECEIPT_BYTES,
     ConductorActorMode,
     ConductorDecisionPhase,
     ConductorDirective,
@@ -183,9 +184,9 @@ class RecordConductorDecisionHandler:
             if phase is ConductorDecisionPhase.SELECTED:
                 event = await self._selected_event(arguments, decision_id, existing)
                 if existing:
-                    return self._result(event, replayed=True)
+                    return await self._result(event, replayed=True, selected_event=event)
                 await self.event_store.append(event)
-                return self._result(event, replayed=False)
+                return await self._result(event, replayed=False, selected_event=event)
             event = self._terminal_event(arguments, decision_id, phase, existing)
             terminal = next(
                 (
@@ -196,14 +197,18 @@ class RecordConductorDecisionHandler:
                 ),
                 None,
             )
+            selected = next(
+                (item for item in existing if item.type == "conductor.decision.selected"),
+                None,
+            )
             if terminal is not None:
                 if terminal.type != event.type or terminal.data.get(
                     "outcome_digest"
                 ) != event.data.get("outcome_digest"):
                     raise ValueError("decision_id already has a different terminal outcome")
-                return self._result(terminal, replayed=True)
+                return await self._result(terminal, replayed=True, selected_event=selected)
             await self.event_store.append(event)
-            return self._result(event, replayed=False)
+            return await self._result(event, replayed=False, selected_event=selected)
         except (TypeError, ValueError) as exc:
             return Result.err(MCPToolError(str(exc), tool_name=_TOOL_NAME))
         except Exception as exc:  # noqa: BLE001 - preserve MCP boundary.
@@ -331,28 +336,119 @@ class RecordConductorDecisionHandler:
             successor_execution_id=successor_execution_id,
         )
 
-    @staticmethod
-    def _result(event: Any, *, replayed: bool) -> Result[MCPToolResult, MCPServerError]:
+    async def _trust_escalation_summary(self, execution_id: str) -> str | None:
+        """Bounded Task 1/2 summary for the AC(s) this decision followed.
+
+        Queries the SAME durable events Kanban/HUD already read
+        (``execution.ac.decomposition_attested`` / ``execution.ac.parked_for_operator``),
+        scoped to ``execution_id`` (the execution the selected successor
+        follows) — the concrete link between this conductor decision and the
+        AC(s) it is "relevant for". Fails closed to ``None`` on any query
+        error so an audit-surface hiccup never fails the decision recording
+        itself (the caller's ``try`` around this whole method already treats
+        any raised exception as a hard failure of the MCP call).
+        """
+        try:
+            attested = await self.event_store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.ac.decomposition_attested",
+                limit=200,
+            )
+            parked = await self.event_store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.ac.parked_for_operator",
+                limit=200,
+            )
+        except Exception:  # noqa: BLE001 - optional audit enrichment, never fatal.
+            return None
+
+        untrustworthy_nodes = {
+            item.data.get("node_id")
+            for item in attested
+            if isinstance(item.data, dict) and item.data.get("trustworthy") is False
+        }
+        parked_nodes = {
+            item.data.get("node_id")
+            for item in parked
+            if isinstance(item.data, dict) and item.data.get("node_id")
+        }
+        parts: list[str] = []
+        if untrustworthy_nodes:
+            plural = "s" if len(untrustworthy_nodes) != 1 else ""
+            parts.append(f"{len(untrustworthy_nodes)} untrustworthy decomposition{plural}")
+        if parked_nodes:
+            plural = "s" if len(parked_nodes) != 1 else ""
+            parts.append(f"{len(parked_nodes)} AC{plural} parked for operator")
+        if not parts:
+            return None
+
+        summary = " · ".join(parts)
+        encoded = summary.encode("utf-8")
+        if len(encoded) > MAX_RECEIPT_BYTES:
+            summary = encoded[: MAX_RECEIPT_BYTES - 3].decode("utf-8", errors="ignore") + "..."
+        return summary
+
+    async def _result(
+        self,
+        event: Any,
+        *,
+        replayed: bool,
+        selected_event: Any | None,
+    ) -> Result[MCPToolResult, MCPServerError]:
         phase = event.type.rsplit(".", 1)[-1]
+        selected_data = selected_event.data if selected_event is not None else {}
+        verification_summary = (
+            selected_data.get("verification_summary") if isinstance(selected_data, dict) else None
+        )
+        selected_action = (
+            selected_data.get("selected_action") if isinstance(selected_data, dict) else None
+        )
+        predecessor_execution_id = (
+            selected_data.get("predecessor_execution_id")
+            if isinstance(selected_data, dict)
+            else None
+        )
+        trust_escalation_summary = (
+            await self._trust_escalation_summary(predecessor_execution_id)
+            if isinstance(predecessor_execution_id, str) and predecessor_execution_id
+            else None
+        )
+
+        text_lines = [
+            f"Conductor decision {event.aggregate_id} recorded as {phase}."
+            + (" Existing idempotent receipt returned." if replayed else "")
+        ]
+        if selected_action:
+            text_lines.append(f"Selected action: {selected_action}")
+        if verification_summary:
+            text_lines.append(f"Verification summary: {verification_summary}")
+        if trust_escalation_summary:
+            text_lines.append(f"Trust/escalation: {trust_escalation_summary}")
+
+        meta: dict[str, Any] = {
+            "decision_id": event.aggregate_id,
+            "phase": phase,
+            "event_id": event.id,
+            "replayed": replayed,
+            "successor_execution_id": event.data.get("successor_execution_id"),
+        }
+        if selected_action:
+            meta["selected_action"] = selected_action
+        if verification_summary:
+            meta["verification_summary"] = verification_summary
+        if trust_escalation_summary:
+            meta["trust_escalation_summary"] = trust_escalation_summary
+
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=(
-                            f"Conductor decision {event.aggregate_id} recorded as {phase}."
-                            + (" Existing idempotent receipt returned." if replayed else "")
-                        ),
+                        text="\n".join(text_lines),
                     ),
                 ),
                 is_error=phase == ConductorDecisionPhase.FAILED.value,
-                meta={
-                    "decision_id": event.aggregate_id,
-                    "phase": phase,
-                    "event_id": event.id,
-                    "replayed": replayed,
-                    "successor_execution_id": event.data.get("successor_execution_id"),
-                },
+                meta=meta,
             )
         )
 
