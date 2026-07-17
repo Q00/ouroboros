@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
@@ -89,6 +91,43 @@ class TestRefreshPMSnapshotWorktrees:
         with root_patch, enabled_patch:
             assert refresh_pm_snapshot_worktrees(repos) == repos
 
+    def test_filesystem_error_falls_back_to_original(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repos = [{"path": str(repo), "name": "repo"}]
+        root_patch, enabled_patch = _patched_env(tmp_path)
+        with (
+            root_patch,
+            enabled_patch,
+            patch("ouroboros.core.pm_snapshot._resolve_repo_root", return_value=repo),
+            patch("ouroboros.core.pm_snapshot._refresh_one", side_effect=OSError("disk full")),
+        ):
+            assert refresh_pm_snapshot_worktrees(repos) == repos
+
+    def test_refresh_uses_stable_per_repo_lock(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        snapshot = tmp_path / "snapshots" / "repo-snapshot"
+        lock_paths: list[Path] = []
+
+        @contextmanager
+        def capture_lock(path: Path) -> Iterator[None]:
+            lock_paths.append(path)
+            yield
+
+        repos = [{"path": str(repo), "name": "repo"}]
+        root_patch, enabled_patch = _patched_env(tmp_path)
+        with (
+            root_patch,
+            enabled_patch,
+            patch("ouroboros.core.pm_snapshot._resolve_repo_root", return_value=repo),
+            patch("ouroboros.core.pm_snapshot._refresh_one", return_value=snapshot),
+            patch("ouroboros.core.pm_snapshot.file_lock", side_effect=capture_lock),
+        ):
+            result = refresh_pm_snapshot_worktrees(repos)
+
+        assert result[0]["path"] == str(snapshot)
+        assert len(lock_paths) == 1
+        assert lock_paths[0].parent == tmp_path / "snapshots" / ".locks"
+
     def test_creates_snapshot_pinned_to_remote_main(self, tmp_path: Path) -> None:
         """A stale local clone must snapshot origin/main, not local HEAD."""
         _, _, local = _make_remote_and_stale_clone(tmp_path)
@@ -133,7 +172,9 @@ class TestRefreshPMSnapshotWorktrees:
         assert (snapshot / "a.txt").read_text() == "v3\n"
         assert not (snapshot / "untracked.txt").exists()
         # Only one snapshot dir exists for the repo.
-        entries = [p for p in (tmp_path / "snapshots").iterdir() if p.is_dir()]
+        entries = [
+            p for p in (tmp_path / "snapshots").iterdir() if p.is_dir() and p.name != ".locks"
+        ]
         assert len(entries) == 1
 
     def test_repo_without_remote_snapshots_local_head(self, tmp_path: Path) -> None:

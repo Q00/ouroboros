@@ -71,14 +71,17 @@ log = structlog.get_logger()
 _DATA_DIR = Path.home() / ".ouroboros" / "data"
 
 
-def _refresh_plugin_repo_paths(paths: list[Any]) -> list[Any]:
-    """Swap plugin-mode repo path strings for refreshed snapshot worktrees.
+def _refresh_plugin_repo_records(paths: list[Any]) -> list[Any]:
+    """Return plugin repo records with scan and durable source paths.
 
     Plugin dispatch forwards ``selected_repos`` (path strings) to a child
     session that reads them directly, so the snapshot redirection must
-    happen before the paths are persisted and handed to the subagent.
+    happen before the repos are persisted and handed to the subagent. The
+    complete snapshot record is retained in pm_meta so later ``generate``
+    turns can restore the durable source checkout identity.
+
     Non-string entries and repos that cannot be snapshotted (not a git
-    repo, git failure) pass through unchanged.
+    repo, git/filesystem failure) pass through unchanged.
     """
     result: list[Any] = []
     for path in paths:
@@ -86,8 +89,27 @@ def _refresh_plugin_repo_paths(paths: list[Any]) -> list[Any]:
             result.append(path)
             continue
         refreshed = refresh_pm_snapshot_worktrees([{"path": path}])
-        result.append(refreshed[0]["path"])
+        result.append(refreshed[0])
     return result
+
+
+def _plugin_repo_paths(repos: list[Any], *, durable: bool = False) -> list[Any]:
+    """Project persisted plugin repo records to child-visible path strings."""
+    result: list[Any] = []
+    for repo in repos:
+        if not isinstance(repo, dict):
+            result.append(repo)
+            continue
+        preferred_key = "source_path" if durable else "path"
+        path = repo.get(preferred_key) or repo.get("path") or repo.get("source_path")
+        if path:
+            result.append(path)
+    return result
+
+
+def _refresh_plugin_repo_paths(paths: list[Any]) -> list[Any]:
+    """Backward-compatible scan-path projection for plugin repo refresh."""
+    return _plugin_repo_paths(_refresh_plugin_repo_records(paths))
 
 
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
@@ -505,10 +527,10 @@ class PMInterviewHandler:
                 # the user's live working repo and may hold intentional WIP.
                 persisted_repos: list[Any] = []
                 if selected_repos is not None:
-                    selected_repos = await asyncio.to_thread(
-                        _refresh_plugin_repo_paths, selected_repos
+                    persisted_repos = await asyncio.to_thread(
+                        _refresh_plugin_repo_records, selected_repos
                     )
-                    persisted_repos = selected_repos
+                    selected_repos = _plugin_repo_paths(persisted_repos)
                 elif state.codebase_paths:
                     persisted_repos = [
                         {"path": p["path"], "role": p.get("role", "primary")}
@@ -549,8 +571,11 @@ class PMInterviewHandler:
                 # Redirect selected repos to refreshed snapshot worktrees so
                 # the child session explores remote-main state, then update
                 # pm_meta with them and mark interview_started.
-                selected_repos = await asyncio.to_thread(_refresh_plugin_repo_paths, selected_repos)
-                meta["brownfield_repos"] = selected_repos
+                persisted_repos = await asyncio.to_thread(
+                    _refresh_plugin_repo_records, selected_repos
+                )
+                selected_repos = _plugin_repo_paths(persisted_repos)
+                meta["brownfield_repos"] = persisted_repos
                 meta["status"] = "interview_started"
                 _save_pm_meta(
                     session_id,
@@ -560,7 +585,7 @@ class PMInterviewHandler:
                     status="interview_started",
                     extra={
                         "initial_context": meta.get("initial_context", ""),
-                        "brownfield_repos": selected_repos,
+                        "brownfield_repos": persisted_repos,
                     },
                 )
                 # Use initial_context from pm_meta for subagent prompt
@@ -585,7 +610,10 @@ class PMInterviewHandler:
                     meta = _load_pm_meta(session_id, data_dir=self.data_dir)
                     if meta:
                         if meta.get("brownfield_repos") is not None:
-                            selected_repos = meta["brownfield_repos"]
+                            selected_repos = _plugin_repo_paths(
+                                meta["brownfield_repos"],
+                                durable=action == "generate",
+                            )
                         # Also restore initial_context for generate prompts
                         if not initial_context and meta.get("initial_context"):
                             initial_context = meta["initial_context"]

@@ -19,7 +19,9 @@ import pytest
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.pm_handler import (
     PMInterviewHandler,
+    _plugin_repo_paths,
     _refresh_plugin_repo_paths,
+    _refresh_plugin_repo_records,
 )
 
 
@@ -28,6 +30,16 @@ def _fake_refresh(repos: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 class TestRefreshPluginRepoPaths:
+    def test_retains_scan_and_source_paths_for_persistence(self) -> None:
+        with patch(
+            "ouroboros.mcp.tools.pm_handler.refresh_pm_snapshot_worktrees",
+            side_effect=_fake_refresh,
+        ):
+            result = _refresh_plugin_repo_records(["/repo/a"])
+        assert result == [{"path": "/snap/repo/a", "source_path": "/repo/a"}]
+        assert _plugin_repo_paths(result) == ["/snap/repo/a"]
+        assert _plugin_repo_paths(result, durable=True) == ["/repo/a"]
+
     def test_swaps_string_paths_and_passes_through_others(self) -> None:
         with patch(
             "ouroboros.mcp.tools.pm_handler.refresh_pm_snapshot_worktrees",
@@ -82,7 +94,7 @@ class TestPluginDispatchSnapshots:
 
         assert result.is_ok
         _, meta = self._load_single_meta(tmp_path)
-        assert meta["brownfield_repos"] == ["/snap/repo/a"]
+        assert meta["brownfield_repos"] == [{"path": "/snap/repo/a", "source_path": "/repo/a"}]
         payload = dispatch_mock.call_args.kwargs["payload"]
         assert payload.context["selected_repos"] == ["/snap/repo/a"]
 
@@ -113,9 +125,48 @@ class TestPluginDispatchSnapshots:
 
         assert result.is_ok
         _, meta = self._load_single_meta(tmp_path)
-        assert meta["brownfield_repos"] == ["/snap/repo/a", "/snap/repo/b"]
+        assert meta["brownfield_repos"] == [
+            {"path": "/snap/repo/a", "source_path": "/repo/a"},
+            {"path": "/snap/repo/b", "source_path": "/repo/b"},
+        ]
         payload = dispatch_mock.call_args.kwargs["payload"]
         assert payload.context["selected_repos"] == ["/snap/repo/a", "/snap/repo/b"]
+
+    @pytest.mark.asyncio
+    async def test_generate_restores_durable_source_paths(self, tmp_path: Path) -> None:
+        handler = PMInterviewHandler(data_dir=tmp_path)
+        result, _ = await self._dispatch(
+            handler,
+            {
+                "initial_context": "Build a review reminder feature",
+                "selected_repos": ["/repo/a", "/repo/b"],
+                "cwd": str(tmp_path),
+            },
+        )
+        assert result.is_ok
+        session_id, _ = self._load_single_meta(tmp_path)
+
+        result, _ = await self._dispatch(
+            handler,
+            {
+                "action": "resume",
+                "session_id": session_id,
+                "answer": "Notify reviewers after 24 hours.",
+                "last_question": "When should reminders be sent?",
+            },
+        )
+        assert result.is_ok
+
+        result, dispatch_mock = await self._dispatch(
+            handler,
+            {"action": "generate", "session_id": session_id},
+        )
+
+        assert result.is_ok
+        payload = dispatch_mock.call_args.kwargs["payload"]
+        assert payload.context["selected_repos"] == ["/repo/a", "/repo/b"]
+        assert "/snap/repo/a" not in payload.prompt
+        assert "- /repo/a" in payload.prompt
 
     @pytest.mark.asyncio
     async def test_cwd_derived_fallback_is_not_redirected(self, tmp_path: Path) -> None:

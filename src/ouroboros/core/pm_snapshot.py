@@ -25,6 +25,7 @@ import structlog
 from ouroboros.config.loader import load_config
 from ouroboros.config.models import OrchestratorConfig
 from ouroboros.core.errors import ConfigError
+from ouroboros.core.file_lock import file_lock
 
 log = structlog.get_logger()
 
@@ -86,6 +87,11 @@ def _snapshot_dir(source_root: Path) -> Path:
     """
     digest = hashlib.sha1(str(source_root).encode("utf-8")).hexdigest()[:8]
     return snapshot_root() / f"{source_root.name}-{digest}"
+
+
+def _snapshot_lock_path(source_root: Path) -> Path:
+    """Return the stable per-repo refresh lock path."""
+    return snapshot_root() / ".locks" / _snapshot_dir(source_root).name
 
 
 def _resolve_snapshot_ref(repo_root: Path) -> tuple[str, str]:
@@ -199,8 +205,9 @@ def refresh_pm_snapshot_worktrees(
             continue
         try:
             source_root = _resolve_repo_root(Path(source).expanduser())
-            snapshot_path = _refresh_one(source_root)
-        except PMSnapshotError as exc:
+            with file_lock(_snapshot_lock_path(source_root)):
+                snapshot_path = _refresh_one(source_root)
+        except (PMSnapshotError, OSError, RuntimeError) as exc:
             log.warning("pm_snapshot.refresh_failed", repo=source, error=str(exc))
             result.append(repo)
             continue
