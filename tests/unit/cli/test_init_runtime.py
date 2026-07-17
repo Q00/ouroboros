@@ -94,6 +94,58 @@ class TestInitWorkflowRuntimeHandoff:
         mock_generate_seed.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_aborted_continuation_does_not_reenter_completion_or_seed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An aborted follow-up loop is terminal after Seed requests more detail."""
+        initial_state = InterviewState(
+            interview_id="interview_question_failure",
+            initial_context="Build a CLI",
+        )
+        completed_state = initial_state.model_copy(deep=True)
+        completed_state.status = InterviewStatus.COMPLETED
+        aborted_state = initial_state.model_copy(deep=True)
+        aborted_state.status = InterviewStatus.ABORTED
+
+        engine = MagicMock()
+        engine.start_interview = AsyncMock(return_value=Result.ok(initial_state))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+        run_loop = AsyncMock(side_effect=[completed_state, aborted_state])
+        generate_seed = AsyncMock(
+            side_effect=[
+                (None, SeedGenerationResult.CONTINUE_INTERVIEW),
+                AssertionError("aborted continuation re-entered Seed generation"),
+            ]
+        )
+
+        with (
+            patch("ouroboros.cli.commands.init._get_adapter", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.InterviewEngine", return_value=engine),
+            patch("ouroboros.cli.commands.init._run_interview_loop", new=run_loop),
+            patch(
+                "ouroboros.cli.commands.init._get_init_event_store",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("ouroboros.cli.commands.init.Confirm.ask", return_value=True),
+            patch(
+                "ouroboros.cli.commands.init._generate_seed_from_interview",
+                new=generate_seed,
+            ),
+        ):
+            with pytest.raises(typer.Exit) as exc_info:
+                await _run_interview(
+                    "Build a CLI",
+                    state_dir=tmp_path,
+                    use_orchestrator=True,
+                    workflow_runtime_backend="codex",
+                )
+
+        assert exc_info.value.exit_code == 1
+        assert run_loop.await_count == 2
+        assert generate_seed.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_aborted_interview_cannot_be_resumed(
         self,
         tmp_path: Path,

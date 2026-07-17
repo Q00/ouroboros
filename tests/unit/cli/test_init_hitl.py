@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+import typer
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.cli.commands.init import (
@@ -14,7 +15,7 @@ from ouroboros.cli.commands.init import (
     _interview_hitl_response,
     _run_interview_loop,
 )
-from ouroboros.core.errors import ProviderError
+from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_requested_event
 
@@ -151,6 +152,37 @@ async def test_question_generation_failure_declined_retry_persists_aborted_state
     assert final_state.status == InterviewStatus.ABORTED
     assert final_state.rounds == []
     assert engine.saved[-1].status == InterviewStatus.ABORTED
+
+
+@pytest.mark.asyncio
+async def test_question_generation_abort_save_failure_exits_without_claiming_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed terminal write must not advertise the session as durably aborted."""
+
+    class FakeEngine:
+        async def ask_next_question(self, state: InterviewState):
+            return Result.err(ProviderError("question generation failed"))
+
+        async def save_state(self, state: InterviewState):
+            return Result.err(ValidationError("disk is read-only"))
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.init.Confirm.ask",
+        lambda *_args, **_kwargs: False,
+    )
+    errors: list[str] = []
+    monkeypatch.setattr("ouroboros.cli.commands.init.print_error", errors.append)
+
+    state = InterviewState(interview_id="interview_question_failure")
+
+    with pytest.raises(typer.Exit) as exc_info:
+        await _run_interview_loop(FakeEngine(), state)
+
+    assert exc_info.value.exit_code == 1
+    assert state.status == InterviewStatus.ABORTED
+    assert any("Failed to persist aborted interview state" in error for error in errors)
+    assert all("is saved with status" not in error for error in errors)
 
 
 @pytest.mark.asyncio

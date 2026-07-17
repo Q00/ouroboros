@@ -305,9 +305,10 @@ async def _run_interview_loop(
                 save_result = await engine.save_state(state)
                 if save_result.is_err:
                     print_error(
-                        "Warning: Failed to save aborted interview state: "
+                        "Failed to persist aborted interview state; do not resume this session: "
                         f"{save_result.error.message}"
                     )
+                    raise typer.Exit(code=1)
                 break
             continue
 
@@ -380,7 +381,7 @@ def _raise_for_aborted_interview(state: InterviewState) -> None:
         return
     print_error(
         "Interview stopped before completion after question generation failed. "
-        f"Session {state.interview_id} is saved with status 'aborted'; start a new "
+        f"Session {state.interview_id} is terminal with status 'aborted'; start a new "
         "interview instead of resuming this session."
     )
     raise typer.Exit(code=1)
@@ -454,12 +455,12 @@ async def _run_interview(
             disabled_event_stores=disabled_event_stores,
         )
 
-        if state.status == InterviewStatus.ABORTED:
-            console.print()
-            _raise_for_aborted_interview(state)
-
         # Outer loop for retry on high ambiguity
         while True:
+            if state.status == InterviewStatus.ABORTED:
+                console.print()
+                _raise_for_aborted_interview(state)
+
             # Interview complete
             console.print()
             print_success("Interview completed!")
