@@ -111,6 +111,47 @@ Emitted periodically during execution with runtime progress.
 | `progress` | `object` | Nested progress state (structure varies by runtime) |
 | `progress.runtime_status` | `string?` | Runtime-reported status when available |
 
+### Interview latency events
+
+The following interview events carry the same privacy-safe `timings_ms`
+object for newly measured handler turns:
+
+- `interview.response.emitted`: a question-bearing start, answer, or resume response.
+- `interview.completed`: a turn that completes without returning another question.
+- `interview.failed`: a terminal failure, including completion and question generation.
+- `interview.question_generation.parent_handoff`: question generation delegated to the
+  parent session after a provider envelope violation.
+
+Historical rows written before phase timing was introduced may not contain
+`timings_ms`. A `null` phase in a new timing object means that phase did not
+execute during the measured turn; it does not mean zero milliseconds.
+
+| `timings_ms` field | Type | Description |
+|--------------------|------|-------------|
+| `total` | `number?` | Monotonic server-side handler time through terminal event creation |
+| `ambiguity_scoring` | `number?` | Time spent in live ambiguity scoring |
+| `question_generation` | `number?` | Time spent awaiting `ask_next_question` |
+| `advisory_build` | `number?` | Time spent preparing server-side advisory request metadata |
+
+`total` is not user-observed wall time. It excludes work performed by the host
+after the MCP response returns. In particular, `advisory_build` does not
+measure execution of host-side advisory fan-out. `question_generation` may
+include adapter/client startup and provider latency because those operations
+remain inside the question-generation boundary.
+
+Event-specific fields remain additive. The benchmark exporter allowlists only
+the non-content metadata needed for phase analysis:
+
+| Event | Additional fields |
+|-------|-------------------|
+| `interview.response.emitted` | `response_kind`, `round_number`, `payload_chars`, `transcript_chars`, `ambiguity_prefix_present`, `is_length_guard` |
+| `interview.completed` | `total_rounds` |
+| `interview.failed` | `phase`, existing bounded `error` diagnostics |
+| `interview.question_generation.parent_handoff` | `phase`, `reason_code`, optional `provider_error_type` |
+
+Use `scripts/export_interview_latency.py` when sharing benchmark evidence. The
+exporter excludes failure text and all non-allowlisted payload fields.
+
 ### workflow.run.created / completed / failed / cancelled
 
 Durable lifecycle events for #956 Workflow IR runs. All events share the

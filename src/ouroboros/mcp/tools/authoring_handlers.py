@@ -1961,10 +1961,28 @@ class InterviewHandler:
         score: AmbiguityScore | None = None,
         *,
         seed_ready_override: bool | None = None,
+        turn_started_at: float | None = None,
+        ambiguity_scoring_duration_ms: float | None = None,
+        question_generation_duration_ms: float | None = None,
+        advisory_build_duration_ms: float | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Complete the interview and return a Seed-ready MCP response."""
         complete_result = await engine.complete_interview(state)
         if complete_result.is_err:
+            if turn_started_at is not None:
+                from ouroboros.events.interview import interview_failed
+
+                self._emit_event_bg(
+                    interview_failed(
+                        session_id,
+                        _format_interview_failure_event_error(complete_result.error),
+                        phase="completion",
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                        question_generation_duration_ms=question_generation_duration_ms,
+                        advisory_build_duration_ms=advisory_build_duration_ms,
+                    )
+                )
             return Result.err(
                 MCPToolError(
                     str(complete_result.error),
@@ -1986,6 +2004,12 @@ class InterviewHandler:
             interview_completed(
                 interview_id=session_id,
                 total_rounds=len(state.rounds),
+                total_duration_ms=(
+                    _elapsed_ms(turn_started_at) if turn_started_at is not None else None
+                ),
+                ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                question_generation_duration_ms=question_generation_duration_ms,
+                advisory_build_duration_ms=advisory_build_duration_ms,
             )
         )
 
@@ -2558,6 +2582,7 @@ class InterviewHandler:
         engine, _ = self._create_interview_engine()
         _interview_id: str | None = None  # Track for error event emission
         question_generation_duration_ms: float | None = None
+        advisory_build_duration_ms: float | None = None
 
         try:
             # Start new interview
@@ -2602,8 +2627,10 @@ class InterviewHandler:
                 # (pm_interview.py:889); apply the same optimisation here.
                 live_score = None
                 question_generation_started_at = time.perf_counter()
-                question_result = await engine.ask_next_question(state)
-                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+                try:
+                    question_result = await engine.ask_next_question(state)
+                finally:
+                    question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
                 if question_result.is_err:
                     if _is_question_generation_envelope_violation(question_result.error):
                         from ouroboros.events.interview import interview_question_parent_handoff
@@ -2615,7 +2642,9 @@ class InterviewHandler:
                                 reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
                                 provider_error_type=_provider_error_type(question_result.error),
                                 total_duration_ms=_elapsed_ms(turn_started_at),
+                                ambiguity_scoring_duration_ms=None,
                                 question_generation_duration_ms=question_generation_duration_ms,
+                                advisory_build_duration_ms=None,
                             )
                         )
                         log.warning(
@@ -2642,7 +2671,9 @@ class InterviewHandler:
                             event_error_msg,
                             phase="question_generation",
                             total_duration_ms=_elapsed_ms(turn_started_at),
+                            ambiguity_scoring_duration_ms=None,
                             question_generation_duration_ms=question_generation_duration_ms,
+                            advisory_build_duration_ms=None,
                         )
                     )
                     # ``InterviewEngine.start_interview`` already persisted
@@ -2793,20 +2824,22 @@ class InterviewHandler:
                     start_meta.update(_length_guard_meta_fields())
                 else:
                     advisory_build_started_at = time.perf_counter()
-                    _attach_question_assist_requests(
-                        start_meta,
-                        session_id=state.interview_id,
-                        question=question,
-                        phase="start",
-                        score=live_score,
-                        dispatch_mode=resolve_subagent_dispatch(
-                            self.agent_runtime_backend, self.opencode_mode
-                        ),
-                        runtime_backend=self.agent_runtime_backend,
-                        opencode_mode=self.opencode_mode,
-                        fanout_registry=self._resolved_fanout_registry(),
-                    )
-                    advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+                    try:
+                        _attach_question_assist_requests(
+                            start_meta,
+                            session_id=state.interview_id,
+                            question=question,
+                            phase="start",
+                            score=live_score,
+                            dispatch_mode=resolve_subagent_dispatch(
+                                self.agent_runtime_backend, self.opencode_mode
+                            ),
+                            runtime_backend=self.agent_runtime_backend,
+                            opencode_mode=self.opencode_mode,
+                            fanout_registry=self._resolved_fanout_registry(),
+                        )
+                    finally:
+                        advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
                 if is_length_guard:
                     advisory_build_duration_ms = None
 
@@ -2863,7 +2896,9 @@ class InterviewHandler:
                         _format_interview_failure_event_error(e),
                         phase="unexpected_error",
                         total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=None,
                         question_generation_duration_ms=question_generation_duration_ms,
+                        advisory_build_duration_ms=advisory_build_duration_ms,
                     )
                 )
             return Result.err(
@@ -2943,12 +2978,16 @@ class InterviewHandler:
                     # stale-streak invalidation contract even
                     # though this branch disables the qualifying-
                     # score increment.
-                    exit_score = await self._score_interview_state(
-                        llm_adapter,
-                        state,
-                        advance_streak=False,
-                        reset_on_failure=True,
-                    )
+                    ambiguity_scoring_started_at = time.perf_counter()
+                    try:
+                        exit_score = await self._score_interview_state(
+                            llm_adapter,
+                            state,
+                            advance_streak=False,
+                            reset_on_failure=True,
+                        )
+                    finally:
+                        ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
                 # Safe-default synthesis is emitted only after the
                 # auto driver has filled every remaining required
                 # ledger gap with audited conservative defaults. Do
@@ -2976,6 +3015,8 @@ class InterviewHandler:
                         session_id,
                         None,
                         seed_ready_override=True,
+                        turn_started_at=turn_started_at,
+                        ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                     )
                 if exit_score is not None and qualifies_for_seed_completion(
                     exit_score,
@@ -2989,6 +3030,8 @@ class InterviewHandler:
                             state,
                             session_id,
                             exit_score,
+                            turn_started_at=turn_started_at,
+                            ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                         )
 
                     # Explicit 'done' with a qualifying score counts
@@ -3010,6 +3053,8 @@ class InterviewHandler:
                             state,
                             session_id,
                             exit_score,
+                            turn_started_at=turn_started_at,
+                            ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                         )
                     # Streak advanced but still short of the
                     # threshold — persist the advance and invite the
@@ -3234,8 +3279,10 @@ class InterviewHandler:
                 # Running them in parallel would give the question
                 # generator stale routing context.
                 ambiguity_scoring_started_at = time.perf_counter()
-                live_score = await self._score_interview_state(llm_adapter, state)
-                ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
+                try:
+                    live_score = await self._score_interview_state(llm_adapter, state)
+                finally:
+                    ambiguity_scoring_duration_ms = _elapsed_ms(ambiguity_scoring_started_at)
                 lateral_review_meta = _maybe_record_lateral_review_advisory(
                     state,
                     previous_milestone=previous_milestone,
@@ -3254,15 +3301,21 @@ class InterviewHandler:
                         state,
                         session_id,
                         live_score,
+                        turn_started_at=turn_started_at,
+                        ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                     )
                 question_generation_started_at = time.perf_counter()
-                question_result = await engine.ask_next_question(state)
-                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+                try:
+                    question_result = await engine.ask_next_question(state)
+                finally:
+                    question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             else:
                 live_score = None
                 question_generation_started_at = time.perf_counter()
-                question_result = await engine.ask_next_question(state)
-                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+                try:
+                    question_result = await engine.ask_next_question(state)
+                finally:
+                    question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(
                 engine,
                 state,
@@ -3288,6 +3341,7 @@ class InterviewHandler:
                         total_duration_ms=_elapsed_ms(turn_started_at),
                         ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                         question_generation_duration_ms=question_generation_duration_ms,
+                        advisory_build_duration_ms=None,
                     )
                 )
             return Result.err(
@@ -3312,6 +3366,7 @@ class InterviewHandler:
         engine, _ = self._create_interview_engine()
         _interview_id: str | None = None
         question_generation_duration_ms: float | None = None
+        advisory_build_duration_ms: float | None = None
 
         try:
             load_result = await engine.load_state(session_id)
@@ -3372,20 +3427,22 @@ class InterviewHandler:
                     resume_meta.update(_length_guard_meta_fields())
                 else:
                     advisory_build_started_at = time.perf_counter()
-                    _attach_question_assist_requests(
-                        resume_meta,
-                        session_id=session_id,
-                        question=pending_question,
-                        phase="resume_pending",
-                        score=_load_state_ambiguity_score(state),
-                        dispatch_mode=resolve_subagent_dispatch(
-                            self.agent_runtime_backend, self.opencode_mode
-                        ),
-                        runtime_backend=self.agent_runtime_backend,
-                        opencode_mode=self.opencode_mode,
-                        fanout_registry=self._resolved_fanout_registry(),
-                    )
-                    advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+                    try:
+                        _attach_question_assist_requests(
+                            resume_meta,
+                            session_id=session_id,
+                            question=pending_question,
+                            phase="resume_pending",
+                            score=_load_state_ambiguity_score(state),
+                            dispatch_mode=resolve_subagent_dispatch(
+                                self.agent_runtime_backend, self.opencode_mode
+                            ),
+                            runtime_backend=self.agent_runtime_backend,
+                            opencode_mode=self.opencode_mode,
+                            fanout_registry=self._resolved_fanout_registry(),
+                        )
+                    finally:
+                        advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
                 if resume_is_length_guard:
                     advisory_build_duration_ms = None
 
@@ -3427,8 +3484,10 @@ class InterviewHandler:
 
             live_score = _load_state_ambiguity_score(state)
             question_generation_started_at = time.perf_counter()
-            question_result = await engine.ask_next_question(state)
-            question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
+            try:
+                question_result = await engine.ask_next_question(state)
+            finally:
+                question_generation_duration_ms = _elapsed_ms(question_generation_started_at)
             return await self._respond_with_next_question(
                 engine,
                 state,
@@ -3452,7 +3511,9 @@ class InterviewHandler:
                         _format_interview_failure_event_error(e),
                         phase="unexpected_error",
                         total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=None,
                         question_generation_duration_ms=question_generation_duration_ms,
+                        advisory_build_duration_ms=advisory_build_duration_ms,
                     )
                 )
             return Result.err(
@@ -3521,6 +3582,7 @@ class InterviewHandler:
                     total_duration_ms=_elapsed_ms(turn_started_at),
                     ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
                     question_generation_duration_ms=question_generation_duration_ms,
+                    advisory_build_duration_ms=None,
                 )
             )
             if "empty response" in error_msg.lower():
@@ -3639,20 +3701,46 @@ class InterviewHandler:
             answer_meta.update(_length_guard_meta_fields())
         else:
             advisory_build_started_at = time.perf_counter()
-            _attach_question_assist_requests(
-                answer_meta,
-                session_id=session_id,
-                question=question,
-                phase="answer",
-                score=live_score,
-                dispatch_mode=resolve_subagent_dispatch(
-                    self.agent_runtime_backend, self.opencode_mode
-                ),
-                runtime_backend=self.agent_runtime_backend,
-                opencode_mode=self.opencode_mode,
-                fanout_registry=self._resolved_fanout_registry(),
-            )
-            advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+            advisory_build_error: Exception | None = None
+            try:
+                _attach_question_assist_requests(
+                    answer_meta,
+                    session_id=session_id,
+                    question=question,
+                    phase="answer",
+                    score=live_score,
+                    dispatch_mode=resolve_subagent_dispatch(
+                        self.agent_runtime_backend, self.opencode_mode
+                    ),
+                    runtime_backend=self.agent_runtime_backend,
+                    opencode_mode=self.opencode_mode,
+                    fanout_registry=self._resolved_fanout_registry(),
+                )
+            except Exception as error:
+                advisory_build_error = error
+            finally:
+                advisory_build_duration_ms = _elapsed_ms(advisory_build_started_at)
+            if advisory_build_error is not None:
+                log.error("mcp.tool.interview.error", error=str(advisory_build_error))
+                from ouroboros.events.interview import interview_failed
+
+                self._emit_event_bg(
+                    interview_failed(
+                        session_id,
+                        _format_interview_failure_event_error(advisory_build_error),
+                        phase="unexpected_error",
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                        question_generation_duration_ms=question_generation_duration_ms,
+                        advisory_build_duration_ms=advisory_build_duration_ms,
+                    )
+                )
+                return Result.err(
+                    MCPToolError(
+                        f"Interview failed: {advisory_build_error}",
+                        tool_name="ouroboros_interview",
+                    )
+                )
         if answer_is_length_guard:
             advisory_build_duration_ms = None
 

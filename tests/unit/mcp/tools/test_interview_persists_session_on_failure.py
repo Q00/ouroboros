@@ -48,6 +48,7 @@ class _FakeInterviewEngine:
     saved_states: list[InterviewState] = field(default_factory=list)
     states: dict[str, InterviewState] = field(default_factory=dict)
     question_error: Any | None = None
+    question_exception: Exception | None = None
 
     async def start_interview(
         self, initial_context: str, cwd: str | None = None, interview_id: str | None = None
@@ -62,6 +63,8 @@ class _FakeInterviewEngine:
         return Result.ok(state)
 
     async def ask_next_question(self, state: InterviewState) -> Result[str, MCPServerError]:
+        if self.question_exception is not None:
+            raise self.question_exception
         if self.question_error is not None:
             return Result.err(self.question_error)
         return Result.err(_RecoverableProviderError("Question generation timed out"))
@@ -419,6 +422,68 @@ async def test_question_failure_after_answer_closes_phase_timings(tmp_path: Path
         for call in mock_store.append.await_args_list
         if call.args[0].type == "interview.failed"
     )
+    assert failed_event.data["timings_ms"] == {
+        "total": 2000.0,
+        "ambiguity_scoring": None,
+        "question_generation": 500.0,
+        "advisory_build": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["start", "answer", "resume"])
+async def test_raised_question_generation_closes_active_span(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    session_id = f"interview_raised_{action}"
+    engine = _FakeInterviewEngine(
+        state_dir=tmp_path,
+        question_exception=RuntimeError("question generation raised"),
+    )
+    if action == "start":
+        arguments = {"initial_context": "Build a CLI", "cwd": str(tmp_path)}
+    else:
+        state = InterviewState(
+            interview_id=session_id,
+            initial_context="Build a CLI",
+            status=InterviewStatus.IN_PROGRESS,
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question="What should the CLI do first?",
+                user_response=None if action == "answer" else "It scaffolds plugins.",
+            )
+        )
+        await engine.save_state(state)
+        arguments = {"session_id": session_id}
+        if action == "answer":
+            arguments["answer"] = "It scaffolds plugin manifests."
+
+    mock_store = AsyncMock()
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=mock_store,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    with patch(
+        "ouroboros.mcp.tools.authoring_handlers.time.perf_counter",
+        side_effect=(100.0, 101.0, 101.5, 102.0),
+    ):
+        outcome = await handler.handle(arguments)
+    await handler.close()
+
+    assert outcome.is_err
+    failed_event = next(
+        call.args[0]
+        for call in mock_store.append.await_args_list
+        if call.args[0].type == "interview.failed"
+    )
+    assert failed_event.data["phase"] == "unexpected_error"
     assert failed_event.data["timings_ms"] == {
         "total": 2000.0,
         "ambiguity_scoring": None,

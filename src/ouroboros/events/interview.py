@@ -60,6 +60,11 @@ def interview_response_recorded(
 def interview_completed(
     interview_id: str,
     total_rounds: int,
+    *,
+    total_duration_ms: float | None = None,
+    ambiguity_scoring_duration_ms: float | None = None,
+    question_generation_duration_ms: float | None = None,
+    advisory_build_duration_ms: float | None = None,
 ) -> BaseEvent:
     """Create event when an interview session completes."""
     return BaseEvent(
@@ -68,6 +73,12 @@ def interview_completed(
         aggregate_id=interview_id,
         data={
             "total_rounds": total_rounds,
+            "timings_ms": _interview_timings(
+                total_duration_ms=total_duration_ms,
+                ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                question_generation_duration_ms=question_generation_duration_ms,
+                advisory_build_duration_ms=advisory_build_duration_ms,
+            ),
         },
     )
 
