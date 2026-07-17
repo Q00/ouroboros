@@ -34,8 +34,14 @@ from ouroboros.interview_adapters import (
 )
 
 _EXPLICIT_REQUIREMENT_RE = re.compile(
+    r"(?:"
     r"\b(?:must|need(?:s|ed)? to|required?|requirement|acceptance criteri(?:on|a)|"
-    r"confirm(?:ed|ing)?|shall)\b",
+    r"confirm(?:ed|ing)?|shall)\b"
+    r"|(?:확인|확정)(?:된|한)?\s*(?:요구\s*사항|조건)"
+    r"|요구\s*사항|필수|반드시|해야\s*(?:한다|합니다|함)|되어야\s*(?:한다|합니다|함)"
+    r"|確認済み|確定(?:した|済み)?|要件|必須|必要(?:です|がある)|"
+    r"なければならない|べき(?:です|だ)?"
+    r")",
     re.IGNORECASE,
 )
 _CONSTRAINT_RE = re.compile(
@@ -143,8 +149,7 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             )
         )
         explicitly_required = bool(_EXPLICIT_REQUIREMENT_RE.search(answer))
-        confirmed_after_reference_contrast = bool(resolved_reference_ids)
-        if not explicitly_required and not confirmed_after_reference_contrast:
+        if not explicitly_required:
             continue
 
         referenced = tuple(

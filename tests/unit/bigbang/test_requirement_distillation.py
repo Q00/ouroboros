@@ -216,6 +216,20 @@ def test_non_english_confirmation_after_reference_contrast_is_preserved(
     assert promoted.confirmation_authority is ConfirmationAuthority.USER
 
 
+def test_ordinary_follow_up_after_reference_contrast_is_not_promoted() -> None:
+    distillation = build_requirement_distillation(
+        _reference_state(confirmation="Maybe blue is nice.")
+    )
+
+    applied = apply_requirement_distillation(_requirements(), distillation)
+
+    assert applied.promotion.is_ready_for_seed
+    assert applied.requirements["acceptance_criteria"] == ""
+    assert all(
+        candidate.candidate_id != "round-3:requirement" for candidate in distillation.candidates
+    )
+
+
 def test_non_reference_interview_preserves_legacy_extraction() -> None:
     state = InterviewState(
         interview_id="legacy",
