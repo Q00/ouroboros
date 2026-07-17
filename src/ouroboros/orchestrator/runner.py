@@ -31,7 +31,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import uuid4
 
 from rich.console import Console
@@ -611,6 +611,7 @@ class OrchestratorRunner:
         mcp_tool_prefix: str = "",
         debug: bool = False,
         enable_decomposition: bool = True,
+        decomposition_mode: Literal["preflight", "bounce_only", "off"] | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         inherited_tools: list[str] | None = None,
         task_cwd: str | None = None,
@@ -637,6 +638,9 @@ class OrchestratorRunner:
                            conflicts (e.g., "mcp_" makes "read" become "mcp_read").
             debug: Enable verbose logging output. When False, only Live display shown.
             enable_decomposition: Enable AC decomposition into Sub-ACs.
+            decomposition_mode: Optional decomposition mode override. When omitted,
+                the runner uses ``execution.decomposition_mode`` from config.
+                ``enable_decomposition=False`` forces the effective mode to ``off``.
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions that should fork a session.
             inherited_tools: Optional effective tool set inherited from a
@@ -752,6 +756,15 @@ class OrchestratorRunner:
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
+        self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
+            "off"
+            if not enable_decomposition
+            else (
+                _execution_config.decomposition_mode
+                if decomposition_mode is None
+                else decomposition_mode
+            )
+        )
         if not _model_routing_disabled:
             from ouroboros.orchestrator.model_routing import build_model_router
 
@@ -4765,6 +4778,7 @@ class OrchestratorRunner:
             event_store=self._event_store,
             console=self._console,
             enable_decomposition=self._enable_decomposition,
+            decomposition_mode=self._decomposition_mode,
             max_concurrent=effective_workers,
             max_decomposition_depth=self._max_decomposition_depth,
             inherited_runtime_handle=self._inherited_runtime_handle,

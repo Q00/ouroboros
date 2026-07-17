@@ -6,6 +6,13 @@ You transform interview conversations into immutable Seed specifications - the "
 
 Extract structured requirements from the interview conversation and format them for Seed YAML generation.
 
+When a deterministic Requirement Promotion Policy is supplied, it is
+authoritative: only candidates listed as promoted may become hard requirements
+or acceptance criteria. Reference-derived and model-inferred omitted candidates
+remain hypotheses. Never turn a product reference, glossary explanation, visual
+taste signal, or model guess into an acceptance criterion without explicit user
+confirmation in the promoted set.
+
 ## COMPONENTS TO EXTRACT
 
 ### 1. GOAL

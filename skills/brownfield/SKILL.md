@@ -87,43 +87,49 @@ Then stop.
 
 **Step 2: Default Selection**
 
-**IMMEDIATELY after showing the list**, use `AskUserQuestion` with the current default numbers from the scan response.
+**Do NOT use `AskUserQuestion` for this selection.** Two rendering constraints
+make it unusable here:
 
-**If defaults exist**, show them as the recommended option:
+- Assistant text emitted between tool calls (scan result → grid → question
+  dialog) is not guaranteed to render, so the user may face the dialog
+  without ever seeing the repo list.
+- Embedding the list in option `preview` fields does not work either — the
+  preview box has a fixed height and silently truncates long lists
+  ("N lines hidden"), and repo lists routinely exceed it.
 
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"},
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"}
-    ],
-    "multiSelect": false
-  }]
-}
+Instead, **end the turn with the repo grid as the final message** so its
+display is guaranteed, and collect the selection as a plain chat reply.
+
+Immediately below the grid (same message, same code block or right after it),
+append the selection prompt:
+
+**If defaults exist:**
+```
+Current defaults: <current default names> (numbers <current default numbers>)
+
+Reply with repo numbers to change defaults (e.g. "6, 18, 19"),
+"keep" to keep the current defaults, or "none" to clear them.
 ```
 
-**If no defaults exist**, do NOT show a "(Recommended)" option — offer "None" and "Select repos" instead:
+**If no defaults exist:**
+```
+No defaults set.
 
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"},
-      {"label": "Select repos", "description": "Type repo numbers to set as default"}
-    ],
-    "multiSelect": false
-  }]
-}
+Reply with repo numbers to set defaults (e.g. "6, 18, 19"),
+or "none" to run interviews in greenfield mode.
 ```
 
-The user can select the recommended defaults (if any), choose "None", or type custom numbers.
+Then **end the turn** — no tool calls after the grid. The RFC #1392
+breadcrumb footer is still the last line of the message.
 
-After the user responds, re-run `tool discovery query: "+ouroboros brownfield"`, then use ONE MCP call to update all defaults at once:
+On the next turn, parse the user's reply:
+
+- Numbers (any separator) → those indices
+- "keep" (defaults exist) → stop; no MCP call needed, confirm defaults unchanged
+- "none" → empty indices (clear all)
+- Anything else → ask again in plain text; do not guess
+
+Then re-run `tool discovery query: "+ouroboros brownfield"` and use ONE MCP call to update all defaults at once:
 
 ```
 Tool: ouroboros_brownfield
@@ -134,7 +140,7 @@ Example: if the user picks IDs 6, 18, 19 → `{ "action": "set_defaults", "indic
 
 This clears all existing defaults and sets the selected repos as default in one call.
 
-If "None" → `{ "action": "set_defaults", "indices": "" }` to clear all defaults.
+If "none" → `{ "action": "set_defaults", "indices": "" }` to clear all defaults.
 
 **Step 3: Confirmation**
 
@@ -145,10 +151,15 @@ Defaults: grape, podo-app, podo-backend
 These repos will be used as context in interviews.
 ```
 
-Or if "None" selected:
+Or if "none" selected:
 ```
 No default repos set. Interviews will run in greenfield mode.
 You can set defaults anytime with: ooo brownfield
+```
+
+Or if "keep" selected:
+```
+Defaults unchanged: <current default names>
 ```
 
 ---

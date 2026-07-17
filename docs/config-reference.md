@@ -179,7 +179,7 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi"
+  runtime_backend: claude       # "claude" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   max_parallel_workers: 3       # Maximum concurrent AC workers
@@ -188,12 +188,13 @@ orchestrator:
   opencode_cli_path: null       # Path to OpenCode CLI binary; null = resolve from PATH
   copilot_cli_path: null        # Path to Copilot CLI binary; null = resolve from PATH
   pi_cli_path: null             # Path to Pi CLI binary; null = resolve from PATH
+  zcode_cli_path: null          # Path to zcode.cjs or a zcode executable
   default_max_turns: 10
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `runtime_backend` | `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` | `"claude"` | The agent runtime backend used for workflow execution. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
+| `runtime_backend` | `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `max_parallel_workers` | `int >= 1` | `3` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. **Note:** the effective fan-out is additionally capped to the connected backend's known concurrency limit — the native Claude backend is governed by its RPM/TPM rate bucket, while CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) are **serialized to 1 by default** to avoid stampeding the provider's rate/quota window. Raise that cap with `OUROBOROS_MAX_CONCURRENCY`. |
@@ -202,6 +203,7 @@ orchestrator:
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `copilot_cli_path` | `string \| null` | `null` | Absolute path to the GitHub Copilot CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_COPILOT_CLI_PATH`. |
 | `pi_cli_path` | `string \| null` | `null` | Absolute path to the Pi CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_PI_CLI_PATH`. |
+| `zcode_cli_path` | `string \| null` | `null` | Path to the Zcode app-bundle `zcode.cjs` script, a standalone script, or a directly executable `zcode` wrapper. Official app bundles use their bundled Electron/Node runtime. Resolution falls back to the macOS app bundle, then `PATH`. Overridable via `OUROBOROS_ZCODE_CLI_PATH`. |
 | `ourocode_cli_path` | `string \| null` | `null` | Absolute path to the ourocode CLI binary (`~` is expanded). Used by the LLM-only `ourocode` backend; when `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OUROCODE_CLI_PATH`. |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
 
