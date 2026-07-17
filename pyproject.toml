@@ -82,6 +82,7 @@ packages = ["src/ouroboros"]
 # the same wheel via this same config.
 exclude = [
     "src/ouroboros/opencode/plugin/**",
+    "src/ouroboros/interview_adapters/packs/**",
     "src/ouroboros/plugin/schemas/**",
     "src/ouroboros/profiles/**",
 ]
@@ -97,6 +98,10 @@ exclude = [
 # so they must reach the installed wheel as package data, not just the
 # source tree.
 "src/ouroboros/plugin/schemas" = "ouroboros/plugin/schemas"
+# Built-in interview glossary packs. The loader resolves these through
+# importlib.resources, so the wheel must include them as package data exactly
+# once.
+"src/ouroboros/interview_adapters/packs" = "ouroboros/interview_adapters/packs"
 # Execution profile YAMLs (RFC v2 #830). The loader resolves them via
 # Path(__file__).parent.parent / "profiles", so they must ship with the wheel.
 "src/ouroboros/profiles" = "ouroboros/profiles"

@@ -290,12 +290,14 @@ class TestExecutionConfig:
             retrospective_interval=5,
             tui_autolaunch=True,
             auto_evaluate=False,
+            decomposition_mode="bounce_only",
             context_pack=False,
         )
         assert config.max_iterations_per_ac == 20
         assert config.retrospective_interval == 5
         assert config.tui_autolaunch is True
         assert config.auto_evaluate is False
+        assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is False
 
     def test_execution_config_defaults(self) -> None:
@@ -305,7 +307,13 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
+        assert config.decomposition_mode == "preflight"
         assert config.context_pack is True
+
+    def test_execution_config_rejects_invalid_decomposition_mode(self) -> None:
+        """ExecutionConfig only accepts known decomposition modes."""
+        with pytest.raises(ValidationError):
+            ExecutionConfig(decomposition_mode="invalid")  # type: ignore[arg-type]
 
 
 class TestResilienceConfig:

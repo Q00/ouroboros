@@ -218,6 +218,10 @@ class ExecutionConfig(BaseModel, frozen=True):
         n_version_tournament: Whether an AC that has already exhausted its
             alt-harness redispatch may fan out to multiple runtimes in parallel,
             first-passing-verification wins (PR-X N-version tournament, opt-in).
+        decomposition_mode: Controls where AC decomposition is allowed:
+            ``preflight`` uses the configured preflight decomposition path,
+            ``bounce_only`` only decomposes after an atomic AC bounces, and
+            ``off`` disables decomposition.
         context_pack: Whether to append a deterministic repo context pack
             (stack, verify commands, layout) to run worker system prompts.
     """
@@ -231,6 +235,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = True
     n_version_tournament: bool = False
+    decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight"
     context_pack: bool = True
 
 
@@ -550,6 +555,12 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - ``remove``: remove clean worktrees; delete the branch only when
               Git accepts a safe merged-branch deletion
         worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
+        pm_snapshot_worktrees: Whether PM brownfield exploration reads from
+            persistent detached worktrees pinned to the remote default branch
+            (``origin/HEAD``) instead of the developer's live checkout. The
+            worktree is created once per repo and refreshed (fetch + hard
+            reset) on each PM interview start
+        pm_snapshot_root: Root directory for PM snapshot worktrees
     """
 
     runtime_backend: Literal[
@@ -615,6 +626,8 @@ class OrchestratorConfig(BaseModel, frozen=True):
     worktree_root: str = "~/.ouroboros/worktrees"
     worktree_cleanup: Literal["keep", "remove", "prune-merged"] = "keep"
     worktree_lock_stale_after_minutes: int = Field(default=60, ge=1)
+    pm_snapshot_worktrees: bool = True
+    pm_snapshot_root: str = "~/.ouroboros/pm-snapshots"
 
     @field_validator(
         "cli_path",

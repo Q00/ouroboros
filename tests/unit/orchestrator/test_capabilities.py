@@ -175,6 +175,8 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_interview": (
         "initial_context",
         "cwd",
+        "confused_terms",
+        "references",
         "session_id",
         "answer",
         "last_question",

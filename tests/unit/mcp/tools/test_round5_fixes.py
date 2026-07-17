@@ -598,12 +598,16 @@ class TestPMBrownfieldReposPersistence:
         session_id = data.get("session_id")
         assert session_id
 
-        # Verify pm_meta persisted the caller's selected_repos
-        from ouroboros.mcp.tools.pm_handler import _load_pm_meta
+        # Verify pm_meta persisted the caller's selected_repos.  Repos are
+        # stored as records (scan path + durable source path); both scan and
+        # durable projections must resolve back to the caller's paths here
+        # since these paths cannot be snapshotted.
+        from ouroboros.mcp.tools.pm_handler import _load_pm_meta, _plugin_repo_paths
 
         meta = _load_pm_meta(session_id, data_dir=handler.data_dir)
         assert meta is not None
-        assert meta["brownfield_repos"] == repos
+        assert _plugin_repo_paths(meta["brownfield_repos"]) == repos
+        assert _plugin_repo_paths(meta["brownfield_repos"], durable=True) == repos
 
     async def test_resume_restores_repos_from_meta(self, handler, monkeypatch) -> None:
         """Resume without selected_repos still gets repos from pm_meta."""

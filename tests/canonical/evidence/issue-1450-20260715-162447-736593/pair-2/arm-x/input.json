@@ -1,0 +1,285 @@
+{
+  "arm": "x",
+  "auto_session_id": "auto_20b877d7935f",
+  "initial_seed_before_repair": {
+    "acceptance_criteria": [
+      {
+        "description": "Completion requires an observable check that demonstrates the requested behavior and a negative or edge-path check where the implementation surface supports one",
+        "semantic_ac_key": "ac_86dab4e489d13a5c"
+      }
+    ],
+    "brownfield_context": {
+      "context_references": [],
+      "existing_dependencies": [],
+      "existing_patterns": [],
+      "project_type": "greenfield"
+    },
+    "constraints": [
+      "Keep the implementation to the smallest safe MVP that satisfies the task goal",
+      "Non-goal: Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects"
+    ],
+    "evaluation_principles": [
+      {
+        "description": "All required Seed Draft Ledger sections are resolved before execution.",
+        "name": "ledger_completeness",
+        "weight": 0.5
+      },
+      {
+        "description": "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly.",
+        "name": "observable_verification",
+        "weight": 0.5
+      }
+    ],
+    "exit_conditions": [
+      {
+        "criteria": "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly.",
+        "description": "All acceptance criteria pass under the verification plan.",
+        "name": "acceptance_verified"
+      },
+      {
+        "criteria": "No listed failure mode is observed in verification evidence.",
+        "description": "Known failure modes are absent: Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP.",
+        "name": "failure_modes_absent"
+      }
+    ],
+    "goal": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory.",
+    "metadata": {
+      "ambiguity_score": 0.05,
+      "created_at": "2026-07-15T16:28:14.865161Z",
+      "decision_provenance": {
+        "maintainer_policy": 2,
+        "timeout_default": 7,
+        "user_confirmed": 1
+      },
+      "degraded": false,
+      "generation_mode": "normal",
+      "interview_id": null,
+      "parent_seed_id": null,
+      "recovery_reason": null,
+      "seed_id": "seed_da990e3e2fd7",
+      "unresolved_slots": [],
+      "version": "1.0.0"
+    },
+    "ontology_schema": {
+      "description": "Auto-synthesized ontology from the completed Seed Draft Ledger.",
+      "fields": [
+        {
+          "description": "Assume the primary actor is the user or automation agent described by the goal; do not introduce additional actor classes.",
+          "name": "actors",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Use only inputs already present in the goal, repository state, or explicit interview answers; do not require new external data.",
+          "name": "inputs",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Produce the smallest observable artifact, state change, or response needed to satisfy the goal and make verification possible.",
+          "name": "outputs",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target.",
+          "name": "runtime_context",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "name": "BuildASmallHabit"
+    },
+    "task_type": "code"
+  },
+  "ledger": {
+    "question_history": [
+      {
+        "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+        "question": "What else should we know?"
+      }
+    ],
+    "sections": {
+      "acceptance_criteria": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "acceptance_criteria.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "A Seed needs testable acceptance criteria before generation. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Completion requires an observable check that demonstrates the requested behavior and a negative or edge-path check where the implementation surface supports one."
+          }
+        ],
+        "name": "acceptance_criteria"
+      },
+      "actors": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "actors.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "No explicit actor split remained after the bounded interview. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Assume the primary actor is the user or automation agent described by the goal; do not introduce additional actor classes."
+          }
+        ],
+        "name": "actors"
+      },
+      "constraints": {
+        "entries": [
+          {
+            "confidence": 0.82,
+            "evidence": [],
+            "key": "constraints.conservative_mvp",
+            "rationale": "Default auto policy favors safe convergence.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+          }
+        ],
+        "name": "constraints"
+      },
+      "failure_modes": {
+        "entries": [
+          {
+            "confidence": 0.8,
+            "evidence": [],
+            "key": "failure_modes.unverified_or_scope_creep",
+            "rationale": "A-grade Seeds need explicit failure boundaries.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+          }
+        ],
+        "name": "failure_modes"
+      },
+      "goal": {
+        "entries": [
+          {
+            "confidence": 0.95,
+            "evidence": [],
+            "key": "goal.primary",
+            "rationale": "Initial user-provided auto task.",
+            "reversible": false,
+            "source": "user_goal",
+            "status": "confirmed",
+            "value": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory."
+          }
+        ],
+        "name": "goal"
+      },
+      "inputs": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "inputs.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Unspecified inputs can be safely bounded to existing local context. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Use only inputs already present in the goal, repository state, or explicit interview answers; do not require new external data."
+          }
+        ],
+        "name": "inputs"
+      },
+      "non_goals": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "non_goals.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Unsafe authority remains out of scope without explicit user direction. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects."
+          }
+        ],
+        "name": "non_goals"
+      },
+      "outputs": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "outputs.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Unspecified outputs can be safely bounded to observable MVP behavior. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Produce the smallest observable artifact, state change, or response needed to satisfy the goal and make verification possible."
+          }
+        ],
+        "name": "outputs"
+      },
+      "runtime_context": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "runtime_context.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Existing local conventions are the safest runtime default. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target."
+          }
+        ],
+        "name": "runtime_context"
+      },
+      "verification_plan": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "verification_plan.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Verification can be safely scoped to local, non-destructive checks. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly."
+          }
+        ],
+        "name": "verification_plan"
+      }
+    }
+  },
+  "ledger_sha256": "38f4454bfa1330558bf9690a045723e9311de5436b4189e1db7de9acdd2747ba",
+  "pair": 2
+}
