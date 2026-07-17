@@ -59,6 +59,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.providers.ourocode_llm_adapter import OurocodeLLMAdapter
 
         return OurocodeLLMAdapter
+    if name == "ZcodeCliLLMAdapter":
+        from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
+
+        return ZcodeCliLLMAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -81,6 +85,7 @@ __all__ = [
     "PiLLMAdapter",
     "GjcLLMAdapter",
     "OurocodeLLMAdapter",
+    "ZcodeCliLLMAdapter",
     "LiteLLMAdapter",
     # Factory helpers
     "create_llm_adapter",

@@ -90,6 +90,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     KIRO = "kiro"
     PI = "pi"
+    ZCODE = "zcode"
 
 
 def _write_pid_file() -> bool:
@@ -860,7 +861,11 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi).",
+            help=(
+                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
+                "antigravity, grok, or zcode)."
+            ),
             case_sensitive=False,
         ),
     ] = None,
@@ -869,7 +874,8 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, "
+                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, or zcode)."
             ),
             case_sensitive=False,
         ),
@@ -961,7 +967,11 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, opencode, hermes, gemini, copilot, goose, kiro, or pi).",
+            help=(
+                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
+                "antigravity, grok, or zcode)."
+            ),
             case_sensitive=False,
         ),
     ] = None,
@@ -970,7 +980,8 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, copilot, opencode, gemini, goose, kiro, or pi)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, "
+                "litellm, codex, copilot, opencode, gemini, goose, kiro, pi, or zcode)."
             ),
             case_sensitive=False,
         ),

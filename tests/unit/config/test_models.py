@@ -233,6 +233,21 @@ class TestLLMConfig:
         config = LLMConfig(backend="gjc")
         assert config.backend == "gjc"
 
+    def test_llm_config_accepts_zcode_backend(self) -> None:
+        """LLMConfig accepts zcode now that the zcode LLM adapter is registered."""
+        config = LLMConfig(backend="zcode")
+        assert config.backend == "zcode"
+
+    def test_llm_config_zcode_persists_in_orchestrator_config(self) -> None:
+        """zcode LLM backend survives persisted-config validation (OuroborosConfig).
+
+        Regression for the end-to-end gap where the capability/factory/loader
+        layers advertised zcode as an LLM backend but ``LLMConfig.backend``
+        rejected it, so a saved ``llm.backend: zcode`` could not load.
+        """
+        config = OuroborosConfig(llm=LLMConfig(backend="zcode"))
+        assert config.llm.backend == "zcode"
+
 
 class TestLLMTaskProfileConfig:
     """Test provider-neutral LLM task profile configuration."""

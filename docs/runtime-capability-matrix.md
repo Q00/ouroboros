@@ -26,12 +26,12 @@ ouroboros run workflow --runtime codex seed.yaml
 
 You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` environment variable.
 
-> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, Gemini CLI, Kiro CLI, GitHub Copilot CLI, Pi CLI, GJC, Antigravity (`agy`), Grok Build (`grok`), and Zcode (`zcode`) are natively shipped backends. Antigravity, Grok, and Zcode are runtime-only. Additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture - How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
+> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, OpenCode, Hermes, Gemini CLI, Kiro CLI, GitHub Copilot CLI, Pi CLI, GJC, Antigravity (`agy`), Grok Build (`grok`), and Zcode (`zcode`) are natively shipped backends. Antigravity and Grok are runtime-only; Zcode also supports explicit LLM-completion selection with `llm.backend: zcode`. Additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture - How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
 
 ## Capability Matrix
 
-> **Note — runtime-only backends not yet threaded as columns:** The tables below
-> predate the runtime-only backends added more recently. Their per-capability
+> **Note — newer backends not yet threaded as columns:** The tables below
+> predate the newer runtime surfaces added more recently. Their per-capability
 > contract lives in the per-runtime guide rather than as a column here:
 > Antigravity (`agy`) → [runtime-guides/antigravity.md](runtime-guides/antigravity.md);
 > Grok (`grok`) → [runtime-guides/grok.md](runtime-guides/grok.md);

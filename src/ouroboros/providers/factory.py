@@ -23,6 +23,7 @@ from ouroboros.config import (
     get_ourocode_cli_path,
     get_pi_cli_path,
     get_runtime_profile,
+    get_zcode_cli_path,
 )
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
@@ -275,6 +276,22 @@ def _create_ourocode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     )
 
 
+def _create_zcode_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
+    from ouroboros.providers.zcode_cli_adapter import ZcodeCliLLMAdapter
+
+    return ZcodeCliLLMAdapter(
+        cli_path=request.cli_path or get_zcode_cli_path(),
+        cwd=request.cwd,
+        permission_mode=request.permission_mode,
+        allowed_tools=request.allowed_tools,
+        max_turns=request.max_turns,
+        on_message=request.on_message,
+        timeout=request.timeout,
+        max_retries=request.max_retries,
+        runtime_profile=get_runtime_profile(),
+    )
+
+
 def _create_kiro_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
     from ouroboros.config import get_kiro_cli_path
     from ouroboros.providers.kiro_adapter import KiroCodeAdapter
@@ -336,6 +353,7 @@ _LLM_ADAPTER_FACTORIES: dict[str, Callable[[_LLMAdapterRequest], LLMAdapter]] = 
     "_create_ourocode_adapter": _create_ourocode_adapter,
     "_create_kiro_adapter": _create_kiro_adapter,
     "_create_litellm_adapter": _create_litellm_adapter,
+    "_create_zcode_adapter": _create_zcode_adapter,
 }
 
 

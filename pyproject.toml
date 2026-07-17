@@ -38,6 +38,7 @@ all = ["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]
 [project.scripts]
 ooo = "ouroboros.cli.main:app"
 ouroboros = "ouroboros.cli.main:app"
+ozo = "ouroboros.cli.commands.zcode:app"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

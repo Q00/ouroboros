@@ -110,7 +110,9 @@ _FACTORY_SPECS: tuple[BackendFactorySpec, ...] = (
     ),
     BackendFactorySpec(
         name="zcode",
+        llm_backend="zcode",
         runtime_backend="zcode",
+        llm_adapter_factory="_create_zcode_adapter",
         agent_runtime_factory="_create_zcode_runtime",
     ),
     BackendFactorySpec(

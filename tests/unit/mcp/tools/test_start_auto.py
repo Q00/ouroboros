@@ -867,9 +867,9 @@ class TestBackgroundJobPath:
                 break
 
         assert terminal_wait is not None
+        assert terminal_wait.meta["job_id"] == job_id
         assert terminal_wait.meta["status"] == "completed"
         assert terminal_wait.meta["session_id"] == auto_session_id
-        assert job_id in terminal_wait.text_content
 
         completed = await result_handler.handle({"job_id": job_id})
 
