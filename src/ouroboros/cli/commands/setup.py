@@ -1146,30 +1146,55 @@ def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
         value = _get_nested_value(config_dict, path)
         if value is _MISSING:
             continue
+        if _is_codex_setup_unset_model_value(value):
+            continue
         if _is_codex_setup_shipped_default_value(value, shipped_default):
             continue
-        if value == _CODEX_DEFAULT_MODEL_SENTINEL:
+        if _is_codex_setup_default_sentinel(value):
             continue
         if isinstance(value, list | tuple) and _is_codex_setup_shipped_default_roster(
             value, shipped_default
         ):
             continue
-        if (
-            isinstance(value, list | tuple)
-            and value
-            and all(item == _CODEX_DEFAULT_MODEL_SENTINEL for item in value)
-        ):
+        if _is_codex_setup_default_sentinel_roster(value):
             continue
-        if value is not None:
-            return True
+        return True
     return False
+
+
+def _is_codex_setup_unset_model_value(value: object) -> bool:
+    """Return whether runtime model resolution treats a value as unset."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if not isinstance(value, list | tuple):
+        return False
+    return not value or all(isinstance(item, str) and not item.strip() for item in value)
+
+
+def _is_codex_setup_default_sentinel(value: object) -> bool:
+    """Return whether a scalar resolves to the backend default sentinel."""
+    return isinstance(value, str) and value.strip() == _CODEX_DEFAULT_MODEL_SENTINEL
+
+
+def _is_codex_setup_default_sentinel_roster(value: object) -> bool:
+    """Return whether every roster entry resolves to the default sentinel."""
+    return (
+        bool(value)
+        and isinstance(value, list | tuple)
+        and all(
+            isinstance(item, str) and item.strip() == _CODEX_DEFAULT_MODEL_SENTINEL
+            for item in value
+        )
+    )
 
 
 def _is_codex_setup_shipped_default_value(value: object, shipped_default: object) -> bool:
     """Return whether a scalar value is a current or legacy shipped default."""
     if not isinstance(value, str) or not isinstance(shipped_default, str):
         return False
-    return value in recognized_shipped_defaults(shipped_default)
+    return value.strip() in recognized_shipped_defaults(shipped_default)
 
 
 def _is_codex_setup_shipped_default_roster(
@@ -1185,7 +1210,7 @@ def _is_codex_setup_shipped_default_roster(
     return all(
         isinstance(candidate, str)
         and isinstance(default, str)
-        and candidate in recognized_shipped_defaults(default)
+        and candidate.strip() in recognized_shipped_defaults(default)
         for candidate, default in zip(current, shipped_default, strict=True)
     )
 
@@ -1195,18 +1220,22 @@ def _apply_codex_default_model_sentinel(config_dict: dict) -> None:
     for section_name, key, shipped_default in _CODEX_DEFAULT_MODEL_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None or current == _CODEX_DEFAULT_MODEL_SENTINEL:
-            section[key] = _CODEX_DEFAULT_MODEL_SENTINEL
-        elif _is_codex_setup_shipped_default_value(current, shipped_default):
+        if (
+            _is_codex_setup_unset_model_value(current)
+            or _is_codex_setup_default_sentinel(current)
+            or _is_codex_setup_shipped_default_value(current, shipped_default)
+        ):
             section[key] = _CODEX_DEFAULT_MODEL_SENTINEL
 
     for section_name, key, shipped_roster in _CODEX_DEFAULT_MODEL_LIST_TARGETS:
         section = _ensure_mapping_section(config_dict, section_name)
         current = section.get(key)
-        if current is None:
-            section[key] = [_CODEX_DEFAULT_MODEL_SENTINEL] * len(shipped_roster)
-        elif isinstance(current, list | tuple) and _is_codex_setup_shipped_default_roster(
-            current, shipped_roster
+        if _is_codex_setup_unset_model_value(current) or (
+            isinstance(current, list | tuple)
+            and (
+                _is_codex_setup_default_sentinel_roster(current)
+                or _is_codex_setup_shipped_default_roster(current, shipped_roster)
+            )
         ):
             section[key] = [_CODEX_DEFAULT_MODEL_SENTINEL] * len(shipped_roster)
 

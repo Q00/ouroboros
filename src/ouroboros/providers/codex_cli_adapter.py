@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import tomllib
 from typing import Any
 
 import structlog
@@ -160,6 +161,49 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             self._permission_mode,
             default_mode="default",
             source=f"{self._log_namespace}.llm_adapter",
+        )
+
+    @staticmethod
+    def _codex_config_home() -> Path:
+        """Return the config root used by the nested Codex process."""
+        configured = os.environ.get("CODEX_HOME", "").strip()
+        return Path(configured).expanduser() if configured else Path.home() / ".codex"
+
+    @staticmethod
+    def _mapping_declares_ouroboros_mcp(config: object) -> bool:
+        """Return whether a parsed Codex config contains a valid server transport."""
+        if not isinstance(config, dict):
+            return False
+        mcp_servers = config.get("mcp_servers")
+        if not isinstance(mcp_servers, dict):
+            return False
+        entry = mcp_servers.get("ouroboros")
+        if not isinstance(entry, dict):
+            return False
+        return any(
+            isinstance(entry.get(key), str) and bool(entry[key].strip())
+            for key in ("command", "url")
+        )
+
+    @classmethod
+    def _config_file_declares_ouroboros_mcp(cls, config_path: Path) -> bool:
+        """Inspect one Codex config layer without inventing a missing transport."""
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            return False
+        return cls._mapping_declares_ouroboros_mcp(config)
+
+    def _has_configured_ouroboros_mcp(self, *, task_profile: str | None) -> bool:
+        """Return whether the effective user/profile config can be safely disabled."""
+        codex_home = self._codex_config_home()
+        active_profile = self._codex_profile or task_profile
+        if self._config_file_declares_ouroboros_mcp(codex_home / "config.toml"):
+            return True
+        if not active_profile:
+            return False
+        return self._config_file_declares_ouroboros_mcp(
+            codex_home / f"{active_profile}.config.toml"
         )
 
     def _get_configured_cli_path(self) -> str | None:
@@ -433,7 +477,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
 
         command.extend(self._build_permission_args())
 
-        if self._strict_mcp_config:
+        if self._strict_mcp_config and self._has_configured_ouroboros_mcp(task_profile=profile):
             command.extend(["-c", "mcp_servers.ouroboros.enabled=false"])
 
         if self._ephemeral:

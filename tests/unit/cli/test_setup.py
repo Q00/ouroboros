@@ -1069,6 +1069,7 @@ class TestCodexSetup:
         assert config_dict["consensus"]["models"] == ["default", "default", "default"]
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
         assert config_dict["llm_role_profiles"]["clarification"] == "frontier"
+        assert config_dict["llm_role_profiles"]["consensus_vote"] == "deep"
 
     def test_setup_codex_rewrites_legacy_shipped_default_model(self, tmp_path: Path) -> None:
         """Legacy shipped defaults are setup defaults, not explicit choices."""
@@ -1104,6 +1105,109 @@ class TestCodexSetup:
         assert config_dict["llm"]["qa_model"] == "default"
         assert config_dict["clarification"]["default_model"] == "default"
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+
+    @pytest.mark.parametrize("roster", [[], [" ", "\t"]])
+    def test_setup_codex_treats_blank_models_as_unset(
+        self,
+        tmp_path: Path,
+        roster: list[str],
+    ) -> None:
+        """Blank scalar and empty roster values should receive Codex defaults."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"backend": "claude_code", "qa_model": "  "},
+                    "consensus": {"models": roster},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert config_dict["llm"]["qa_model"] == "default"
+        assert config_dict["consensus"]["models"] == ["default", "default", "default"]
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+        assert config_dict["llm_role_profiles"]["consensus_vote"] == "deep"
+
+    def test_setup_codex_preserves_explicit_consensus_roster(self, tmp_path: Path) -> None:
+        """A custom consensus roster must remain an explicit role override."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        custom_roster = ["custom-a", "custom-b", "custom-c"]
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"backend": "claude_code"},
+                    "consensus": {"models": custom_roster},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert config_dict["consensus"]["models"] == custom_roster
+        assert "consensus_vote" not in config_dict["llm_role_profiles"]
+
+    def test_setup_codex_normalizes_padded_default_sentinels(self, tmp_path: Path) -> None:
+        """Whitespace around default sentinels must not suppress role profiles."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"backend": "codex", "qa_model": " default "},
+                    "consensus": {"models": [" default ", "default", "\tdefault\t"]},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert config_dict["llm"]["qa_model"] == "default"
+        assert config_dict["consensus"]["models"] == ["default", "default", "default"]
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+        assert config_dict["llm_role_profiles"]["consensus_vote"] == "deep"
 
     def test_setup_codex_merges_codex_mapping_into_existing_profiles(self, tmp_path: Path) -> None:
         """Existing same-name profiles should be made safe before role mappings target them."""
