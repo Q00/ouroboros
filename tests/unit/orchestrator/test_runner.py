@@ -42,6 +42,7 @@ from ouroboros.orchestrator.runner import (
     OrchestratorError,
     OrchestratorResult,
     OrchestratorRunner,
+    _seed_has_investment_metadata,
     build_system_prompt,
     build_task_prompt,
 )
@@ -60,6 +61,26 @@ def _task_workspace() -> TaskWorkspace:
         branch="ooo/orch_test",
         lock_path="/tmp/worktree/.locks/repo/orch_test.json",
     )
+
+
+def test_seed_investment_detection_supports_legacy_string_criteria(sample_seed: Seed) -> None:
+    assert _seed_has_investment_metadata(sample_seed) is False
+
+
+def test_seed_investment_detection_finds_structured_metadata(sample_seed: Seed) -> None:
+    seed = sample_seed.model_copy(
+        update={
+            "acceptance_criteria": (
+                sample_seed.acceptance_criteria[0],
+                AcceptanceCriterionSpec(
+                    description="Protect the production migration",
+                    investment=InvestmentSpec(stakes="high"),
+                ),
+            )
+        }
+    )
+
+    assert _seed_has_investment_metadata(seed) is True
 
 
 @pytest.fixture

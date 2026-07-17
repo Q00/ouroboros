@@ -46,7 +46,7 @@ from ouroboros.core.execution_preferences import (
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
-from ouroboros.core.seed import ac_text, ac_texts
+from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     render_auto_recursion_guard,
@@ -317,7 +317,10 @@ def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> Executi
 
 def _seed_has_investment_metadata(seed: Seed) -> bool:
     """Return whether any AC requires per-criterion investment routing."""
-    return any(criterion.investment is not None for criterion in seed.acceptance_criteria)
+    return any(
+        isinstance(criterion, AcceptanceCriterionSpec) and criterion.investment is not None
+        for criterion in seed.acceptance_criteria
+    )
 
 
 def build_system_prompt(
