@@ -413,8 +413,8 @@ Scan a root directory for existing git repositories and linked worktrees, then r
   Scanning for Existing Projects...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Looking for git repositories and worktrees under the scan root directory.
-Linked worktrees reported by discovered normal repo roots may also be registered, even outside the scan root directory.
+Looking for git repositories and worktrees up to two directories below the scan root.
+Only repositories and worktrees reached directly by this depth-bounded walk are registered.
 Local repos and repos with any remote name are eligible.
 This may take a moment...
 ```
@@ -435,14 +435,14 @@ non-MCP setup fallback instead of retrying the failing call.
    Tool: ouroboros_brownfield
    Arguments: { "action": "scan" }
    ```
-   This walks `scan_root` for valid seed repos/worktrees and registers them in DB. For each discovered normal repo root with a `.git` directory, Git-reported linked worktrees are also considered, even when they live outside `scan_root`. A linked worktree found under `scan_root` with a `.git` file is registered itself, but it is not used to register its main worktree or sibling worktrees outside `scan_root`. Existing defaults are preserved.
+   This walks `scan_root` up to two directory levels deep for valid seed repos/worktrees and registers them in DB. Each repo or worktree reached directly by the walk is registered self-only. Git worktree families are not expanded, so main or sibling worktrees outside the depth-bounded walk are not pulled in. Existing defaults are preserved.
 
 **Scan boundaries:**
 - The filesystem walk starts at `scan_root`; when omitted, `scan_root` defaults to the current user's home directory.
-- Repositories are only discovered directly by walking directories inside `scan_root`.
+- Repositories are discovered directly by walking directories inside `scan_root`, at most two levels deep.
 - Dot-prefixed directories and known noisy directories such as `node_modules` are not walked as seed locations.
-- Git worktrees are different: once a normal repo root with a `.git` directory is discovered, Ouroboros runs `git worktree list --porcelain` and may register those linked worktrees even if their paths are outside `scan_root`.
-- A linked worktree found inside `scan_root` with a `.git` file is registered itself, but it is not used to register its main worktree or sibling worktrees outside `scan_root`.
+- Both normal repos with a `.git` directory and linked worktrees with a `.git` file are registered when the walk reaches them.
+- Git worktree families are not expanded. A worktree is registered only when the depth-bounded walk finds it directly.
 - Local repos, repos without remotes, and repos whose remotes are not named `origin` are all eligible.
 
 The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**

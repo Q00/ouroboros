@@ -135,6 +135,41 @@ def test_brownfield_default_selection_ends_turn_in_every_skill_bundle() -> None:
             assert "Default repo selection — IMMEDIATELY" not in text
 
 
+def test_brownfield_scan_contract_matches_runtime_in_every_skill_bundle() -> None:
+    """All shipped host bundles must describe the depth-bounded, self-only scan.
+
+    ``scan_home_for_repos()`` walks ``scan_root`` at most two levels deep and
+    registers each candidate self-only — it never expands Git worktree families
+    via ``git worktree list``. Skill instructions in both ``skills/`` and
+    ``.claude-plugin/skills/`` must not advertise the retired outside-root
+    worktree-expansion behavior.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    stale_phrases = (
+        "even outside the scan root directory",
+        "even when they live outside `scan_root`",
+        "even if their paths are outside `scan_root`",
+        "git worktree list --porcelain",
+    )
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("brownfield", "setup"):
+            skill_path = root / skill / "SKILL.md"
+            text = skill_path.read_text(encoding="utf-8")
+            compact = " ".join(text.split())
+            for phrase in stale_phrases:
+                assert phrase not in compact, (
+                    f"{skill_path}: stale worktree-expansion scan contract `{phrase}` — "
+                    "the runtime scan is depth-bounded and registers repos self-only"
+                )
+            assert "Git worktree families are not expanded" in compact.replace(
+                "families are NOT expanded", "families are not expanded"
+            ), f"{skill_path}: missing self-only scan contract statement"
+            assert "two" in compact and "level" in compact, (
+                f"{skill_path}: missing depth-bounded (two-level) scan description"
+            )
+
+
 def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     """Run/auto should free the main session when native child sessions exist."""
     repo_root = Path(__file__).resolve().parents[3]
