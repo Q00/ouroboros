@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
+import ouroboros.config.loader as loader_module
 from ouroboros.config.loader import (
     config_exists,
     create_default_config,
@@ -43,6 +44,7 @@ from ouroboros.config.loader import (
     get_semantic_model,
     get_usage_limit_pause_seconds,
     get_wonder_model,
+    get_zcode_cli_path,
     load_config,
     load_credentials,
 )
@@ -59,6 +61,27 @@ from ouroboros.config.models import (
     RuntimeProfileConfig,
 )
 from ouroboros.core.errors import ConfigError
+
+_ZCODE_APP_BUNDLE_DEFAULT = Path("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
+
+
+def _hide_default_zcode_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep zcode path tests independent from the developer machine's install.
+
+    ``get_zcode_cli_path`` intentionally falls back to the standard macOS
+    ZCode.app bundle after rejecting stale explicit env/config paths. Tests
+    that assert rejection of the explicit value must hide only that default
+    fallback; otherwise they fail on Macs where ZCode.app is installed and pass
+    on CI machines where it is absent.
+    """
+    original = loader_module._is_runnable_zcode_cli_path
+
+    def _without_default_bundle(path: str | Path) -> bool:
+        if Path(path) == _ZCODE_APP_BUNDLE_DEFAULT:
+            return False
+        return original(path)
+
+    monkeypatch.setattr(loader_module, "_is_runnable_zcode_cli_path", _without_default_bundle)
 
 
 @pytest.fixture
@@ -655,6 +678,109 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_grok_cli_path() is None
+
+    def test_get_zcode_cli_path_returns_existing_env_script(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode.cjs"
+        fake.write_text("// zcode", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(fake))
+
+        assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_returns_executable_env_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(fake))
+
+        assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_returns_relative_executable_env_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", "zcode")
+
+        assert get_zcode_cli_path() == str(fake.resolve())
+
+    def test_get_zcode_cli_path_rejects_non_executable_env_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(fake))
+        _hide_default_zcode_bundle(monkeypatch)
+
+        with patch("ouroboros.config.loader.load_config", side_effect=ConfigError("missing")):
+            assert get_zcode_cli_path() is None
+
+    def test_get_zcode_cli_path_rejects_stale_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_ZCODE_CLI_PATH", str(tmp_path / "missing.cjs"))
+        _hide_default_zcode_bundle(monkeypatch)
+        with patch("ouroboros.config.loader.load_config", side_effect=ConfigError("missing")):
+            assert get_zcode_cli_path() is None
+
+    def test_get_zcode_cli_path_falls_back_to_config(self, tmp_path: Path) -> None:
+        fake = tmp_path / "zcode.cjs"
+        fake.write_text("// zcode", encoding="utf-8")
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(zcode_cli_path=str(fake)))
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() == str(fake)
+
+    def test_get_zcode_cli_path_returns_relative_executable_config_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.chdir(tmp_path)
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(zcode_cli_path="zcode"))
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() == str(fake.resolve())
+
+    def test_get_zcode_cli_path_rejects_stale_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = OuroborosConfig(
+            orchestrator=OrchestratorConfig(zcode_cli_path=str(tmp_path / "missing.cjs"))
+        )
+        _hide_default_zcode_bundle(monkeypatch)
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            assert get_zcode_cli_path() is None
+
+    def test_get_zcode_cli_path_rejects_non_executable_config_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = tmp_path / "zcode"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(zcode_cli_path=str(fake)))
+
+        with (
+            patch.dict(os.environ, {"OUROBOROS_ZCODE_CLI_PATH": ""}, clear=False),
+            patch("ouroboros.config.loader.load_config", return_value=config),
+        ):
+            _hide_default_zcode_bundle(monkeypatch)
+            assert get_zcode_cli_path() is None
 
     def test_get_kiro_cli_path_returns_executable_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

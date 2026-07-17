@@ -403,6 +403,8 @@ VALID_RUNTIME_BACKENDS = frozenset(
         "grok",
         "grok_cli",
         "grok_build",
+        "zcode",
+        "zcode_cli",
     }
 )
 
@@ -526,6 +528,14 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - Absolute path: /path/to/grok
             - ~ expansion: ~/.local/bin/grok
             - None: Resolve from PATH at runtime (or OUROBOROS_GROK_CLI_PATH)
+        zcode_cli_path: Path to the Zcode CLI entry script (``zcode.cjs``).
+            Official app-bundle scripts launch through ZCode's bundled
+            Electron/Node runtime; standalone scripts use the system Node.
+            Directly executable wrappers are also accepted. Supports:
+            - Absolute path: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+            - ~ expansion supported
+            - None: Resolve from config/env or fall back to the macOS app-bundle
+              default (or OUROBOROS_ZCODE_CLI_PATH)
         default_max_turns: Default max turns for agent execution
         max_parallel_workers: Default maximum concurrent AC workers
         usage_limit_pause_hours: Default pause window for provider usage/quota limits
@@ -554,6 +564,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "gjc",
         "antigravity",
         "grok",
+        "zcode",
     ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
@@ -595,6 +606,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     antigravity_cli_path: str | None = None
     grok_cli_path: str | None = None
     ourocode_cli_path: str | None = None
+    zcode_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     max_parallel_workers: int = Field(default=3, ge=1)
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
@@ -617,6 +629,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "antigravity_cli_path",
         "grok_cli_path",
         "ourocode_cli_path",
+        "zcode_cli_path",
     )
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:

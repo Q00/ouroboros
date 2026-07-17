@@ -389,9 +389,7 @@ def show(
 def backend(
     new_backend: Annotated[
         str | None,
-        typer.Argument(
-            help="Backend to switch to (claude, codex, hermes, gemini, gjc, goose, pi)."
-        ),
+        typer.Argument(help=f"Backend to switch to ({', '.join(_SWITCHABLE_BACKENDS)})."),
     ] = None,
 ) -> None:
     """Show or switch the runtime backend.
@@ -410,6 +408,7 @@ def backend(
     [dim]    ouroboros config backend gjc       # switch to GJC[/dim]
     [dim]    ouroboros config backend goose     # switch to Goose[/dim]
     [dim]    ouroboros config backend pi        # switch to Pi CLI[/dim]
+    [dim]    ouroboros config backend zcode     # switch to Zcode[/dim]
     """
     data, config_path = _load_config()
     current = data.get("orchestrator", {}).get("runtime_backend", "unknown")
@@ -422,7 +421,7 @@ def backend(
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
         console.print(
             "\n[dim]Switch with: ouroboros config backend "
-            "<claude|codex|hermes|gemini|gjc|goose|pi>[/dim]\n"
+            "<claude|codex|hermes|gemini|gjc|goose|pi|antigravity|grok|zcode>[/dim]\n"
         )
         return
 
@@ -470,6 +469,10 @@ def backend(
         from ouroboros.config import get_grok_cli_path
 
         cli_path = get_grok_cli_path()
+    elif new_backend == "zcode":
+        from ouroboros.config import get_zcode_cli_path
+
+        cli_path = get_zcode_cli_path()
     if not cli_path:
         cli_path = shutil.which(cli_name)
     if not cli_path:
@@ -497,6 +500,12 @@ def backend(
                 "Set OUROBOROS_PI_CLI_PATH, configure orchestrator.pi_cli_path "
                 "in config.yaml, or install pi on PATH and retry."
             )
+        elif new_backend == "zcode":
+            print_error(
+                "zcode CLI not found.\n"
+                "Set OUROBOROS_ZCODE_CLI_PATH, configure orchestrator.zcode_cli_path "
+                "in config.yaml, install ZCode, or put zcode on PATH and retry."
+            )
         else:
             print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")
         raise typer.Exit(1)
@@ -517,6 +526,7 @@ def backend(
         _setup_grok,
         _setup_hermes,
         _setup_pi,
+        _setup_zcode,
     )
 
     _setup_had_errors = False
@@ -550,6 +560,8 @@ def backend(
             _setup_antigravity(cli_path)
         elif new_backend == "grok":
             _setup_grok(cli_path)
+        elif new_backend == "zcode":
+            _setup_zcode(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet

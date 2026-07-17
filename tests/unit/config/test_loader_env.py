@@ -91,8 +91,9 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
     config-home root) without a failing test.
     """
     required = {
-        # Explicit executable-path overrides + bare alias.
+        # Process lookup/preload hooks + explicit path overrides/bare alias.
         "PATH",
+        "NODE_OPTIONS",
         "OUROBOROS_CLI_PATH",
         "OPENCODE_CLI_PATH",
         # Spawned-CLI / agent instruction + extension roots.
@@ -140,6 +141,20 @@ def test_untrusted_env_cannot_set_bare_opencode_alias(
     _load_env_file(env_file, trusted=False)
 
     assert "OPENCODE_CLI_PATH" not in os.environ
+
+
+def test_untrusted_env_cannot_set_node_options(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A cloned repo cannot preload JavaScript into a spawned Node CLI."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("NODE_OPTIONS=--require ./evil.js\n")
+    monkeypatch.delenv("NODE_OPTIONS", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "NODE_OPTIONS" not in os.environ
 
 
 def test_untrusted_env_cannot_disable_approval_gate(
