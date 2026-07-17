@@ -1474,6 +1474,84 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_live_owner_retry_failure_does_not_terminalize_job(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.created",
+                    aggregate_type="job",
+                    aggregate_id="job_live_retry",
+                    data={
+                        "job_type": "execute_seed",
+                        "status": "running",
+                        "message": "Retry pending",
+                        "links": {
+                            "session_id": "orch_live_retry",
+                            "execution_id": "exec_live_retry",
+                            "lineage_id": None,
+                            "preserve_runner_result": True,
+                        },
+                        "owner_pid": os.getpid(),
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.failed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_live_retry_ac_1_attempt_1",
+                    data={
+                        "execution_id": "exec_live_retry",
+                        "session_id": "child_attempt_1",
+                        "session_scope_id": "exec_live_retry_ac_1",
+                        "success": False,
+                        "error_message": "attempt 1 failed; retry scheduled",
+                    },
+                )
+            )
+
+            snapshot = await manager.get_snapshot("job_live_retry")
+
+            assert snapshot.status is JobStatus.RUNNING
+            events, _ = await store.get_events_after("job", "job_live_retry", last_row_id=0)
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    async def test_cancelled_job_wait_branch_cancels_inner_task(self) -> None:
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def _blocking_wait() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        outer = asyncio.create_task(
+            job_handlers_module._await_job_wait_branch(
+                _blocking_wait(),
+                timeout=60,
+                job_id="job_cancel_wait",
+                branch="snapshot",
+            )
+        )
+        await started.wait()
+        outer.cancel()
+
+        try:
+            await outer
+        except asyncio.CancelledError:
+            pass
+        else:  # pragma: no cover - defensive assertion
+            raise AssertionError("outer job wait cancellation did not propagate")
+        await asyncio.wait_for(stopped.wait(), timeout=1)
+
     async def test_cancel_requested_wins_over_complete_execution_terminal(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)

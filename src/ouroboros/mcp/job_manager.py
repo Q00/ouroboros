@@ -1351,7 +1351,12 @@ class JobManager:
             "AC completion."
         )
 
-    async def _derive_linked_execution_failure_result(self, snapshot: JobSnapshot) -> str | None:
+    async def _derive_linked_execution_failure_result(
+        self,
+        snapshot: JobSnapshot,
+        *,
+        allow_nonterminal_evidence: bool = False,
+    ) -> str | None:
         """Return failure text when linked execution already recorded failure.
 
         This is intentionally not a success recovery path. It only prevents a
@@ -1376,6 +1381,8 @@ class JobManager:
             if status not in {"failed", "cancelled", "interrupted"}:
                 return None
             terminal_failure_events.append(terminal_events[0])
+        if not terminal_failure_events and not allow_nonterminal_evidence:
+            return None
 
         failed_session_events = await self._event_store.query_execution_related_events(
             snapshot.links.execution_id,
@@ -1622,7 +1629,11 @@ class JobManager:
             error=error,
         )
         owner_pid, owner_start_time = _read_owner_identity(created.data)
-        snapshot = await self._recover_linked_execution_terminal_snapshot(snapshot)
+        owner_is_dead = self._job_owner_is_dead(owner_pid, owner_start_time)
+        snapshot = await self._recover_linked_execution_terminal_snapshot(
+            snapshot,
+            owner_is_dead=owner_is_dead,
+        )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
             owner_pid=owner_pid,
@@ -1631,7 +1642,10 @@ class JobManager:
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
     async def _recover_linked_execution_terminal_snapshot(
-        self, snapshot: JobSnapshot
+        self,
+        snapshot: JobSnapshot,
+        *,
+        owner_is_dead: bool = False,
     ) -> JobSnapshot:
         """Recover linked execution terminal jobs when no live runner remains.
 
@@ -1659,7 +1673,10 @@ class JobManager:
         linked_failure = (
             None
             if completed_result is not None or progress_blocker is not None
-            else await self._derive_linked_execution_failure_result(snapshot)
+            else await self._derive_linked_execution_failure_result(
+                snapshot,
+                allow_nonterminal_evidence=owner_is_dead,
+            )
         )
         if completed_result is None and progress_blocker is None and linked_failure is None:
             return snapshot

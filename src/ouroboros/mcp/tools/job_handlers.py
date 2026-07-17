@@ -258,7 +258,12 @@ async def _await_job_wait_branch(
         guard_version=_JOB_WAIT_GUARD_VERSION,
         pid=os.getpid(),
     )
-    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_detached_wait_task)
+        raise
     log.debug(
         "mcp.tool.job_wait.guard.wait_returned",
         job_id=job_id,
