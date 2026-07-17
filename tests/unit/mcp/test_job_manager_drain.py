@@ -39,6 +39,34 @@ async def _start_blocked_job(manager: JobManager, *, session_id: str | None = No
 
 
 class TestJobManagerDrain:
+    async def test_drain_allows_short_job_to_complete_before_interrupting(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        try:
+            started = asyncio.Event()
+
+            async def _quick_runner() -> str:
+                started.set()
+                await asyncio.sleep(0.01)
+                return "finished during drain"
+
+            snapshot = await manager.start_job(
+                job_type="test_drain_quick",
+                initial_message="quick",
+                runner=_quick_runner(),
+            )
+            await asyncio.wait_for(started.wait(), timeout=2.0)
+
+            drained = await manager.drain(grace_seconds=1.0)
+
+            assert drained == 1
+            final = await manager.get_snapshot(snapshot.job_id)
+            assert final.status is JobStatus.COMPLETED
+            assert final.result_text == "finished during drain"
+        finally:
+            await store.close()
+
     async def test_drain_persists_interrupted_before_store_closes(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -46,12 +74,68 @@ class TestJobManagerDrain:
         try:
             snapshot = await _start_blocked_job(manager)
 
-            drained = await manager.drain(grace_seconds=2.0)
+            drained = await manager.drain(grace_seconds=0.05)
 
             assert drained == 1
             final = await manager.get_snapshot(snapshot.job_id)
             assert final.status is JobStatus.INTERRUPTED
             assert final.result_meta.get("interrupted_from_shutdown") is True
+        finally:
+            await store.close()
+
+    async def test_drain_is_idempotent_after_terminalizing_job(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        try:
+            snapshot = await _start_blocked_job(manager)
+
+            first = await manager.drain(grace_seconds=0.05)
+            second = await manager.drain(grace_seconds=0.05)
+
+            assert first == 1
+            assert second == 0
+            final = await manager.get_snapshot(snapshot.job_id)
+            assert final.status is JobStatus.INTERRUPTED
+            events, _ = await store.get_events_after("job", snapshot.job_id, last_row_id=0)
+            interrupted_events = [event for event in events if event.type == "mcp.job.interrupted"]
+            assert len(interrupted_events) == 1
+        finally:
+            await store.close()
+
+    async def test_repeated_drain_does_not_double_terminalize_mixed_jobs(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        try:
+            quick_started = asyncio.Event()
+
+            async def _quick_runner() -> str:
+                quick_started.set()
+                await asyncio.sleep(0.01)
+                return "finished during drain"
+
+            quick = await manager.start_job(
+                job_type="test_drain_quick",
+                initial_message="quick",
+                runner=_quick_runner(),
+            )
+            blocked = await _start_blocked_job(manager)
+            await asyncio.wait_for(quick_started.wait(), timeout=2.0)
+
+            drain_counts = [await manager.drain(grace_seconds=0.1)]
+            for _ in range(3):
+                drain_counts.append(await manager.drain(grace_seconds=0.05))
+
+            assert drain_counts[0] in {1, 2}
+            assert drain_counts[1:] == [0, 0, 0]
+            assert (await manager.get_snapshot(quick.job_id)).status is JobStatus.COMPLETED
+            assert (await manager.get_snapshot(blocked.job_id)).status is JobStatus.INTERRUPTED
+
+            quick_events, _ = await store.get_events_after("job", quick.job_id, last_row_id=0)
+            blocked_events, _ = await store.get_events_after("job", blocked.job_id, last_row_id=0)
+            assert sum(1 for event in quick_events if event.type == "mcp.job.completed") == 1
+            assert sum(1 for event in blocked_events if event.type == "mcp.job.interrupted") == 1
         finally:
             await store.close()
 
@@ -62,7 +146,7 @@ class TestJobManagerDrain:
         try:
             snapshot = await _start_blocked_job(manager)
 
-            await manager.drain(grace_seconds=2.0)
+            await manager.drain(grace_seconds=0.05)
 
             events, _ = await store.get_events_after("job", snapshot.job_id, last_row_id=0)
             types = [event.type for event in events]
@@ -86,15 +170,29 @@ class TestJobManagerDrain:
                 "is_owned_by_current_process",
                 lambda _session_id: False,
             )
+            runner_task = manager._runner_tasks[snapshot.job_id]
+            job_task = manager._tasks[snapshot.job_id]
 
-            await manager.drain(grace_seconds=2.0)
+            await manager.drain(grace_seconds=0.05)
 
             final = await manager.get_snapshot(snapshot.job_id)
             assert not final.is_terminal, (
                 "drain must not terminalize a job whose live external holder "
                 "is the progress authority"
             )
+            assert not runner_task.done()
+            assert not runner_task.cancelled()
+            assert not job_task.done()
+            assert not job_task.cancelled()
         finally:
+            for task in [*manager._tasks.values(), *manager._runner_tasks.values()]:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *manager._tasks.values(),
+                *manager._runner_tasks.values(),
+                return_exceptions=True,
+            )
             await store.close()
 
     async def test_drain_terminalizes_wedged_job_directly(self, tmp_path) -> None:

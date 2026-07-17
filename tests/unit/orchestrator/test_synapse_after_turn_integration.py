@@ -430,8 +430,7 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
             expires_at=expires_at,
         )
         assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
-        delay_until_expiry = max((expires_at - datetime.now(UTC)).total_seconds(), 0)
-        await asyncio.sleep(delay_until_expiry + 0.05)
+        await asyncio.sleep(max(0.0, (expires_at - datetime.now(UTC)).total_seconds()) + 0.05)
         runtime.release_first_turn.set()
 
         result = await asyncio.wait_for(execution_task, timeout=5)

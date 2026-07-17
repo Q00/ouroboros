@@ -547,6 +547,22 @@ class TestOuroborosConfig:
         assert config.runtime_controls is not None
         assert config.logging is not None
 
+    def test_execution_config_project_guidance_defaults_empty(self) -> None:
+        config = OuroborosConfig()
+        assert config.execution.project_guidance == ()
+
+    def test_execution_config_accepts_project_guidance_allowlist(self) -> None:
+        config = ExecutionConfig(project_guidance=["security", "team.rules"])
+        assert config.project_guidance == ("security", "team.rules")
+
+    def test_execution_config_rejects_path_like_project_guidance_ids(self) -> None:
+        with pytest.raises(ValidationError):
+            ExecutionConfig(project_guidance=["../escape"])
+
+    def test_execution_config_rejects_duplicate_project_guidance_ids(self) -> None:
+        with pytest.raises(ValidationError):
+            ExecutionConfig(project_guidance=["security", "security"])
+
     def test_ouroboros_config_accepts_llm_profiles(self) -> None:
         """OuroborosConfig stores task profiles and role mappings."""
         config = OuroborosConfig(

@@ -13,6 +13,8 @@ import time
 from typing import Any
 from uuid import uuid4
 
+import structlog
+
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
@@ -114,6 +116,7 @@ _JOB_TTL = timedelta(hours=1)
 _COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS = 5.0
 _RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 _RECOVERED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-failed-"
+_RECOVERED_LINKED_FAILURE_EVENT_ID_PREFIX = "mcp-job-recovered-linked-failed-"
 _RECOVERED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-recovered-interrupted-"
 _STRANDED_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-stranded-interrupted-"
 _DRAIN_INTERRUPTED_EVENT_ID_PREFIX = "mcp-job-drain-interrupted-"
@@ -134,6 +137,7 @@ def _drain_interrupted_data() -> dict[str, Any]:
 
 
 logger = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 def _read_owner_identity(created_data: dict[str, Any]) -> tuple[int | None, float | None]:
@@ -252,6 +256,25 @@ def _progress_accounting_failed_job_event(job_id: str, blocker: str) -> BaseEven
     )
 
 
+def _linked_execution_failed_job_event(job_id: str, failure: str) -> BaseEvent:
+    """Build a job-failure event from linked execution failure evidence."""
+    return BaseEvent(
+        id=f"{_RECOVERED_LINKED_FAILURE_EVENT_ID_PREFIX}{job_id}",
+        type="mcp.job.failed",
+        aggregate_type="job",
+        aggregate_id=job_id,
+        data={
+            "status": JobStatus.FAILED.value,
+            "message": "Job failed: linked execution recorded failure",
+            "error": failure,
+            "result_text": failure,
+            "result_meta": {"failed_from_linked_execution_failure": True},
+            "is_error": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def _orphaned_job_interrupted_event(job_id: str) -> BaseEvent:
     """Build the synthetic job-interrupted event for a dead-owner zombie job."""
     return BaseEvent(
@@ -361,6 +384,83 @@ class JobManager:
         self._draining = False
         self._cleanup_running = False
         self._last_cleanup_monotonic = time.monotonic()
+        self._live_snapshots: dict[str, JobSnapshot] = {}
+
+    def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
+        """Return a snapshot that is safe to use without durable reconciliation.
+
+        The in-process cache is updated from persisted job events, but a
+        non-terminal entry can outlive the task that owned the job.  Once that
+        happens, :meth:`get_snapshot` must inspect linked execution evidence
+        and owner liveness before callers report the job as still running.
+        Terminal snapshots are monotonic, while a non-terminal snapshot is a
+        valid fast path only while this manager still owns a live job task.
+        """
+        snapshot = self._live_snapshots.get(job_id)
+        if snapshot is None or snapshot.is_terminal:
+            return snapshot
+        task = self._tasks.get(job_id)
+        if task is not None and not task.done():
+            return snapshot
+        return None
+
+    def _merge_live_snapshot(self, job_id: str, data: dict[str, Any], *, cursor: int) -> None:
+        """Keep a non-authoritative live snapshot for responsive MCP polling."""
+        now = datetime.now(UTC)
+        links_data = data.get("links") if isinstance(data.get("links"), dict) else {}
+        existing = self._live_snapshots.get(job_id)
+        if existing is None:
+            if "job_type" not in data:
+                return
+            links = JobLinks(
+                session_id=links_data.get("session_id"),
+                execution_id=links_data.get("execution_id"),
+                lineage_id=links_data.get("lineage_id"),
+                preserve_runner_result=links_data.get("preserve_runner_result") is True,
+            )
+            self._live_snapshots[job_id] = JobSnapshot(
+                job_id=job_id,
+                job_type=str(data.get("job_type", "unknown")),
+                status=JobStatus(data.get("status", JobStatus.QUEUED.value)),
+                message=str(data.get("message", "")),
+                created_at=now,
+                updated_at=now,
+                cursor=cursor,
+                links=links,
+            )
+            return
+
+        links = existing.links
+        if links_data:
+            links = JobLinks(
+                session_id=links_data.get("session_id") or links.session_id,
+                execution_id=links_data.get("execution_id") or links.execution_id,
+                lineage_id=links_data.get("lineage_id") or links.lineage_id,
+                preserve_runner_result=(
+                    links_data.get("preserve_runner_result")
+                    if isinstance(links_data.get("preserve_runner_result"), bool)
+                    else links.preserve_runner_result
+                ),
+            )
+        result_meta = existing.result_meta
+        if isinstance(data.get("result_meta"), dict):
+            result_meta = data["result_meta"]
+        self._live_snapshots[job_id] = replace(
+            existing,
+            status=JobStatus(data.get("status", existing.status.value)),
+            message=str(data.get("message", existing.message)),
+            updated_at=now,
+            cursor=max(existing.cursor, cursor),
+            links=links,
+            result_text=data.get("result_text", existing.result_text),
+            result_meta=result_meta,
+            result_payload=(
+                data.get("result_payload")
+                if isinstance(data.get("result_payload"), dict)
+                else existing.result_payload
+            ),
+            error=data.get("error", existing.error),
+        )
 
     async def _ensure_initialized(self) -> None:
         if not self._initialized:
@@ -1149,6 +1249,34 @@ class JobManager:
         )
         return True
 
+    async def _append_linked_execution_failed_event(
+        self,
+        job_id: str,
+        failure: str,
+        *,
+        check_current: bool = True,
+        event_id: str | None = None,
+    ) -> bool:
+        """Persist durable job failure derived from linked execution evidence."""
+        if check_current:
+            snapshot = await self.get_snapshot(job_id)
+            if snapshot.is_terminal or snapshot.status == JobStatus.CANCEL_REQUESTED:
+                return False
+        await self._append_event(
+            "mcp.job.failed",
+            job_id,
+            {
+                "status": JobStatus.FAILED.value,
+                "message": "Job failed: linked execution recorded failure",
+                "error": failure,
+                "result_text": failure,
+                "result_meta": {"failed_from_linked_execution_failure": True},
+                "is_error": True,
+            },
+            event_id=event_id,
+        )
+        return True
+
     async def _derive_completed_execution_result(self, snapshot: JobSnapshot) -> str | None:
         """Return a terminal result when linked execution state proves completion.
 
@@ -1236,6 +1364,75 @@ class JobManager:
             "in Deliver. Local output may exist, but orchestration did not record "
             "AC completion."
         )
+
+    async def _derive_linked_execution_failure_result(
+        self,
+        snapshot: JobSnapshot,
+        *,
+        allow_nonterminal_evidence: bool = False,
+    ) -> str | None:
+        """Return failure text when linked execution already recorded failure.
+
+        This is intentionally not a success recovery path. It only prevents a
+        dead MCP owner from hiding more specific execution evidence such as a
+        failed AC runtime session or finalized failed AC outcome.
+        """
+        if not snapshot.links.execution_id:
+            return None
+        if await self._has_active_execution_session(snapshot.links.execution_id):
+            return None
+
+        terminal_events = await self._event_store.query_events(
+            aggregate_id=snapshot.links.execution_id,
+            event_type="execution.terminal",
+            limit=1,
+        )
+        terminal_failure_events = []
+        if terminal_events:
+            status = terminal_events[0].data.get("status")
+            if status == "completed":
+                return None
+            if status not in {"failed", "cancelled", "interrupted"}:
+                return None
+            terminal_failure_events.append(terminal_events[0])
+        if not terminal_failure_events and not allow_nonterminal_evidence:
+            return None
+
+        failed_session_events = await self._event_store.query_execution_related_events(
+            snapshot.links.execution_id,
+            event_type="execution.session.failed",
+            limit=None,
+        )
+        failed_outcome_events = await self._event_store.query_events(
+            aggregate_id=snapshot.links.execution_id,
+            event_type="execution.ac.outcome_finalized",
+            limit=20,
+        )
+        failed_outcomes = [
+            event
+            for event in failed_outcome_events
+            if event.data.get("success") is False
+            or str(event.data.get("outcome") or "").casefold() == "failed"
+        ]
+        if not terminal_failure_events and not failed_session_events and not failed_outcomes:
+            return None
+
+        detail = None
+        for event in [*terminal_failure_events, *failed_session_events, *failed_outcomes]:
+            data = event.data
+            for key in ("error", "error_message", "final_message", "message"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    detail = value.strip()
+                    break
+            if detail:
+                break
+
+        base = (
+            "Linked execution failed before the MCP job reached a terminal event "
+            f"(execution_id={snapshot.links.execution_id})"
+        )
+        return f"{base}: {detail}" if detail else base
 
     async def _has_active_execution_session(self, execution_id: str) -> bool:
         """Return True while any known AC runtime lifecycle stream is still active."""
@@ -1446,7 +1643,11 @@ class JobManager:
             error=error,
         )
         owner_pid, owner_start_time = _read_owner_identity(created.data)
-        snapshot = await self._recover_linked_execution_terminal_snapshot(snapshot)
+        owner_is_dead = self._job_owner_is_dead(owner_pid, owner_start_time)
+        snapshot = await self._recover_linked_execution_terminal_snapshot(
+            snapshot,
+            owner_is_dead=owner_is_dead,
+        )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
             owner_pid=owner_pid,
@@ -1455,7 +1656,10 @@ class JobManager:
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
     async def _recover_linked_execution_terminal_snapshot(
-        self, snapshot: JobSnapshot
+        self,
+        snapshot: JobSnapshot,
+        *,
+        owner_is_dead: bool = False,
     ) -> JobSnapshot:
         """Recover linked execution terminal jobs when no live runner remains.
 
@@ -1469,6 +1673,7 @@ class JobManager:
         if (
             snapshot.is_terminal
             or snapshot.status == JobStatus.CANCEL_REQUESTED
+            or not snapshot.links.execution_id
             or snapshot.job_id in self._tasks
             or snapshot.job_id in self._runner_tasks
         ):
@@ -1479,18 +1684,27 @@ class JobManager:
             if completed_result is not None
             else await self._derive_progress_accounting_blocker(snapshot)
         )
-        if completed_result is None and progress_blocker is None:
+        linked_failure = (
+            None
+            if completed_result is not None or progress_blocker is not None
+            else await self._derive_linked_execution_failure_result(
+                snapshot,
+                allow_nonterminal_evidence=owner_is_dead,
+            )
+        )
+        if completed_result is None and progress_blocker is None and linked_failure is None:
             return snapshot
         if getattr(self._event_store, "_read_only", False):
-            event = (
-                _execution_completed_job_event(
+            if completed_result is not None:
+                event = _execution_completed_job_event(
                     snapshot.job_id,
                     completed_result,
                     session_id=snapshot.links.session_id,
                 )
-                if completed_result is not None
-                else _progress_accounting_failed_job_event(snapshot.job_id, progress_blocker or "")
-            )
+            elif progress_blocker is not None:
+                event = _progress_accounting_failed_job_event(snapshot.job_id, progress_blocker)
+            else:
+                event = _linked_execution_failed_job_event(snapshot.job_id, linked_failure or "")
             return _snapshot_with_terminal_event(snapshot, event, snapshot.cursor)
         lock = self._recovery_locks.setdefault(snapshot.job_id, asyncio.Lock())
         async with lock:
@@ -1515,12 +1729,19 @@ class JobManager:
                         check_current=False,
                         event_id=f"{_RECOVERED_COMPLETION_EVENT_ID_PREFIX}{snapshot.job_id}",
                     )
-                else:
+                elif progress_blocker is not None:
                     recovered = await self._append_progress_accounting_failed_event(
                         snapshot.job_id,
-                        progress_blocker or "",
+                        progress_blocker,
                         check_current=False,
                         event_id=f"{_RECOVERED_FAILURE_EVENT_ID_PREFIX}{snapshot.job_id}",
+                    )
+                else:
+                    recovered = await self._append_linked_execution_failed_event(
+                        snapshot.job_id,
+                        linked_failure or "",
+                        check_current=False,
+                        event_id=(f"{_RECOVERED_LINKED_FAILURE_EVENT_ID_PREFIX}{snapshot.job_id}"),
                     )
             except PersistenceError:
                 events, cursor = await self._event_store.get_events_after(
@@ -2039,6 +2260,11 @@ class JobManager:
         """
         self._draining = True
         live_job_ids = [job_id for job_id, task in self._tasks.items() if not task.done()]
+        log.info(
+            "mcp.job.drain_start",
+            live_job_count=len(live_job_ids),
+            grace_seconds=grace_seconds,
+        )
         # Monitors are progress mirrors with no terminal authority — stop them
         # first so they cannot race the terminal events written below.
         for job_id, monitor in list(self._monitors.items()):
@@ -2047,17 +2273,33 @@ class JobManager:
                 monitor.add_done_callback(_consume_task_result)
             self._monitors.pop(job_id, None)
         if not live_job_ids:
+            log.info("mcp.job.drain_complete", drained=0, skipped_external=0)
             return 0
-        # Cancel runners (not the _run_job wrappers): the CancelledError path
-        # in _run_job persists the terminal event — INTERRUPTED while draining.
+        owned_job_ids: list[str] = []
+        skipped_external = 0
         for job_id in live_job_ids:
-            runner = self._runner_tasks.get(job_id)
-            if runner is not None and not runner.done():
-                runner.cancel()
-            else:
-                task = self._tasks.get(job_id)
-                if task is not None and not task.done():
-                    task.cancel()
+            try:
+                snapshot = await self.get_snapshot(job_id)
+            except (PersistenceError, ValueError):
+                owned_job_ids.append(job_id)
+                continue
+            if not snapshot.is_terminal and not self._drain_should_terminalize(snapshot):
+                skipped_external += 1
+                log.info(
+                    "mcp.job.drain_skip_external_holder",
+                    job_id=job_id,
+                    session_id=snapshot.links.session_id,
+                )
+                continue
+            owned_job_ids.append(job_id)
+        live_job_ids = owned_job_ids
+        if not live_job_ids:
+            log.info(
+                "mcp.job.drain_complete",
+                drained=0,
+                skipped_external=skipped_external,
+            )
+            return 0
         job_tasks = {
             self._tasks[job_id]
             for job_id in live_job_ids
@@ -2069,6 +2311,25 @@ class JobManager:
             drained = len(done)
             for task in done:
                 _consume_task_result(task)
+            # Give short jobs a chance to finish cleanly before turning server
+            # shutdown into an interruption. This keeps stdio client EOF from
+            # cancelling work that could have terminalized durably within the
+            # normal drain grace.
+            for job_id in live_job_ids:
+                task = self._tasks.get(job_id)
+                if task is None or task.done() or task not in pending:
+                    continue
+                runner = self._runner_tasks.get(job_id)
+                if runner is not None and not runner.done():
+                    runner.cancel()
+                else:
+                    task.cancel()
+            if pending:
+                cancel_grace = min(grace_seconds, 1.0)
+                cancel_done, pending = await asyncio.wait(pending, timeout=cancel_grace)
+                drained += len(cancel_done)
+                for task in cancel_done:
+                    _consume_task_result(task)
             for task in pending:
                 task.cancel()
                 task.add_done_callback(_consume_task_result)
@@ -2083,6 +2344,11 @@ class JobManager:
                 snapshot = await self.get_snapshot(job_id)
                 if snapshot.is_terminal or not self._drain_should_terminalize(snapshot):
                     continue
+                log.info(
+                    "mcp.job.drain_terminalize",
+                    job_id=job_id,
+                    session_id=snapshot.links.session_id,
+                )
                 await self._append_event(
                     "mcp.job.interrupted",
                     job_id,
@@ -2095,6 +2361,19 @@ class JobManager:
                     extra={"job_id": job_id},
                     exc_info=True,
                 )
+        drained = 0
+        for job_id in live_job_ids:
+            try:
+                snapshot = await self.get_snapshot(job_id)
+            except (PersistenceError, ValueError):
+                continue
+            if snapshot.is_terminal:
+                drained += 1
+        log.info(
+            "mcp.job.drain_complete",
+            drained=drained,
+            skipped_external=skipped_external,
+        )
         return drained
 
     async def _maybe_cleanup_expired(self) -> None:
@@ -2140,6 +2419,7 @@ class JobManager:
                 expired.append(job_id)
         for job_id in expired:
             self._known_job_ids.discard(job_id)
+            self._live_snapshots.pop(job_id, None)
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
             self._monitors.pop(job_id, None)
@@ -2158,7 +2438,7 @@ class JobManager:
     ) -> None:
         """Persist one job event."""
         await self._ensure_initialized()
-        await self._event_store.append(
+        cursor = await self._event_store.append_with_rowid(
             BaseEvent(
                 id=event_id or str(uuid4()),
                 type=event_type,
@@ -2167,3 +2447,4 @@ class JobManager:
                 data={**data, "timestamp": datetime.now(UTC).isoformat()},
             )
         )
+        self._merge_live_snapshot(job_id, data, cursor=cursor)

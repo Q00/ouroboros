@@ -1183,11 +1183,13 @@ class _FinalMessageRuntime:
         native_session_id: str,
         support_messages: tuple[AgentMessage, ...] = (),
         cwd: str = "/tmp/project",
+        success: bool = True,
     ) -> None:
         self._final_message = final_message
         self._native_session_id = native_session_id
         self._support_messages = support_messages
         self._cwd = cwd
+        self._success = success
         self.last_prompt: str | None = None
         self.last_system_prompt: str | None = None
 
@@ -1235,7 +1237,7 @@ class _FinalMessageRuntime:
         yield AgentMessage(
             type="result",
             content=self._final_message,
-            data={"subtype": "success"},
+            data={"subtype": "success" if self._success else "error"},
             resume_handle=RuntimeHandle(
                 backend=resume_handle.backend if resume_handle is not None else "opencode",
                 kind=resume_handle.kind if resume_handle is not None else "implementation_session",
@@ -7502,6 +7504,315 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_reasons"] == [
             "claimed test command did not support the AC"
         ]
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_accepts_artifact_success_contract_with_incomplete_typed_evidence(
+        self, tmp_path: Any
+    ) -> None:
+        """Artifact ACs may be proven by expected_artifacts + verify_command."""
+        (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                'Done.\n```json\n{"files_touched":["output.txt"]}\n```',
+                native_session_id="opencode-session-artifact-contract",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("artifact"),
+            fat_harness_mode=True,
+        )
+
+        with patch("ouroboros.orchestrator.parallel_executor.log") as log_mock:
+            result = await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Create output.txt with the smoke marker.",
+                session_id="orch_123",
+                tools=["Read"],
+                tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+                system_prompt="system",
+                seed_goal="Ship the artifact",
+                depth=0,
+                start_time=datetime.now(UTC),
+                ac_spec=AcceptanceCriterionSpec(
+                    description="Create output.txt with the smoke marker.",
+                    expected_artifacts=("output.txt",),
+                    verify_command="test -f output.txt",
+                ),
+            )
+
+        assert result.success is True
+        assert result.error is None
+        assert result.typed_evidence is not None
+        assert result.typed_evidence_validation is not None
+        assert result.typed_evidence_validation.ok is True
+        assert result.typed_evidence_validation.missing_fields == ()
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.passed is True
+        assert not any(
+            call.args and call.args[0] == "parallel_executor.ac.verifier_rejected"
+            for call in log_mock.warning.call_args_list
+        )
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["typed_evidence_present"] is True
+        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["enforcement_error"] is None
+        assert evidence_event.data["has_success_contract"] is True
+        assert evidence_event.data["has_expected_artifacts"] is True
+        assert evidence_event.data["verify_gate_active"] is True
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_accepts_artifact_contract_without_typed_evidence(
+        self, tmp_path: Any
+    ) -> None:
+        """A passing artifact gate may replace every profile evidence field."""
+        (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[TASK_COMPLETE] artifact created without a JSON evidence block",
+                native_session_id="opencode-session-artifact-no-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("artifact"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create output.txt with the smoke marker.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the artifact",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=AcceptanceCriterionSpec(
+                description="Create output.txt with the smoke marker.",
+                expected_artifacts=("output.txt",),
+                verify_command="test -f output.txt",
+            ),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert result.typed_evidence is None
+        assert result.atomic_verifier_verdict is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == []
+        assert evidence_event.data["typed_evidence_present"] is False
+        assert evidence_event.data["enforcement_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_verify_only_code_contract_still_requires_files_touched_evidence(
+        self, tmp_path: Any
+    ) -> None:
+        """A command gate cannot replace code-profile filesystem evidence."""
+        (tmp_path / "hello.py").write_text("VALUE = 1\n", encoding="utf-8")
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "[TASK_COMPLETE] command passed without a JSON evidence block",
+                native_session_id="opencode-session-code-verify-only-no-evidence",
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement hello.py.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the code",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=AcceptanceCriterionSpec(
+                description="Implement hello.py.",
+                verify_command="test -f hello.py",
+            ),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Evidence is not valid JSON" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["files_touched"]
+        assert evidence_event.data["typed_evidence_present"] is False
+        assert evidence_event.data["enforcement_error"] is not None
+
+    @pytest.mark.asyncio
+    async def test_contract_verify_gate_is_single_shot_across_atomic_and_final_gate(
+        self, tmp_path: Any
+    ) -> None:
+        """A cached atomic verify outcome prevents duplicate shell side effects."""
+        (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
+        counter = tmp_path / "verify-count.txt"
+        command = (
+            "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
+            "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+            'raise SystemExit(0 if n == 0 else 7)"'
+        )
+        seed = Seed.from_dict(
+            {
+                "goal": "Create output.txt",
+                "task_type": "artifact",
+                "acceptance_criteria": [
+                    {
+                        "description": "Create output.txt with the smoke marker.",
+                        "expected_artifacts": ["output.txt"],
+                        "verify_command": command,
+                    }
+                ],
+                "ontology_schema": {
+                    "name": "SmokeArtifact",
+                    "description": "Smoke artifact contract.",
+                    "fields": [],
+                },
+                "metadata": {
+                    "ambiguity_score": 0.0,
+                    "generation_mode": "test",
+                },
+            }
+        )
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                'Done.\n```json\n{"files_touched":["output.txt"]}\n```',
+                native_session_id="opencode-session-single-shot-contract",
+                cwd=str(tmp_path),
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("artifact"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create output.txt with the smoke marker.",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the artifact",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=seed.acceptance_criteria[0],
+        )
+        assert result.success is True
+        assert result.verify_gate_outcome is not None
+        assert counter.read_text(encoding="utf-8") == "1"
+
+        finalized = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=result,
+            session_id="orch_123",
+            execution_id="exec_123",
+        )
+
+        assert finalized.success is True
+        assert counter.read_text(encoding="utf-8") == "1"
+
+    @pytest.mark.asyncio
+    async def test_verify_gate_recovers_failed_artifact_result_when_contract_passes(
+        self, tmp_path: Any
+    ) -> None:
+        """Artifact contracts can recover runtime false-negatives."""
+        (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
+        seed = Seed.from_dict(
+            {
+                "goal": "Create output.txt",
+                "task_type": "artifact",
+                "acceptance_criteria": [
+                    {
+                        "description": "Create output.txt with the smoke marker.",
+                        "expected_artifacts": ["output.txt"],
+                        "verify_command": "test -f output.txt",
+                    }
+                ],
+                "ontology_schema": {
+                    "name": "SmokeArtifact",
+                    "description": "Smoke artifact contract.",
+                    "fields": [],
+                },
+                "metadata": {
+                    "ambiguity_score": 0.0,
+                    "generation_mode": "test",
+                },
+            }
+        )
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "memory pressure timeout after artifact write",
+                native_session_id="codex-session-artifact-false-negative",
+                cwd=str(tmp_path),
+                success=False,
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("artifact"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+        failed = ACExecutionResult(
+            ac_index=0,
+            ac_content="Create output.txt with the smoke marker.",
+            success=False,
+            error="memory pressure timeout after artifact write",
+            final_message="memory pressure timeout after artifact write",
+            outcome=ACExecutionOutcome.FAILED,
+        )
+
+        recovered = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=failed,
+            session_id="orch_123",
+            execution_id="exec_123",
+        )
+
+        assert recovered.success is True
+        assert recovered.error is None
+        assert recovered.outcome == ACExecutionOutcome.SUCCEEDED
+        recovery_event = next(
+            event for event in appended_events if event.type == "execution.verify.recovered"
+        )
+        assert recovery_event.data["prior_error"] == "memory pressure timeout after artifact write"
+        assert recovery_event.data["expected_artifacts"] == ["output.txt"]
 
     @pytest.mark.asyncio
     async def test_fat_harness_mode_surfaces_operational_verifier_error(self) -> None:

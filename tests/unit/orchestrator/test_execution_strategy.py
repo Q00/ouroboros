@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros.orchestrator.execution_strategy import (
     AnalysisStrategy,
+    ArtifactStrategy,
     CodeStrategy,
     ExecutionStrategy,
     ResearchStrategy,
@@ -97,6 +98,34 @@ class TestAnalysisStrategy:
         assert "analy" in suffix.lower()
 
 
+class TestArtifactStrategy:
+    """Tests for artifact/document/presentation strategy."""
+
+    def test_implements_protocol(self) -> None:
+        """Test that ArtifactStrategy satisfies ExecutionStrategy protocol."""
+        assert isinstance(ArtifactStrategy(), ExecutionStrategy)
+
+    def test_get_tools(self) -> None:
+        """Test artifact strategy supports file edits and artifact checks."""
+        tools = ArtifactStrategy().get_tools()
+        assert "Read" in tools
+        assert "Write" in tools
+        assert "Edit" in tools
+        assert "Bash" in tools
+
+    def test_prompt_is_artifact_oriented(self) -> None:
+        """Test prompt steers away from code-test evidence."""
+        fragment = ArtifactStrategy().get_system_prompt_fragment()
+        assert "artifact" in fragment.lower()
+        assert "unit-test evidence" in fragment.lower()
+
+    def test_task_suffix_mentions_verification_commands(self) -> None:
+        """Test artifact tasks preserve verify_command as the contract."""
+        suffix = ArtifactStrategy().get_task_prompt_suffix()
+        assert "artifact" in suffix.lower()
+        assert "verification commands" in suffix.lower()
+
+
 class TestGetStrategy:
     """Tests for get_strategy registry function."""
 
@@ -115,10 +144,17 @@ class TestGetStrategy:
         strategy = get_strategy("analysis")
         assert isinstance(strategy, AnalysisStrategy)
 
+    @pytest.mark.parametrize("task_type", ["artifact", "document", "documentation", "presentation"])
+    def test_get_artifact_strategy_aliases(self, task_type: str) -> None:
+        """Test retrieving artifact-oriented strategy aliases."""
+        strategy = get_strategy(task_type)
+        assert isinstance(strategy, ArtifactStrategy)
+
     def test_case_insensitive(self) -> None:
         """Test strategy lookup is case-insensitive."""
         assert isinstance(get_strategy("Code"), CodeStrategy)
         assert isinstance(get_strategy("RESEARCH"), ResearchStrategy)
+        assert isinstance(get_strategy("PRESENTATION"), ArtifactStrategy)
 
     def test_unknown_type_raises(self) -> None:
         """Test that unknown task type raises ValueError."""
@@ -161,7 +197,7 @@ class TestStrategyProtocol:
 
     @pytest.mark.parametrize(
         "strategy_class",
-        [CodeStrategy, ResearchStrategy, AnalysisStrategy],
+        [CodeStrategy, ResearchStrategy, AnalysisStrategy, ArtifactStrategy],
     )
     def test_all_strategies_return_non_empty_tools(self, strategy_class: type) -> None:
         """Test all strategies return at least one tool."""
@@ -171,7 +207,7 @@ class TestStrategyProtocol:
 
     @pytest.mark.parametrize(
         "strategy_class",
-        [CodeStrategy, ResearchStrategy, AnalysisStrategy],
+        [CodeStrategy, ResearchStrategy, AnalysisStrategy, ArtifactStrategy],
     )
     def test_all_strategies_return_non_empty_prompt(self, strategy_class: type) -> None:
         """Test all strategies return non-empty system prompt."""
@@ -180,7 +216,7 @@ class TestStrategyProtocol:
 
     @pytest.mark.parametrize(
         "strategy_class",
-        [CodeStrategy, ResearchStrategy, AnalysisStrategy],
+        [CodeStrategy, ResearchStrategy, AnalysisStrategy, ArtifactStrategy],
     )
     def test_all_strategies_return_valid_activity_map(self, strategy_class: type) -> None:
         """Test all strategies return valid activity maps."""

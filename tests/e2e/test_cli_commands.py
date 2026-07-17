@@ -110,10 +110,13 @@ class TestCLIBasics:
             ),
         )
 
-        with patch(
-            "ouroboros.cli.commands.qa.QAHandler.handle",
-            new=AsyncMock(return_value=handler_result),
-        ) as mock_handle:
+        with (
+            patch("ouroboros.cli.commands.mcp._ensure_shell_env") as ensure_shell_env,
+            patch(
+                "ouroboros.cli.commands.qa.QAHandler.handle",
+                new=AsyncMock(return_value=handler_result),
+            ) as mock_handle,
+        ):
             result = runner.invoke(
                 app,
                 [
@@ -136,6 +139,7 @@ class TestCLIBasics:
 
         assert result.exit_code == 0
         assert "QA Verdict [PASS]" in result.output
+        ensure_shell_env.assert_called_once()
         mock_handle.assert_awaited_once()
         call_args = mock_handle.await_args.args[0]
         assert call_args == {

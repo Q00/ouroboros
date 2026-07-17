@@ -338,6 +338,23 @@ class TestLoadConfig:
         # Should have all defaults
         assert config.economics.default_tier == "frugal"
 
+    def test_load_config_project_guidance_has_no_env_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.dump({"execution": {"project_guidance": ["team"]}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OUROBOROS_PROJECT_GUIDANCE", "evil")
+        monkeypatch.setenv("OUROBOROS_EXECUTION_PROJECT_GUIDANCE", "evil")
+
+        config = load_config(config_path)
+
+        assert config.execution.project_guidance == ("team",)
+
     def test_load_config_partial_config(self, tmp_path: Path) -> None:
         """load_config fills in missing sections with defaults."""
         config_path = tmp_path / "config.yaml"
