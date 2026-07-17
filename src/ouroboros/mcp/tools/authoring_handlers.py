@@ -2557,6 +2557,7 @@ class InterviewHandler:
         turn_started_at = time.perf_counter()
         engine, _ = self._create_interview_engine()
         _interview_id: str | None = None  # Track for error event emission
+        question_generation_duration_ms: float | None = None
 
         try:
             # Start new interview
@@ -2613,6 +2614,8 @@ class InterviewHandler:
                                 phase="start_question_generation",
                                 reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
                                 provider_error_type=_provider_error_type(question_result.error),
+                                total_duration_ms=_elapsed_ms(turn_started_at),
+                                question_generation_duration_ms=question_generation_duration_ms,
                             )
                         )
                         log.warning(
@@ -2638,6 +2641,8 @@ class InterviewHandler:
                             state.interview_id,
                             event_error_msg,
                             phase="question_generation",
+                            total_duration_ms=_elapsed_ms(turn_started_at),
+                            question_generation_duration_ms=question_generation_duration_ms,
                         )
                     )
                     # ``InterviewEngine.start_interview`` already persisted
@@ -2857,6 +2862,8 @@ class InterviewHandler:
                         _interview_id,
                         _format_interview_failure_event_error(e),
                         phase="unexpected_error",
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        question_generation_duration_ms=question_generation_duration_ms,
                     )
                 )
             return Result.err(
@@ -2880,6 +2887,8 @@ class InterviewHandler:
         turn_started_at = time.perf_counter()
         engine, llm_adapter = self._create_interview_engine()
         _interview_id: str | None = None
+        ambiguity_scoring_duration_ms: float | None = None
+        question_generation_duration_ms: float | None = None
 
         try:
             load_result = await engine.load_state(session_id)
@@ -3216,7 +3225,6 @@ class InterviewHandler:
             # the latest ambiguity snapshot, closure threshold,
             # and completion-candidate streak.
             answered = _count_answered_rounds(state)
-            ambiguity_scoring_duration_ms: float | None = None
             if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
                 # Scoring must complete before question generation:
                 # _score_interview_state mutates state.ambiguity_score,
@@ -3277,6 +3285,9 @@ class InterviewHandler:
                         _interview_id,
                         _format_interview_failure_event_error(e),
                         phase="unexpected_error",
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                        question_generation_duration_ms=question_generation_duration_ms,
                     )
                 )
             return Result.err(
@@ -3300,6 +3311,7 @@ class InterviewHandler:
         turn_started_at = time.perf_counter()
         engine, _ = self._create_interview_engine()
         _interview_id: str | None = None
+        question_generation_duration_ms: float | None = None
 
         try:
             load_result = await engine.load_state(session_id)
@@ -3439,6 +3451,8 @@ class InterviewHandler:
                         _interview_id,
                         _format_interview_failure_event_error(e),
                         phase="unexpected_error",
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        question_generation_duration_ms=question_generation_duration_ms,
                     )
                 )
             return Result.err(
@@ -3476,6 +3490,9 @@ class InterviewHandler:
                         phase="next_question_generation",
                         reason_code=_QUESTION_GENERATION_ENVELOPE_REASON_CODE,
                         provider_error_type=_provider_error_type(question_result.error),
+                        total_duration_ms=_elapsed_ms(turn_started_at),
+                        ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                        question_generation_duration_ms=question_generation_duration_ms,
                     )
                 )
                 log.warning(
@@ -3501,6 +3518,9 @@ class InterviewHandler:
                     session_id,
                     event_error_msg,
                     phase="question_generation",
+                    total_duration_ms=_elapsed_ms(turn_started_at),
+                    ambiguity_scoring_duration_ms=ambiguity_scoring_duration_ms,
+                    question_generation_duration_ms=question_generation_duration_ms,
                 )
             )
             if "empty response" in error_msg.lower():
