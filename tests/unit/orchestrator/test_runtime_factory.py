@@ -16,6 +16,7 @@ from ouroboros.orchestrator.runtime_factory import (
     create_agent_runtime,
     resolve_agent_runtime_backend,
 )
+from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
 
 class TestResolveAgentRuntimeBackend:
@@ -455,5 +456,34 @@ def test_create_gjc_runtime_accepts_stream_timeout_overrides() -> None:
         )
 
     assert isinstance(runtime, GjcRuntime)
+    assert runtime._startup_output_timeout_seconds is None
+    assert runtime._stdout_idle_timeout_seconds is None
+
+
+def test_create_zcode_runtime_accepts_stream_timeout_overrides() -> None:
+    """Zcode runtime forwards the execute-seed stream-timeout overrides.
+
+    ``zcode --prompt --json`` emits a single buffered JSON summary at
+    completion — it produces no stdout until the run finishes. The MCP
+    execute-seed path therefore calls ``create_agent_runtime(...,
+    startup_output_timeout_seconds=0, stdout_idle_timeout_seconds=0)``
+    to disable the inherited Codex quiet-stream guards; if the Zcode
+    factory drops those overrides the subprocess is killed as "produced
+    no stdout" after the 60s startup default, even on a healthy run.
+    Regression for the bot review on PR #1568 (HEAD 1f31e1d1).
+    """
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+        return_value=object(),
+    ):
+        runtime = create_agent_runtime(
+            backend="zcode",
+            cli_path="/tmp/zcode.cjs",
+            cwd="/tmp/project",
+            startup_output_timeout_seconds=0,
+            stdout_idle_timeout_seconds=0,
+        )
+
+    assert isinstance(runtime, ZcodeCLIRuntime)
     assert runtime._startup_output_timeout_seconds is None
     assert runtime._stdout_idle_timeout_seconds is None

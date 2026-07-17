@@ -15,7 +15,9 @@ and no scheduled execution.
 
 - Not a continuous regression engine.
 - Not a nightly CI workflow.
-- Not a recorded-replay system.
+- Not a general-purpose recorded-replay system. The issue-specific #1450
+  experiment below replays one frozen ledger solely to answer that issue's
+  bounded quality question.
 - Not a cost-budgeted live runner.
 
 If any of those becomes valuable later (evidence-driven follow-up
@@ -65,6 +67,80 @@ uv run pytest tests/canonical/ -v -k cli-todo
 
 Add `OUROBOROS_RUN_CANONICAL=1` to opt into the live invocation for
 that scenario.
+
+### Issue #1450 paired auto-fill quality experiment
+
+`test_issue_1450_quality.py` compares two closure strategies from the
+same frozen non-converged `cli-todo` ledger:
+
+- arm `x`: `finalize_safe_defaultable_gaps`,
+- arm `y`: one proposal manifest produced through the existing
+  `AutoAnswerer.answer_gap` + temperature-zero `LLMAnswerRefiner`
+  contract, then applied through `auto_fill_remaining`.
+
+The default path is hermetic and checks fixture reproduction, ledger
+clone invariants, both transformations, and verdict classification:
+
+```sh
+uv run pytest tests/canonical/test_issue_1450_quality.py -v
+```
+
+The product comparison is costly and requires an explicit opt-in plus
+an evidence directory that will survive pytest cleanup. Run it from a
+Git checkout (not a source archive or unpacked package), because the
+preflight uses Git object and worktree checks to verify the frozen
+fixture and source hashes:
+
+```sh
+PATH="$PWD/.venv/bin:$PATH" \
+OUROBOROS_RUN_AUTO_FILL_QUALITY=1 \
+OUROBOROS_AUTO_FILL_QUALITY_EVIDENCE_DIR=/absolute/path/to/issue-1450-evidence \
+uv run pytest tests/canonical/test_issue_1450_quality.py \
+  -k live_paired_quality_experiment -v -s
+```
+
+The `PATH` preflight matters because the `cli-todo` smoke contract
+invokes `python`. The live runner also fails before any LLM call when
+the frozen fixture, `src/ouroboros` tree, goal, expected contract, or
+required smoke executables have drifted.
+
+The runner generates the treatment proposals once and reuses the exact
+manifest for paired orders `x/y`, `y/x`, `x/y`. It extends to five
+pairs only when the first three pairs contain exactly one classified
+infrastructure/transient failure. Every arm uses a fresh `AutoStore`
+and workdir.
+
+Evidence is written under
+`$OUROBOROS_AUTO_FILL_QUALITY_EVIDENCE_DIR/issue-1450-<UTC>/` and
+includes:
+
+- fixture/source hashes, resolved runtime-config fingerprint, proposal
+  manifest and hash,
+- both transformed ledgers and their provenance,
+- each arm's pre-repair Seed, final persisted state, MCP envelope, and
+  A2 trace directory,
+- complete smoke argv/stdout/stderr/exit-code records,
+- pair outcomes and the final experiment verdict.
+
+Verdicts are intentionally narrow:
+
+| Verdict | Meaning |
+|---|---|
+| `no_observed_gap` | Every valid pair passed all mandatory product smoke checks in both arms. |
+| `treatment_improvement_candidate` | Arm `y` alone passed the same mandatory oracle in at least two pairs, with no opposite result. |
+| `treatment_regression` | Arm `x` alone passed in at least two pairs, with no opposite result. |
+| `inconclusive` | Mixed results, insufficient valid pairs, repeated shared failure, degraded/partial output, or unresolved infrastructure variance. |
+
+An `inconclusive` verdict fails the pytest invocation after persisting
+the evidence. Other verdicts are valid experiment outcomes and do not
+themselves fail the test.
+
+This experiment does **not** establish broad strategy equivalence and
+does not isolate metadata causality. It only measures whether the two
+proposal-content strategies produce a reproducible product-smoke
+difference for the frozen canonical `cli-todo` fixture.
+
+Latest committed live evidence: [2026-07-15 paired run](evidence/issue-1450-20260715-162447-736593/REPORT.md). The run completed three pairs and returned `inconclusive` because neither arm produced the required state-consistent terminal trace; the report records the provider/model, ledgers, raw outputs, reproduction command, cost tracking gap, and production decision.
 
 ## Scenario directory shape
 
@@ -189,12 +265,14 @@ acceptance.
 
 ## Closure-mode contract (PR-β / SSOT #1157 Closure Policy)
 
-The live-run test asserts that `interview_closure_mode` (when present
-on the envelope) is one of `{ledger_only, mutual_agreement,
-safe_default}`. Per SSOT #1157 *Closure Policy* (2026-05-27),
-`ledger_only` is the expected default path; `mutual_agreement` is
-the lucky case where both signals align; `safe_default` is the
-max_rounds fallback for ledgers that never structurally complete.
+The live-run test accepts `interview_closure_mode` values
+`{ledger_only, mutual_agreement, safe_default}` for persisted-session
+compatibility. On current code, a normal backend closure is
+`mutual_agreement`, while bounded unresolved but safely defaultable
+gaps may close as `safe_default` only after the backend confirms the
+post-synthesis ambiguity gate. `ledger_only` remains accepted for
+legacy evidence and resume compatibility; it is not the expected
+current-main default path.
 
 Any `interview_max_rounds_exhausted` blocker on a canonical scenario
 is treated as a hard failure — it indicates either the legacy

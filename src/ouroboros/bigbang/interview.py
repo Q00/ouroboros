@@ -18,8 +18,22 @@ import structlog
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
+from ouroboros.core.requirement_candidate import (
+    RequirementDistillation,
+    compute_requirement_input_fingerprint,
+)
 from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewTurnContext,
+    ReferenceContrastResolution,
+    ReferenceCue,
+    ReferenceResolutionStatus,
+    build_reference_contrast_question,
+    detect_explicit_confusion_terms,
+    next_unresolved_reference,
+    select_glossary_injection,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -189,6 +203,11 @@ class InterviewState(BaseModel):
     ambiguity_breakdown: dict[str, Any] | None = None
     completion_candidate_streak: int = Field(default=0, ge=0)
     lateral_review_advised_milestones: list[str] = Field(default_factory=list)
+    reference_cues: tuple[ReferenceCue, ...] = Field(default_factory=tuple)
+    reference_resolutions: tuple[ReferenceContrastResolution, ...] = Field(default_factory=tuple)
+    pending_confused_terms: tuple[str, ...] = Field(default_factory=tuple)
+    requirement_input_revision: int = Field(default=0, ge=0)
+    requirement_distillation: RequirementDistillation | None = None
 
     @property
     def current_round_number(self) -> int:
@@ -253,6 +272,152 @@ class InterviewState(BaseModel):
         self.ambiguity_score = None
         self.ambiguity_breakdown = None
         self.mark_updated()
+
+    def requirement_input_fingerprint(self) -> str:
+        """Fingerprint canonical inputs used by the derived distillation cache."""
+        return compute_requirement_input_fingerprint(
+            {
+                "initial_context": self.initial_context,
+                "rounds": [
+                    {
+                        "round_number": round_data.round_number,
+                        "question": round_data.question,
+                        "user_response": round_data.user_response,
+                    }
+                    for round_data in self.rounds
+                ],
+                "reference_cues": self.reference_cues,
+                "reference_resolutions": self.reference_resolutions,
+                "codebase_context": self.codebase_context,
+                "codebase_paths": self.codebase_paths,
+            }
+        )
+
+    def invalidate_requirement_distillation(self) -> None:
+        """Advance canonical-input revision and clear derived cached output."""
+        self.requirement_input_revision += 1
+        self.requirement_distillation = None
+        self.mark_updated()
+
+    def discard_stale_requirement_distillation(self) -> bool:
+        """Discard a persisted cache that no longer matches canonical inputs."""
+        cached = self.requirement_distillation
+        if cached is None:
+            return False
+        if cached.is_current(
+            input_revision=self.requirement_input_revision,
+            input_fingerprint=self.requirement_input_fingerprint(),
+        ):
+            return False
+        self.requirement_distillation = None
+        self.mark_updated()
+        return True
+
+    def merge_turn_context(self, context: InterviewTurnContext | None) -> bool:
+        """Merge bounded adapter input and invalidate only requirement changes."""
+        if context is None:
+            return False
+
+        pending = list(self.pending_confused_terms)
+        seen_terms = {term.casefold() for term in pending}
+        for term in context.confused_terms:
+            if term.casefold() not in seen_terms:
+                pending.append(term)
+                seen_terms.add(term.casefold())
+        self.pending_confused_terms = tuple(pending)
+
+        cues_by_id = {cue.reference_id: cue for cue in self.reference_cues}
+        cue_order = [cue.reference_id for cue in self.reference_cues]
+        references_changed = False
+        changed_ids: set[str] = set()
+        for cue in context.references:
+            previous = cues_by_id.get(cue.reference_id)
+            if previous == cue:
+                continue
+            if previous is None:
+                cue_order.append(cue.reference_id)
+            cues_by_id[cue.reference_id] = cue
+            changed_ids.add(cue.reference_id)
+            references_changed = True
+
+        if references_changed:
+            self.reference_cues = tuple(cues_by_id[reference_id] for reference_id in cue_order)
+            self.reference_resolutions = tuple(
+                resolution
+                for resolution in self.reference_resolutions
+                if resolution.reference_id not in changed_ids
+            )
+            self.invalidate_requirement_distillation()
+        elif context.confused_terms:
+            self.mark_updated()
+        return references_changed or bool(context.confused_terms)
+
+    def next_adapter_question(self) -> str | None:
+        """Return one deterministic post-base-frame adapter question."""
+        base_question_answered = any(
+            round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+            and bool(round_data.user_response)
+            for round_data in self.rounds
+        )
+        if not base_question_answered:
+            return None
+
+        if self.pending_confused_terms:
+            context = InterviewTurnContext(confused_terms=self.pending_confused_terms)
+            injection = select_glossary_injection(
+                context=context,
+                base_question_answered=True,
+            )
+            self.pending_confused_terms = ()
+            if injection is not None:
+                self.mark_updated()
+                return (
+                    f"{injection.render()}\n\n"
+                    "Using your own words, what does that term need to mean for this project?"
+                )
+
+        cue = next_unresolved_reference(self.reference_cues, self.reference_resolutions)
+        if cue is None:
+            return None
+        question = build_reference_contrast_question(cue)
+        remaining = tuple(
+            resolution
+            for resolution in self.reference_resolutions
+            if resolution.reference_id != cue.reference_id
+        )
+        self.reference_resolutions = (
+            *remaining,
+            ReferenceContrastResolution(
+                reference_id=cue.reference_id,
+                status=ReferenceResolutionStatus.ASKED,
+                asked_question=question,
+            ),
+        )
+        self.mark_updated()
+        return question
+
+    def record_adapter_answer(self, question: str, answer: str) -> None:
+        """Resolve a persisted reference contrast when its exact question is answered."""
+        updated: list[ReferenceContrastResolution] = []
+        changed = False
+        for resolution in self.reference_resolutions:
+            if (
+                resolution.status is ReferenceResolutionStatus.ASKED
+                and resolution.asked_question == question
+            ):
+                updated.append(
+                    ReferenceContrastResolution(
+                        reference_id=resolution.reference_id,
+                        status=ReferenceResolutionStatus.RESOLVED,
+                        asked_question=question,
+                        answer=answer,
+                    )
+                )
+                changed = True
+            else:
+                updated.append(resolution)
+        if changed:
+            self.reference_resolutions = tuple(updated)
 
 
 def prompt_safe_initial_context(state: InterviewState) -> str:
@@ -603,6 +768,10 @@ class InterviewEngine:
         if effective_initial_context is None:
             return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
 
+        adapter_question = state.next_adapter_question()
+        if adapter_question is not None:
+            return Result.ok(adapter_question)
+
         # Build the context from previous rounds
         conversation_history = self._build_conversation_history(
             state,
@@ -821,6 +990,8 @@ class InterviewEngine:
                 prior_completion_candidate_streak=prior_streak,
             )
 
+        state.record_adapter_answer(question, user_response)
+
         # Create new round
         round_data = InterviewRound(
             round_number=state.current_round_number,
@@ -829,6 +1000,10 @@ class InterviewEngine:
         )
 
         state.rounds.append(round_data)
+        detected_terms = detect_explicit_confusion_terms(user_response)
+        if detected_terms:
+            state.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
+        state.invalidate_requirement_distillation()
         state.mark_updated()
 
         log.info(
@@ -921,6 +1096,7 @@ class InterviewEngine:
             content = await asyncio.to_thread(_sync_read)
 
             state = InterviewState.model_validate_json(content)
+            state.discard_stale_requirement_distillation()
 
             log.info(
                 "interview.state_loaded",

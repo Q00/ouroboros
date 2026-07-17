@@ -22,6 +22,7 @@ import pytest
 from ouroboros.plugin.manifest import SUPPORTED_SCHEMA_VERSIONS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+BUILTIN_GLOSSARY_PACKS = ("ui_ux_basics.yaml",)
 
 
 @pytest.mark.skipif(
@@ -98,3 +99,48 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
             "python_version < '3.14'" in requirement and f"extra == '{extra}'" in requirement
             for requirement in wheel_litellm_requirements
         ), f"wheel metadata lost the LiteLLM Python marker for [{extra}]"
+
+
+@pytest.mark.skipif(
+    shutil.which("uv") is None,
+    reason="uv not on PATH — wheel build cannot run in this environment.",
+)
+def test_built_wheel_ships_builtin_interview_adapter_packs_once_and_loadable(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "dist"
+    result = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(out_dir)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"`uv build --wheel` failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+    wheels = list(out_dir.glob("*.whl"))
+    assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+
+    expected = {
+        f"ouroboros/interview_adapters/packs/{pack_name}" for pack_name in BUILTIN_GLOSSARY_PACKS
+    }
+    with zipfile.ZipFile(wheels[0]) as archive:
+        names = archive.namelist()
+        present = [n for n in names if n.startswith("ouroboros/interview_adapters/packs/")]
+        for path in present:
+            assert names.count(path) == 1, (
+                f"{path} appears {names.count(path)} times — duplicate ZIP entries "
+                "indicate the wheel `exclude`/`force-include` pair is misaligned."
+            )
+        assert expected <= set(present)
+
+        import yaml
+
+        for path in expected:
+            loaded = yaml.safe_load(archive.read(path).decode("utf-8"))
+            assert loaded["name"] == Path(path).stem
+            assert loaded["schema_version"] == 1
+            assert loaded["glossary_terms"]

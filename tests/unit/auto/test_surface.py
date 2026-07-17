@@ -45,6 +45,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "gjc",
         "antigravity",
         "grok",
+        "zcode",
     }
 
 
@@ -56,6 +57,16 @@ def test_cli_runtime_enums_accept_gjc_for_frontdoor_commands() -> None:
     assert run.AgentRuntimeBackend("gjc") is run.AgentRuntimeBackend.GJC
     assert mcp.AgentRuntimeBackend("gjc") is mcp.AgentRuntimeBackend.GJC
     assert init.AgentRuntimeBackend("gjc") is init.AgentRuntimeBackend.GJC
+
+
+def test_cli_runtime_enums_accept_zcode_for_frontdoor_commands() -> None:
+    from ouroboros.cli.commands import init, mcp, run
+    from ouroboros.cli.commands.auto import AgentRuntimeBackend as AutoRuntimeBackend
+
+    assert AutoRuntimeBackend("zcode") is AutoRuntimeBackend.ZCODE
+    assert run.AgentRuntimeBackend("zcode") is run.AgentRuntimeBackend.ZCODE
+    assert mcp.AgentRuntimeBackend("zcode") is mcp.AgentRuntimeBackend.ZCODE
+    assert init.AgentRuntimeBackend("zcode") is init.AgentRuntimeBackend.ZCODE
 
 
 def test_cli_llm_enums_keep_gjc_out_until_adapter_lands() -> None:

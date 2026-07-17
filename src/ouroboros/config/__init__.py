@@ -75,6 +75,7 @@ from ouroboros.config.loader import (
     get_semantic_model,
     get_usage_limit_pause_seconds,
     get_wonder_model,
+    get_zcode_cli_path,
     load_config,
     load_credentials,
 )
@@ -171,6 +172,7 @@ __all__ = [
     "get_opencode_mode",
     "get_ourocode_cli_path",
     "get_pi_cli_path",
+    "get_zcode_cli_path",
     "get_qa_model",
     "get_dependency_analysis_model",
     "get_ontology_analysis_model",

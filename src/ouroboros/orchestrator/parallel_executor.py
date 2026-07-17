@@ -37,7 +37,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
 from rich.console import Console
@@ -85,8 +85,22 @@ from ouroboros.orchestrator.context_governor import SiblingStatus, compose_conte
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
 from ouroboros.orchestrator.decomposition_params import (
     build_decomposition_system_prompt,
-    build_decomposition_user_prompt,
     params_from_profile,
+)
+from ouroboros.orchestrator.decomposition_policy import (
+    BounceCause,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionProposal,
+    DecompositionSource,
+    DecompositionTraceSummary,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+    legacy_unverified_split_decision,
+    parse_decomposition_proposal,
+    redact_and_truncate_text,
+    summarize_decomposition_trace,
+    validate_decomposition_proposal,
 )
 from ouroboros.orchestrator.effort_routing import resolve_execute_effort
 from ouroboros.orchestrator.events import create_ac_stall_detected_event
@@ -864,6 +878,7 @@ class ParallelACExecutor:
         event_store: EventStore,
         console: Console | None = None,
         enable_decomposition: bool = True,
+        decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight",
         max_concurrent: int = 3,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
@@ -888,6 +903,8 @@ class ParallelACExecutor:
             event_store: Event store for progress tracking.
             console: Rich console for output.
             enable_decomposition: Enable Claude to decompose complex ACs.
+            decomposition_mode: Whether decomposition runs before execution,
+                only after a classified bounce, or not at all.
             max_concurrent: Maximum number of concurrent AC executions.
             max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
@@ -916,7 +933,13 @@ class ParallelACExecutor:
         self._adapter = adapter
         self._event_store = event_store
         self._console = console or Console()
-        self._enable_decomposition = enable_decomposition
+        if decomposition_mode not in {"preflight", "bounce_only", "off"}:
+            msg = f"Unsupported decomposition_mode: {decomposition_mode!r}"
+            raise ValueError(msg)
+        self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
+            "off" if not enable_decomposition else decomposition_mode
+        )
+        self._enable_decomposition = self._decomposition_mode != "off"
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (
@@ -968,6 +991,7 @@ class ParallelACExecutor:
             safe_emit_event=self._safe_emit_event,
         )
         self._checkpoint_store = checkpoint_store
+        self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
         self._execution_counters_lock = asyncio.Lock()
         self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
         # Param degradations already surfaced this run, keyed by (param, support),
@@ -1658,6 +1682,14 @@ class ParallelACExecutor:
                         saved_contexts = cp.state.get("level_contexts", [])
                         if saved_contexts:
                             level_contexts = deserialize_level_contexts(saved_contexts)
+                        raw_decisions = cp.state.get("decomposition_decisions", {})
+                        if isinstance(raw_decisions, Mapping):
+                            for raw_node_id, raw_record in raw_decisions.items():
+                                if not isinstance(raw_node_id, str):
+                                    continue
+                                restored = DecompositionDecisionRecord.from_dict(raw_record)
+                                if restored is not None and restored.node_id == raw_node_id:
+                                    self._decomposition_decisions[raw_node_id] = restored
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
@@ -2219,6 +2251,10 @@ class ParallelACExecutor:
                                 "failed_indices": sorted(failed_indices),
                                 "completed_count": completed_count,
                                 "level_contexts": serialize_level_contexts(level_contexts),
+                                "decomposition_decisions": {
+                                    node_id: record.to_dict()
+                                    for node_id, record in self._decomposition_decisions.items()
+                                },
                             },
                         )
                         save_result = self._checkpoint_store.save(checkpoint)
@@ -2294,6 +2330,564 @@ class ParallelACExecutor:
             total_duration_seconds=total_duration,
         )
 
+    def _coerce_decomposition_decision(
+        self,
+        value: object,
+        *,
+        node_identity: ExecutionNodeIdentity,
+        source: DecompositionSource,
+        cause: BounceCause | None = None,
+    ) -> DecompositionDecisionRecord:
+        """Normalize production and legacy/mocked decomposition results."""
+        if isinstance(value, DecompositionDecisionRecord):
+            if value.node_id != node_identity.node_id or value.source is not source:
+                return DecompositionDecisionRecord(
+                    node_id=node_identity.node_id,
+                    source=source,
+                    disposition=DecompositionDisposition.UNKNOWN,
+                    cause=cause,
+                    reasons=("decomposition_decision_identity_mismatch",),
+                )
+            if cause is not None and value.cause is not cause:
+                return DecompositionDecisionRecord(
+                    node_id=node_identity.node_id,
+                    source=source,
+                    disposition=DecompositionDisposition.UNKNOWN,
+                    cause=cause,
+                    reasons=("decomposition_decision_cause_mismatch",),
+                )
+            return value
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            if not MIN_SUB_ACS <= len(value) <= MAX_SUB_ACS:
+                return DecompositionDecisionRecord(
+                    node_id=node_identity.node_id,
+                    source=source,
+                    disposition=DecompositionDisposition.UNKNOWN,
+                    cause=cause,
+                    reasons=("legacy_split_child_count_invalid",),
+                )
+            return legacy_unverified_split_decision(
+                node_id=node_identity.node_id,
+                source=source,
+                child_descriptions=value,
+                cause=cause,
+                reasons=("legacy_unverified_split",),
+            )
+        if value is None:
+            return DecompositionDecisionRecord(
+                node_id=node_identity.node_id,
+                source=source,
+                disposition=DecompositionDisposition.ATOMIC,
+                cause=cause,
+                reasons=("legacy_atomic_result",),
+            )
+        return DecompositionDecisionRecord(
+            node_id=node_identity.node_id,
+            source=source,
+            disposition=DecompositionDisposition.UNKNOWN,
+            cause=cause,
+            reasons=("unsupported_decomposition_result",),
+        )
+
+    async def _finalize_decomposition_decision(
+        self,
+        *,
+        decision: DecompositionDecisionRecord,
+        node_identity: ExecutionNodeIdentity,
+        execution_id: str,
+        session_id: str,
+    ) -> DecompositionDecisionRecord:
+        """Cache and emit a finalized node decision once per distinct value."""
+        if decision.node_id != node_identity.node_id:
+            decision = DecompositionDecisionRecord(
+                node_id=node_identity.node_id,
+                source=decision.source,
+                disposition=DecompositionDisposition.UNKNOWN,
+                cause=decision.cause,
+                reasons=("decomposition_decision_identity_mismatch",),
+            )
+        previous = self._decomposition_decisions.get(node_identity.node_id)
+        self._decomposition_decisions[node_identity.node_id] = decision
+        if previous != decision:
+            await self._event_emitter.emit_decomposition_decision_finalized(
+                execution_id=execution_id,
+                session_id=session_id,
+                mode=self._decomposition_mode,
+                node_identity=node_identity,
+                decision=decision,
+            )
+        return decision
+
+    async def _execute_decomposition_children(
+        self,
+        *,
+        decision: DecompositionDecisionRecord,
+        ac_index: int,
+        ac_content: str,
+        session_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        seed_goal: str,
+        depth: int,
+        execution_id: str,
+        level_contexts: list[LevelContext] | None,
+        retry_attempt: int,
+        execution_counters: dict[str, int] | None,
+        node_identity: ExecutionNodeIdentity,
+        start_time: datetime,
+        semantic_ac_key: str,
+    ) -> ACExecutionResult:
+        """Dispatch one finalized split through the shared recursive child path."""
+        sub_acs = [child.description for child in decision.children]
+        display_label = (
+            f"AC {node_identity.display_path}"
+            if node_identity.depth == 0
+            else f"Sub-AC {node_identity.display_path}"
+        )
+        self._console.print(
+            f"  [cyan]{display_label} → Decomposed into {len(sub_acs)} Sub-ACs (parallel)[/cyan]"
+        )
+        self._flush_console()
+        for idx, sub_ac in enumerate(sub_acs):
+            await self._emit_subtask_event(
+                execution_id=execution_id,
+                ac_index=ac_index,
+                sub_task_index=idx + 1,
+                sub_task_content=sub_ac,
+                status="pending",
+                node_identity=node_identity.child(idx),
+            )
+
+        self._console.print(f"    [green]Starting {len(sub_acs)} Sub-ACs sequentially...[/green]")
+        sub_results: list[ACExecutionResult | BaseException | None] = [None] * len(sub_acs)
+        sub_depth = depth + 1
+        for idx, sub_ac in enumerate(sub_acs):
+            try:
+                child_node_identity = node_identity.child(idx)
+                child_is_sub_ac = child_node_identity.depth > 0
+                legacy_parent_ac_index = (
+                    node_identity.root_ac_index if child_node_identity.depth == 1 else None
+                )
+                legacy_sub_ac_index = idx if child_node_identity.depth == 1 else None
+                await self._emit_subtask_event(
+                    execution_id=execution_id,
+                    ac_index=ac_index,
+                    sub_task_index=idx + 1,
+                    sub_task_content=sub_ac,
+                    status="executing",
+                    node_identity=child_node_identity,
+                )
+                sub_results[idx] = await self._execute_single_ac(
+                    ac_index=ac_index * 100 + idx,
+                    ac_content=sub_ac,
+                    session_id=session_id,
+                    tools=tools,
+                    tool_catalog=tool_catalog,
+                    system_prompt=system_prompt,
+                    seed_goal=seed_goal,
+                    depth=sub_depth,
+                    execution_id=execution_id,
+                    level_contexts=level_contexts,
+                    retry_attempt=retry_attempt,
+                    execution_counters=execution_counters,
+                    is_sub_ac=child_is_sub_ac,
+                    parent_ac_index=legacy_parent_ac_index,
+                    sub_ac_index=legacy_sub_ac_index,
+                    node_identity=child_node_identity,
+                    decomposition_trustworthy=decision.trustworthy,
+                    semantic_ac_key=semantic_ac_key,
+                )
+            except BaseException as exc:
+                if isinstance(exc, anyio.get_cancelled_exc_class()):
+                    raise
+                sub_results[idx] = exc
+
+        final_sub_results: list[ACExecutionResult] = []
+        for idx, result in enumerate(sub_results):
+            if isinstance(result, BaseException) or result is None:
+                final_sub_results.append(
+                    ACExecutionResult(
+                        ac_index=ac_index * 100 + idx,
+                        ac_content=sub_acs[idx],
+                        success=False,
+                        error=(
+                            str(result)
+                            if isinstance(result, BaseException)
+                            else "Task cancelled or produced no result"
+                        ),
+                        retry_attempt=retry_attempt,
+                        depth=sub_depth,
+                    )
+                )
+            else:
+                final_sub_results.append(result)
+
+        success_count = sum(1 for result in final_sub_results if result.success)
+        self._console.print(
+            f"    [{'green' if success_count == len(sub_acs) else 'yellow'}]"
+            f"Sub-ACs completed: {success_count}/{len(sub_acs)} succeeded[/]"
+        )
+        for idx, result in enumerate(final_sub_results):
+            await self._emit_subtask_event(
+                execution_id=execution_id,
+                ac_index=ac_index,
+                sub_task_index=idx + 1,
+                sub_task_content=sub_acs[idx],
+                status="completed" if result.success else "failed",
+                node_identity=node_identity.child(idx),
+            )
+
+        duration = (datetime.now(UTC) - start_time).total_seconds()
+        all_success = all(result.success for result in final_sub_results)
+        return ACExecutionResult(
+            ac_index=ac_index,
+            ac_content=ac_content,
+            success=all_success,
+            messages=(),
+            final_message="\n".join(
+                _render_ac_section(
+                    ACExecutionResult(
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        success=all_success,
+                        messages=(),
+                        duration_seconds=duration,
+                        is_decomposed=True,
+                        sub_results=tuple(final_sub_results),
+                        depth=depth,
+                    ),
+                    index_path=(ac_index + 1,),
+                    heading_level=3,
+                    include_header=False,
+                )
+            ),
+            duration_seconds=duration,
+            retry_attempt=retry_attempt,
+            is_decomposed=True,
+            sub_results=tuple(final_sub_results),
+            depth=depth,
+            decomposition_decision=decision,
+        )
+
+    def _build_decomposition_trace_summary(
+        self,
+        *,
+        result: ACExecutionResult,
+        ac_spec: AcceptanceCriterionSpec | None,
+    ) -> DecompositionTraceSummary:
+        """Project one failed attempt into bounded, secret-safe recovery evidence."""
+        verdict = result.atomic_verifier_verdict
+        tool_names = tuple(
+            dict.fromkeys(
+                message.tool_name
+                for message in result.messages
+                if isinstance(message.tool_name, str) and message.tool_name.strip()
+            )
+        )[:8]
+        evidence_fields = (
+            tuple(sorted(str(key) for key in result.typed_evidence.data))[:8]
+            if result.typed_evidence is not None
+            else ()
+        )
+        evidence_refs = tuple(verdict.evidence_used) if verdict is not None else ()
+        verified_artifacts: list[str] = []
+        remaining_artifacts: list[str] = []
+        if ac_spec is not None and ac_spec.expected_artifacts:
+            cwd = Path(self._task_cwd or self._adapter.working_directory or os.getcwd())
+            for artifact in ac_spec.expected_artifacts[:8]:
+                target = Path(artifact)
+                if not target.is_absolute():
+                    target = cwd / target
+                (verified_artifacts if target.exists() else remaining_artifacts).append(artifact)
+
+        failure_class = verdict.failure_class if verdict is not None else None
+        retry_admission = (
+            verdict.retry_admission.value
+            if verdict is not None and hasattr(verdict.retry_admission, "value")
+            else (str(verdict.retry_admission) if verdict is not None else None)
+        )
+        reasons = tuple(verdict.reasons) if verdict is not None else ()
+        lines = [
+            "attempted_tools=" + (", ".join(tool_names) if tool_names else "none-recorded"),
+            "evidence_fields="
+            + (", ".join(evidence_fields) if evidence_fields else "none-recorded"),
+            "verified_artifacts="
+            + (", ".join(verified_artifacts) if verified_artifacts else "none-recorded"),
+            "remaining_artifacts="
+            + (", ".join(remaining_artifacts) if remaining_artifacts else "none-recorded"),
+            f"failure_class={failure_class or 'UNKNOWN'}",
+            f"retry_admission={retry_admission or 'UNKNOWN'}",
+            "verifier_reasons=" + ("; ".join(reasons) if reasons else "none-recorded"),
+            f"failure_detail_present={bool(result.error or result.final_message)}",
+        ]
+        if ac_spec is not None:
+            lines.append(f"verify_command_present={bool(ac_spec.verify_command)}")
+            lines.append(f"output_assertion_present={bool(ac_spec.output_assertion)}")
+        return summarize_decomposition_trace("\n".join(lines), evidence_refs=evidence_refs)
+
+    async def _dispatch_decomposition_prompt(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str,
+        independent_session: bool = False,
+    ) -> str:
+        """Run one bounded tool-free decomposition-policy request.
+
+        Semantic attestation must not resume the proposer conversation. Passing
+        ``independent_session=True`` starts a fresh runtime session even when the
+        parent executor inherited a resumable handle.
+        """
+        self._announce_param_degradations(system_prompt=system_prompt, tools=[])
+        await self._await_dispatch_rate_budget(prompt=prompt, system_prompt=system_prompt)
+        response_text = ""
+        async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
+            async for message in self._adapter.execute_task(
+                prompt=prompt,
+                tools=[],
+                system_prompt=system_prompt,
+                resume_handle=None if independent_session else self._inherited_runtime_handle,
+            ):
+                if not message.content:
+                    continue
+                if getattr(self._adapter, "runtime_backend", "") == "goose":
+                    if message.type not in {"assistant", "result"}:
+                        continue
+                    if message.is_final:
+                        response_text = message.content
+                    else:
+                        response_text += message.content
+                else:
+                    response_text = message.content
+        return response_text.strip()
+
+    async def _request_bounce_classification(
+        self,
+        *,
+        trace: DecompositionTraceSummary,
+    ) -> tuple[BounceCause, str, tuple[str, ...], bool]:
+        """Ask a bounded tool-free classifier only for ambiguous failure causes."""
+        prompt = (
+            "Classify this failed execution attempt for recovery. Use only the bounded "
+            "attempt evidence below. Do not infer complexity from task length or wording. "
+            "Return ONLY JSON with cause, reason, evidence_refs, and has_remaining_scope. "
+            "cause must be TOO_BIG, BAD_SPEC, ENVIRONMENT, MODEL, or UNKNOWN. TOO_BIG is "
+            "allowed only when the trace shows attempted work and distinct parent scope "
+            "still remaining.\n\n"
+            f"## Bounded Attempt Trace\n{trace.summary}"
+        )
+        try:
+            response = await self._dispatch_decomposition_prompt(
+                prompt=prompt,
+                system_prompt="You are a conservative execution-recovery classifier.",
+            )
+            if len(response) > 10_000:
+                raise ValueError
+            match = re.search(r"\{.*\}", response, re.DOTALL)
+            payload = json.loads(match.group() if match is not None else response)
+            if not isinstance(payload, dict):
+                raise ValueError
+            cause = BounceCause(payload.get("cause", BounceCause.UNKNOWN.value))
+            reason = payload.get("reason", "")
+            refs = payload.get("evidence_refs", ())
+            remaining = payload.get("has_remaining_scope", False)
+            if not isinstance(reason, str):
+                reason = ""
+            if not isinstance(refs, list) or not all(isinstance(item, str) for item in refs):
+                refs = []
+            if type(remaining) is not bool:
+                remaining = False
+            bounded_refs = DecompositionTraceSummary(
+                summary="",
+                evidence_refs=tuple(refs[:8]),
+            ).evidence_refs
+            return (
+                cause,
+                redact_and_truncate_text(reason, max_chars=240),
+                bounded_refs,
+                remaining,
+            )
+        except (TimeoutError, ValueError, json.JSONDecodeError, TypeError):
+            return BounceCause.UNKNOWN, "Bounce classifier returned no admissible cause.", (), False
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.bounce_classifier.error",
+                error=redact_and_truncate_text(str(exc), max_chars=240),
+            )
+            return BounceCause.UNKNOWN, "Bounce classifier failed operationally.", (), False
+
+    async def _classify_bounce_result(
+        self,
+        *,
+        result: ACExecutionResult,
+        trace: DecompositionTraceSummary,
+    ) -> Any:
+        """Combine deterministic failure routing with bounded ambiguous classification."""
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass, classify_bounce
+
+        verdict = result.atomic_verifier_verdict
+        failure: FailureClass | None = None
+        if verdict is not None and verdict.failure_class:
+            try:
+                failure = FailureClass(verdict.failure_class)
+            except ValueError:
+                failure = None
+        admission = verdict.retry_admission if verdict is not None else None
+        deterministic = classify_bounce(
+            failure,
+            admission,
+            evidence_refs=trace.evidence_refs,
+            has_attempt_evidence=bool(
+                result.messages or result.typed_evidence or trace.evidence_refs
+            ),
+        )
+        if deterministic.cause is not BounceCause.UNKNOWN:
+            return deterministic
+        if failure not in {None, FailureClass.SCOPE_CREEP, FailureClass.STALL}:
+            return deterministic
+
+        (
+            proposed_cause,
+            reason,
+            proposed_refs,
+            has_remaining_scope,
+        ) = await self._request_bounce_classification(trace=trace)
+        refs = tuple(dict.fromkeys((*trace.evidence_refs, *proposed_refs)))
+        return classify_bounce(
+            failure,
+            admission,
+            proposed_cause=proposed_cause,
+            proposed_reasons=(reason,),
+            evidence_refs=refs,
+            has_attempt_evidence=bool(
+                result.messages or result.typed_evidence or trace.evidence_refs
+            ),
+            has_remaining_scope=has_remaining_scope,
+        )
+
+    async def _maybe_recover_with_bounce_decomposition(
+        self,
+        *,
+        result: ACExecutionResult,
+        ac_index: int,
+        ac_content: str,
+        session_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        seed_goal: str,
+        depth: int,
+        execution_id: str,
+        level_contexts: list[LevelContext] | None,
+        retry_attempt: int,
+        execution_counters: dict[str, int] | None,
+        node_identity: ExecutionNodeIdentity,
+        ac_spec: AcceptanceCriterionSpec | None,
+        start_time: datetime,
+        semantic_ac_key: str,
+    ) -> tuple[ACExecutionResult | None, DecompositionDecisionRecord | None]:
+        """Run cause-matched bounce recovery before alternate-harness fallback."""
+        if self._decomposition_mode != "bounce_only" or result.success:
+            return None, None
+        previous = self._decomposition_decisions.get(node_identity.node_id)
+        if previous is not None and previous.source is DecompositionSource.BOUNCE:
+            return None, previous
+
+        trace = self._build_decomposition_trace_summary(result=result, ac_spec=ac_spec)
+        classification = await self._classify_bounce_result(result=result, trace=trace)
+        verdict = result.atomic_verifier_verdict
+        retry_admission = (
+            verdict.retry_admission.value
+            if verdict is not None and hasattr(verdict.retry_admission, "value")
+            else (str(verdict.retry_admission) if verdict is not None else None)
+        )
+        await self._event_emitter.emit_bounce_classified(
+            execution_id=execution_id or session_id,
+            session_id=session_id,
+            node_identity=node_identity,
+            cause=classification.cause.value,
+            rationale=classification.rationale,
+            failure_class=verdict.failure_class if verdict is not None else None,
+            retry_admission=retry_admission,
+            evidence_refs=classification.evidence_refs,
+            trace_summary=trace.summary,
+        )
+        if not classification.allows_decomposition:
+            return None, None
+
+        if depth >= self._max_decomposition_depth:
+            decision = await self._finalize_decomposition_decision(
+                decision=DecompositionDecisionRecord(
+                    node_id=node_identity.node_id,
+                    source=DecompositionSource.BOUNCE,
+                    disposition=DecompositionDisposition.ESCALATED,
+                    cause=BounceCause.TOO_BIG,
+                    reasons=("decomposition_depth_cap", classification.rationale),
+                    evidence_refs=classification.evidence_refs,
+                    compromise_reason="depth_cap_forced_atomic",
+                ),
+                node_identity=node_identity,
+                execution_id=execution_id or session_id,
+                session_id=session_id,
+            )
+            return None, decision
+
+        decision = await self._try_decompose_ac(
+            ac_content=ac_content,
+            ac_index=ac_index,
+            seed_goal=seed_goal,
+            tools=tools,
+            system_prompt=system_prompt,
+            node_identity=node_identity,
+            session_id=session_id,
+            execution_id=execution_id,
+            retry_attempt=retry_attempt,
+            depth=depth,
+            ac_spec=ac_spec,
+            source=DecompositionSource.BOUNCE,
+            cause=BounceCause.TOO_BIG,
+            trace_summary=trace.summary,
+            evidence_refs=classification.evidence_refs,
+        )
+        decision = self._coerce_decomposition_decision(
+            decision,
+            node_identity=node_identity,
+            source=DecompositionSource.BOUNCE,
+            cause=BounceCause.TOO_BIG,
+        )
+        decision = await self._finalize_decomposition_decision(
+            decision=decision,
+            node_identity=node_identity,
+            execution_id=execution_id or session_id,
+            session_id=session_id,
+        )
+        if (
+            decision.disposition is DecompositionDisposition.SPLIT
+            and decision.trustworthy is True
+            and len(decision.children) >= MIN_SUB_ACS
+        ):
+            recovered = await self._execute_decomposition_children(
+                decision=decision,
+                ac_index=ac_index,
+                ac_content=ac_content,
+                session_id=session_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                seed_goal=seed_goal,
+                depth=depth,
+                execution_id=execution_id,
+                level_contexts=level_contexts,
+                retry_attempt=retry_attempt,
+                execution_counters=execution_counters,
+                node_identity=node_identity,
+                start_time=start_time,
+                semantic_ac_key=semantic_ac_key,
+            )
+            return recovered, decision
+        return None, decision
+
     async def _execute_single_ac(
         self,
         ac_index: int,
@@ -2316,6 +2910,7 @@ class ParallelACExecutor:
         retry_prompt_extra: str = "",
         same_runtime_budget_exhausted: bool = True,
         ac_spec: AcceptanceCriterionSpec | None = None,
+        decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
@@ -2373,8 +2968,11 @@ class ParallelACExecutor:
             depth=depth,
         )
 
-        # Try decomposition if enabled and not too deep
-        if self._enable_decomposition and depth < self._max_decomposition_depth:
+        node_decision = self._decomposition_decisions.get(node_identity.node_id)
+
+        # Compatibility mode keeps preflight ordering, but every result is now a
+        # persisted explicit decision and only a trusted SPLIT may lower children.
+        if self._decomposition_mode == "preflight" and depth < self._max_decomposition_depth:
             display_label = (
                 f"AC {node_identity.display_path}"
                 if node_identity.depth == 0
@@ -2382,159 +2980,87 @@ class ParallelACExecutor:
             )
             self._console.print(f"  [dim]{display_label}: Analyzing complexity...[/dim]")
             self._flush_console()
-            sub_acs = await self._try_decompose_ac(
-                ac_content=ac_content,
+            if node_decision is None:
+                raw_decision = await self._try_decompose_ac(
+                    ac_content=ac_content,
+                    ac_index=ac_index,
+                    seed_goal=seed_goal,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    node_identity=node_identity,
+                    session_id=session_id,
+                    execution_id=execution_context_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    ac_spec=ac_spec,
+                    source=DecompositionSource.PREFLIGHT,
+                )
+                node_decision = self._coerce_decomposition_decision(
+                    raw_decision,
+                    node_identity=node_identity,
+                    source=DecompositionSource.PREFLIGHT,
+                )
+                node_decision = await self._finalize_decomposition_decision(
+                    decision=node_decision,
+                    node_identity=node_identity,
+                    execution_id=execution_context_id,
+                    session_id=session_id,
+                )
+
+        if (
+            node_decision is not None
+            and node_decision.disposition is DecompositionDisposition.SPLIT
+            and len(node_decision.children) >= MIN_SUB_ACS
+            and (self._decomposition_mode == "preflight" or node_decision.trustworthy is True)
+        ):
+            return await self._execute_decomposition_children(
+                decision=node_decision,
                 ac_index=ac_index,
-                seed_goal=seed_goal,
+                ac_content=ac_content,
+                session_id=session_id,
                 tools=tools,
+                tool_catalog=tool_catalog,
                 system_prompt=system_prompt,
+                seed_goal=seed_goal,
+                depth=depth,
+                execution_id=execution_id,
+                level_contexts=level_contexts,
+                retry_attempt=retry_attempt,
+                execution_counters=execution_counters,
                 node_identity=node_identity,
+                start_time=start_time,
+                semantic_ac_key=semantic_ac_key,
             )
 
-            if sub_acs and len(sub_acs) >= MIN_SUB_ACS:
-                # Decomposition successful - execute Sub-ACs in parallel
-                self._console.print(
-                    f"  [cyan]{display_label} → Decomposed into {len(sub_acs)} Sub-ACs (parallel)[/cyan]"
-                )
-                self._flush_console()
-
-                # Emit decomposition event for TUI
-                for i, sub_ac in enumerate(sub_acs):
-                    child_node_identity = node_identity.child(i)
-                    await self._emit_subtask_event(
-                        execution_id=execution_id,
-                        ac_index=ac_index,
-                        sub_task_index=i + 1,
-                        sub_task_content=sub_ac,
-                        status="pending",
-                        node_identity=child_node_identity,
-                    )
-
-                # Execute Sub-ACs sequentially (memory optimization) while
-                # re-entering this same method for both composite and atomic children.
-                self._console.print(
-                    f"    [green]Starting {len(sub_acs)} Sub-ACs sequentially...[/green]"
-                )
-
-                sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
-                sub_depth = depth + 1
-
-                for idx, sub_ac in enumerate(sub_acs):
-                    try:
-                        child_node_identity = node_identity.child(idx)
-                        child_is_sub_ac = child_node_identity.depth > 0
-                        legacy_parent_ac_index = (
-                            node_identity.root_ac_index if child_node_identity.depth == 1 else None
-                        )
-                        legacy_sub_ac_index = idx if child_node_identity.depth == 1 else None
-                        await self._emit_subtask_event(
-                            execution_id=execution_id,
-                            ac_index=ac_index,
-                            sub_task_index=idx + 1,
-                            sub_task_content=sub_ac,
-                            status="executing",
-                            node_identity=child_node_identity,
-                        )
-
-                        sub_results[idx] = await self._execute_single_ac(
-                            ac_index=ac_index * 100 + idx,
-                            ac_content=sub_ac,
-                            session_id=session_id,
-                            tools=tools,
-                            tool_catalog=tool_catalog,
-                            system_prompt=system_prompt,
-                            seed_goal=seed_goal,
-                            depth=sub_depth,
-                            execution_id=execution_id,
-                            level_contexts=level_contexts,
-                            retry_attempt=retry_attempt,
-                            execution_counters=execution_counters,
-                            is_sub_ac=child_is_sub_ac,
-                            parent_ac_index=legacy_parent_ac_index,
-                            sub_ac_index=legacy_sub_ac_index,
-                            node_identity=child_node_identity,
-                            semantic_ac_key=semantic_ac_key,
-                        )
-                    except BaseException as e:
-                        if isinstance(e, anyio.get_cancelled_exc_class()):
-                            raise
-                        sub_results[idx] = e
-
-                # Convert exceptions and None sentinels to failed results
-                final_sub_results: list[ACExecutionResult] = []
-                for i, result in enumerate(sub_results):
-                    if isinstance(result, BaseException) or result is None:
-                        final_sub_results.append(
-                            ACExecutionResult(
-                                ac_index=ac_index * 100 + i,
-                                ac_content=sub_acs[i],
-                                success=False,
-                                error=str(result)
-                                if isinstance(result, BaseException)
-                                else "Task cancelled or produced no result",
-                                retry_attempt=retry_attempt,
-                                depth=sub_depth,
-                            )
-                        )
-                    else:
-                        final_sub_results.append(result)
-
-                success_count = sum(1 for result in final_sub_results if result.success)
-                self._console.print(
-                    f"    [{'green' if success_count == len(sub_acs) else 'yellow'}]"
-                    f"Sub-ACs completed: {success_count}/{len(sub_acs)} succeeded[/]"
-                )
-
-                # Update TUI with final statuses
-                for i, result in enumerate(final_sub_results):
-                    status = "completed" if result.success else "failed"
-                    child_node_identity = node_identity.child(i)
-                    await self._emit_subtask_event(
-                        execution_id=execution_id,
-                        ac_index=ac_index,
-                        sub_task_index=i + 1,
-                        sub_task_content=sub_acs[i],
-                        status=status,
-                        node_identity=child_node_identity,
-                    )
-
-                duration = (datetime.now(UTC) - start_time).total_seconds()
-                all_success = all(result.success for result in final_sub_results)
-
-                return ACExecutionResult(
-                    ac_index=ac_index,
-                    ac_content=ac_content,
-                    success=all_success,
-                    messages=(),
-                    final_message="\n".join(
-                        _render_ac_section(
-                            ACExecutionResult(
-                                ac_index=ac_index,
-                                ac_content=ac_content,
-                                success=all_success,
-                                messages=(),
-                                duration_seconds=duration,
-                                is_decomposed=True,
-                                sub_results=tuple(final_sub_results),
-                                depth=depth,
-                            ),
-                            index_path=(ac_index + 1,),
-                            heading_level=3,
-                            include_header=False,
-                        )
-                    ),
-                    duration_seconds=duration,
-                    retry_attempt=retry_attempt,
-                    is_decomposed=True,
-                    sub_results=tuple(final_sub_results),
-                    depth=depth,
-                )
+        if (
+            self._decomposition_mode == "preflight"
+            and depth >= self._max_decomposition_depth
+            and node_decision is None
+        ):
+            node_decision = await self._finalize_decomposition_decision(
+                decision=DecompositionDecisionRecord(
+                    node_id=node_identity.node_id,
+                    source=DecompositionSource.PREFLIGHT,
+                    disposition=DecompositionDisposition.ESCALATED,
+                    reasons=("decomposition_depth_cap",),
+                    compromise_reason="depth_cap_forced_atomic",
+                ),
+                node_identity=node_identity,
+                execution_id=execution_context_id,
+                session_id=session_id,
+            )
 
         # Depth-limit canary: execution is forced atomic once the soft recursion
         # safety net is reached, so downstream stages can detect decomposition pressure.
         decomposition_depth_warning = (
-            self._enable_decomposition and depth >= self._max_decomposition_depth
+            self._decomposition_mode == "preflight" and depth >= self._max_decomposition_depth
         )
+
+        def _finalize_node_result(result: ACExecutionResult) -> ACExecutionResult:
+            updates: dict[str, Any] = {"decomposition_decision": node_decision}
+            if decomposition_depth_warning:
+                updates["decomposition_depth_warning"] = True
+            return replace(result, **updates)
 
         # Stall recovery belongs to atomic leaves only. Once this method decides
         # to execute atomically, it can retry the leaf without re-running the
@@ -2562,6 +3088,7 @@ class ParallelACExecutor:
             "sub_ac_index": sub_ac_index,
             "node_identity": node_identity,
             "ac_spec": ac_spec,
+            "decomposition_trustworthy": decomposition_trustworthy,
             "semantic_ac_key": semantic_ac_key,
         }
         while True:
@@ -2586,9 +3113,39 @@ class ParallelACExecutor:
                 sub_ac_index=sub_ac_index,
                 node_identity=node_identity,
                 ac_spec=ac_spec,
+                decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
             )
             if atomic_result.error != _STALL_SENTINEL:
+                if not atomic_result.success:
+                    (
+                        bounce_result,
+                        bounce_decision,
+                    ) = await self._maybe_recover_with_bounce_decomposition(
+                        result=atomic_result,
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed_goal,
+                        depth=depth,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        retry_attempt=atomic_retry_attempt,
+                        execution_counters=execution_counters,
+                        node_identity=node_identity,
+                        ac_spec=ac_spec,
+                        start_time=start_time,
+                        semantic_ac_key=semantic_ac_key,
+                    )
+                    if bounce_decision is not None:
+                        node_decision = bounce_decision
+                        if bounce_decision.compromise_reason == "depth_cap_forced_atomic":
+                            decomposition_depth_warning = True
+                    if bounce_result is not None:
+                        return _finalize_node_result(bounce_result)
                 if not atomic_result.success and same_runtime_budget_exhausted:
                     # Non-stall terminal failure (e.g. fabrication, exhausted
                     # transient 429/529) on the FINAL same-runtime attempt: try
@@ -2603,9 +3160,7 @@ class ParallelACExecutor:
                     )
                     if alt_result is not None:
                         atomic_result = alt_result
-                if decomposition_depth_warning:
-                    return replace(atomic_result, decomposition_depth_warning=True)
-                return atomic_result
+                return _finalize_node_result(atomic_result)
 
             runtime_identity = build_ac_runtime_identity(
                 ac_index,
@@ -2642,6 +3197,34 @@ class ParallelACExecutor:
                     atomic_result,
                     error=f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)",
                 )
+                (
+                    bounce_result,
+                    bounce_decision,
+                ) = await self._maybe_recover_with_bounce_decomposition(
+                    result=failed_result,
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    session_id=session_id,
+                    tools=tools,
+                    tool_catalog=tool_catalog,
+                    system_prompt=system_prompt,
+                    seed_goal=seed_goal,
+                    depth=depth,
+                    execution_id=execution_id,
+                    level_contexts=level_contexts,
+                    retry_attempt=atomic_retry_attempt,
+                    execution_counters=execution_counters,
+                    node_identity=node_identity,
+                    ac_spec=ac_spec,
+                    start_time=start_time,
+                    semantic_ac_key=semantic_ac_key,
+                )
+                if bounce_decision is not None:
+                    node_decision = bounce_decision
+                    if bounce_decision.compromise_reason == "depth_cap_forced_atomic":
+                        decomposition_depth_warning = True
+                if bounce_result is not None:
+                    return _finalize_node_result(bounce_result)
                 # An abandoned stall is re-dispatched by the batch-level
                 # same-runtime retry loop (its error is no longer the stall
                 # sentinel), so only try a cross-harness redispatch once that
@@ -2657,9 +3240,7 @@ class ParallelACExecutor:
                     )
                     if alt_result is not None:
                         failed_result = alt_result
-                if decomposition_depth_warning:
-                    return replace(failed_result, decomposition_depth_warning=True)
-                return failed_result
+                return _finalize_node_result(failed_result)
 
             atomic_retry_attempt += 1
 
@@ -2876,6 +3457,179 @@ class ParallelACExecutor:
         )
         return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
 
+    @staticmethod
+    def _parse_legacy_decomposition(
+        response_text: str,
+        *,
+        min_sub_acs: int,
+        max_sub_acs: int,
+    ) -> list[str] | None:
+        """Parse a legacy string-array response without granting it trust."""
+        match = re.search(r"\[.*\]", response_text, re.DOTALL)
+        if match is None:
+            return None
+        try:
+            parsed = json.loads(match.group())
+        except json.JSONDecodeError:
+            return None
+        if (
+            isinstance(parsed, list)
+            and all(isinstance(item, str) and item.strip() for item in parsed)
+            and min_sub_acs <= len(parsed) <= max_sub_acs
+        ):
+            return [item.strip() for item in parsed]
+        return None
+
+    @staticmethod
+    def _parse_structured_decomposition(
+        response_text: str,
+        *,
+        parent_text: str,
+        min_sub_acs: int,
+        max_sub_acs: int,
+    ) -> tuple[DecompositionProposal | None, tuple[str, ...]]:
+        """Parse a bounded generic proposal without claiming semantic trust."""
+        if len(response_text) > 10_000:
+            return None, ("proposal_payload_too_large",)
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        candidate = match.group() if match is not None else response_text
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None, ("malformed_json",)
+        errors = validate_decomposition_proposal(
+            payload,
+            parent_text=parent_text,
+            min_children=min_sub_acs,
+            max_children=max_sub_acs,
+        )
+        if errors:
+            return None, errors
+        proposal = parse_decomposition_proposal(
+            payload,
+            parent_text=parent_text,
+            min_children=min_sub_acs,
+            max_children=max_sub_acs,
+        )
+        return proposal, (() if proposal is not None else ("invalid_structured_proposal",))
+
+    async def _attest_decomposition_proposal(
+        self,
+        *,
+        parent_text: str,
+        proposal: DecompositionProposal,
+        trace_summary: str,
+        system_prompt: str,
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Run one independent bounded semantic attestation for a proposed split."""
+        profile_clause = ""
+        if self._execution_profile is not None:
+            profile_clause = (
+                f"Profile axis: {self._execution_profile.axis}.\n"
+                f"Minimum unit: {self._execution_profile.min_unit}.\n"
+                f"Cut signal: {self._execution_profile.cut_signal}.\n"
+            )
+        prompt = (
+            "Independently attest this proposed decomposition. Do not modify files and do "
+            "not accept the proposal merely because it declares coverage. Return ONLY JSON "
+            "with boolean coverage_established, non_overlap_established, "
+            "simpler_units_established, and a reasons string array. All three booleans must "
+            "be true to establish the split.\n\n"
+            f"{profile_clause}"
+            f"Parent criterion:\n{parent_text}\n\n"
+            f"Bounded attempt trace:\n{trace_summary or 'none'}\n\n"
+            "Proposal:\n"
+            f"{json.dumps(proposal.to_dict(), sort_keys=True)}"
+        )
+        try:
+            response = await self._dispatch_decomposition_prompt(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                independent_session=True,
+            )
+            if len(response) > 10_000:
+                raise ValueError
+            match = re.search(r"\{.*\}", response, re.DOTALL)
+            payload = json.loads(match.group() if match is not None else response)
+            if not isinstance(payload, dict):
+                raise ValueError
+            checks = (
+                payload.get("coverage_established"),
+                payload.get("non_overlap_established"),
+                payload.get("simpler_units_established"),
+            )
+            reasons_raw = payload.get("reasons", ())
+            reasons = (
+                tuple(
+                    redact_and_truncate_text(item, max_chars=240)
+                    for item in reasons_raw[:7]
+                    if isinstance(item, str) and item.strip()
+                )
+                if isinstance(reasons_raw, list)
+                else ()
+            )
+            if all(value is True for value in checks):
+                return True, ("semantic_attestation_established", *reasons)
+            return False, ("semantic_attestation_not_established", *reasons)
+        except (TimeoutError, ValueError, json.JSONDecodeError, TypeError):
+            return False, ("semantic_attestation_unparseable",)
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.decomposition.attestation_error",
+                error=redact_and_truncate_text(str(exc), max_chars=240),
+            )
+            return False, ("semantic_attestation_runtime_error",)
+
+    @staticmethod
+    def _build_generic_decomposition_repair_prompt(
+        *,
+        parent_text: str,
+        trace_summary: str,
+        reasons: tuple[str, ...],
+        min_sub_acs: int,
+        max_sub_acs: int,
+    ) -> str:
+        """Build the single verifier-guided repair request for a generic proposal."""
+        return (
+            "Repair the rejected decomposition proposal exactly once. Return ONLY the "
+            "structured JSON object described below; do not return ATOMIC or a string array.\n\n"
+            f"Rejection reasons: {json.dumps(reasons)}\n\n"
+            f"Parent criterion:\n{parent_text}\n\n"
+            f"Bounded attempt trace:\n{trace_summary or 'none'}\n\n"
+            f"Return {min_sub_acs}-{max_sub_acs} children in this shape:\n"
+            '{"children":[{"description":"...","coverage_claims":["..."],'
+            '"verification_hint":"..."}],"covers_parent":true,"rationale":"..."}'
+        )
+
+    async def _verify_generic_decomposition(
+        self,
+        *,
+        response_text: str,
+        parent_text: str,
+        trace_summary: str,
+        system_prompt: str,
+        min_sub_acs: int,
+        max_sub_acs: int,
+    ) -> tuple[DecompositionProposal | None, tuple[str, ...]]:
+        """Apply structural validation followed by independent semantic attestation."""
+        proposal, reasons = self._parse_structured_decomposition(
+            response_text,
+            parent_text=parent_text,
+            min_sub_acs=min_sub_acs,
+            max_sub_acs=max_sub_acs,
+        )
+        if proposal is None:
+            return None, reasons
+        established, attestation_reasons = await self._attest_decomposition_proposal(
+            parent_text=parent_text,
+            proposal=proposal,
+            trace_summary=trace_summary,
+            system_prompt=system_prompt,
+        )
+        if not established:
+            return None, attestation_reasons
+        return proposal, attestation_reasons
+
     async def _try_decompose_ac(
         self,
         ac_content: str,
@@ -2884,16 +3638,32 @@ class ParallelACExecutor:
         tools: list[str],
         system_prompt: str,
         node_identity: ExecutionNodeIdentity | None = None,
-    ) -> list[str] | None:
-        """Ask Claude to decompose AC into Sub-ACs if complex.
-
-        Returns:
-            List of Sub-AC descriptions, or None if AC is atomic.
-        """
+        session_id: str = "",
+        execution_id: str = "",
+        retry_attempt: int = 0,
+        depth: int = 0,
+        ac_spec: AcceptanceCriterionSpec | None = None,
+        source: DecompositionSource = DecompositionSource.PREFLIGHT,
+        cause: BounceCause | None = None,
+        trace_summary: str = "",
+        evidence_refs: tuple[str, ...] = (),
+    ) -> DecompositionDecisionRecord:
+        """Decompose an AC and return a versioned, fail-closed decision."""
+        del tools, system_prompt, retry_attempt, ac_spec
         ac_label = (
             f"AC #{node_identity.display_path}"
             if node_identity is not None
             else f"AC #{ac_index + 1}"
+        )
+        run_anchor = (
+            execution_id
+            or (node_identity.execution_context_id if node_identity is not None else "")
+            or session_id
+            or f"local-ac-{ac_index}"
+        )
+        decision_identity = node_identity or ExecutionNodeIdentity.root(
+            execution_context_id=run_anchor,
+            ac_index=ac_index,
         )
         decomposition_system_prompt = (
             "You are a task decomposition expert. Analyze tasks and break them down if needed."
@@ -2901,22 +3671,27 @@ class ParallelACExecutor:
         min_sub_acs = MIN_SUB_ACS
         max_sub_acs = MAX_SUB_ACS
         profile_metadata = self._decomposition_profile_metadata()
+        profile_lines = ""
         if self._execution_profile is not None:
             params = params_from_profile(
                 self._execution_profile,
                 min_branching=MIN_SUB_ACS,
             )
             min_sub_acs = params.min_branching
-            max_sub_acs = params.max_branching
+            max_sub_acs = min(params.max_branching, MAX_SUB_ACS)
             decomposition_system_prompt = build_decomposition_system_prompt(params)
-            decompose_prompt = build_decomposition_user_prompt(
-                params,
-                ac_label=ac_label,
-                ac_content=ac_content,
-                seed_goal=seed_goal,
+            profile_lines = (
+                f"Split along the axis: {params.axis}.\n"
+                f"Smallest acceptable unit: {params.min_unit}.\n"
+                + (
+                    f"A sub-AC is small enough when: {params.cut_signal}.\n"
+                    if params.cut_signal
+                    else ""
+                )
             )
-        else:
-            decompose_prompt = f"""Analyze this acceptance criterion and determine if it should be decomposed.
+
+        bounded_trace = redact_and_truncate_text(trace_summary, max_chars=1_000)
+        decompose_prompt = f"""Analyze this acceptance criterion and determine if it should be decomposed.
 
 ## Goal Context
 {seed_goal}
@@ -2925,119 +3700,172 @@ class ParallelACExecutor:
 {ac_content}
 
 ## Instructions
-Default to ATOMIC. Each Sub-AC you create becomes a separate agent session with
-its own full context, so decomposing has a real token cost — only split when it
-clearly pays for itself.
+Default to ATOMIC. Each sub-AC becomes a separate agent session with its own full
+context, so split only when the parent bundles multiple independently valuable
+outcomes that can be verified separately.
+{profile_lines}
+Decompose into {min_sub_acs}-{max_sub_acs} sub-ACs only when each child is simpler,
+independently executable, and owns distinct parent scope. Multiple steps or files
+alone are not evidence that a split is warranted.
 
-Decompose into {MIN_SUB_ACS}-{MAX_SUB_ACS} Sub-ACs ONLY if this AC bundles
-multiple independently *valuable* outcomes that would each be verified
-differently. Needing several steps, or touching several files, is NOT by itself a
-reason to decompose — the executor handles multi-step work within one unit.
+If the AC is one focused outcome, respond with: ATOMIC
 
-If the AC is a single focused outcome (the common case), respond with: ATOMIC
+If decomposing, respond with ONLY this structured JSON object:
+{{"children":[{{"description":"...","coverage_claims":["distinct parent scope"],
+"verification_hint":"how this child is independently checked"}}],
+"covers_parent":true,"rationale":"why the children cover the parent without overlap"}}
 
-If decomposing, respond with ONLY a JSON array of Sub-AC descriptions:
-["Sub-AC 1: description", "Sub-AC 2: description", ...]
-
-Each Sub-AC should be:
-- Independently executable
-- Specific and focused
-- Part of achieving the parent AC
-- Targeting distinct files or distinct sections within shared files (avoid overlap)
-
-Respond with either "ATOMIC" or the JSON array only, nothing else.
+Respond with either ATOMIC or the structured JSON object only.
 """
-
-        self._announce_param_degradations(
-            system_prompt=decomposition_system_prompt,
-            tools=[],
-        )
-        # Pace this backend request within the shared budget before starting the
-        # decomposition timeout, so rate-limit waiting never eats into it.
-        await self._await_dispatch_rate_budget(
-            prompt=decompose_prompt,
-            system_prompt=decomposition_system_prompt,
-        )
+        if bounded_trace:
+            decompose_prompt += f"\n\n## Bounded Attempt Trace\n{bounded_trace}"
 
         try:
-            response_text = ""
-            # NOTE: Do NOT use `break` or `aclosing` with the SDK generator.
-            # The SDK uses anyio cancel scopes internally. If the generator
-            # is closed via aclose() (from break or aclosing), the cancel scope
-            # cleanup creates background asyncio Tasks that cancel other
-            # running tasks. Let the generator complete naturally instead.
-            async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
-                async for message in self._adapter.execute_task(
-                    prompt=decompose_prompt,
-                    tools=[],  # No tools for decomposition analysis
-                    system_prompt=decomposition_system_prompt,
-                    resume_handle=self._inherited_runtime_handle,
-                ):
-                    if message.content:
-                        # Some runtimes (notably Goose stream-json) emit assistant text
-                        # as token/delta chunks.  The decomposition parser needs the
-                        # full response, so accumulate chunks for Goose while preserving
-                        # the previous last-message behavior for runtimes that emit
-                        # complete assistant messages.
-                        if getattr(self._adapter, "runtime_backend", "") == "goose":
-                            if message.type not in {"assistant", "result"}:
-                                continue
-                            if message.is_final:
-                                response_text = message.content
-                            else:
-                                response_text += message.content
-                        else:
-                            response_text = message.content
-
-            # Parse response.
-            #
-            # Check for an explicit Sub-AC JSON array FIRST, before the ATOMIC
-            # verdict. A bare ``"ATOMIC" in text`` substring match (the previous
-            # behavior) mis-reads a legitimate split such as
-            # ``"NOT ATOMIC, decompose into: [...]"`` — or an array element that
-            # merely mentions the word "atomic" — as a verdict of atomic. By
-            # parsing the array first and only then accepting an ATOMIC verdict
-            # that the response *starts with*, both false-atomic and false-split
-            # directions are closed. Anything we cannot parse fails closed to
-            # atomic (no split): an erroneous split multiplies token cost across
-            # the whole subtree, so atomic is the frugal default.
-            response_text = response_text.strip()
-
-            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
-            if json_match:
-                try:
-                    sub_acs = json.loads(json_match.group())
-                except json.JSONDecodeError:
-                    sub_acs = None
-                if (
-                    isinstance(sub_acs, list)
-                    and all(isinstance(s, str) for s in sub_acs)
-                    and min_sub_acs <= len(sub_acs) <= max_sub_acs
-                ):
-                    log.info(
-                        "parallel_executor.decomposition.success",
-                        ac_index=ac_index,
-                        sub_ac_count=len(sub_acs),
-                        **profile_metadata,
-                    )
-                    return sub_acs
-
+            response_text = await self._dispatch_decomposition_prompt(
+                prompt=decompose_prompt,
+                system_prompt=decomposition_system_prompt,
+            )
             if response_text.upper().startswith("ATOMIC"):
                 log.info(
                     "parallel_executor.decomposition.atomic",
                     ac_index=ac_index,
                     **profile_metadata,
                 )
-                return None
+                return DecompositionDecisionRecord(
+                    node_id=decision_identity.node_id,
+                    source=source,
+                    disposition=(
+                        DecompositionDisposition.ATOMIC
+                        if source is DecompositionSource.PREFLIGHT
+                        else DecompositionDisposition.ESCALATED
+                    ),
+                    cause=cause,
+                    reasons=("explicit_atomic",),
+                    evidence_refs=evidence_refs,
+                    compromise_reason=(
+                        None
+                        if source is DecompositionSource.PREFLIGHT
+                        else "too_big_classifier_disagreed_with_decomposer"
+                    ),
+                )
+
+            if "{" in response_text:
+                proposal, proposal_reasons = await self._verify_generic_decomposition(
+                    response_text=response_text,
+                    parent_text=ac_content,
+                    trace_summary=bounded_trace,
+                    system_prompt=decomposition_system_prompt,
+                    min_sub_acs=min_sub_acs,
+                    max_sub_acs=max_sub_acs,
+                )
+                if proposal is not None:
+                    return DecompositionDecisionRecord(
+                        node_id=decision_identity.node_id,
+                        source=source,
+                        disposition=DecompositionDisposition.SPLIT,
+                        cause=cause,
+                        reasons=proposal_reasons,
+                        evidence_refs=evidence_refs,
+                        children=proposal.children,
+                        structural_status=StructuralCheckStatus.PASSED,
+                        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                        trustworthy=True,
+                    )
+
+                repair_prompt = self._build_generic_decomposition_repair_prompt(
+                    parent_text=ac_content,
+                    trace_summary=bounded_trace,
+                    reasons=proposal_reasons,
+                    min_sub_acs=min_sub_acs,
+                    max_sub_acs=max_sub_acs,
+                )
+                repaired_text = await self._dispatch_decomposition_prompt(
+                    prompt=repair_prompt,
+                    system_prompt=decomposition_system_prompt,
+                )
+                repaired_proposal, repaired_reasons = await self._verify_generic_decomposition(
+                    response_text=repaired_text,
+                    parent_text=ac_content,
+                    trace_summary=bounded_trace,
+                    system_prompt=decomposition_system_prompt,
+                    min_sub_acs=min_sub_acs,
+                    max_sub_acs=max_sub_acs,
+                )
+                if repaired_proposal is not None:
+                    return DecompositionDecisionRecord(
+                        node_id=decision_identity.node_id,
+                        source=source,
+                        disposition=DecompositionDisposition.SPLIT,
+                        cause=cause,
+                        reasons=repaired_reasons,
+                        evidence_refs=evidence_refs,
+                        children=repaired_proposal.children,
+                        structural_status=StructuralCheckStatus.PASSED,
+                        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                        repair_count=1,
+                        trustworthy=True,
+                    )
+
+                final_reasons = repaired_reasons or proposal_reasons
+                semantic_failure = any(
+                    reason.startswith("semantic_attestation") for reason in final_reasons
+                )
+                return DecompositionDecisionRecord(
+                    node_id=decision_identity.node_id,
+                    source=source,
+                    disposition=DecompositionDisposition.ESCALATED,
+                    cause=cause,
+                    reasons=final_reasons,
+                    evidence_refs=evidence_refs,
+                    structural_status=(
+                        StructuralCheckStatus.PASSED
+                        if semantic_failure
+                        else StructuralCheckStatus.FAILED
+                    ),
+                    semantic_status=(
+                        SemanticAttestationStatus.NOT_ESTABLISHED
+                        if semantic_failure
+                        else SemanticAttestationStatus.NOT_RUN
+                    ),
+                    repair_count=1,
+                    compromise_reason="generic_decomposition_repair_failed",
+                )
+
+            sub_acs = self._parse_legacy_decomposition(
+                response_text,
+                min_sub_acs=min_sub_acs,
+                max_sub_acs=max_sub_acs,
+            )
+            if sub_acs is not None:
+                log.warning(
+                    "parallel_executor.decomposition.legacy_array_untrusted",
+                    ac_index=ac_index,
+                    sub_ac_count=len(sub_acs),
+                    **profile_metadata,
+                )
+                return legacy_unverified_split_decision(
+                    node_id=decision_identity.node_id,
+                    source=source,
+                    child_descriptions=sub_acs,
+                    cause=cause,
+                    reasons=("legacy_array_without_attestation",),
+                    evidence_refs=evidence_refs,
+                )
 
             log.warning(
-                "parallel_executor.decomposition.unparseable_defaulting_atomic",
+                "parallel_executor.decomposition.unparseable_unknown",
                 ac_index=ac_index,
-                response_preview=response_text[:100],
+                response_preview=redact_and_truncate_text(response_text, max_chars=100),
                 **profile_metadata,
             )
-            return None
-
+            return DecompositionDecisionRecord(
+                node_id=decision_identity.node_id,
+                source=source,
+                disposition=DecompositionDisposition.UNKNOWN,
+                cause=cause,
+                reasons=("unparseable_decomposition_response",),
+                evidence_refs=evidence_refs,
+            )
         except TimeoutError:
             log.warning(
                 "parallel_executor.decomposition.timeout",
@@ -3045,15 +3873,29 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 timeout_seconds=DECOMPOSITION_TIMEOUT_SECONDS,
                 **profile_metadata,
             )
-            return None
-        except Exception as e:
+            return DecompositionDecisionRecord(
+                node_id=decision_identity.node_id,
+                source=source,
+                disposition=DecompositionDisposition.UNKNOWN,
+                cause=cause,
+                reasons=("decomposition_timeout",),
+                evidence_refs=evidence_refs,
+            )
+        except Exception as exc:
             log.warning(
                 "parallel_executor.decomposition.error",
                 ac_index=ac_index,
-                error=str(e),
+                error=redact_and_truncate_text(str(exc), max_chars=240),
                 **profile_metadata,
             )
-            return None
+            return DecompositionDecisionRecord(
+                node_id=decision_identity.node_id,
+                source=source,
+                disposition=DecompositionDisposition.UNKNOWN,
+                cause=cause,
+                reasons=("decomposition_runtime_error",),
+                evidence_refs=evidence_refs,
+            )
 
     @staticmethod
     def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -3330,6 +4172,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         execution_counters: dict[str, int] | None = None,
         retry_prompt_extra: str = "",
         ac_spec: AcceptanceCriterionSpec | None = None,
+        decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
@@ -3486,6 +4329,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             self._adapter,
             router=self._model_router,
             is_decomposed_child=is_sub_ac,
+            decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=retry_attempt,
             suggested_tier=suggested_tier,
         )
@@ -3493,6 +4337,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             self._adapter,
             router=self._model_router,
             is_decomposed_child=is_sub_ac,
+            decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=0,
             suggested_tier=suggested_tier,
         )
@@ -3975,16 +4820,9 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             # harness re-executes it at the parent tier/effort in an ISOLATED
             # workspace and emits ``execution.ac.shadow_replay``. Default OFF
             # (doubles token cost) and fire-and-forget — it never changes this AC's
-            # result. Forced-atomic children are marked untrustworthy so the proof
-            # excludes them (mirrors the depth-limit canary in _execute_single_ac).
+            # result. The finalized decision's trust flag is threaded into the
+            # proof producer; untrusted and depth-capped children remain excluded.
             if self._shadow_replay_enabled and is_sub_ac and success:
-                # The current decomposer validates only JSON shape/count. It does
-                # not deterministically prove semantic coverage or exclusivity,
-                # so live children must not claim the MECE trust required by the
-                # frugality proof. Test harnesses may still exercise the complete
-                # proof contract by calling the replay producer with an explicit
-                # trusted decomposition attestation.
-                decomposition_trustworthy = False
                 await run_shadow_replay(
                     self,
                     runtime_identity=runtime_identity,
@@ -4725,7 +5563,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             parts.append(f"### Prior failure classification\n{failure_class}")
         last_error = result.error or result.final_message or ""
         if last_error and last_error != _STALL_SENTINEL:
-            parts.append("### Last error (tail)\n" + last_error[-500:])
+            redacted_error = redact_and_truncate_text(
+                last_error,
+                max_chars=max(500, len(last_error) * 2),
+            )
+            parts.append("### Last error (tail)\n" + redacted_error[-500:])
         if is_final_attempt:
             from ouroboros.resilience.lateral import (
                 build_lateral_change_of_approach_directive,
@@ -4926,10 +5768,10 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     # agnostic to the unit's start tier and ladder shape: escalation
                     # stays pending until the resolved model stops climbing (the
                     # frontier ceiling), then early-stop resumes. Whether the unit
-                    # routes as a child is read from the dispatched result — a
-                    # decomposed parent re-runs its children (routed one tier
-                    # cheaper, sharing this retry counter) on the next retry, so the
-                    # child ladder, not the parent's, governs the escalation ahead.
+                    # routes as a trusted child is read from the dispatched result.
+                    # A trusted decomposed parent re-runs its children one tier
+                    # cheaper with this retry counter, so that child ladder governs
+                    # the escalation ahead; untrusted decomposition stays at base.
                     pending_enforced_escalation = False
                     if (
                         self._model_router is not None
@@ -4941,16 +5783,21 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         routes_as_child = (
                             isinstance(gated, ACExecutionResult) and gated.is_decomposed
                         )
+                        decomposition_trustworthy = (
+                            isinstance(gated, ACExecutionResult) and gated.decomposition_trustworthy
+                        )
                         just_dispatched = decide_model(
                             model_support,
                             router=self._model_router,
                             is_decomposed_child=routes_as_child,
+                            decomposition_trustworthy=decomposition_trustworthy,
                             retry_attempt=ac_retry_attempts[ac_idx],
                         )
                         next_scheduled = decide_model(
                             model_support,
                             router=self._model_router,
                             is_decomposed_child=routes_as_child,
+                            decomposition_trustworthy=decomposition_trustworthy,
                             retry_attempt=ac_retry_attempts[ac_idx] + 1,
                         )
                         pending_enforced_escalation = (

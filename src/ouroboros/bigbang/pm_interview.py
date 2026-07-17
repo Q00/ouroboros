@@ -16,7 +16,8 @@ questions for classification and collects PM-specific metadata.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from ouroboros.bigbang.question_classifier import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -286,6 +288,18 @@ class PMInterviewEngine:
                 model=self.model,
             )
             results = await explorer.explore(paths)
+
+            # Snapshot worktrees are scan locations only — present the
+            # durable source checkout in the injected context.
+            source_by_scan_path = {
+                r["path"]: r["source_path"] for r in repos if r.get("source_path")
+            }
+            if source_by_scan_path:
+                results = [
+                    replace(res, path=source_by_scan_path.get(res.path, res.path))
+                    for res in results
+                ]
+
             self.codebase_context = format_explore_results(results)
 
             # Share context with classifier
@@ -390,8 +404,15 @@ class PMInterviewEngine:
         self.classifications = []
         self._reframe_map = {}
 
-        # Explore codebases if brownfield repos are provided
+        # Explore codebases if brownfield repos are provided.
+        # Redirect exploration to persistent snapshot worktrees pinned to
+        # the remote default branch (created once, then fetch + hard-reset)
+        # so a stale local checkout never leaks into PRD context. This hook
+        # covers every engine-driven entry point (MCP in-process and CLI).
         if brownfield_repos:
+            brownfield_repos = await asyncio.to_thread(
+                refresh_pm_snapshot_worktrees, list(brownfield_repos)
+            )
             self._selected_brownfield_repos = list(brownfield_repos)
             await self.explore_codebases(brownfield_repos)
 
@@ -424,8 +445,12 @@ class PMInterviewEngine:
             if brownfield_repos and self.codebase_context:
                 state.is_brownfield = True
                 state.codebase_context = self.codebase_context
+                # Persist the durable source checkout, not an ephemeral
+                # snapshot worktree path, into interview state.
                 state.codebase_paths = [
-                    {"path": r["path"], "role": "primary"} for r in brownfield_repos if "path" in r
+                    {"path": r.get("source_path") or r["path"], "role": "primary"}
+                    for r in brownfield_repos
+                    if "path" in r
                 ]
                 state.explore_completed = True
             log.info(
@@ -1258,8 +1283,17 @@ Include them as original question text in "decide_later_items":
             if item not in all_decide_later:
                 all_decide_later.append(item)
 
-        # Include brownfield repos — use session-stored repos, not DB
-        brownfield_repos = tuple(dict(r) for r in self._selected_brownfield_repos)
+        # Include brownfield repos — use session-stored repos, not DB.
+        # Snapshot worktree paths are working locations only; the seed must
+        # record the durable source checkout (``source_path``) instead.
+        def _durable_repo(repo: dict[str, str]) -> dict[str, str]:
+            entry = dict(repo)
+            source = entry.pop("source_path", None)
+            if source:
+                entry["path"] = source
+            return entry
+
+        brownfield_repos = tuple(_durable_repo(r) for r in self._selected_brownfield_repos)
 
         return PMSeed(
             pm_id=f"pm_seed_{interview_id}",

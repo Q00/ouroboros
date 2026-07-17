@@ -38,12 +38,23 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    InterviewStatus,
+)
+from ouroboros.bigbang.requirement_distillation import (
+    build_promoted_reference_seed,
+    build_requirement_distillation,
+    is_reference_aware_distillation,
+    seed_readiness_details,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewTurnContext,
+    detect_explicit_confusion_terms,
+)
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -104,6 +115,12 @@ REQUIRED_CLIENT_GATES: tuple[str, ...] = (
     "restate_goal_approved",
 )
 _REQUIRE_CLIENT_GATES_ENV = "OUROBOROS_REQUIRE_CLIENT_GATES"
+_NORMALIZED_TURN_CONTEXT_KEY = "_normalized_interview_turn_context"
+
+
+def _normalized_turn_context(arguments: dict[str, Any]) -> InterviewTurnContext | None:
+    value = arguments.get(_NORMALIZED_TURN_CONTEXT_KEY)
+    return value if isinstance(value, InterviewTurnContext) else None
 
 
 def _normalize_client_gates(value: Any) -> frozenset[str]:
@@ -1210,6 +1227,7 @@ async def _plugin_load_state(state_dir: Path, interview_id: str) -> Result[Inter
 
         content = await asyncio.to_thread(_sync_read)
         state = InterviewState.model_validate_json(content)
+        state.discard_stale_requirement_distillation()
         return Result.ok(state)
     except (OSError, ValueError) as e:
         return Result.err(f"Failed to load interview state: {e}")
@@ -1434,6 +1452,63 @@ class GenerateSeedHandler:
                     )
 
             transcript = _format_interview_transcript(interview_state)
+            distillation = build_requirement_distillation(interview_state)
+            from ouroboros.core.requirement_candidate import evaluate_promotion
+
+            promotion = evaluate_promotion(distillation)
+            if promotion.blockers:
+                details = seed_readiness_details(promotion)
+                return Result.err(
+                    MCPToolError(
+                        f"Interview must be reopened before Seed generation: {details}",
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
+            interview_state.requirement_distillation = distillation
+            cache_save_result = await _plugin_save_state(state_dir, interview_state)
+            if cache_save_result.is_err:
+                log.warning(
+                    "mcp.tool.generate_seed.persist_distillation_failed",
+                    session_id=session_id,
+                    error=str(cache_save_result.error),
+                )
+
+            if is_reference_aware_distillation(distillation):
+                reference_seed = build_promoted_reference_seed(
+                    interview_state,
+                    distillation,
+                    ambiguity_score=float(effective_score if effective_score is not None else 0.15),
+                )
+                seed_yaml = yaml.dump(
+                    reference_seed.to_dict(),
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                result_text = (
+                    _client_gate_warning_text(client_gate_status) + "Seed Generated Successfully\n"
+                    "=========================\n"
+                    f"Seed ID: {reference_seed.metadata.seed_id}\n"
+                    f"Interview ID: {reference_seed.metadata.interview_id}\n"
+                    f"Ambiguity Score: {reference_seed.metadata.ambiguity_score:.2f}\n"
+                    f"Goal: {reference_seed.goal}\n\n"
+                    "--- Seed YAML ---\n"
+                    f"{seed_yaml}"
+                )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                        is_error=False,
+                        meta={
+                            "seed_id": reference_seed.metadata.seed_id,
+                            "interview_id": reference_seed.metadata.interview_id,
+                            "ambiguity_score": reference_seed.metadata.ambiguity_score,
+                            "force": force,
+                            "requirement_distillation": distillation.model_dump(mode="json"),
+                            **client_gate_status,
+                        },
+                    )
+                )
 
             payload = build_generate_seed_subagent(
                 session_id=session_id,
@@ -1441,6 +1516,7 @@ class GenerateSeedHandler:
                 transcript=transcript,
                 client_gates=client_gate_status["accepted_client_gates"],
                 force=force,
+                requirement_distillation=(distillation if interview_state.reference_cues else None),
             )
             return await dispatch_plugin_terminal(
                 self.event_store,
@@ -1587,6 +1663,11 @@ class GenerateSeedHandler:
                         "interview_id": seed.metadata.interview_id,
                         "ambiguity_score": seed.metadata.ambiguity_score,
                         "force": force,
+                        "requirement_distillation": (
+                            state.requirement_distillation.model_dump(mode="json")
+                            if state.requirement_distillation is not None
+                            else None
+                        ),
                         **client_gate_status,
                     },
                 )
@@ -2014,6 +2095,26 @@ class InterviewHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="confused_terms",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Explicit domain terms the user says they do not understand. "
+                        "Queued on the start turn and applied only after the first answer."
+                    ),
+                    required=False,
+                    items={"type": "string"},
+                ),
+                MCPToolParameter(
+                    name="references",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Bounded user-provided reference cues. Each object requires "
+                        "reference_id, label, and origin; url/excerpt are optional."
+                    ),
+                    required=False,
+                    items={"type": "object"},
+                ),
             ),
         )
 
@@ -2029,6 +2130,23 @@ class InterviewHandler:
         Returns:
             Result containing interview question and session_id or error.
         """
+        try:
+            turn_context = InterviewTurnContext.model_validate(
+                {
+                    "confused_terms": arguments.get("confused_terms") or (),
+                    "references": arguments.get("references") or (),
+                }
+            )
+        except PydanticValidationError as exc:
+            return Result.err(
+                MCPToolError(
+                    f"Invalid interview adapter context: {exc}",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        arguments = dict(arguments)
+        arguments[_NORMALIZED_TURN_CONTEXT_KEY] = turn_context
+
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
@@ -2149,6 +2267,9 @@ class InterviewHandler:
         real_session_id = session_id
         plugin_state: InterviewState | None = None
         plugin_intent_guard_report: IntentGuardReport | None = None
+        turn_context = _normalized_turn_context(arguments)
+        adapter_question: str | None = None
+        plugin_state_changed = False
 
         if action == "start" and initial_context:
             cwd = arguments.get("cwd") or os.getcwd()
@@ -2176,6 +2297,7 @@ class InterviewHandler:
                 interview_id=interview_id,
                 initial_context=resolved_context.value,
             )
+            state.merge_turn_context(turn_context)
             plugin_state = state
             # Detect brownfield
             if cwd:
@@ -2201,6 +2323,7 @@ class InterviewHandler:
                 )
             state = load_result.value
             plugin_state = state
+            plugin_state_changed = state.merge_turn_context(turn_context)
             # Record answer into persisted state.
             # In plugin mode each dispatch = new child session. The child
             # generates questions but can't write back to server-side state.
@@ -2211,6 +2334,10 @@ class InterviewHandler:
             # question) and passes it back here so we can persist the real
             # question text instead of a placeholder.
             if answer:
+                if state.is_complete:
+                    state.status = InterviewStatus.IN_PROGRESS
+                    state.clear_stored_ambiguity()
+                    state.completion_candidate_streak = 0
                 if state.rounds and state.rounds[-1].user_response is None:
                     question_text = last_question or state.rounds[-1].question
                     plugin_intent_guard_report = _guard_interview_answer(
@@ -2232,6 +2359,7 @@ class InterviewHandler:
                     if last_question:
                         state.rounds[-1].question = last_question
                     state.rounds[-1].user_response = answer
+                    state.record_adapter_answer(question_text, answer)
                 else:
                     # No rounds yet or all answered — append new round.
                     # Use last_question when available; fall back to a
@@ -2259,14 +2387,23 @@ class InterviewHandler:
                             user_response=answer,
                         )
                     )
-                state.mark_updated()
-                save_result = await _plugin_save_state(state_dir, state)
+                    state.record_adapter_answer(question_text, answer)
+                detected_terms = detect_explicit_confusion_terms(answer)
+                if detected_terms:
+                    state.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
+                state.invalidate_requirement_distillation()
+                plugin_state_changed = True
+            # Build transcript from persisted rounds
+            transcript = _format_interview_transcript(state)
+
+        if plugin_state is not None:
+            adapter_question = plugin_state.next_adapter_question()
+            if adapter_question is not None or plugin_state_changed:
+                save_result = await _plugin_save_state(state_dir, plugin_state)
                 if save_result.is_err:
                     return Result.err(
                         MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
-            # Build transcript from persisted rounds
-            transcript = _format_interview_transcript(state)
 
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
@@ -2275,6 +2412,8 @@ class InterviewHandler:
             answer=answer,
             cwd=arguments.get("cwd"),
             transcript=transcript,
+            turn_context=turn_context,
+            adapter_question=adapter_question,
         )
         return await dispatch_plugin_terminal(
             self.event_store,
@@ -2439,6 +2578,15 @@ class InterviewHandler:
                     )
 
                 state = result.value
+                if state.merge_turn_context(_normalized_turn_context(arguments)):
+                    merge_save_result = await engine.save_state(state)
+                    if merge_save_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                str(merge_save_result.error),
+                                tool_name="ouroboros_interview",
+                            )
+                        )
                 _interview_id = state.interview_id
                 # No answers exist yet — scoring cannot trigger completion
                 # and would waste an LLM call (~3-8s). The PM handler
@@ -2726,6 +2874,15 @@ class InterviewHandler:
                 )
 
             state = load_result.value
+            if state.merge_turn_context(_normalized_turn_context(arguments)):
+                merge_save_result = await engine.save_state(state)
+                if merge_save_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(merge_save_result.error),
+                            tool_name="ouroboros_interview",
+                        )
+                    )
             _interview_id = session_id
 
             lateral_review_meta: dict[str, Any] | None = None
@@ -3126,6 +3283,15 @@ class InterviewHandler:
                 )
 
             state = load_result.value
+            if state.merge_turn_context(_normalized_turn_context(arguments)):
+                merge_save_result = await engine.save_state(state)
+                if merge_save_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(merge_save_result.error),
+                            tool_name="ouroboros_interview",
+                        )
+                    )
             _interview_id = session_id
 
             if not answer and state.rounds and state.rounds[-1].user_response is None:

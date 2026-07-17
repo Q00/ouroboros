@@ -28,6 +28,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
+from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
@@ -8361,7 +8362,9 @@ class TestParallelACExecutor:
                 system_prompt="system",
             )
 
-        assert result is None
+        assert result.disposition is DecompositionDisposition.UNKNOWN
+        assert result.reasons == ("decomposition_timeout",)
+        assert result.trustworthy is False
         assert runtime.cancelled is True
 
     @pytest.mark.asyncio
@@ -11531,7 +11534,12 @@ async def test_try_decompose_ac_replaces_goose_chunks_with_final_result() -> Non
         system_prompt="system",
     )
 
-    assert result == ["Sub-AC 1: inspect", "Sub-AC 2: test"]
+    assert result.disposition is DecompositionDisposition.SPLIT
+    assert [child.description for child in result.children] == [
+        "Sub-AC 1: inspect",
+        "Sub-AC 2: test",
+    ]
+    assert result.trustworthy is False
 
 
 @pytest.mark.asyncio
@@ -11573,11 +11581,13 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
         system_prompt="system",
     )
 
-    assert result == [
+    assert result.disposition is DecompositionDisposition.SPLIT
+    assert [child.description for child in result.children] == [
         "Sub-AC 1: inspect the implementation",
         "Sub-AC 2: write a focused regression test",
         "Sub-AC 3: document the result",
     ]
+    assert result.trustworthy is False
 
 
 @pytest.mark.asyncio
@@ -11623,7 +11633,12 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
         system_prompt="system",
     )
 
-    assert result == ["Sub-AC 1: inspect", "Sub-AC 2: test"]
+    assert result.disposition is DecompositionDisposition.SPLIT
+    assert [child.description for child in result.children] == [
+        "Sub-AC 1: inspect",
+        "Sub-AC 2: test",
+    ]
+    assert result.trustworthy is False
     assert runtime.dispatched_tools == []
     console.print.assert_called_once()
     notice = console.print.call_args.args[0]

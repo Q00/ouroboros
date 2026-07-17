@@ -1,0 +1,44 @@
+#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+
+const habitsPath = path.join(process.cwd(), "habits.json");
+const [command, ...args] = process.argv.slice(2);
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+function loadHabits() {
+  if (!fs.existsSync(habitsPath)) return [];
+  return JSON.parse(fs.readFileSync(habitsPath, "utf8"));
+}
+
+function saveHabits(habits) {
+  fs.writeFileSync(habitsPath, JSON.stringify(habits));
+}
+
+if (command === "add" && args.length === 1) {
+  const habits = loadHabits();
+  const id = habits.reduce((max, habit) => Math.max(max, habit.id), 0) + 1;
+  const habit = { id, text: args[0], checked: false };
+  habits.push(habit);
+  saveHabits(habits);
+  console.log(`Added habit ${habit.id}: ${habit.text}`);
+} else if (command === "list" && args.length === 0) {
+  const habits = loadHabits();
+  for (const habit of habits) {
+    console.log(`${habit.checked ? "[x]" : "[ ]"} ${habit.id}. ${habit.text}`);
+  }
+} else if (command === "check" && args.length === 1) {
+  const habits = loadHabits();
+  const id = Number(args[0]);
+  const habit = habits.find((entry) => entry.id === id);
+  if (!habit) fail("Error: habit not found");
+  habit.checked = true;
+  saveHabits(habits);
+  console.log(`Checked habit ${habit.id}: ${habit.text}`);
+} else {
+  fail("Error: unsupported command");
+}

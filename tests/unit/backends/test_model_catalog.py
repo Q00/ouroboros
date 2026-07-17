@@ -42,6 +42,8 @@ def test_codex_catalog_offers_known_models_after_sentinel() -> None:
 def test_default_model_sentinel_support_follows_backend_contract() -> None:
     assert mc.uses_default_model_sentinel("codex") is True
     assert mc.uses_default_model_sentinel("codex_cli") is True
+    assert mc.uses_default_model_sentinel("zcode") is True
+    assert mc.uses_default_model_sentinel("zcode_cli") is True
     assert mc.uses_default_model_sentinel("claude") is False
     assert mc.uses_default_model_sentinel("claude_code") is False
 

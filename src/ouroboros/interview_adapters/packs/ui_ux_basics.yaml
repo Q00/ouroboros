@@ -1,0 +1,25 @@
+name: ui_ux_basics
+domain: ui_ux
+schema_version: 1
+glossary_terms:
+  - term: affordance
+    explanation: A visible or felt clue that suggests what action is possible.
+    aliases:
+      - affordances
+  - term: hierarchy
+    explanation: The order and emphasis that tells people what to notice first.
+    aliases:
+      - visual hierarchy
+  - term: information architecture
+    explanation: How content and navigation are organized so people can find and understand things.
+    aliases:
+      - IA
+  - term: microcopy
+    explanation: Short interface text that guides an action, state, or error.
+    aliases: []
+disambiguation_prompts:
+  - Explain only terms the user explicitly asks about.
+applies_when:
+  - The user explicitly asks what a UI or UX term means.
+does_not_apply_when:
+  - The user is asking for a product decision or requirement recommendation.
