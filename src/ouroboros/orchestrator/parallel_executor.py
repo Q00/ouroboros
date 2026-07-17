@@ -694,6 +694,33 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
     return tuple(missing)
 
 
+def _revalidate_cached_verify_gate_outcome(
+    *,
+    spec: AcceptanceCriterionSpec,
+    cwd: str,
+    outcome: _VerifyGateOutcome,
+) -> _VerifyGateOutcome:
+    """Refresh filesystem evidence without replaying a cached command.
+
+    Verify commands may be non-idempotent, so an atomic result caches their
+    outcome for finalization. Expected artifacts live in the shared workspace,
+    however, and sibling ACs can delete or replace them after the atomic gate.
+    A cached success is therefore valid only while its artifact leg still
+    passes at the final acceptance boundary.
+    """
+    if not outcome.passed or not spec.expected_artifacts:
+        return outcome
+    missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+    if not missing_artifacts:
+        return outcome
+    return _VerifyGateOutcome(
+        passed=False,
+        reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
+        output_tail=outcome.output_tail,
+        missing_artifacts=missing_artifacts,
+    )
+
+
 def _collect_decomposition_depth_warning_paths(
     result: ACExecutionResult,
     *,
@@ -4422,11 +4449,15 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         ):
             return result
 
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         cached_outcome = result.verify_gate_outcome
         if isinstance(cached_outcome, _VerifyGateOutcome):
-            outcome = cached_outcome
+            outcome = _revalidate_cached_verify_gate_outcome(
+                spec=spec,
+                cwd=cwd,
+                outcome=cached_outcome,
+            )
         else:
-            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
             outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
         if outcome.passed:
             if not result.success and not result.is_blocked and not result.is_invalid:
@@ -4632,11 +4663,15 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 spec.verify_command or spec.expected_artifacts
             ):
                 continue
+            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
             cached_outcome = result.verify_gate_outcome
             if isinstance(cached_outcome, _VerifyGateOutcome):
-                outcome = cached_outcome
+                outcome = _revalidate_cached_verify_gate_outcome(
+                    spec=spec,
+                    cwd=cwd,
+                    outcome=cached_outcome,
+                )
             else:
-                cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
                 outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
             if not outcome.passed:
                 gated_out.add(ac_idx)

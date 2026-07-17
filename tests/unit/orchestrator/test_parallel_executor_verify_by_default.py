@@ -179,6 +179,45 @@ async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) ->
 
 
 @pytest.mark.asyncio
+async def test_apply_verify_gate_rechecks_artifacts_without_replaying_cached_command(
+    tmp_path: Any,
+) -> None:
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("ready", encoding="utf-8")
+    counter = tmp_path / "verify-count.txt"
+    command = (
+        "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
+        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+        'raise SystemExit(0 if n == 0 else 7)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(
+            description="ac",
+            verify_command=command,
+            expected_artifacts=("artifact.txt",),
+        )
+    )
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    artifact.unlink()
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=True,
+        verify_gate_outcome=cached,
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
+    )
+
+    assert gated.success is False
+    assert gated.verify_gate_outcome is not None
+    assert gated.verify_gate_outcome.missing_artifacts == ("artifact.txt",)
+    assert counter.read_text(encoding="utf-8") == "1"
+
+
+@pytest.mark.asyncio
 async def test_apply_verify_gate_recovers_failed_result_once(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
