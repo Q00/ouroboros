@@ -4,17 +4,19 @@ The sibling of :mod:`ouroboros.orchestrator.effort_routing`. Where effort routin
 picks *how much reasoning* a unit of work gets, this module picks *which model
 tier* runs it — the frugality lever ``ooo run`` leans on. The RLM thesis is that
 decomposing a big goal into small, verified-MECE acceptance criteria makes each
-child easy enough to run on a cheaper model, so decomposed children drop one tier
-(``standard`` -> ``frugal`` -> haiku) while top-level ACs keep today's default
-(``standard`` -> sonnet). A failing AC earns a stronger model on retry, and one
-that keeps failing climbs the ladder progressively — one tier per retry past the
-escalation threshold, capped at the frontier ceiling.
+child easy enough to run on a cheaper model, so trusted decomposed children drop
+one tier (``standard`` -> ``frugal`` -> haiku) while top-level ACs keep today's
+default (``standard`` -> sonnet). Child status alone is insufficient; the drop is
+admitted only by an explicit decomposition-trust signal. A failing AC earns a
+stronger model on retry, and one that keeps failing climbs the ladder
+progressively — one tier per retry past the escalation threshold, capped at the
+frontier ceiling.
 
 Note the deliberate asymmetry with effort routing V5: that module stopped lowering
 a decomposed child's *reasoning depth* (a harder child needs at least as much
-thinking as its parent). This module still lowers a child's *model tier* — a child
-keeps its reasoning depth but runs on a cheaper model, because decomposition, not
-weaker reasoning, is what makes it affordable.
+thinking as its parent). This module still lowers a trusted child's *model tier* —
+a child keeps its reasoning depth but runs on a cheaper model, because trusted
+decomposition, not weaker reasoning, is what makes it affordable.
 
 Like effort routing, this is a single, pure decision point free of executor state:
 the orchestrator decides a tier, maps it to a backend-executable model id, and the
@@ -161,7 +163,8 @@ class ModelRouter:
             backend it was resolved for, so :func:`resolve_execute_model` treats
             this router as absent when the adapter's backend does not match.
         child_tier: The tier decomposed children start at (RLM thesis:
-            decomposition makes children cheap enough for the frugal tier).
+            decomposition makes trusted children cheap enough for the frugal tier;
+            child status alone is insufficient.
         base_tier: The tier top-level / non-decomposed ACs start at. Defaults to
             one notch above ``child_tier`` so the top keeps today's model.
         escalation_retry_threshold: The ``retry_attempt`` at which tier escalation
@@ -425,6 +428,7 @@ def decide_model(
     *,
     router: ModelRouter | None,
     is_decomposed_child: bool,
+    decomposition_trustworthy: bool = False,
     retry_attempt: int = 0,
     suggested_tier: str | None = None,
 ) -> ModelDecision:
@@ -436,13 +440,15 @@ def decide_model(
             ``runtime.capabilities.model_override_support``.
         router: The per-run policy from :func:`build_model_router`, or ``None`` to
             leave model routing dormant.
-        is_decomposed_child: Whether this unit is a runtime-decomposed child. Unlike
-            effort routing V5 (which does NOT lower a child's reasoning depth),
-            this drops the child ONE tier cheaper — the RLM frugality move: a child
-            keeps its reasoning depth but runs on a cheaper model because the
-            outer success/verifier gate still owns final acceptance. This flag is
-            not itself a MECE attestation; proof admission separately requires a
-            deterministic decomposition-trust signal.
+        is_decomposed_child: Whether this unit is a runtime-decomposed child. This
+            flag is not itself a MECE attestation and is insufficient to lower
+            the model tier.
+        decomposition_trustworthy: Whether the decomposition has an explicit
+            finalized trust signal. Only exactly ``True`` permits the RLM
+            frugality move: unlike effort routing V5 (which does NOT lower a
+            child's reasoning depth), a trusted child drops ONE tier cheaper and
+            keeps its reasoning depth while the outer success/verifier gate still
+            owns final acceptance. The default is fail-closed for older callers.
         retry_attempt: Same-runtime retry index for this unit (0 on the initial
             dispatch). From ``router.escalation_retry_threshold`` onward the tier
             climbs PROGRESSIVELY — one notch per retry at or past the threshold
@@ -466,8 +472,8 @@ def decide_model(
         return ModelDecision(tier=None, model=None, mode=MODEL_MODE_NONE)
 
     tier = suggested_tier or router.base_tier
-    if is_decomposed_child:
-        # THE RLM frugality move: a decomposed child runs one tier cheaper.
+    if is_decomposed_child and decomposition_trustworthy is True:
+        # THE RLM frugality move: only a trusted decomposed child runs one tier cheaper.
         tier = lower_one_notch(tier)
     # PROGRESSIVE retry escalation: raise one tier per retry at or past the
     # threshold, capped at the frontier ceiling. Applied AFTER the child drop so
@@ -493,17 +499,20 @@ def resolve_execute_model(
     *,
     router: ModelRouter | None,
     is_decomposed_child: bool,
+    decomposition_trustworthy: bool = False,
     retry_attempt: int = 0,
     suggested_tier: str | None = None,
 ) -> tuple[ModelDecision, dict[str, str]]:
     """Decide the model for one ``execute_task`` call and build its kwargs.
 
     The single place every live execute_task call site lays itself on the model
-    capability contract. Reads ``adapter.capabilities.model_override_support``
-    (defaulting to IGNORED when an adapter declares no capabilities — or none
-    that carry the field yet), decides the model, and returns the ``execute_task``
-    kwargs — which are **empty unless the runtime enforces the model**, so a
-    runtime that cannot honor a per-call model override is never handed one.
+    capability contract. ``is_decomposed_child`` alone is insufficient to lower a
+    tier; only ``decomposition_trustworthy=True`` admits the trusted-child
+    discount. Reads ``adapter.capabilities.model_override_support`` (defaulting
+    to IGNORED when an adapter declares no capabilities — or none that carry the
+    field yet), decides the model, and returns the ``execute_task`` kwargs —
+    which are **empty unless the runtime enforces the model**, so a runtime that
+    cannot honor a per-call model override is never handed one.
 
     If the adapter's backend differs from the one the router was built for, the
     router is treated as absent for this call (none-mode decision, empty kwargs):
@@ -530,6 +539,7 @@ def resolve_execute_model(
         support,
         router=router,
         is_decomposed_child=is_decomposed_child,
+        decomposition_trustworthy=decomposition_trustworthy,
         retry_attempt=retry_attempt,
         suggested_tier=suggested_tier,
     )

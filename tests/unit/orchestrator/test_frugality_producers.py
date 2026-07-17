@@ -213,6 +213,7 @@ async def _run_one_ac(
     *,
     is_sub_ac: bool = True,
     retry_attempt: int = 0,
+    decomposition_trustworthy: bool = False,
 ):
     return await executor._execute_atomic_ac(
         ac_index=1,
@@ -228,6 +229,7 @@ async def _run_one_ac(
         parent_ac_index=0 if is_sub_ac else None,
         sub_ac_index=0 if is_sub_ac else None,
         retry_attempt=retry_attempt,
+        decomposition_trustworthy=decomposition_trustworthy,
     )
 
 
@@ -447,8 +449,8 @@ class TestTokenAttribution:
             reasoning_effort="high",
         )
 
-        # Decomposed child → frugal tier (standard base dropped one notch).
-        await _run_one_ac(executor, is_sub_ac=True)
+        # Trusted decomposed child -> frugal tier (standard base dropped one notch).
+        await _run_one_ac(executor, is_sub_ac=True, decomposition_trustworthy=True)
 
         token = _token_events(events)
         assert len(token) == 1
@@ -1385,7 +1387,11 @@ class TestProducedEventsMatchProofContract:
             # reasoning_effort intentionally omitted: shipped default is None.
         )
 
-        result = await _run_one_ac(executor, is_sub_ac=True)
+        result = await _run_one_ac(
+            executor,
+            is_sub_ac=True,
+            decomposition_trustworthy=True,
+        )
         identity = _runtime_identity()
         await executor._event_emitter.emit_deliver_verdict(
             runtime_identity=identity,

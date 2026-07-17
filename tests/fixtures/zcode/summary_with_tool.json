@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_acb1ac9f-0f50-461e-8411-db09540b05b7",
+  "traceId": "1e8f0fbe-f7e1-4b75-aa5e-8ffa8542e6f6",
+  "turnId": "turn_cb51c5d8-e329-408b-a9a9-924bdaec53e7",
+  "response": "Created `/tmp/zcode-probe-XYZ.txt` containing `hello-world`.",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 2,
+    "inputTokens": 17892,
+    "outputTokens": 50,
+    "totalTokens": 17942,
+    "cacheReadTokens": 8896,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 51,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 17942,
+    "contextUsed": 8997,
+    "contextWindow": 1000000
+  }
+}

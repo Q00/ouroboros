@@ -416,7 +416,7 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
-        expires_at = datetime.now(UTC) + timedelta(milliseconds=200)
+        expires_at = datetime.now(UTC) + timedelta(seconds=1)
         signal = SessionSignal(
             signal_id="sig_expire_at_boundary",
             target_session_scope_id="exec_expire_ac_1",

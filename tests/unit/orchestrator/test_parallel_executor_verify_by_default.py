@@ -15,6 +15,14 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionChild,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+)
 from ouroboros.orchestrator.model_routing import ModelRouter, decide_model
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
@@ -605,9 +613,24 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
 
     def _decomposed_fail() -> ACExecutionResult:
         # A decomposed parent whose children (routed one tier cheaper) failed:
-        # the predicate keys off ``is_decomposed`` to probe the child ladder.
+        # the predicate requires both child status and a trusted split record.
         base = _fail(0, "EVIDENCE_MISSING")
-        return replace(base, is_decomposed=True)
+        return replace(
+            base,
+            is_decomposed=True,
+            decomposition_decision=DecompositionDecisionRecord(
+                node_id="trusted-decomposed-parent",
+                source=DecompositionSource.PREFLIGHT,
+                disposition=DecompositionDisposition.SPLIT,
+                children=(
+                    DecompositionChild("child a", ("scope a",), "verify a"),
+                    DecompositionChild("child b", ("scope b",), "verify b"),
+                ),
+                structural_status=StructuralCheckStatus.PASSED,
+                semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                trustworthy=True,
+            ),
+        )
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
         calls.append(list(kwargs["batch_indices"]))
@@ -616,6 +639,7 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
                 ParamSupport.NATIVE,
                 router=router,
                 is_decomposed_child=True,
+                decomposition_trustworthy=True,
                 retry_attempt=kwargs["ac_retry_attempts"][0],
             ).tier
         )
@@ -770,6 +794,30 @@ def test_retry_prompt_final_attempt_carries_lateral_directive() -> None:
     assert "Change of Approach" in final
     assert "EVIDENCE_MISSING" in final
     assert "Change of Approach" not in interim
+
+
+def test_retry_prompt_redacts_secret_like_failure_values() -> None:
+    executor = _make_executor()
+    long_secret = "s" * 505
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="build the thing",
+        success=False,
+        error=(
+            f"provider failed with password=hunter2 and API_KEY=secret-value token={long_secret}"
+        ),
+    )
+
+    prompt = executor._build_ac_retry_prompt(
+        result=result,
+        ac_content="build the thing",
+        is_final_attempt=False,
+    )
+
+    assert "hunter2" not in prompt
+    assert "secret-value" not in prompt
+    assert long_secret[-100:] not in prompt
+    assert prompt.count("[REDACTED]") == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1148,7 +1196,10 @@ class TestSuccessContractBlock:
         )
         block = _build_success_contract_block(spec)
         assert block.startswith("SUCCESS CONTRACT for this AC:")
-        assert "- Run: make build and report it in commands_run" in block
+        assert (
+            "- Run locally before completion: make build. "
+            "The verify gate re-runs it and records authoritative evidence." in block
+        )
         assert (
             "- Expected artifacts: dist/app, dist/app.map — ensure they exist in the workspace"
             in block
@@ -1158,6 +1209,9 @@ class TestSuccessContractBlock:
     def test_partial_contract_only_renders_present_fields(self) -> None:
         spec = AcceptanceCriterionSpec(description="verify only", verify_command="pytest -q")
         block = _build_success_contract_block(spec)
-        assert "- Run: pytest -q and report it in commands_run" in block
+        assert (
+            "- Run locally before completion: pytest -q. "
+            "The verify gate re-runs it and records authoritative evidence." in block
+        )
         assert "Expected artifacts" not in block
         assert "Expected output" not in block

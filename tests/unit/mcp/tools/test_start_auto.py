@@ -399,6 +399,10 @@ class TestBackgroundJobPath:
         assert observer["job_id"] == "job_auto_001"
         assert observer["session_id"] == auto_session_id
         assert observer["main_session_policy"] == "start_and_on_demand_only"
+        codex_relay = observer["host_lifecycle"]["codex_parent_relay"]
+        assert codex_relay["wait_tool"] == "wait_agent"
+        assert codex_relay["keep_turn_open_while_observer_active"] is True
+        assert codex_relay["user_opt_out"] == "stop_relay_keep_durable_job_running"
         assert observer["follow_result_job_keys"] == [
             "job_id",
             "ralph_job_id",

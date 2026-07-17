@@ -120,8 +120,58 @@ def test_packaged_skills_gate_fallback_on_callability_not_empty_discovery() -> N
                 )
 
 
+def test_brownfield_default_selection_ends_turn_in_every_skill_bundle() -> None:
+    """All shipped host bundles must render the repo list before selection."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("brownfield", "setup"):
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            compact = " ".join(text.split())
+            assert "Do NOT use `AskUserQuestion` for this selection" in text
+            assert "end the turn with the repo grid as the final message" in compact
+            assert '"keep" to keep the current defaults' in compact
+            assert "IMMEDIATELY after showing the list" not in text
+            assert "Default repo selection — IMMEDIATELY" not in text
+
+
+def test_brownfield_scan_contract_matches_runtime_in_every_skill_bundle() -> None:
+    """All shipped host bundles must describe the depth-bounded, self-only scan.
+
+    ``scan_home_for_repos()`` walks ``scan_root`` at most two levels deep and
+    registers each candidate self-only — it never expands Git worktree families
+    via ``git worktree list``. Skill instructions in both ``skills/`` and
+    ``.claude-plugin/skills/`` must not advertise the retired outside-root
+    worktree-expansion behavior.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    stale_phrases = (
+        "even outside the scan root directory",
+        "even when they live outside `scan_root`",
+        "even if their paths are outside `scan_root`",
+        "git worktree list --porcelain",
+    )
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("brownfield", "setup"):
+            skill_path = root / skill / "SKILL.md"
+            text = skill_path.read_text(encoding="utf-8")
+            compact = " ".join(text.split())
+            for phrase in stale_phrases:
+                assert phrase not in compact, (
+                    f"{skill_path}: stale worktree-expansion scan contract `{phrase}` — "
+                    "the runtime scan is depth-bounded and registers repos self-only"
+                )
+            assert "Git worktree families are not expanded" in compact.replace(
+                "families are NOT expanded", "families are not expanded"
+            ), f"{skill_path}: missing self-only scan contract statement"
+            assert "two" in compact and "level" in compact, (
+                f"{skill_path}: missing depth-bounded (two-level) scan description"
+            )
+
+
 def test_background_skills_delegate_one_exclusive_job_observer() -> None:
-    """Run/auto should free the main session when native child sessions exist."""
+    """Background skills delegate polling while the parent relays child events."""
     repo_root = Path(__file__).resolve().parents[3]
 
     for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
@@ -138,6 +188,12 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
             assert "isolated worktree" in compact
             assert "tui open" in normalized
             assert "conversation" in normalized and "available" in normalized
+            assert "wait_agent" in text
+            assert "cannot revive" in compact or "cannot wake" in compact
+            assert "must not poll" in normalized
+            assert "stop live observation" in compact
+            assert "keep the durable job running" in compact
+            assert "instead of waiting indefinitely" in compact
 
     for skill in ("run", "auto", "ralph"):
         text = (repo_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
@@ -148,6 +204,14 @@ def test_background_skills_delegate_one_exclusive_job_observer() -> None:
         assert "stdio" in normalized
         assert "detached worker" in normalized
         assert "survive" in normalized or "continues" in normalized
+
+    codex_instructions = (repo_root / "src" / "ouroboros" / "codex" / "ouroboros.md").read_text(
+        encoding="utf-8"
+    )
+    assert "wait_agent" in codex_instructions
+    assert "cannot revive a parent turn" in codex_instructions
+    assert "stop live observation" in codex_instructions
+    assert "without cancelling the durable job" in codex_instructions
 
 
 def test_run_and_auto_route_human_intent_without_exposing_internal_ids() -> None:

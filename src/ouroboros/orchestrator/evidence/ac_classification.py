@@ -270,12 +270,13 @@ def _effective_evidence_schema_for_ac(
     """Return the active evidence schema for one atomic AC dispatch.
 
     ``has_success_contract`` is True when the AC declares a ``verify_command``.
-    For such ACs ``tests_passed`` is dropped from the required evidence set: the
-    orchestrator itself runs the declared command via ``_run_ac_verify_gate``
-    (real subprocess, real exit code + output_assertion), which is an
-    authoritative, non-fabricatable check — strictly stronger than reconstructing
-    "did a test pass" from the worker's transcript. Legacy ACs (no
-    ``verify_command``) keep ``tests_passed`` required and verified as before.
+    When the verify gate is active, such ACs drop ``commands_run`` and
+    ``tests_passed`` from the required evidence set: the orchestrator itself runs
+    the declared command via ``_run_ac_verify_gate`` (real subprocess, real exit
+    code + output_assertion), which is an authoritative, non-fabricatable check —
+    strictly stronger than reconstructing command execution or "did a test pass"
+    from the worker's transcript. Legacy ACs (no ``verify_command``) keep both
+    fields required and verified as before.
 
     ``has_expected_artifacts`` is True when the AC declares filesystem artifacts.
     For contract ACs that also declare artifacts, ``files_touched`` is likewise
@@ -284,22 +285,23 @@ def _effective_evidence_schema_for_ac(
     there is no filesystem oracle to replace it.
 
     ``verify_gate_active`` is True only when the orchestrator verify gate is
-    actually enabled (``run_verify_commands``). Delegation of ``tests_passed`` /
-    ``files_touched`` to the gate is *only* valid when the gate will run. When an
-    operator disables verify commands, the gate that would replace the transcript
-    check never fires (``_apply_verify_gate`` returns early), so we retain the
-    transcript-backed evidence — the pre-delegation behavior — as a fail-safe.
-    The default is ``False`` so we never delegate unless explicitly told the gate
-    is active. The content-based ``_is_validation_only_ac`` /
-    ``_is_documentation_only_ac`` drops are unaffected — those are not gate
-    delegations.
+    actually enabled (``run_verify_commands``). Delegation of ``commands_run``,
+    ``tests_passed``, and ``files_touched`` to the gate is *only* valid when the
+    gate will run. When an operator disables verify commands, the gate that would
+    replace the transcript check never fires (``_apply_verify_gate`` returns
+    early), so we retain the transcript-backed evidence — the pre-delegation
+    behavior — as a fail-safe. The default is ``False`` so we never delegate
+    unless explicitly told the gate is active. The content-based
+    ``_is_validation_only_ac`` / ``_is_documentation_only_ac`` drops are
+    unaffected — those are not gate delegations.
     """
     schema = profile.evidence_schema
     if _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
         schema = _drop_required_evidence_field(schema, "files_touched")
     elif _is_documentation_only_ac(ac_content) and "tests_passed" in schema.required:
         schema = _drop_required_evidence_field(schema, "tests_passed")
-    if has_success_contract and verify_gate_active and "tests_passed" in schema.required:
+    if has_success_contract and verify_gate_active:
+        schema = _drop_required_evidence_field(schema, "commands_run")
         schema = _drop_required_evidence_field(schema, "tests_passed")
     if (
         has_success_contract

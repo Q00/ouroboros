@@ -75,6 +75,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GJC = "gjc"
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
+    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042

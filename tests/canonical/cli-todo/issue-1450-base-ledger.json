@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "issue": 1450,
+  "scenario": "cli-todo",
+  "capture_kind": "current_main_deterministic_backend_reproduction",
+  "capture_commit": "c4beb2276b125b52852816aa185da26f6cc549c5",
+  "source_tree_hash": "fbf81aec9f68e1a2359f15b0dc0ea4e9412fe617",
+  "goal_blob_hash": "620332b67fc7ba87dd92f69d9f2d9b229b94665e",
+  "expected_blob_hash": "8ae66d5b4d6327a4b44ece75a9473227b943cc31",
+  "ledger_sha256": "bd515172d9c2810d07682bc42b5f39947fea8ad4990f97f135f69b423d75ba1e",
+  "reproduction": {
+    "max_rounds": 1,
+    "backend_question": "What else should we know?",
+    "backend_ambiguity_score": 0.42,
+    "terminal_status": "blocked",
+    "stop_reason_code": "interview_safe_default_synthesis_incomplete",
+    "closure_observation": "safe-default synthesis reached backend completion but remained above the 0.20 ambiguity gate; finalization entries were rolled back"
+  },
+  "ledger": {
+    "question_history": [
+      {
+        "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+        "question": "What else should we know?"
+      }
+    ],
+    "sections": {
+      "acceptance_criteria": {
+        "entries": [],
+        "name": "acceptance_criteria"
+      },
+      "actors": {
+        "entries": [],
+        "name": "actors"
+      },
+      "constraints": {
+        "entries": [
+          {
+            "confidence": 0.82,
+            "evidence": [],
+            "key": "constraints.conservative_mvp",
+            "rationale": "Default auto policy favors safe convergence.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+          }
+        ],
+        "name": "constraints"
+      },
+      "failure_modes": {
+        "entries": [
+          {
+            "confidence": 0.8,
+            "evidence": [],
+            "key": "failure_modes.unverified_or_scope_creep",
+            "rationale": "A-grade Seeds need explicit failure boundaries.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+          }
+        ],
+        "name": "failure_modes"
+      },
+      "goal": {
+        "entries": [
+          {
+            "confidence": 0.95,
+            "evidence": [],
+            "key": "goal.primary",
+            "rationale": "Initial user-provided auto task.",
+            "reversible": false,
+            "source": "user_goal",
+            "status": "confirmed",
+            "value": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory."
+          }
+        ],
+        "name": "goal"
+      },
+      "inputs": {
+        "entries": [],
+        "name": "inputs"
+      },
+      "non_goals": {
+        "entries": [],
+        "name": "non_goals"
+      },
+      "outputs": {
+        "entries": [],
+        "name": "outputs"
+      },
+      "runtime_context": {
+        "entries": [],
+        "name": "runtime_context"
+      },
+      "verification_plan": {
+        "entries": [],
+        "name": "verification_plan"
+      }
+    }
+  }
+}

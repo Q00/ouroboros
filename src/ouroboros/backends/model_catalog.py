@@ -37,7 +37,18 @@ from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_
 # than a Claude model id. Mirrors the loader's sentinel frozensets
 # (_CODEX_LLM_BACKENDS et al.); the mirror is locked by a unit test.
 _SENTINEL_MODEL_BACKENDS = frozenset(
-    {"codex", "opencode", "kiro", "copilot", "hermes", "pi", "gjc", "antigravity", "grok"}
+    {
+        "codex",
+        "opencode",
+        "kiro",
+        "copilot",
+        "hermes",
+        "pi",
+        "gjc",
+        "antigravity",
+        "grok",
+        "zcode",
+    }
 )
 
 # The sentinel the loader maps Claude-incapable backends to.
@@ -240,6 +251,12 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     "antigravity": "get_antigravity_cli_path",
     "grok": "get_grok_cli_path",
     "ourocode": "get_ourocode_cli_path",
+    # Zcode is runtime-only and Claude-incapable (runs Z.ai GLM-5). Its CLI
+    # path is resolved exactly like the other runtime-only CLIs above: env
+    # / config / macOS app-bundle default, via ``get_zcode_cli_path``.
+    # Without this entry, ``detect_backend_cli("zcode")`` ignored the
+    # configured path and Zcode was invisible to ``installed_backends()``.
+    "zcode": "get_zcode_cli_path",
 }
 
 

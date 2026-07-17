@@ -1,0 +1,21 @@
+{
+  "config_fingerprint_sha256": "af05f96c44ef18e407ad20539cf5408134f438c0bf4788a4c030e4c4c19553c1",
+  "errors": [],
+  "expected_blob_hash": "8ae66d5b4d6327a4b44ece75a9473227b943cc31",
+  "goal_blob_hash": "620332b67fc7ba87dd92f69d9f2d9b229b94665e",
+  "python_executable": "/private/tmp/ouroboros-review-pr1609.N4HfTO/.venv/bin/python",
+  "resolved_interview_backend": "codex",
+  "resolved_interview_model": "default",
+  "runtime_env": {
+    "OUROBOROS_AGENT_RUNTIME_BACKEND": null,
+    "OUROBOROS_CLARIFICATION_MODEL": null,
+    "OUROBOROS_EXECUTION_MODEL": null,
+    "OUROBOROS_QA_MODEL": null,
+    "OUROBOROS_REFLECT_MODEL": null
+  },
+  "sha256": "9896ad6f33a81f98510ca6973a971fd5ed24e519cfde5164d19e07da56e0d596",
+  "smoke_executables": {
+    "python": "/private/tmp/ouroboros-review-pr1609.N4HfTO/.venv/bin/python"
+  },
+  "source_tree_hash": "fbf81aec9f68e1a2359f15b0dc0ea4e9412fe617"
+}

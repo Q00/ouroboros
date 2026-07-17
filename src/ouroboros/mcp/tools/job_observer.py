@@ -18,9 +18,10 @@ def build_job_observer_contract(
     """Build the model-facing contract for one exclusive read-only observer.
 
     Host runtimes with independent child sessions can hand this object to one
-    observer session. The main conversation then owns only start and explicit
-    user-requested drill-down calls, while the observer owns the wait cursor and
-    terminal result retrieval. Sequential hosts use the declared fallback.
+    observer session. The main conversation owns start, explicit user-requested
+    drill-down calls, and any host-specific child-message relay lifecycle, while
+    the observer owns the wait cursor and terminal result retrieval. Sequential
+    hosts use the declared fallback.
     """
     normalized_cursor = cursor if isinstance(cursor, int) and not isinstance(cursor, bool) else 0
     if normalized_cursor < 0:
@@ -58,6 +59,14 @@ def build_job_observer_contract(
             "codex_task_name": "run_observer",
             "spawn_ack_required": True,
             "wait_is_not_spawn": True,
+            "codex_parent_relay": {
+                "wait_tool": "wait_agent",
+                "wait_timeout_ms": 60000,
+                "keep_turn_open_while_observer_active": True,
+                "interruptible_by_user": True,
+                "user_opt_out": "stop_relay_keep_durable_job_running",
+                "observer_exit_fallback": "durable_catch_up_next_parent_turn",
+            },
             "durable_job_survives_parent_turn": True,
             "fallback_keep_turn_open": False,
             "fallback_notification_timing": "next_parent_turn_or_explicit_status",
@@ -96,6 +105,10 @@ def build_job_observer_contract(
         "instructions": [
             "For live proactive relays, create one real child with the host spawn primitive and require its live agent/session acknowledgement; a wait call is not a spawn.",
             "On Codex call spawn_agent exactly once with task_name run_observer and include this contract unchanged in the child message.",
+            "After Codex receives the live child acknowledgement, the parent should keep its turn open with host_lifecycle.codex_parent_relay.wait_tool while the observer is active. A child send_message only reaches the parent's mailbox; it does not wake a parent turn that already ended.",
+            "Use the Codex parent relay timeout, relay meaningful mailbox updates, and wait again until the observer reports terminal completion or the child exits. User input may interrupt the wait and must be handled before observation resumes.",
+            "If the user asks to stop live observation, end the parent relay loop without cancelling the durable job, explain that catch-up remains available on the next turn or explicit status request, and do not resume waiting.",
+            "If the observer child fails, is cancelled, or exits before a terminal job summary, stop the parent relay loop and fall back to durable catch-up instead of waiting indefinitely.",
             "If spawning is unavailable or fails, do not claim an observer exists. State that the durable worker continues independently and that the parent will catch up on the next turn or explicit status request; keep the turn open only when the user explicitly asked for live watching.",
             "Reload deferred Ouroboros tool schemas immediately before each tool call.",
             "Call wait.tool with wait.arguments; replace the local cursor from response meta.",

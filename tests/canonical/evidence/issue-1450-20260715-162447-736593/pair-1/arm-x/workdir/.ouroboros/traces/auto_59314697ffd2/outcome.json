@@ -1,0 +1,65 @@
+{
+  "assumptions": [
+    "Completion requires an observable check that demonstrates the requested behavior and a negative or edge-path check where the implementation surface supports one.",
+    "Assume the primary actor is the user or automation agent described by the goal; do not introduce additional actor classes.",
+    "Use only inputs already present in the goal, repository state, or explicit interview answers; do not require new external data.",
+    "Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects.",
+    "Produce the smallest observable artifact, state change, or response needed to satisfy the goal and make verification possible.",
+    "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target.",
+    "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly."
+  ],
+  "auto_session_id": "auto_59314697ffd2",
+  "blocker": "Seed QA did not pass after 5 attempt(s): revise (score 0.72); differences: Acceptance criteria are mostly generic and do not concretely verify the core habit-tracker behaviors: add, list, check off, and JSON persistence in the working directory.; The Seed references documented arguments but does not define the CLI command surface, argument names, or expected observable stdout/stderr for happy and error paths.; One acceptance criterion has malformed/recursive wording: it says the output proves the original requirement for 'Completion requires...' instead of directly specifying the required observable check.; suggestions: Add behavior-specific acceptance criteria for adding a habit, listing persisted habits, checking off a habit, and verifying the JSON file is created or updated in the working directory.; Specify the minimal CLI interface, such as command names and required arguments, plus expected exit codes and deterministic output examples for success and invalid usage.; Rewrite the recursive acceptance criterion into a direct requirement, for example: 'A smoke check demonstrates add, list, check-off, persistence across invocations, and one invalid-command path.'",
+  "counts": {
+    "ambiguity": 0,
+    "decisions": 10,
+    "flags": 2,
+    "gated": 7,
+    "lateral": 1,
+    "promoted": 10,
+    "questions": 1,
+    "rejected": 0
+  },
+  "degraded": false,
+  "gate_findings": [],
+  "grade": "A",
+  "interview_closure_mode": null,
+  "interview_session_id": null,
+  "non_goals": [],
+  "open_gaps": [],
+  "phase": "blocked",
+  "provenance_histogram": {
+    "maintainer_policy": 2,
+    "timeout_default": 7,
+    "user_confirmed": 1
+  },
+  "qa": {
+    "differences": [
+      "Acceptance criteria are mostly generic and do not concretely verify the core habit-tracker behaviors: add, list, check off, and JSON persistence in the working directory.",
+      "The Seed references documented arguments but does not define the CLI command surface, argument names, or expected observable stdout/stderr for happy and error paths.",
+      "One acceptance criterion has malformed/recursive wording: it says the output proves the original requirement for 'Completion requires...' instead of directly specifying the required observable check.",
+      "Boundary and state-file behavior is under-specified for a CLI that accepts user input and persists JSON: empty habit names, duplicate habits, missing/corrupt JSON files, and existing data preservation are not addressed."
+    ],
+    "passed": false,
+    "score": 0.72,
+    "suggestions": [
+      "Add behavior-specific acceptance criteria for adding a habit, listing persisted habits, checking off a habit, and verifying the JSON file is created or updated in the working directory.",
+      "Specify the minimal CLI interface, such as command names and required arguments, plus expected exit codes and deterministic output examples for success and invalid usage.",
+      "Rewrite the recursive acceptance criterion into a direct requirement, for example: 'A smoke check demonstrates add, list, check-off, persistence across invocations, and one invalid-command path.'",
+      "Add constraints or acceptance criteria covering empty/invalid habit names, duplicate handling, missing or malformed JSON storage, and preservation of existing unrelated working-directory files."
+    ],
+    "verdict": "revise"
+  },
+  "run_id": "auto_59314697ffd2",
+  "seed_decision_provenance": {
+    "maintainer_policy": 2,
+    "timeout_default": 7,
+    "user_confirmed": 1
+  },
+  "seed_id": "seed_fb017ab44182",
+  "seed_origin": "auto_pipeline",
+  "seed_path": "/Users/jaegyu.lee/.ouroboros/seeds/seed_fb017ab44182.yaml",
+  "status": "blocked",
+  "stop_reason_code": null,
+  "unverified_provenance_findings": []
+}

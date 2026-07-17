@@ -1,0 +1,554 @@
+{
+  "arm_mapping": {
+    "x": "finalize_safe_defaultable_gaps",
+    "y": "LLMAnswerRefiner proposals + auto_fill_remaining"
+  },
+  "baseline_ledger": {
+    "question_history": [
+      {
+        "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+        "question": "What else should we know?"
+      }
+    ],
+    "sections": {
+      "acceptance_criteria": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "acceptance_criteria.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "A Seed needs testable acceptance criteria before generation. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Completion requires an observable check that demonstrates the requested behavior and a negative or edge-path check where the implementation surface supports one."
+          }
+        ],
+        "name": "acceptance_criteria"
+      },
+      "actors": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "actors.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "No explicit actor split remained after the bounded interview. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Assume the primary actor is the user or automation agent described by the goal; do not introduce additional actor classes."
+          }
+        ],
+        "name": "actors"
+      },
+      "constraints": {
+        "entries": [
+          {
+            "confidence": 0.82,
+            "evidence": [],
+            "key": "constraints.conservative_mvp",
+            "rationale": "Default auto policy favors safe convergence.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+          }
+        ],
+        "name": "constraints"
+      },
+      "failure_modes": {
+        "entries": [
+          {
+            "confidence": 0.8,
+            "evidence": [],
+            "key": "failure_modes.unverified_or_scope_creep",
+            "rationale": "A-grade Seeds need explicit failure boundaries.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+          }
+        ],
+        "name": "failure_modes"
+      },
+      "goal": {
+        "entries": [
+          {
+            "confidence": 0.95,
+            "evidence": [],
+            "key": "goal.primary",
+            "rationale": "Initial user-provided auto task.",
+            "reversible": false,
+            "source": "user_goal",
+            "status": "confirmed",
+            "value": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory."
+          }
+        ],
+        "name": "goal"
+      },
+      "inputs": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "inputs.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Unspecified inputs can be safely bounded to existing local context. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Use only inputs already present in the goal, repository state, or explicit interview answers; do not require new external data."
+          }
+        ],
+        "name": "inputs"
+      },
+      "non_goals": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "non_goals.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Unsafe authority remains out of scope without explicit user direction. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Do not perform credential handling, billing, production deployment, legal or medical judgment, security-sensitive authority choices, or ambiguous external side effects."
+          }
+        ],
+        "name": "non_goals"
+      },
+      "outputs": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "outputs.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Unspecified outputs can be safely bounded to observable MVP behavior. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Produce the smallest observable artifact, state change, or response needed to satisfy the goal and make verification possible."
+          }
+        ],
+        "name": "outputs"
+      },
+      "runtime_context": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "runtime_context.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Existing local conventions are the safest runtime default. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Use the current repository/worktree runtime and established project conventions; do not choose a new framework, provider, or deployment target."
+          }
+        ],
+        "name": "runtime_context"
+      },
+      "verification_plan": {
+        "entries": [
+          {
+            "confidence": 0.68,
+            "evidence": [
+              "issue-1450 paired quality experiment",
+              "safe-default policy: missing/weak required gap, local and reversible, no unsafe context detected"
+            ],
+            "key": "verification_plan.safe_default_finalization",
+            "provenance": "timeout_default",
+            "rationale": "Verification can be safely scoped to local, non-destructive checks. Applied at issue-1450 paired quality experiment.",
+            "reversible": true,
+            "source": "assumption",
+            "status": "defaulted",
+            "value": "Run the narrowest relevant local tests, type checks, or smoke checks for the changed behavior; report any verification gap explicitly."
+          }
+        ],
+        "name": "verification_plan"
+      }
+    }
+  },
+  "fixture": {
+    "capture_commit": "c4beb2276b125b52852816aa185da26f6cc549c5",
+    "capture_kind": "current_main_deterministic_backend_reproduction",
+    "expected_blob_hash": "8ae66d5b4d6327a4b44ece75a9473227b943cc31",
+    "goal_blob_hash": "620332b67fc7ba87dd92f69d9f2d9b229b94665e",
+    "issue": 1450,
+    "ledger": {
+      "question_history": [
+        {
+          "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+          "question": "What else should we know?"
+        }
+      ],
+      "sections": {
+        "acceptance_criteria": {
+          "entries": [],
+          "name": "acceptance_criteria"
+        },
+        "actors": {
+          "entries": [],
+          "name": "actors"
+        },
+        "constraints": {
+          "entries": [
+            {
+              "confidence": 0.82,
+              "evidence": [],
+              "key": "constraints.conservative_mvp",
+              "rationale": "Default auto policy favors safe convergence.",
+              "reversible": true,
+              "source": "conservative_default",
+              "status": "defaulted",
+              "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+            }
+          ],
+          "name": "constraints"
+        },
+        "failure_modes": {
+          "entries": [
+            {
+              "confidence": 0.8,
+              "evidence": [],
+              "key": "failure_modes.unverified_or_scope_creep",
+              "rationale": "A-grade Seeds need explicit failure boundaries.",
+              "reversible": true,
+              "source": "conservative_default",
+              "status": "defaulted",
+              "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+            }
+          ],
+          "name": "failure_modes"
+        },
+        "goal": {
+          "entries": [
+            {
+              "confidence": 0.95,
+              "evidence": [],
+              "key": "goal.primary",
+              "rationale": "Initial user-provided auto task.",
+              "reversible": false,
+              "source": "user_goal",
+              "status": "confirmed",
+              "value": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory."
+            }
+          ],
+          "name": "goal"
+        },
+        "inputs": {
+          "entries": [],
+          "name": "inputs"
+        },
+        "non_goals": {
+          "entries": [],
+          "name": "non_goals"
+        },
+        "outputs": {
+          "entries": [],
+          "name": "outputs"
+        },
+        "runtime_context": {
+          "entries": [],
+          "name": "runtime_context"
+        },
+        "verification_plan": {
+          "entries": [],
+          "name": "verification_plan"
+        }
+      }
+    },
+    "ledger_sha256": "bd515172d9c2810d07682bc42b5f39947fea8ad4990f97f135f69b423d75ba1e",
+    "reproduction": {
+      "backend_ambiguity_score": 0.42,
+      "backend_question": "What else should we know?",
+      "closure_observation": "safe-default synthesis reached backend completion but remained above the 0.20 ambiguity gate; finalization entries were rolled back",
+      "max_rounds": 1,
+      "stop_reason_code": "interview_safe_default_synthesis_incomplete",
+      "terminal_status": "blocked"
+    },
+    "scenario": "cli-todo",
+    "schema_version": 1,
+    "source_tree_hash": "fbf81aec9f68e1a2359f15b0dc0ea4e9412fe617"
+  },
+  "fixture_sha256": "900fbf5261bb5b9631a8ef5e0850a939fc3b7dd2f42a4e21b56d2456143902b1",
+  "issue": 1450,
+  "preflight": {
+    "config_fingerprint_sha256": "af05f96c44ef18e407ad20539cf5408134f438c0bf4788a4c030e4c4c19553c1",
+    "errors": [],
+    "expected_blob_hash": "8ae66d5b4d6327a4b44ece75a9473227b943cc31",
+    "goal_blob_hash": "620332b67fc7ba87dd92f69d9f2d9b229b94665e",
+    "python_executable": "/private/tmp/ouroboros-review-pr1609.N4HfTO/.venv/bin/python",
+    "resolved_interview_backend": "codex",
+    "resolved_interview_model": "default",
+    "runtime_env": {
+      "OUROBOROS_AGENT_RUNTIME_BACKEND": null,
+      "OUROBOROS_CLARIFICATION_MODEL": null,
+      "OUROBOROS_EXECUTION_MODEL": null,
+      "OUROBOROS_QA_MODEL": null,
+      "OUROBOROS_REFLECT_MODEL": null
+    },
+    "sha256": "9896ad6f33a81f98510ca6973a971fd5ed24e519cfde5164d19e07da56e0d596",
+    "smoke_executables": {
+      "python": "/private/tmp/ouroboros-review-pr1609.N4HfTO/.venv/bin/python"
+    },
+    "source_tree_hash": "fbf81aec9f68e1a2359f15b0dc0ea4e9412fe617"
+  },
+  "proposal_manifest": {
+    "adapter": "CodexCliLLMAdapter",
+    "completion_model_argument": "",
+    "configured_backend": "codex",
+    "configured_model": "default",
+    "generator": "LLMAnswerRefiner",
+    "records": [
+      {
+        "confidence": 0.5,
+        "generic_value": "Single local user",
+        "proposal": "One actor: a single local terminal user running `habit` from the working directory. Inputs are CLI commands `habit add \"Drink water\"`, `habit list`, and `habit check 1`; outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water`; invalid IDs print `Error: habit not found` to stderr and exit with code `1`.",
+        "question": "Who are the actors, inputs, and outputs for this task?",
+        "section": "actors",
+        "status": "complete"
+      },
+      {
+        "confidence": 0.5,
+        "generic_value": "Explicit command/API arguments derived from the task goal",
+        "proposal": "Inputs are exactly three CLI forms: `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`, run by one local terminal user from the working directory. `habit add \"Drink water\"` creates or updates `./habits.json` and prints `Added habit 1: Drink water`; `habit list` prints `[ ] 1. Drink water`; `habit check 1` marks habit id `1` checked and prints `Checked habit 1: Drink water`. Invalid IDs print `Error: habit not found` to stderr and exit with code `1`.",
+        "question": "Who are the actors, inputs, and outputs for this task?",
+        "section": "inputs",
+        "status": "complete"
+      },
+      {
+        "confidence": 0.5,
+        "generic_value": "Stable text output or generated artifacts suitable for verification",
+        "proposal": "Outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, writes `./habits.json` as `[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water` and updates `./habits.json` to `[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]`. Invalid IDs print `Error: habit not found` to stderr, print nothing to stdout, leave `./habits.json` unchanged, and exit with code `1`.",
+        "question": "Who are the actors, inputs, and outputs for this task?",
+        "section": "outputs",
+        "status": "complete"
+      },
+      {
+        "confidence": 0.5,
+        "generic_value": "For auto MVP scope, cloud sync, paid services, authentication, production deployment are non-goals unless explicitly requested.",
+        "proposal": "Non-goals: no cloud sync, paid services, authentication, production deployment, multi-user support, dates/streaks/reminders, edit/delete commands, custom file paths, config files, sorting/filtering/search, colored output, interactive prompts, or commands beyond `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`. Tests must reject scope expansion by confirming `habit delete 1` exits with code `1`, prints an unsupported-command error to stderr, prints nothing to stdout, and leaves `./habits.json` unchanged.",
+        "question": "What non-goals should explicitly remain out of scope?",
+        "section": "non_goals",
+        "status": "complete"
+      },
+      {
+        "confidence": 0.5,
+        "generic_value": "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion.",
+        "proposal": "Acceptance is verified by this exact shell check in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. `habit add \"Drink water\"` must stdout exactly `Added habit 1: Drink water`, `habit list` must stdout exactly `[ ] 1. Drink water`, and `habit check 1` must stdout exactly `Checked habit 1: Drink water`, each with exit code `0` and empty stderr. `habit check 999` must exit code `1`, stderr exactly `Error: habit not found`, stdout empty, and leave `./habits.json` unchanged. `habit delete 1` must exit code `1`, print an unsupported-command error to stderr, print nothing to stdout, and leave `./habits.json` unchanged.",
+        "question": "Which command output verifies the acceptance criteria?",
+        "section": "acceptance_criteria",
+        "status": "complete"
+      },
+      {
+        "confidence": 0.5,
+        "generic_value": "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable.",
+        "proposal": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`.",
+        "question": "Which command output verifies the acceptance criteria?",
+        "section": "verification_plan",
+        "status": "complete"
+      },
+      {
+        "confidence": 0.5,
+        "generic_value": "Use the existing repository runtime, package manager, and architectural patterns; avoid new dependencies unless required by acceptance criteria.",
+        "proposal": "Use Node.js 20+ with a single executable CommonJS file `bin/habit` using only built-in modules `fs` and `path`, no external dependencies, and `package.json` exposing `\"bin\": {\"habit\":\"bin/habit\"}`. Persist to `path.join(process.cwd(), \"habits.json\")` as compact JSON with `JSON.stringify(habits)`, read missing files as `[]`, assign IDs as `max(existing ids)+1`, and print all errors to stderr with exit code `1`. Unsupported commands such as `habit delete 1` must print exactly `Error: unsupported command` to stderr, stdout empty, exit code `1`, and leave `./habits.json` unchanged.",
+        "question": "Which runtime stack, repo, and project patterns should be used?",
+        "section": "runtime_context",
+        "status": "complete"
+      }
+    ],
+    "sha256": "f7aa2e855581714261b291f5897d7fe56551f8972554cc55ee356058b0d4851c",
+    "status": "complete"
+  },
+  "scenario": "cli-todo",
+  "treatment_ledger": {
+    "question_history": [
+      {
+        "answer": "[from-auto][conservative_default] Proceed with a conservative MVP: keep scope small, prefer existing project patterns, document assumptions, and make completion verifiable with observable acceptance criteria.",
+        "question": "What else should we know?"
+      }
+    ],
+    "sections": {
+      "acceptance_criteria": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "acceptance_criteria.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "Acceptance is verified by this exact shell check in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. `habit add \"Drink water\"` must stdout exactly `Added habit 1: Drink water`, `habit list` must stdout exactly `[ ] 1. Drink water`, and `habit check 1` must stdout exactly `Checked habit 1: Drink water`, each with exit code `0` and empty stderr. `habit check 999` must exit code `1`, stderr exactly `Error: habit not found`, stdout empty, and leave `./habits.json` unchanged. `habit delete 1` must exit code `1`, print an unsupported-command error to stderr, print nothing to stdout, and leave `./habits.json` unchanged."
+          }
+        ],
+        "name": "acceptance_criteria"
+      },
+      "actors": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "actors.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "One actor: a single local terminal user running `habit` from the working directory. Inputs are CLI commands `habit add \"Drink water\"`, `habit list`, and `habit check 1`; outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water`; invalid IDs print `Error: habit not found` to stderr and exit with code `1`."
+          }
+        ],
+        "name": "actors"
+      },
+      "constraints": {
+        "entries": [
+          {
+            "confidence": 0.82,
+            "evidence": [],
+            "key": "constraints.conservative_mvp",
+            "rationale": "Default auto policy favors safe convergence.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Keep the implementation to the smallest safe MVP that satisfies the task goal."
+          }
+        ],
+        "name": "constraints"
+      },
+      "failure_modes": {
+        "entries": [
+          {
+            "confidence": 0.8,
+            "evidence": [],
+            "key": "failure_modes.unverified_or_scope_creep",
+            "rationale": "A-grade Seeds need explicit failure boundaries.",
+            "reversible": true,
+            "source": "conservative_default",
+            "status": "defaulted",
+            "value": "Failure includes unverified behavior, non-reproducible output, or scope expansion beyond the MVP."
+          }
+        ],
+        "name": "failure_modes"
+      },
+      "goal": {
+        "entries": [
+          {
+            "confidence": 0.95,
+            "evidence": [],
+            "key": "goal.primary",
+            "rationale": "Initial user-provided auto task.",
+            "reversible": false,
+            "source": "user_goal",
+            "status": "confirmed",
+            "value": "Build a small habit-tracker CLI that lets the user add, list, and check off habits, persisting them as JSON in the working directory."
+          }
+        ],
+        "name": "goal"
+      },
+      "inputs": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "inputs.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "Inputs are exactly three CLI forms: `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`, run by one local terminal user from the working directory. `habit add \"Drink water\"` creates or updates `./habits.json` and prints `Added habit 1: Drink water`; `habit list` prints `[ ] 1. Drink water`; `habit check 1` marks habit id `1` checked and prints `Checked habit 1: Drink water`. Invalid IDs print `Error: habit not found` to stderr and exit with code `1`."
+          }
+        ],
+        "name": "inputs"
+      },
+      "non_goals": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "non_goals.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "Non-goals: no cloud sync, paid services, authentication, production deployment, multi-user support, dates/streaks/reminders, edit/delete commands, custom file paths, config files, sorting/filtering/search, colored output, interactive prompts, or commands beyond `habit add \"<habit text>\"`, `habit list`, and `habit check <id>`. Tests must reject scope expansion by confirming `habit delete 1` exits with code `1`, prints an unsupported-command error to stderr, prints nothing to stdout, and leaves `./habits.json` unchanged."
+          }
+        ],
+        "name": "non_goals"
+      },
+      "outputs": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "outputs.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "Outputs are stdout text plus a `habits.json` file in the current directory. For a fresh directory, `habit add \"Drink water\"` prints `Added habit 1: Drink water`, writes `./habits.json` as `[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]`, `habit list` prints `[ ] 1. Drink water`, and `habit check 1` prints `Checked habit 1: Drink water` and updates `./habits.json` to `[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]`. Invalid IDs print `Error: habit not found` to stderr, print nothing to stdout, leave `./habits.json` unchanged, and exit with code `1`."
+          }
+        ],
+        "name": "outputs"
+      },
+      "runtime_context": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "runtime_context.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "Use Node.js 20+ with a single executable CommonJS file `bin/habit` using only built-in modules `fs` and `path`, no external dependencies, and `package.json` exposing `\"bin\": {\"habit\":\"bin/habit\"}`. Persist to `path.join(process.cwd(), \"habits.json\")` as compact JSON with `JSON.stringify(habits)`, read missing files as `[]`, assign IDs as `max(existing ids)+1`, and print all errors to stderr with exit code `1`. Unsupported commands such as `habit delete 1` must print exactly `Error: unsupported command` to stderr, stdout empty, exit code `1`, and leave `./habits.json` unchanged."
+          }
+        ],
+        "name": "runtime_context"
+      },
+      "verification_plan": {
+        "entries": [
+          {
+            "confidence": 0.5,
+            "evidence": [],
+            "key": "verification_plan.auto_fill_inference",
+            "provenance": "timeout_default",
+            "rationale": "Auto-filled by inference (RFC #1256 §I3) because the interview did not converge before its deadline.",
+            "reversible": true,
+            "source": "auto_fill_inference",
+            "status": "defaulted",
+            "value": "Run this exact verification in a fresh temporary working directory: `habit add \"Drink water\" && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":false}]' && test \"$(habit list)\" = '[ ] 1. Drink water' && habit check 1 && test \"$(cat habits.json)\" = '[{\"id\":1,\"text\":\"Drink water\",\"checked\":true}]'`. Also verify failures with `habit check 999` expecting exit code `1`, stdout empty, stderr exactly `Error: habit not found`, and unchanged `./habits.json`; and `habit delete 1` expecting exit code `1`, stdout empty, an unsupported-command error on stderr, and unchanged `./habits.json`."
+          }
+        ],
+        "name": "verification_plan"
+      }
+    }
+  }
+}

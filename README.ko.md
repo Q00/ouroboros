@@ -25,6 +25,7 @@
   <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
   <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/github/sponsors/Q00?logo=githubsponsors&color=EA4AAA&label=sponsors" alt="GitHub Sponsors"></a>
 </p>
 
 <p align="center">
@@ -92,13 +93,13 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Claude Code, Codex CLI, Kiro CLI 모두 지원합니다. 런타임 감지, MCP 서버 등록, 스킬 설치까지 자동으로 처리됩니다.
+> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI를 지원합니다. 설치 프로그램은 Claude Code, Codex CLI, Hermes CLI를 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. OpenCode, Kiro, GitHub Copilot CLI, Gemini CLI 또는 Pi CLI는 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
 
 <details>
 <summary><strong>Kiro CLI 빠른 시작</strong></summary>
 
 ```bash
-pip install ouroboros-ai
+pip install 'ouroboros-ai[mcp,claude]'
 ouroboros setup            # Kiro CLI 감지 및 MCP 서버 등록
 ```
 
@@ -108,6 +109,22 @@ OUROBOROS_RUNTIME=kiro
 ```
 
 이후 Kiro CLI 세션에서 `ooo` 명령어를 사용합니다.
+
+</details>
+
+<details>
+<summary><strong>GitHub Copilot CLI 빠른 시작</strong></summary>
+
+```bash
+gh auth login                                # 최초 1회 GitHub 인증(실시간 모델 검색에 사용)
+pipx install 'ouroboros-ai[mcp]'             # 또는: uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime copilot            # 모델 실시간 검색 및 기본값 선택,
+                                             # ~/.copilot/mcp-config.json에 MCP 서버 등록
+```
+
+Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. 다른 설정에서 사용하는 하이픈 형식의 Anthropic 모델 ID(`claude-opus-4-6`)는 런타임에서 Copilot의 점 표기 형식(`claude-opus-4.6`)으로 자동 변환되므로, 백엔드를 전환해도 기존 설정을 그대로 사용할 수 있습니다.
+
+자세한 내용은 [GitHub Copilot CLI 런타임 가이드](./docs/runtime-guides/copilot.md)를 참고하세요.
 
 </details>
 
@@ -388,6 +405,18 @@ uv run --python 3.13 --no-sync pytest
 ```
 
 [이슈](https://github.com/Q00/ouroboros/issues) · [토론](https://github.com/Q00/ouroboros/discussions)
+
+---
+
+## 후원하기
+
+Ouroboros는 MIT 라이선스로 공개 개발되는 오픈소스입니다. 이 프로젝트가 재작업을 줄여줬다면 — 혹은 이 루프가 계속 진화하길 바란다면 — 후원을 고려해주세요. 후원금은 유지보수, 새로운 런타임 통합, 후원자 전용 심층 콘텐츠 제작에 직접 사용됩니다.
+
+<p align="center">
+  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/badge/%E2%9D%A4%EF%B8%8E%20Sponsor%20on%20GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Q00 on GitHub"></a>
+</p>
+
+모든 후원자가 이 뱀을 계속 진화하게 합니다. 감사합니다.
 
 ---
 

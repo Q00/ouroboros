@@ -1,0 +1,11 @@
+{
+  "name": "habit-tracker-cli",
+  "version": "1.0.0",
+  "private": true,
+  "bin": {
+    "habit": "bin/habit"
+  },
+  "scripts": {
+    "test": "node test/habit.test.js"
+  }
+}

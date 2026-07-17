@@ -122,6 +122,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GJC = "gjc"
     ANTIGRAVITY = "antigravity"
     GROK = "grok"
+    ZCODE = "zcode"
 
 
 app = typer.Typer(

@@ -157,7 +157,13 @@ def _model_events(events: list) -> list:
     return [e for e in events if getattr(e, "type", None) == "execution.ac.model_routed"]
 
 
-async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool, retry_attempt: int = 0):
+async def _run_one_ac(
+    executor: ParallelACExecutor,
+    *,
+    is_sub_ac: bool,
+    retry_attempt: int = 0,
+    decomposition_trustworthy: bool = False,
+):
     return await executor._execute_atomic_ac(
         ac_index=1,
         ac_content="Implement a thing",
@@ -172,6 +178,7 @@ async def _run_one_ac(executor: ParallelACExecutor, *, is_sub_ac: bool, retry_at
         parent_ac_index=0 if is_sub_ac else None,
         sub_ac_index=0 if is_sub_ac else None,
         retry_attempt=retry_attempt,
+        decomposition_trustworthy=decomposition_trustworthy,
     )
 
 
@@ -199,7 +206,7 @@ class TestExecutorModelWiring:
         assert runtime.received_model == "sonnet-x"
 
     @pytest.mark.asyncio
-    async def test_decomposed_child_receives_frugal_tier_model(self) -> None:
+    async def test_untrusted_decomposed_child_receives_base_tier_model(self) -> None:
         store, events = _capturing_event_store()
         runtime = _EnforcedModelRuntime()
         executor = ParallelACExecutor(
@@ -213,9 +220,28 @@ class TestExecutorModelWiring:
         await _run_one_ac(executor, is_sub_ac=True)
 
         routed = _model_events(events)
-        assert routed[0].data["model_tier"] == "frugal"  # standard base dropped one notch
-        assert routed[0].data["model"] == "haiku-x"
+        assert routed[0].data["model_tier"] == "standard"
+        assert routed[0].data["model"] == "sonnet-x"
         assert routed[0].data["is_decomposed_child"] is True
+        assert runtime.received_model == "sonnet-x"
+
+    @pytest.mark.asyncio
+    async def test_trusted_decomposed_child_receives_frugal_tier_model(self) -> None:
+        store, events = _capturing_event_store()
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=_claude_router(),
+        )
+
+        await _run_one_ac(executor, is_sub_ac=True, decomposition_trustworthy=True)
+
+        routed = _model_events(events)
+        assert routed[0].data["model_tier"] == "frugal"
+        assert routed[0].data["model"] == "haiku-x"
         assert runtime.received_model == "haiku-x"
 
     @pytest.mark.asyncio
@@ -232,13 +258,43 @@ class TestExecutorModelWiring:
             model_router=_claude_router(),
         )
 
-        await _run_one_ac(executor, is_sub_ac=True, retry_attempt=2)
+        await _run_one_ac(
+            executor,
+            is_sub_ac=True,
+            retry_attempt=2,
+            decomposition_trustworthy=True,
+        )
 
         routed = _model_events(events)
         assert routed[0].data["model_tier"] == "standard"  # drop then raise = base
         assert routed[0].data["model"] == "sonnet-x"
         assert routed[0].data["retry_attempt"] == 2
+        assert routed[0].data["model_escalated"] is True
         assert runtime.received_model == "sonnet-x"
+
+    @pytest.mark.asyncio
+    async def test_retry_below_threshold_is_not_reported_as_escalated(self) -> None:
+        store, events = _capturing_event_store()
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=_claude_router(),
+        )
+
+        await _run_one_ac(
+            executor,
+            is_sub_ac=True,
+            retry_attempt=1,
+            decomposition_trustworthy=True,
+        )
+
+        routed = _model_events(events)
+        assert routed[0].data["model_tier"] == "frugal"
+        assert routed[0].data["model"] == "haiku-x"
+        assert routed[0].data["model_escalated"] is False
 
     @pytest.mark.asyncio
     async def test_advised_runtime_records_advised_without_passing_kwarg(self) -> None:

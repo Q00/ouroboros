@@ -173,6 +173,36 @@ class TestPMInterviewWithDBBrownfield:
         assert "Existing Codebase Context" not in ctx
 
     @pytest.mark.asyncio
+    async def test_start_redirects_repos_to_snapshot_worktrees(self, tmp_path: Path) -> None:
+        """start_interview refreshes snapshot worktrees and explores them, not the source."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+
+        def _fake_refresh(repos: list[dict[str, str]]) -> list[dict[str, str]]:
+            return [{**r, "path": f"/snap{r['path']}", "source_path": r["path"]} for r in repos]
+
+        with (
+            patch(
+                "ouroboros.bigbang.pm_interview.refresh_pm_snapshot_worktrees",
+                side_effect=_fake_refresh,
+            ) as mock_refresh,
+            patch.object(
+                engine, "explore_codebases", new_callable=AsyncMock, return_value=""
+            ) as mock_explore,
+        ):
+            result = await engine.ask_opening_and_start(
+                user_response="Enhance existing project",
+                brownfield_repos=[{"path": "/home/user/project", "name": "project"}],
+            )
+
+        assert result.is_ok
+        mock_refresh.assert_called_once()
+        explored_repos = mock_explore.call_args[0][0]
+        assert explored_repos[0]["path"] == "/snap/home/user/project"
+        assert explored_repos[0]["source_path"] == "/home/user/project"
+        assert engine._selected_brownfield_repos == explored_repos
+
+    @pytest.mark.asyncio
     async def test_opening_and_start_with_db_brownfield_repos(self, tmp_path: Path) -> None:
         """ask_opening_and_start forwards brownfield_repos and explores them."""
         adapter = _make_adapter()
@@ -224,6 +254,41 @@ class TestExploreCodebasesWithDBRepos:
                 assert len(call_args) == 2
                 assert call_args[0]["path"] == "/home/user/repo-a"
                 assert call_args[1]["path"] == "/home/user/repo-b"
+
+    @pytest.mark.asyncio
+    async def test_explore_context_shows_source_path_for_snapshots(self, tmp_path: Path) -> None:
+        """Snapshot worktree scan paths are rewritten to the durable source in context."""
+        from ouroboros.bigbang.explore import CodebaseExploreResult
+
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+
+        snapshot_path = "/home/user/.ouroboros/pm-snapshots/repo-a-abc12345"
+        repos = [
+            {"path": snapshot_path, "source_path": "/home/user/repo-a", "name": "repo-a"},
+        ]
+
+        with patch("ouroboros.bigbang.pm_interview.CodebaseExplorer") as MockExplorer:
+            mock_explorer = MagicMock()
+            mock_explorer.explore = AsyncMock(
+                return_value=[
+                    CodebaseExploreResult(
+                        path=snapshot_path,
+                        role="main",
+                        tech_stack="Python",
+                    ),
+                ]
+            )
+            MockExplorer.return_value = mock_explorer
+
+            context = await engine.explore_codebases(repos)
+
+            # Scanning targeted the snapshot worktree …
+            call_args = mock_explorer.explore.call_args[0][0]
+            assert call_args[0]["path"] == snapshot_path
+            # … but the injected context names the durable source checkout.
+            assert "/home/user/repo-a" in context
+            assert snapshot_path not in context
 
     @pytest.mark.asyncio
     async def test_explore_returns_empty_when_db_has_no_repos(self, tmp_path: Path) -> None:
@@ -314,6 +379,54 @@ class TestPMSeedIncludesDBBrownfieldRepos:
         assert len(seed.brownfield_repos) == 1
         assert seed.brownfield_repos[0]["path"] == "/home/user/existing-app"
         assert seed.brownfield_repos[0]["name"] == "existing-app"
+
+    @pytest.mark.asyncio
+    async def test_pm_seed_records_source_path_over_snapshot_path(self, tmp_path: Path) -> None:
+        """Seed must persist the durable source checkout, not the snapshot worktree."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+
+        extraction_response = """{
+            "product_name": "TaskFlow",
+            "goal": "Manage tasks efficiently",
+            "user_stories": [{"persona": "User", "action": "create tasks", "benefit": "stay organized"}],
+            "constraints": [],
+            "success_criteria": ["tasks can be created"],
+            "deferred_items": [],
+            "decide_later_items": [],
+            "assumptions": []
+        }"""
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(extraction_response)))
+
+        from ouroboros.bigbang.interview import InterviewRound, InterviewState
+
+        state = InterviewState(
+            interview_id="test-seed-snapshot",
+            initial_context="Build on top of existing-app",
+            status=InterviewStatus.COMPLETED,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What problem does this solve?",
+                    user_response="We need better task management",
+                ),
+            ],
+        )
+
+        engine._selected_brownfield_repos = [
+            {
+                "path": "/home/user/.ouroboros/pm-snapshots/existing-app-abc12345",
+                "source_path": "/home/user/existing-app",
+                "name": "existing-app",
+            },
+        ]
+        result = await engine.generate_pm_seed(state)
+
+        assert result.is_ok
+        seed = result.value
+        assert len(seed.brownfield_repos) == 1
+        assert seed.brownfield_repos[0]["path"] == "/home/user/existing-app"
+        assert "source_path" not in seed.brownfield_repos[0]
 
 
 class TestBrownfieldContextInInterviewFlow:

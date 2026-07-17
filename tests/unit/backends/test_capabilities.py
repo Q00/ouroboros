@@ -108,7 +108,7 @@ def test_interview_driver_choices_follow_llm_capability() -> None:
 
 
 def test_soft_tool_enforcement_is_registry_owned() -> None:
-    assert soft_tool_enforcement_backends() == frozenset({"gemini", "goose", "opencode"})
+    assert soft_tool_enforcement_backends() == frozenset({"gemini", "goose", "opencode", "zcode"})
 
 
 def test_tool_envelope_support_is_registry_owned() -> None:
@@ -498,3 +498,42 @@ def test_mcp_server_instructions_are_provider_neutral_and_budget_safe() -> None:
     # mechanism — each runtime maps the abstract concept to its own.
     assert "ToolSearch" not in text
     assert "Task/Agent" not in text
+
+
+def test_zcode_skill_execution_capabilities_are_complete_not_generic() -> None:
+    """Zcode ships a measured capability matrix, not the generic defaults.
+
+    ``ask_user`` and ``orchestrate_subagents`` are intentionally omitted: the
+    headless ``--prompt`` path has no user turn-taking, and Zcode has no
+    native parallel subagent primitive (``/expert`` is sequential). See the
+    rationale block above ``_ZCODE_SKILL_EXECUTION_CAPABILITIES``. Regression
+    for the Q00 review on PR #1568 ("capability matrix as a first-class
+    object — zcode should have a complete matrix instead of the generic one").
+    """
+    capability = get_backend_capability("zcode")
+    assert capability is not None
+    names = {item.name for item in capability.skill_execution_capabilities}
+
+    # The two capabilities Zcode cannot truthfully provide on `--prompt`.
+    assert "ask_user" not in names
+    assert "orchestrate_subagents" not in names
+    # The capabilities Zcode does provide (verified via `zcode --help`,
+    # `zcode skills list`, and captured `--prompt --json` summaries).
+    assert names == {
+        "inspect_code",
+        "call_mcp",
+        "run_lateral_review",
+        "web_research",
+        "run_shell",
+        "refine_answer",
+        "maintain_ledger",
+        "run_closure_gate",
+        "restate_goal",
+    }
+
+    # Guidance references Zcode-specific mechanisms, not generic phrasing.
+    guide = render_backend_skill_capability_guide("zcode")
+    assert guide.startswith("## Ouroboros Skill Capability Guide: Zcode\n")
+    # restate_goal maps onto Zcode's native --target / /goal surface.
+    assert "`--target`" in guide
+    assert "`/goal`" in guide

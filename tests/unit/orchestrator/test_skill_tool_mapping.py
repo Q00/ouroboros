@@ -180,6 +180,8 @@ def test_packaged_skill_bodies_expose_tool_specific_context_keys() -> None:
         "ouroboros_interview": (
             "initial_context",
             "cwd",
+            "confused_terms",
+            "references",
             "session_id",
             "answer",
             "last_question",
@@ -285,6 +287,8 @@ def test_discover_skill_context_keys_merges_packaged_frontmatter_and_body_usage(
     assert context_keys_by_tool["ouroboros_interview"] == (
         "initial_context",
         "cwd",
+        "confused_terms",
+        "references",
         "session_id",
         "answer",
         "last_question",

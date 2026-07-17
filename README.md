@@ -25,6 +25,7 @@
   <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
   <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/github/sponsors/Q00?logo=githubsponsors&color=EA4AAA&label=sponsors" alt="GitHub Sponsors"></a>
 </p>
 
 <p align="center">
@@ -36,7 +37,7 @@
   <a href="#from-wonder-to-ontology">Philosophy</a>
 </p>
 
-**Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, and Pi.**
+**Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, and Zcode.**
 
 Ouroboros is an **Agent OS** for AI coding: a local-first runtime layer that
 turns non-deterministic agent work into a replayable, observable, policy-bound
@@ -112,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, and Pi CLI. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server where the host supports it. For OpenCode, Kiro, GitHub Copilot CLI, Gemini CLI, or Pi CLI, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
+> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, and Zcode. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
 <details>
 <summary><strong>Kiro CLI quick start</strong></summary>
@@ -171,7 +172,7 @@ Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Pi JSON mode](https://pi.dev/docs/latest/json)
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json)
 
 </details>
 
@@ -481,6 +482,18 @@ uv run --python 3.13 --no-sync pytest
 ```
 
 [Issues](https://github.com/Q00/ouroboros/issues) · [Discussions](https://github.com/Q00/ouroboros/discussions) · [Contributing Guide](./CONTRIBUTING.md)
+
+---
+
+## Sponsors
+
+Ouroboros is MIT-licensed and built in the open. If it saves you rework — or you want the loop to keep evolving — consider sponsoring. Sponsorship directly funds maintenance, new runtime integrations, and sponsor-only deep-dive content.
+
+<p align="center">
+  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/badge/%E2%9D%A4%EF%B8%8E%20Sponsor%20on%20GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Q00 on GitHub"></a>
+</p>
+
+Every sponsor keeps the serpent evolving. Thank you.
 
 ---
 

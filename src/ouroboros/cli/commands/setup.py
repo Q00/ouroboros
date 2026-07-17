@@ -264,6 +264,15 @@ def _detect_runtimes() -> dict[str, str | None]:
         grok_path = None
     runtimes["grok"] = grok_path or shutil.which("grok")
 
+    # Zcode: app-bundle/config path first, then a PATH wrapper/binary.
+    try:
+        from ouroboros.config import get_zcode_cli_path
+
+        zcode_path = get_zcode_cli_path()
+    except Exception:
+        zcode_path = None
+    runtimes["zcode"] = zcode_path or shutil.which("zcode")
+
     return runtimes
 
 
@@ -2131,7 +2140,7 @@ def _setup_gemini(gemini_path: str) -> None:
 
 
 def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str) -> None:
-    """Configure a runtime-only backend (Antigravity / Grok).
+    """Configure a runtime-only backend (Antigravity / Grok / Zcode).
 
     These backends drive the agentic orchestrator runtime but have no
     LLM-completion adapter (``supports_llm=False``), so this intentionally sets
@@ -2179,6 +2188,11 @@ def _setup_antigravity(antigravity_path: str) -> None:
 def _setup_grok(grok_path: str) -> None:
     """Configure Ouroboros for the Grok Build CLI (``grok``) runtime."""
     _setup_runtime_only_backend("grok", grok_path, "grok_cli_path")
+
+
+def _setup_zcode(zcode_path: str) -> None:
+    """Configure Ouroboros for the Zcode CLI runtime."""
+    _setup_runtime_only_backend("zcode", zcode_path, "zcode_cli_path")
 
 
 def _setup_pi(pi_path: str) -> None:
@@ -3002,7 +3016,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -3029,7 +3043,7 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, GJC)
+    Detects available runtimes (Claude Code, Codex, OpenCode, Hermes, Gemini, Kiro, Copilot, Goose, Pi, GJC, Antigravity, Grok, Zcode)
     and configures Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
@@ -3043,6 +3057,7 @@ def setup(
     [dim]    ouroboros setup --runtime pi         # use Pi CLI[/dim]
     [dim]    ouroboros setup --runtime goose      # use Goose[/dim]
     [dim]    ouroboros setup --runtime gjc        # use GJC[/dim]
+    [dim]    ouroboros setup --runtime zcode      # use Zcode[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
@@ -3259,6 +3274,16 @@ def setup(
             )
             raise typer.Exit(1)
         _setup_grok(grok_path)
+    elif selected in ("zcode", "zcode_cli"):
+        zcode_path = available.get("zcode")
+        if not zcode_path:
+            print_error(
+                "Zcode CLI not found.\n"
+                "Install ZCode, set OUROBOROS_ZCODE_CLI_PATH, configure "
+                "orchestrator.zcode_cli_path, or put a zcode executable on PATH."
+            )
+            raise typer.Exit(1)
+        _setup_zcode(zcode_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

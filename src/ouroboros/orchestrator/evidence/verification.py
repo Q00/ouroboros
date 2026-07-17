@@ -39,11 +39,12 @@ def _verify_atomic_evidence_against_runtime_messages(
     accepted evidence cannot be supported only by the leaf's self-report.
 
     ``has_success_contract`` (the AC declares a ``verify_command``) drops
-    ``tests_passed`` from the required set, and contract ACs with declared
-    artifacts also drop ``files_touched`` — but only when ``verify_gate_active``
-    (``run_verify_commands`` is enabled) so the orchestrator's authoritative
-    ``_run_ac_verify_gate`` execution actually runs to replace those checks. With
-    the gate disabled the transcript-backed evidence is retained.
+    ``commands_run`` and ``tests_passed`` from the required set, and contract
+    ACs with declared artifacts also drop ``files_touched`` — but only when
+    ``verify_gate_active`` (``run_verify_commands`` is enabled) so the
+    orchestrator's authoritative ``_run_ac_verify_gate`` execution actually runs
+    to replace those checks. With the gate disabled the transcript-backed evidence
+    is retained.
     """
     support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
     if not support_messages:

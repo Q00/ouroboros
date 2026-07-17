@@ -26,6 +26,13 @@ from ouroboros.bigbang.interview import (
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
+from ouroboros.bigbang.requirement_distillation import (
+    apply_requirement_distillation,
+    build_promoted_reference_seed,
+    build_requirement_distillation,
+    is_reference_aware_distillation,
+    seed_readiness_details,
+)
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
@@ -252,13 +259,42 @@ class SeedGenerator:
                 )
             )
 
+        distillation = build_requirement_distillation(state)
+        preflight = apply_requirement_distillation({}, distillation)
+        if preflight.promotion.blockers:
+            return Result.err(
+                ValidationError(
+                    "Interview must be reopened before Seed generation",
+                    field="requirement_distillation",
+                    details=seed_readiness_details(preflight.promotion),
+                )
+            )
+        state.requirement_distillation = distillation
+        if is_reference_aware_distillation(distillation):
+            return Result.ok(
+                build_promoted_reference_seed(
+                    state,
+                    distillation,
+                    ambiguity_score=ambiguity_score.overall_score,
+                )
+            )
+
         # Extract structured requirements from interview
         extraction_result = await self._extract_requirements(state)
 
         if extraction_result.is_err:
             return Result.err(extraction_result.error)
 
-        requirements = extraction_result.value
+        applied = apply_requirement_distillation(extraction_result.value, distillation)
+        if applied.promotion.blockers:
+            return Result.err(
+                ValidationError(
+                    "Interview must be reopened before Seed generation",
+                    field="requirement_distillation",
+                    details=seed_readiness_details(applied.promotion),
+                )
+            )
+        requirements = applied.requirements
 
         # Create metadata
         metadata = SeedMetadata(

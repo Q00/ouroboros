@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 import os
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
@@ -640,8 +642,12 @@ class TestJobManager:
         await store.initialize()
 
         try:
+            derivation_started = asyncio.Event()
+            release_derivation = asyncio.Event()
 
             async def _boom_derivation(snapshot: JobSnapshot) -> str | None:
+                derivation_started.set()
+                await release_derivation.wait()
                 raise PersistenceError("synthetic derivation crash", operation="select")
 
             manager._derive_completed_execution_result = _boom_derivation
@@ -652,9 +658,20 @@ class TestJobManager:
                 runner=_ok_runner(),
             )
 
-            snapshot = await _wait_for_job_status(
-                manager, started.job_id, JobStatus.FAILED, timeout=2.0
-            )
+            await asyncio.wait_for(derivation_started.wait(), timeout=2.0)
+            job_task = manager._tasks[started.job_id]
+            release_derivation.set()
+            done, pending = await asyncio.wait({job_task}, timeout=2.0)
+            assert not pending
+            assert done == {job_task}
+            assert isinstance(job_task.exception(), PersistenceError)
+
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while manager._backstops and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0)
+            assert not manager._backstops
+
+            snapshot = await manager.get_snapshot(started.job_id)
 
             assert snapshot.status is JobStatus.FAILED
             assert snapshot.result_meta["terminal_append_failed"] is True
@@ -5608,6 +5625,51 @@ class TestJobManager:
         assert result.is_ok
         assert result.value.meta["view"] == "summary"
         assert result.value.text_content == "unchanged cursor=15"
+
+    @pytest.mark.parametrize("view", ["summary", "compact"])
+    async def test_job_wait_terminal_unchanged_line_identifies_job(
+        self,
+        tmp_path,
+        view: str,
+    ) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_terminal_summary",
+            job_type="auto",
+            status=JobStatus.COMPLETED,
+            message="Auto finished",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=15,
+            links=JobLinks(session_id="session_wait_terminal_summary"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {
+                "job_id": "job_wait_terminal_summary",
+                "cursor": 15,
+                "timeout_seconds": 0,
+                "view": view,
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["view"] == view
+        assert result.value.meta["is_terminal"] is True
+        assert "job_wait_terminal_summary" in result.value.text_content
+        assert result.value.text_content != "unchanged cursor=15"
 
     async def test_job_wait_compact_view_surfaces_execution_progress_without_job_change(
         self, tmp_path
