@@ -105,12 +105,21 @@ class EconomicsConfig(BaseModel, frozen=True):
         tiers: Dict mapping tier name to tier configuration
         escalation_threshold: Number of failures before upgrading tier
         downgrade_success_streak: Successes needed to downgrade tier
+        parked_retry_backoff_seconds: Backoff between retries for a root AC
+            that has exhausted the lateral-persona escalation ladder (all 5
+            personas tried, still failing at maximum strength) and has been
+            "parked for operator" attention. Such an AC never surfaces a
+            final FAILED status; it keeps retrying, just at this much
+            longer, clearly-bounded cadence instead of the ordinary retry
+            interval, so it stays operator-visible without hammering the
+            backend.
     """
 
     default_tier: Literal["frugal", "standard", "frontier"] = "frugal"
     tiers: dict[str, TierConfig] = Field(default_factory=dict)
     escalation_threshold: int = Field(default=2, ge=1)
     downgrade_success_streak: int = Field(default=5, ge=1)
+    parked_retry_backoff_seconds: float = Field(default=300.0, ge=1.0)
 
 
 class LLMConfig(BaseModel, frozen=True):

@@ -763,6 +763,9 @@ class OrchestratorRunner:
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
+        # Lateral-persona escalation ladder (Task 2): backoff once an AC is
+        # parked for operator attention.
+        self._parked_retry_backoff_seconds = _economics_config.parked_retry_backoff_seconds
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
         self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
             "off"
@@ -4835,6 +4838,8 @@ class OrchestratorRunner:
             ac_retry_attempts=self._ac_retry_attempts,
             shadow_replay_enabled=self._shadow_replay_enabled,
             session_signal_hub=self._session_signal_hub,
+            parked_retry_backoff_seconds=self._parked_retry_backoff_seconds,
+            lateral_escalation_enabled=True,
         )
 
         # Check for cancellation before starting parallel execution

@@ -28,7 +28,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -113,7 +113,11 @@ from ouroboros.orchestrator.decomposition_policy import (
     summarize_decomposition_trace,
     validate_decomposition_proposal,
 )
-from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
+from ouroboros.orchestrator.effort_routing import (
+    assess_investment,
+    decide_effort,
+    resolve_execute_effort,
+)
 from ouroboros.orchestrator.events import create_ac_stall_detected_event
 from ouroboros.orchestrator.evidence.ac_classification import (  # noqa: F401
     _CODE_IMPLEMENTATION_ACTION_RE,
@@ -265,6 +269,12 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
     ExecutionNodeIdentity,
     build_ac_runtime_identity,
+)
+from ouroboros.orchestrator.lateral_escalation import (
+    LateralEscalationState,
+    advance_lateral_escalation,
+    build_persona_retry_prompt,
+    is_terminal_state_failure,
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatcher,
@@ -906,6 +916,8 @@ class ParallelACExecutor:
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
         session_signal_hub: SessionSignalHub | None = None,
+        parked_retry_backoff_seconds: float = 300.0,
+        lateral_escalation_enabled: bool = False,
     ):
         """Initialize executor.
 
@@ -940,6 +952,16 @@ class ParallelACExecutor:
                 low-level constructor default is 0 so direct/test callers keep
                 today's single-dispatch behavior; real run paths (CLI `ooo run`
                 via the runner) pass the config value (default 2).
+            parked_retry_backoff_seconds: Backoff between retries once a root
+                AC has exhausted the lateral-persona escalation ladder (Task
+                2) and is "parked for operator" attention. Mirrors
+                ``EconomicsConfig.parked_retry_backoff_seconds``.
+            lateral_escalation_enabled: Opt-in switch for the lateral-persona
+                escalation ladder (Task 2). Default OFF, like
+                ``shadow_replay_enabled`` — an AC that keeps retrying forever
+                instead of surfacing FAILED is a significant behavior change
+                that direct/test callers must not get for free. Real run
+                paths (CLI `ooo run` via the runner) turn it on.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -1009,6 +1031,13 @@ class ParallelACExecutor:
         # so a prior round's untrustworthy verdict keeps conditioning THIS
         # root AC's next retry even after the executor re-decomposes it.
         self._decomposition_attestations: dict[str, DecompositionAttestation] = {}
+        # Lateral-persona escalation ladder (Task 2): per-root-AC state, keyed
+        # by ``ac_index``. Injectable sleep so tests never wait through a real
+        # backoff duration.
+        self._lateral_escalation_states: dict[int, LateralEscalationState] = {}
+        self._parked_retry_backoff_seconds = max(1.0, parked_retry_backoff_seconds)
+        self._lateral_escalation_enabled = lateral_escalation_enabled
+        self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._execution_counters_lock = asyncio.Lock()
         self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
         # Param degradations already surfaced this run, keyed by (param, support),
@@ -5727,6 +5756,197 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         return "\n\n".join(parts)
 
+    async def _root_ac_terminal_state(
+        self,
+        *,
+        ac_idx: int,
+        result: ACExecutionResult,
+        retry_attempt: int,
+    ) -> bool:
+        """Whether ``result`` is a failure at this root AC's maximum strength.
+
+        Recomputes the model tier / reasoning effort the last dispatch
+        actually ran at from the SAME pure decision points every retry
+        already routes through (``decide_model`` / ``decide_effort``) rather
+        than persisting a redundant copy on ``ACExecutionResult``.
+        """
+        del ac_idx
+        capabilities = getattr(self._adapter, "capabilities", None)
+        model_support = getattr(capabilities, "model_override_support", ParamSupport.IGNORED)
+        effort_support = getattr(capabilities, "reasoning_effort_support", ParamSupport.IGNORED)
+        model_decision = decide_model(
+            model_support,
+            router=self._model_router,
+            is_decomposed_child=False,
+            retry_attempt=retry_attempt,
+        )
+        effort_decision = decide_effort(
+            effort_support,
+            base_effort=self._reasoning_effort,
+            is_decomposed_child=False,
+            retry_attempt=retry_attempt,
+        )
+        return is_terminal_state_failure(
+            success=result.success,
+            is_decomposed=result.is_decomposed,
+            model_tier=model_decision.tier,
+            effort_level=effort_decision.level,
+        )
+
+    async def _maybe_run_lateral_escalation_ladder(
+        self,
+        *,
+        seed: Seed,
+        ac_idx: int,
+        result: ACExecutionResult,
+        ac_retry_attempts: dict[int, int],
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        execution_counters: dict[str, int] | None,
+    ) -> ACExecutionResult | None:
+        """Task 2: never let a root AC give up at maximum strength.
+
+        Called once this AC's ORDINARY retry budget is exhausted. A genuinely
+        infra-fatal failure (adapter crash, auth failure, an uncaught
+        exception — anything ``_is_retryable_failure`` does not consider a
+        structured, retryable verify-gate/quality failure) is exempt and
+        returns ``None`` immediately so it surfaces through whatever existing
+        mechanism already handles that distinction. A retryable failure that
+        has not yet reached its maximum strength (still room to climb the
+        model-tier/effort ceilings) also returns ``None`` — ordinary
+        recovery-exhausted handling applies; this ladder is specifically for
+        an AC stuck at the TOP of both ladders.
+
+        Once engaged, this method OWNS ``ac_idx`` until it produces a
+        successful result: it keeps retrying identically until
+        :data:`_LATERAL_ESCALATION_THRESHOLD` consecutive terminal-state
+        failures accrue, then cycles a NEW lateral-thinking persona into the
+        retry prompt each attempt (never repeating one already tried), then —
+        once all personas are exhausted — emits
+        ``execution.ac.parked_for_operator`` and keeps retrying forever at
+        ``self._parked_retry_backoff_seconds`` cadence. This AC never
+        surfaces a final FAILED status. The caller's batch therefore blocks
+        on this AC until it succeeds or the run is cancelled — the
+        deliberate, disclosed cost of "never silently give up".
+
+        Opt-in via ``self._lateral_escalation_enabled`` (default OFF, like
+        ``shadow_replay_enabled``): direct/test construction of the executor
+        must not get this significant behavior change for free.
+        """
+        if not self._lateral_escalation_enabled:
+            return None
+        if not self._is_retryable_failure(result):
+            return None
+
+        current_result = result
+        current_retry_attempt = ac_retry_attempts[ac_idx]
+        terminal = await self._root_ac_terminal_state(
+            ac_idx=ac_idx, result=current_result, retry_attempt=current_retry_attempt
+        )
+        if not terminal:
+            return None
+
+        state = self._lateral_escalation_states.get(ac_idx, LateralEscalationState())
+        ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+
+        while True:
+            failure_class = self._failure_class_for_result(current_result)
+            failure_text = (
+                failure_class or current_result.error or current_result.final_message or ""
+            )
+            step = advance_lateral_escalation(
+                state, terminal_state_failure=True, failure_text=failure_text
+            )
+            state = step.state
+            self._lateral_escalation_states[ac_idx] = state
+
+            if step.just_parked:
+                await self._event_emitter.emit_ac_parked_for_operator(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    root_ac_index=ac_idx,
+                    personas_tried=tuple(p.value for p in state.personas_tried),
+                    consecutive_terminal_failures=state.consecutive_terminal_failures,
+                    backoff_seconds=self._parked_retry_backoff_seconds,
+                    reason=(
+                        "all lateral-thinking personas exhausted; AC still failing "
+                        "at maximum strength"
+                    ),
+                )
+
+            if step.apply_long_backoff:
+                await self._sleep(self._parked_retry_backoff_seconds)
+                retry_prompt = self._build_ac_retry_prompt(
+                    result=current_result, ac_content=ac_content, is_final_attempt=True
+                )
+            elif step.persona is not None:
+                retry_prompt = build_persona_retry_prompt(
+                    persona=step.persona,
+                    ac_content=ac_content,
+                    current_approach=(
+                        self._build_ac_retry_prompt(
+                            result=current_result, ac_content=ac_content, is_final_attempt=False
+                        )
+                        or "The previous attempts failed as described above."
+                    ),
+                    failed_attempts=(failure_text,) if failure_text else (),
+                )
+            else:
+                # Below the persona-cycling threshold: one more IDENTICAL
+                # configuration retry before the ladder changes strategy.
+                retry_prompt = self._build_ac_retry_prompt(
+                    result=current_result, ac_content=ac_content, is_final_attempt=False
+                )
+
+            current_retry_attempt += 1
+            ac_retry_attempts[ac_idx] = current_retry_attempt
+            retry_results = await self._execute_ac_batch(
+                seed=seed,
+                batch_indices=[ac_idx],
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+                retry_prompts={ac_idx: retry_prompt},
+                same_runtime_budget_exhausted=True,
+            )
+            candidate = retry_results[0]
+            if isinstance(candidate, ACExecutionResult):
+                candidate = await self._apply_verify_gate(
+                    seed=seed,
+                    ac_index=ac_idx,
+                    result=candidate,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                await self._emit_ac_outcome_finalized(
+                    result=candidate,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+
+            if not isinstance(candidate, ACExecutionResult):
+                # Infra-fatal mid-ladder: exempt, hand back to the caller's
+                # existing exception handling rather than looping forever.
+                return None
+            if candidate.success:
+                # Breakthrough: reset the streak and surface the success.
+                self._lateral_escalation_states.pop(ac_idx, None)
+                return candidate
+
+            current_result = candidate
+            if not self._is_retryable_failure(candidate):
+                return None
+
     async def _run_batch_with_verify_and_retry(
         self,
         *,
@@ -6006,20 +6226,41 @@ Respond with either ATOMIC or the structured JSON object only.
 
         for position, ac_idx in enumerate(batch_executable):
             result = results[position]
-            if isinstance(result, ACExecutionResult):
-                await self._emit_recovery_exhausted(
-                    seed=seed,
-                    result=result,
-                    root_ac_index=ac_idx,
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    retry_termination_reason=retry_termination_reasons.get(
-                        ac_idx,
-                        "budget_exhausted"
-                        if self._is_retryable_failure(result)
-                        else "not_retryable",
-                    ),
-                )
+            if not isinstance(result, ACExecutionResult):
+                continue
+            # Task 2: an AC that exhausted its ordinary retry budget while
+            # failing at maximum strength (frontier tier, max effort, atomic)
+            # is handed to the lateral-persona escalation ladder INSTEAD of
+            # being marked exhausted/FAILED here. Genuinely infra-fatal
+            # failures and ACs still short of maximum strength fall through
+            # to the unchanged recovery-exhausted path below.
+            escalated = await self._maybe_run_lateral_escalation_ladder(
+                seed=seed,
+                ac_idx=ac_idx,
+                result=result,
+                ac_retry_attempts=ac_retry_attempts,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                execution_counters=execution_counters,
+            )
+            if escalated is not None:
+                results[position] = escalated
+                continue
+            await self._emit_recovery_exhausted(
+                seed=seed,
+                result=result,
+                root_ac_index=ac_idx,
+                session_id=session_id,
+                execution_id=execution_id,
+                retry_termination_reason=retry_termination_reasons.get(
+                    ac_idx,
+                    "budget_exhausted" if self._is_retryable_failure(result) else "not_retryable",
+                ),
+            )
         return results
 
     async def _maybe_redispatch_alt_harness_for_batch_ac(

@@ -131,6 +131,43 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_ac_parked_for_operator(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        root_ac_index: int,
+        personas_tried: tuple[str, ...],
+        consecutive_terminal_failures: int,
+        backoff_seconds: float,
+        reason: str,
+    ) -> None:
+        """Persist that a root AC exhausted the lateral-escalation ladder (Task 2).
+
+        This AC has failed at its most expensive configuration, cycled
+        through every lateral-thinking persona, and is still failing. It
+        NEVER surfaces a final FAILED status — the executor keeps retrying it
+        at ``backoff_seconds`` cadence — but this durable event is the
+        operator-visible signal that it needs a human look, replacing what
+        would otherwise be silent infinite identical retries.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": root_ac_index,
+                    "personas_tried": list(personas_tried),
+                    "consecutive_terminal_failures": consecutive_terminal_failures,
+                    "backoff_seconds": backoff_seconds,
+                    "reason": reason,
+                },
+            )
+        )
+
     async def emit_bounce_classified(
         self,
         *,
