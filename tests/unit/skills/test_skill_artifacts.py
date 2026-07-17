@@ -120,6 +120,21 @@ def test_packaged_skills_gate_fallback_on_callability_not_empty_discovery() -> N
                 )
 
 
+def test_brownfield_default_selection_ends_turn_in_every_skill_bundle() -> None:
+    """All shipped host bundles must render the repo list before selection."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill in ("brownfield", "setup"):
+            text = (root / skill / "SKILL.md").read_text(encoding="utf-8")
+            compact = " ".join(text.split())
+            assert "Do NOT use `AskUserQuestion` for this selection" in text
+            assert "end the turn with the repo grid as the final message" in compact
+            assert '"keep" to keep the current defaults' in compact
+            assert "IMMEDIATELY after showing the list" not in text
+            assert "Default repo selection — IMMEDIATELY" not in text
+
+
 def test_background_skills_delegate_one_exclusive_job_observer() -> None:
     """Run/auto should free the main session when native child sessions exist."""
     repo_root = Path(__file__).resolve().parents[3]
