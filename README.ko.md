@@ -25,6 +25,7 @@
   <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
   <a href="https://github.com/Q00/ouroboros/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Q00/ouroboros/test.yml?branch=main" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/github/sponsors/Q00?logo=githubsponsors&color=EA4AAA&label=sponsors" alt="GitHub Sponsors"></a>
 </p>
 
 <p align="center">
@@ -388,6 +389,18 @@ uv run --python 3.13 --no-sync pytest
 ```
 
 [이슈](https://github.com/Q00/ouroboros/issues) · [토론](https://github.com/Q00/ouroboros/discussions)
+
+---
+
+## 후원하기
+
+Ouroboros는 MIT 라이선스로 공개 개발되는 오픈소스입니다. 이 프로젝트가 재작업을 줄여줬다면 — 혹은 이 루프가 계속 진화하길 바란다면 — 후원을 고려해주세요. 후원금은 유지보수, 새로운 런타임 통합, 후원자 전용 심층 콘텐츠 제작에 직접 사용됩니다.
+
+<p align="center">
+  <a href="https://github.com/sponsors/Q00"><img src="https://img.shields.io/badge/%E2%9D%A4%EF%B8%8E%20Sponsor%20on%20GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Q00 on GitHub"></a>
+</p>
+
+모든 후원자가 이 뱀을 계속 진화하게 합니다. 감사합니다.
 
 ---
 

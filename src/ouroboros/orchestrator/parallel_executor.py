@@ -3840,20 +3840,22 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
             # A contract-carrying AC (declares verify_command or expected
-            # artifacts) delegates checks to the orchestrator's authoritative
-            # _run_ac_verify_gate. For artifact-style tasks this gate is the
-            # durable success oracle: the worker may create the file without
-            # emitting profile-shaped typed evidence.
+            # artifacts) delegates commands_run and tests_passed to the
+            # orchestrator's authoritative _run_ac_verify_gate. When it declares
+            # expected_artifacts, files_touched is delegated to the same
+            # filesystem oracle so artifact work does not require fabricated
+            # transcript-shaped evidence.
             has_success_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.verify_command or ac_spec.expected_artifacts
             )
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
             )
-            # Delegating tests_passed/files_touched to _run_ac_verify_gate is only
-            # valid when that gate actually runs. _apply_verify_gate returns early
-            # when run_verify_commands is disabled, so with the gate off we must
-            # retain the transcript-backed evidence rather than drop it.
+            # Delegating commands_run/tests_passed/files_touched to
+            # _run_ac_verify_gate is only valid when that gate actually runs.
+            # _apply_verify_gate returns early when run_verify_commands is disabled,
+            # so with the gate off we must retain the transcript-backed evidence
+            # rather than drop it.
             verify_gate_active = self._run_verify_commands
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
