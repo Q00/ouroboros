@@ -3899,7 +3899,10 @@ class OrchestratorRunner:
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         self._execution_guidance = None
         try:
-            execution_contract = self._build_execution_contract(seed=seed)
+            execution_contract = await asyncio.to_thread(
+                self._build_execution_contract,
+                seed=seed,
+            )
             self._execution_guidance_delivery_mode()
         except OrchestratorError as exc:
             if self._task_workspace is not None:
@@ -4000,7 +4003,7 @@ class OrchestratorRunner:
                     )
                 )
             try:
-                self._restore_guidance_contract(raw_contract)
+                await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
                 self._execution_guidance_delivery_mode()
             except OrchestratorError as exc:
                 self._cleanup_pre_execution_state(
@@ -5079,7 +5082,8 @@ class OrchestratorRunner:
             )
 
         try:
-            execution_contract_changed = self._restore_execution_contract(
+            execution_contract_changed = await asyncio.to_thread(
+                self._restore_execution_contract,
                 tracker.progress,
                 seed=seed,
             )

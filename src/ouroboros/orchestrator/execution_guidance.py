@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -95,39 +96,19 @@ def resolve_execution_guidance(
         candidate = root / relative_path
         resolved_path = _resolve_guidance_path(root, candidate, guidance_id)
 
-        try:
-            raw_content = resolved_path.read_bytes()
-        except OSError as exc:
-            raise ConfigError(
-                f"Unable to read execution guidance {guidance_id!r}: {exc}",
-                details={"guidance_id": guidance_id, "path": display_path},
-            ) from exc
-
+        raw_content = _read_guidance_bytes(
+            resolved_path,
+            guidance_id=guidance_id,
+            display_path=display_path,
+            current_total_size=total_size,
+        )
         size_bytes = len(raw_content)
         if size_bytes == 0:
             raise ConfigError(
                 f"Execution guidance {guidance_id!r} is empty",
                 details={"guidance_id": guidance_id, "path": display_path},
             )
-        if size_bytes > MAX_GUIDANCE_ITEM_BYTES:
-            raise ConfigError(
-                f"Execution guidance {guidance_id!r} exceeds the per-item size limit",
-                details={
-                    "guidance_id": guidance_id,
-                    "path": display_path,
-                    "size_bytes": size_bytes,
-                    "max_size_bytes": MAX_GUIDANCE_ITEM_BYTES,
-                },
-            )
         total_size += size_bytes
-        if total_size > MAX_GUIDANCE_TOTAL_BYTES:
-            raise ConfigError(
-                "Execution guidance exceeds the total size limit",
-                details={
-                    "total_size_bytes": total_size,
-                    "max_total_size_bytes": MAX_GUIDANCE_TOTAL_BYTES,
-                },
-            )
 
         try:
             content = raw_content.decode("utf-8")
@@ -159,6 +140,66 @@ def resolve_execution_guidance(
         rendered_fragment_size_bytes=len(rendered_bytes),
         total_content_size_bytes=total_size,
     )
+
+
+def _read_guidance_bytes(
+    path: Path,
+    *,
+    guidance_id: str,
+    display_path: str,
+    current_total_size: int,
+) -> bytes:
+    """Read one guidance file after size preflight, with a hard byte bound."""
+    try:
+        with path.open("rb") as handle:
+            size_hint = os.fstat(handle.fileno()).st_size
+            if size_hint > MAX_GUIDANCE_ITEM_BYTES:
+                raise ConfigError(
+                    f"Execution guidance {guidance_id!r} exceeds the per-item size limit",
+                    details={
+                        "guidance_id": guidance_id,
+                        "path": display_path,
+                        "size_bytes": size_hint,
+                        "max_size_bytes": MAX_GUIDANCE_ITEM_BYTES,
+                    },
+                )
+            if current_total_size + size_hint > MAX_GUIDANCE_TOTAL_BYTES:
+                raise ConfigError(
+                    "Execution guidance exceeds the total size limit",
+                    details={
+                        "total_size_bytes": current_total_size + size_hint,
+                        "max_total_size_bytes": MAX_GUIDANCE_TOTAL_BYTES,
+                    },
+                )
+            raw_content = handle.read(MAX_GUIDANCE_ITEM_BYTES + 1)
+    except ConfigError:
+        raise
+    except OSError as exc:
+        raise ConfigError(
+            f"Unable to read execution guidance {guidance_id!r}: {exc}",
+            details={"guidance_id": guidance_id, "path": display_path},
+        ) from exc
+
+    size_bytes = len(raw_content)
+    if size_bytes > MAX_GUIDANCE_ITEM_BYTES:
+        raise ConfigError(
+            f"Execution guidance {guidance_id!r} exceeds the per-item size limit",
+            details={
+                "guidance_id": guidance_id,
+                "path": display_path,
+                "size_bytes": size_bytes,
+                "max_size_bytes": MAX_GUIDANCE_ITEM_BYTES,
+            },
+        )
+    if current_total_size + size_bytes > MAX_GUIDANCE_TOTAL_BYTES:
+        raise ConfigError(
+            "Execution guidance exceeds the total size limit",
+            details={
+                "total_size_bytes": current_total_size + size_bytes,
+                "max_total_size_bytes": MAX_GUIDANCE_TOTAL_BYTES,
+            },
+        )
+    return raw_content
 
 
 def _empty_guidance_bundle() -> ExecutionGuidanceBundle:

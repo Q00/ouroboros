@@ -1,6 +1,8 @@
 """Unit tests for project execution guidance resolution."""
 
 from pathlib import Path
+from typing import Any, Self
+from unittest.mock import patch
 
 import pytest
 
@@ -133,6 +135,71 @@ def test_rejects_oversized_item(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="per-item size limit"):
         resolve_execution_guidance(tmp_path, ["team"])
+
+
+def test_oversized_item_is_rejected_before_content_read(tmp_path: Path) -> None:
+    path = _write_guidance(tmp_path, "team", b"")
+    with path.open("wb") as handle:
+        handle.truncate(MAX_GUIDANCE_ITEM_BYTES + 1)
+
+    original_open = Path.open
+
+    class _ReadGuard:
+        def __init__(self, handle: Any) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> Self:
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self._handle.__exit__(*args)
+
+        def fileno(self) -> int:
+            return self._handle.fileno()
+
+        def read(self, _size: int = -1) -> bytes:
+            raise AssertionError("oversized guidance content must not be read")
+
+    def guarded_open(target: Path, *args: Any, **kwargs: Any) -> _ReadGuard:
+        return _ReadGuard(original_open(target, *args, **kwargs))
+
+    with patch.object(Path, "open", new=guarded_open):
+        with pytest.raises(ConfigError, match="per-item size limit"):
+            resolve_execution_guidance(tmp_path, ["team"])
+
+
+def test_guidance_content_read_is_bounded(tmp_path: Path) -> None:
+    _write_guidance(tmp_path, "team", "bounded\n")
+    original_open = Path.open
+    read_sizes: list[int] = []
+
+    class _ReadRecorder:
+        def __init__(self, handle: Any) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> Self:
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self._handle.__exit__(*args)
+
+        def fileno(self) -> int:
+            return self._handle.fileno()
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return self._handle.read(size)
+
+    def recording_open(target: Path, *args: Any, **kwargs: Any) -> _ReadRecorder:
+        return _ReadRecorder(original_open(target, *args, **kwargs))
+
+    with patch.object(Path, "open", new=recording_open):
+        bundle = resolve_execution_guidance(tmp_path, ["team"])
+
+    assert bundle.refs[0].guidance_id == "team"
+    assert read_sizes == [MAX_GUIDANCE_ITEM_BYTES + 1]
 
 
 def test_rejects_oversized_total(tmp_path: Path) -> None:
