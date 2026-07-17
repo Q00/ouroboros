@@ -90,6 +90,11 @@ def _to_fastmcp_tool_result(tool_result: MCPToolResult) -> Any:
     )
 
 
+def _duration_ms(started_at: float) -> int:
+    """Return elapsed monotonic time in whole milliseconds."""
+    return int((time.monotonic() - started_at) * 1000)
+
+
 def _default_interview_state_dir() -> Path:
     """Return the global interview state directory for MCP handlers."""
     from ouroboros.config.models import get_config_dir
@@ -740,21 +745,46 @@ class MCPServerAdapter:
         Returns:
             Result containing the tool result or an error.
         """
+        started_at = time.monotonic()
         self._last_tool_activity = time.monotonic()
+        log.info(
+            "mcp.server.call_tool.start",
+            tool=name,
+            server_name=self._name,
+            pid=os.getpid(),
+            argument_keys=sorted(arguments),
+        )
         handler = self._tool_handlers.get(name)
         if not handler:
-            return Result.err(
-                MCPResourceNotFoundError(
-                    f"Tool not found: {name}",
-                    server_name=self._name,
-                    resource_type="tool",
-                    resource_id=name,
-                )
+            error = MCPResourceNotFoundError(
+                f"Tool not found: {name}",
+                server_name=self._name,
+                resource_type="tool",
+                resource_id=name,
             )
+            log.info(
+                "mcp.server.call_tool.return",
+                tool=name,
+                server_name=self._name,
+                pid=os.getpid(),
+                duration_ms=_duration_ms(started_at),
+                ok=False,
+                error_type=type(error).__name__,
+            )
+            return Result.err(error)
 
         # Security check
         security_result = await self._security.check_request(name, arguments, credentials)
         if security_result.is_err:
+            log.info(
+                "mcp.server.call_tool.return",
+                tool=name,
+                server_name=self._name,
+                pid=os.getpid(),
+                duration_ms=_duration_ms(started_at),
+                ok=False,
+                error_type=type(security_result.error).__name__,
+            )
             return Result.err(security_result.error)
 
         try:
@@ -771,11 +801,30 @@ class MCPServerAdapter:
                     result = await invoke_handler()
             else:
                 result = await invoke_handler()
+            log.info(
+                "mcp.server.call_tool.return",
+                tool=name,
+                server_name=self._name,
+                pid=os.getpid(),
+                duration_ms=_duration_ms(started_at),
+                ok=result.is_ok,
+                error_type=type(result.error).__name__ if result.is_err else None,
+            )
             return result
         except MCPServerError as exc:
             return Result.err(exc)
         except TimeoutError:
-            log.error("mcp.server.tool_timeout", tool=name)
+            duration_ms = _duration_ms(started_at)
+            log.error("mcp.server.tool_timeout", tool=name, duration_ms=duration_ms)
+            log.error(
+                "mcp.server.call_tool.error",
+                tool=name,
+                server_name=self._name,
+                pid=os.getpid(),
+                duration_ms=duration_ms,
+                error_type="TimeoutError",
+                error=str(timeout),
+            )
             return Result.err(
                 MCPToolError(
                     f"Tool execution timed out after {timeout}s: {name}",
@@ -784,7 +833,23 @@ class MCPServerAdapter:
                 )
             )
         except Exception as e:
-            log.error("mcp.server.tool_error", tool=name, error=str(e), exc_info=True)
+            duration_ms = _duration_ms(started_at)
+            log.error(
+                "mcp.server.tool_error",
+                tool=name,
+                error=str(e),
+                duration_ms=duration_ms,
+                exc_info=True,
+            )
+            log.error(
+                "mcp.server.call_tool.error",
+                tool=name,
+                server_name=self._name,
+                pid=os.getpid(),
+                duration_ms=duration_ms,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             return Result.err(
                 MCPToolError(
                     f"Tool execution failed: {e}",
@@ -929,6 +994,14 @@ class MCPServerAdapter:
 
             def _make_tool_wrapper(h: ToolHandler) -> Any:
                 async def tool_wrapper(**kwargs: Any) -> Any:
+                    wrapper_started_at = time.monotonic()
+                    log.info(
+                        "mcp.server.fastmcp_tool_wrapper.entry",
+                        tool=h.definition.name,
+                        server_name=self._name,
+                        pid=os.getpid(),
+                        raw_argument_keys=sorted(kwargs),
+                    )
                     # Backward compat: unwrap nested kwargs from clients that
                     # used the old schema where FastMCP inferred a single "kwargs" param.
                     if (
@@ -957,10 +1030,28 @@ class MCPServerAdapter:
                     if result.is_ok:
                         # Convert MCPToolResult to FastMCP format
                         tool_result = result.value
-                        return _to_fastmcp_tool_result(tool_result)
+                        converted = _to_fastmcp_tool_result(tool_result)
+                        log.info(
+                            "mcp.server.fastmcp_tool_wrapper.return",
+                            tool=h.definition.name,
+                            server_name=self._name,
+                            pid=os.getpid(),
+                            duration_ms=_duration_ms(wrapper_started_at),
+                            ok=True,
+                        )
+                        return converted
                     else:
                         # Raise so FastMCP returns a proper MCP error response
                         # with isError: true, instead of a success with error text.
+                        log.info(
+                            "mcp.server.fastmcp_tool_wrapper.return",
+                            tool=h.definition.name,
+                            server_name=self._name,
+                            pid=os.getpid(),
+                            duration_ms=_duration_ms(wrapper_started_at),
+                            ok=False,
+                            error_type=type(result.error).__name__,
+                        )
                         raise RuntimeError(str(result.error))
 
                 # Set proper signature so FastMCP generates correct JSON schema
@@ -1015,6 +1106,7 @@ class MCPServerAdapter:
             tools=len(self._tool_handlers),
             resources=len(self._resource_handlers),
         )
+        serve_started_at = time.monotonic()
 
         # Log sandbox environment for diagnostics.  Note: CODEX_SANDBOX_
         # NETWORK_DISABLED=1 does NOT necessarily block MCP-spawned child
@@ -1032,12 +1124,33 @@ class MCPServerAdapter:
             )
 
         # Run the server with the appropriate transport
-        if transport == "sse":
-            await self._mcp_server.run_sse_async()
-        elif transport == "streamable-http":
-            await self._mcp_server.run_streamable_http_async()
-        else:
-            await self._mcp_server.run_stdio_async()
+        try:
+            if transport == "sse":
+                await self._mcp_server.run_sse_async()
+            elif transport == "streamable-http":
+                await self._mcp_server.run_streamable_http_async()
+            else:
+                await self._mcp_server.run_stdio_async()
+        except BaseException as exc:
+            log.error(
+                "mcp.server.serve_error",
+                name=self._name,
+                transport=transport,
+                pid=os.getpid(),
+                duration_ms=_duration_ms(serve_started_at),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+        finally:
+            log.info(
+                "mcp.server.serve_exit",
+                name=self._name,
+                transport=transport,
+                pid=os.getpid(),
+                duration_ms=_duration_ms(serve_started_at),
+            )
 
     @property
     def runtime_context(self) -> AgentRuntimeContext | None:

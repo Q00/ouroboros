@@ -46,8 +46,17 @@ def _verify_atomic_evidence_against_runtime_messages(
     to replace those checks. With the gate disabled the transcript-backed evidence
     is retained.
     """
+    effective_schema = _effective_evidence_schema_for_ac(
+        execution_profile,
+        ac_content,
+        has_success_contract=has_success_contract,
+        has_expected_artifacts=has_expected_artifacts,
+        verify_gate_active=verify_gate_active,
+    )
     support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
     if not support_messages:
+        if not effective_schema.required:
+            return VerifierVerdict(passed=True)
         return VerifierVerdict(
             passed=False,
             reasons=("no runtime transcript evidence supports the typed evidence claims",),
@@ -63,13 +72,6 @@ def _verify_atomic_evidence_against_runtime_messages(
             command,
             _runtime_support_messages_for_field("commands_run", support_messages),
         )
-    )
-    effective_schema = _effective_evidence_schema_for_ac(
-        execution_profile,
-        ac_content,
-        has_success_contract=has_success_contract,
-        has_expected_artifacts=has_expected_artifacts,
-        verify_gate_active=verify_gate_active,
     )
     required_fields = set(effective_schema.required)
     fields_to_verify = list(effective_schema.required)

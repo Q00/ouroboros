@@ -1,17 +1,20 @@
 """Tests for MCP server adapter."""
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from ouroboros.core.lineage import EvaluationSummary, TaskResult
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import get_current_io_journal_recorder
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
+from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
     MCPServerAdapter,
@@ -26,6 +29,8 @@ from ouroboros.mcp.server.adapter import (
     _to_fastmcp_tool_result,
     validate_transport,
 )
+from ouroboros.mcp.tools import job_handlers as job_handlers_module
+from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -38,6 +43,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
 from ouroboros.orchestrator.control_bus import ControlBus, ControlBusDrainError
+from ouroboros.persistence.event_store import EventStore
 from ouroboros.verification.models import (
     ACVerificationReport,
     SpecAssertion,
@@ -729,6 +735,152 @@ class TestMCPServerAdapterTools:
         assert result.value.text_content == "Success"
         handler.handle_mock.assert_called_once_with({"input": "test"})
 
+    async def test_call_tool_logs_lifecycle_without_argument_values(self) -> None:
+        """call_tool emits boundary logs without leaking argument payloads."""
+        adapter = MCPServerAdapter(name="test-server")
+        handler = MockToolHandler("my_tool")
+        adapter.register_tool(handler)
+
+        with capture_logs() as logs:
+            result = await adapter.call_tool("my_tool", {"input": "secret-value"})
+
+        assert result.is_ok
+        start = next(event for event in logs if event["event"] == "mcp.server.call_tool.start")
+        returned = next(event for event in logs if event["event"] == "mcp.server.call_tool.return")
+        assert start["tool"] == "my_tool"
+        assert start["server_name"] == "test-server"
+        assert start["argument_keys"] == ["input"]
+        assert "secret-value" not in str(start)
+        assert returned["tool"] == "my_tool"
+        assert returned["ok"] is True
+        assert isinstance(returned["duration_ms"], int)
+        assert returned["duration_ms"] >= 0
+
+    async def test_call_tool_job_wait_returns_capped_pollable_payload_through_adapter(
+        self, tmp_path
+    ) -> None:
+        """Adapter routing exposes the job_wait timeout cap as observable MCP metadata."""
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+        await store.initialize()
+        try:
+            snapshot = JobSnapshot(
+                job_id="job_wait_adapter_timeout_cap",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Running execute_seed",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=7,
+                links=JobLinks(),
+            )
+
+            class StaticJobManager:
+                async def wait_for_change(
+                    self,
+                    job_id: str,
+                    *,
+                    cursor: int,
+                    timeout_seconds: int,
+                ) -> tuple[JobSnapshot, bool]:
+                    assert job_id == snapshot.job_id
+                    assert cursor == 6
+                    assert timeout_seconds == 5
+                    return snapshot, False
+
+            adapter = MCPServerAdapter(name="test-server")
+            adapter.register_tool(JobWaitHandler(event_store=store, job_manager=StaticJobManager()))
+
+            result = await adapter.call_tool(
+                "ouroboros_job_wait",
+                {
+                    "job_id": snapshot.job_id,
+                    "cursor": 6,
+                    "timeout_seconds": 120,
+                },
+            )
+
+            assert result.is_ok
+            assert result.value.meta["job_id"] == snapshot.job_id
+            assert result.value.meta["timeout_seconds"] == 5
+            assert result.value.meta["timeout_seconds_requested"] == 120
+            assert result.value.meta["timeout_seconds_capped"] is True
+            assert result.value.meta["changed"] is False
+            assert result.value.is_error is False
+        finally:
+            await store.close()
+
+    async def test_call_tool_job_wait_timeout_then_job_result_recovers_terminal_snapshot(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A bounded wait response can be followed by adapter-routed terminal result fetch."""
+        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
+        await store.initialize()
+        try:
+            running = JobSnapshot(
+                job_id="job_wait_then_result",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Running execute_seed",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=4,
+                links=JobLinks(),
+            )
+            terminal = JobSnapshot(
+                job_id=running.job_id,
+                job_type=running.job_type,
+                status=JobStatus.COMPLETED,
+                message="Job complete",
+                created_at=running.created_at,
+                updated_at=running.updated_at,
+                cursor=5,
+                links=running.links,
+                result_text="terminal result",
+            )
+
+            class RecoveringJobManager:
+                terminal_snapshot: JobSnapshot | None = None
+
+                def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
+                    assert job_id == running.job_id
+                    return self.terminal_snapshot
+
+                async def wait_for_change(
+                    self,
+                    job_id: str,
+                    *,
+                    cursor: int,
+                    timeout_seconds: int,
+                ) -> tuple[JobSnapshot, bool]:
+                    assert job_id == running.job_id
+                    assert cursor == 4
+                    assert timeout_seconds == 0
+                    await asyncio.sleep(1)
+                    return running, False
+
+            manager = RecoveringJobManager()
+            adapter = MCPServerAdapter(name="test-server")
+            adapter.register_tool(JobWaitHandler(event_store=store, job_manager=manager))
+            adapter.register_tool(JobResultHandler(event_store=store, job_manager=manager))
+
+            wait_result = await adapter.call_tool(
+                "ouroboros_job_wait",
+                {"job_id": running.job_id, "cursor": 4, "timeout_seconds": 0},
+            )
+            manager.terminal_snapshot = terminal
+            result = await adapter.call_tool("ouroboros_job_result", {"job_id": running.job_id})
+
+            assert wait_result.is_ok
+            assert wait_result.value.meta["wait_timed_out"] is True
+            assert wait_result.value.meta["result_available"] is False
+            assert result.is_ok
+            assert result.value.text_content == "terminal result"
+            assert result.value.meta["lifecycle_status"] == "completed"
+            assert result.value.meta["result_available"] is True
+        finally:
+            await store.close()
+
     def test_fastmcp_tool_result_preserves_meta(self) -> None:
         """FastMCP boundary conversion must not drop MCPToolResult.meta."""
         result = MCPToolResult(
@@ -880,10 +1032,12 @@ class TestMCPServerAdapterTools:
         handler.handle_mock.side_effect = RuntimeError("Handler failed")
         adapter.register_tool(handler)
 
-        result = await adapter.call_tool("test_tool", {})
+        with capture_logs() as logs:
+            result = await adapter.call_tool("test_tool", {})
 
         assert result.is_err
         assert "Handler failed" in str(result.error)
+        assert any(event["event"] == "mcp.server.call_tool.error" for event in logs)
 
 
 class TestMCPServerAdapterResources:
@@ -1048,6 +1202,40 @@ class TestServeTransport:
         assert call_kwargs.kwargs["port"] == 9000
 
     @pytest.mark.asyncio
+    async def test_stdio_serve_logs_exit(self) -> None:
+        """serve() logs transport lifecycle completion."""
+        from unittest.mock import MagicMock, patch
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        adapter = MCPServerAdapter(name="test-server")
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+            capture_logs() as logs,
+        ):
+            await adapter.serve(transport="stdio")
+
+        exit_event = next(event for event in logs if event["event"] == "mcp.server.serve_exit")
+        assert exit_event["name"] == "test-server"
+        assert exit_event["transport"] == "stdio"
+        assert isinstance(exit_event["duration_ms"], int)
+        assert exit_event["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
     async def test_sse_ephemeral_port_zero(self):
         """port=0 must reach FastMCP without being rewritten."""
         from unittest.mock import MagicMock, patch
@@ -1184,6 +1372,62 @@ class TestServeTransport:
         # Test: Path traversal should be rejected by input validation
         with pytest.raises(RuntimeError, match="Path traversal detected"):
             await captured_wrapper(input="../../../etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_wrapper_logs_entry_and_return(self) -> None:
+        """FastMCP wrapper logs whether requests cross the SDK boundary."""
+        from unittest.mock import MagicMock, patch
+
+        adapter = MCPServerAdapter(name="test-server")
+        adapter.register_tool(MockToolHandler(name="wrapped_tool"))
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        captured_wrapper = None
+
+        def capture_tool_decorator(name, description):
+            def decorator(func):
+                nonlocal captured_wrapper
+                captured_wrapper = func
+                return func
+
+            return decorator
+
+        mock_instance.tool = capture_tool_decorator
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        assert captured_wrapper is not None
+        with capture_logs() as logs:
+            converted = await captured_wrapper(input="secret-value")
+
+        assert converted.content[0].text == "Success"
+        entry = next(
+            event for event in logs if event["event"] == "mcp.server.fastmcp_tool_wrapper.entry"
+        )
+        returned = next(
+            event for event in logs if event["event"] == "mcp.server.fastmcp_tool_wrapper.return"
+        )
+        assert entry["tool"] == "wrapped_tool"
+        assert entry["raw_argument_keys"] == ["input"]
+        assert "secret-value" not in str(entry)
+        assert returned["tool"] == "wrapped_tool"
+        assert returned["ok"] is True
+        assert isinstance(returned["duration_ms"], int)
 
     @pytest.mark.asyncio
     async def test_fastmcp_registers_base_resource_uri_template(self) -> None:

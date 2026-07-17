@@ -18,6 +18,7 @@ import time
 from typing import Annotated, Any
 
 from rich.console import Console
+import structlog
 import typer
 
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
@@ -56,6 +57,7 @@ _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
+log = structlog.get_logger(__name__)
 
 
 class AgentRuntimeBackend(str, Enum):  # noqa: UP042
@@ -773,7 +775,13 @@ async def _run_mcp_server(
             job_manager = getattr(server, "job_manager", None)
             if isinstance(job_manager, JobManager):
                 with contextlib.suppress(Exception):
-                    await job_manager.drain(grace_seconds=_JOB_DRAIN_GRACE_SECONDS)
+                    log.info(
+                        "mcp.command.job_drain_start",
+                        live_job_count=len(getattr(job_manager, "_tasks", {})),
+                        grace_seconds=_JOB_DRAIN_GRACE_SECONDS,
+                    )
+                    drained = await job_manager.drain(grace_seconds=_JOB_DRAIN_GRACE_SECONDS)
+                    log.info("mcp.command.job_drain_complete", drained=drained)
             # Route teardown through the adapter so its owned resources close in
             # the documented order: the ControlBus reactive surface is drained
             # first (cancelling subscriber tasks), then the EventStore (whose

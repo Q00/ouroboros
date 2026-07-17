@@ -10,6 +10,7 @@ Contains handlers for background job operations and execution cancellation:
 
 import asyncio
 from dataclasses import dataclass, field, replace
+import os
 from typing import Any
 
 import structlog
@@ -44,6 +45,11 @@ from ouroboros.persistence.event_store import EventStore
 log = structlog.get_logger(__name__)
 
 _DEFAULT_JOB_VIEW = "full"
+_MAX_JOB_WAIT_TIMEOUT_SECONDS = 5
+_JOB_WAIT_GUARD_VERSION = "detached-branch-timeout-v2"
+_JOB_WAIT_RESPONSE_GRACE_SECONDS = 1.0
+_JOB_WAIT_EXECUTION_SCAN_TIMEOUT_SECONDS = 1.0
+_JOB_WAIT_RENDER_TIMEOUT_SECONDS = 2.0
 _JOB_EXECUTION_EVENT_LIMIT = 250
 _JOB_SUBTASK_EVENT_PAGE_SIZE = 500
 _JOB_PROGRESS_EVENT_TYPES = {
@@ -92,6 +98,14 @@ _JOB_WAIT_FOR_ALIASES = {
     "done": "terminal",
     "completion": "terminal",
 }
+
+
+def _get_cached_job_snapshot(job_manager: Any, job_id: str) -> JobSnapshot | None:
+    getter = getattr(job_manager, "get_cached_snapshot", None)
+    if getter is None:
+        return None
+    snapshot = getter(job_id)
+    return snapshot if isinstance(snapshot, JobSnapshot) else None
 
 
 def _normalize_job_view(value: object) -> str:
@@ -178,11 +192,117 @@ def _parse_non_negative_int_argument(
     return Result.ok(value)
 
 
+def _job_wait_internal_timeout_result(
+    *,
+    job_id: str,
+    cursor: int,
+    timeout_seconds: int,
+    requested_timeout_seconds: int,
+    view: str,
+    stream: str,
+    wait_for: str,
+) -> MCPToolResult:
+    text = (
+        f"job_wait timed out before producing a snapshot for `{job_id}`. "
+        "Poll `ouroboros_job_status` or call `ouroboros_job_wait` again."
+    )
+    return MCPToolResult(
+        content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+        is_error=False,
+        meta={
+            "job_id": job_id,
+            "cursor": cursor,
+            "changed": False,
+            "view": view,
+            "stream": stream,
+            "wait_for": wait_for,
+            "timeout_seconds": timeout_seconds,
+            "timeout_seconds_requested": requested_timeout_seconds,
+            "timeout_seconds_capped": timeout_seconds != requested_timeout_seconds,
+            "wait_timed_out": True,
+            "result_available": False,
+        },
+    )
+
+
+def _consume_detached_wait_task(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.warning("mcp.tool.job_wait.detached_wait_failed", exc_info=True)
+
+
+async def _await_job_wait_branch(
+    awaitable: Any,
+    *,
+    timeout: float,
+    job_id: str,
+    branch: str,
+) -> Any:
+    """Await a job wait branch without waiting for slow cancellation cleanup."""
+    log.debug(
+        "mcp.tool.job_wait.guard.enter",
+        job_id=job_id,
+        branch=branch,
+        timeout_seconds=timeout,
+        guard_version=_JOB_WAIT_GUARD_VERSION,
+        pid=os.getpid(),
+    )
+    task = asyncio.create_task(awaitable)
+    log.debug(
+        "mcp.tool.job_wait.guard.task_created",
+        job_id=job_id,
+        branch=branch,
+        guard_version=_JOB_WAIT_GUARD_VERSION,
+        pid=os.getpid(),
+    )
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_detached_wait_task)
+        raise
+    log.debug(
+        "mcp.tool.job_wait.guard.wait_returned",
+        job_id=job_id,
+        branch=branch,
+        done=task in done,
+        guard_version=_JOB_WAIT_GUARD_VERSION,
+        pid=os.getpid(),
+    )
+    if task in done:
+        return task.result()
+
+    task.cancel()
+    task.add_done_callback(_consume_detached_wait_task)
+    log.debug(
+        "mcp.tool.job_wait.wait.branch_timeout",
+        job_id=job_id,
+        branch=branch,
+        timeout_seconds=timeout,
+        guard_version=_JOB_WAIT_GUARD_VERSION,
+        pid=os.getpid(),
+    )
+    raise TimeoutError
+
+
 async def _query_all_execution_subtask_events(
     event_store: EventStore, execution_id: str
 ) -> list[Any]:
-    """Fetch subtask updates from one stable execution replay snapshot."""
-    events, _cursor = await event_store.get_events_after("execution", execution_id, 0)
+    """Fetch a bounded recent subtask snapshot for live job rendering.
+
+    ``job_wait`` is called from MCP clients with relatively short tool-call
+    ceilings. Rendering progress must not materialize an execution aggregate's
+    full event history on every poll; the authoritative terminal result remains
+    available through ``job_result``.
+    """
+    events = await event_store.query_events(
+        aggregate_id=execution_id,
+        limit=_JOB_SUBTASK_EVENT_PAGE_SIZE,
+    )
+    events = sorted(events, key=lambda event: (event.timestamp, event.id))
     return [
         event
         for event in events
@@ -205,6 +325,31 @@ async def _query_latest_workflow_event(event_store: EventStore, execution_id: st
     return events[0] if events else None
 
 
+async def _query_recent_execution_progress_events(
+    event_store: EventStore,
+    execution_id: str,
+    *,
+    cursor: int | None = None,
+) -> tuple[list[BaseEvent], int]:
+    """Fetch a bounded latest progress window with durable rowid cursor semantics."""
+    getter = getattr(event_store, "get_recent_aggregate_events", None)
+    if getter is not None:
+        return await getter(
+            "execution",
+            execution_id,
+            event_types=_JOB_PROGRESS_EVENT_TYPES,
+            max_row_id=cursor,
+            limit=_JOB_SUBTASK_EVENT_PAGE_SIZE,
+        )
+    return await event_store.get_events_after(
+        "execution",
+        execution_id,
+        0,
+        max_row_id=cursor,
+        limit=_JOB_SUBTASK_EVENT_PAGE_SIZE,
+    )
+
+
 async def _query_execution_progress_at_cursor(
     event_store: EventStore,
     execution_id: str,
@@ -212,11 +357,10 @@ async def _query_execution_progress_at_cursor(
     cursor: int | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Return execution progress visible at ``cursor`` and the latest rowid read."""
-    events, event_cursor = await event_store.get_events_after(
-        "execution",
+    events, event_cursor = await _query_recent_execution_progress_events(
+        event_store,
         execution_id,
-        0,
-        max_row_id=cursor,
+        cursor=cursor,
     )
     progress = dict(_EMPTY_PROGRESS)
     workflow_event = next(
@@ -1036,10 +1180,14 @@ class JobStatusHandler:
             )
         view = _normalize_job_view(arguments.get("view"))
 
-        try:
-            snapshot = await self._job_manager.get_snapshot(job_id)
-        except ValueError as exc:
-            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
+        cached_snapshot = _get_cached_job_snapshot(self._job_manager, job_id)
+        if cached_snapshot is not None:
+            snapshot = cached_snapshot
+        else:
+            try:
+                snapshot = await self._job_manager.get_snapshot(job_id)
+            except ValueError as exc:
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
         if view == "compact":
@@ -1100,7 +1248,9 @@ class JobWaitHandler:
                     description=(
                         "Maximum seconds to wait for a change. Defaults to 0 so the "
                         "tool returns an immediate snapshot and never holds the MCP "
-                        "client open unless the caller explicitly asks for long-polling."
+                        "client open unless the caller explicitly asks for long-polling. "
+                        f"Values above {_MAX_JOB_WAIT_TIMEOUT_SECONDS} are capped so "
+                        "clients with MCP tool-call timeouts can poll safely."
                     ),
                     required=False,
                     default=0,
@@ -1168,51 +1318,198 @@ class JobWaitHandler:
         if timeout_result.is_err:
             return Result.err(timeout_result.error)
         cursor = cursor_result.value
-        timeout_seconds = timeout_result.value
+        requested_timeout_seconds = timeout_result.value
+        timeout_seconds = min(requested_timeout_seconds, _MAX_JOB_WAIT_TIMEOUT_SECONDS)
         view = _normalize_job_view(arguments.get("view"))
         stream = _normalize_job_stream(arguments.get("stream"))
         wait_for = _normalize_job_wait_for(arguments.get("wait_for"))
+        wait_response_timeout = max(
+            _JOB_WAIT_RESPONSE_GRACE_SECONDS,
+            timeout_seconds + _JOB_WAIT_RESPONSE_GRACE_SECONDS,
+        )
+        started_at = asyncio.get_running_loop().time()
+        log.debug(
+            "mcp.tool.job_wait.start",
+            job_id=job_id,
+            cursor=cursor,
+            argument_keys=sorted(arguments),
+            timeout_seconds=timeout_seconds,
+            timeout_seconds_requested=requested_timeout_seconds,
+            timeout_seconds_capped=timeout_seconds != requested_timeout_seconds,
+            view=view,
+            stream=stream,
+            wait_for=wait_for,
+            wait_response_timeout=wait_response_timeout,
+            guard_version=_JOB_WAIT_GUARD_VERSION,
+            pid=os.getpid(),
+        )
+
+        if stream == "progress" and timeout_seconds > 0:
+            cached_snapshot = _get_cached_job_snapshot(self._job_manager, job_id)
+            if cached_snapshot is not None and (
+                cached_snapshot.cursor > cursor or cached_snapshot.is_terminal
+            ):
+                progress = dict(_EMPTY_PROGRESS)
+                text = _render_compact_job_snapshot(
+                    cached_snapshot,
+                    progress,
+                    include_message=view == "summary",
+                )
+                if view == "full":
+                    text += (
+                        "\n\nLive snapshot returned without long-polling; "
+                        f"poll again with cursor={cached_snapshot.cursor}."
+                    )
+                result = MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                    is_error=_job_is_error(cached_snapshot),
+                    meta={
+                        **_job_snapshot_meta(cached_snapshot),
+                        "changed": cached_snapshot.cursor > cursor,
+                        "view": view,
+                        "stream": stream,
+                        "wait_for": wait_for,
+                        "timeout_seconds": timeout_seconds,
+                        "timeout_seconds_requested": requested_timeout_seconds,
+                        "timeout_seconds_capped": timeout_seconds != requested_timeout_seconds,
+                        "execution_scan_timed_out": False,
+                        "render_timed_out": False,
+                        "live_snapshot": True,
+                        "stream_events": [],
+                        "stream_has_more": False,
+                        **progress,
+                    },
+                )
+                log.debug(
+                    "mcp.tool.job_wait.live_snapshot.return",
+                    job_id=job_id,
+                    status=cached_snapshot.status.value,
+                    changed=cached_snapshot.cursor > cursor,
+                    cursor=cached_snapshot.cursor,
+                    requested_cursor=cursor,
+                    elapsed_seconds=round(
+                        asyncio.get_running_loop().time() - started_at,
+                        3,
+                    ),
+                    guard_version=_JOB_WAIT_GUARD_VERSION,
+                    pid=os.getpid(),
+                )
+                return Result.ok(result)
 
         try:
             if stream == "linked":
+                log.debug(
+                    "mcp.tool.job_wait.wait.enter",
+                    job_id=job_id,
+                    branch="linked",
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                    wait_for=wait_for,
+                    wait_response_timeout=wait_response_timeout,
+                )
                 (
                     snapshot,
                     changed,
                     stream_events,
                     stream_cursor,
                     stream_has_more,
-                ) = await self._wait_for_linked_change(
-                    job_id,
+                ) = await _await_job_wait_branch(
+                    self._wait_for_linked_change(
+                        job_id,
+                        cursor=cursor,
+                        timeout_seconds=timeout_seconds,
+                        wait_for=wait_for,
+                    ),
+                    timeout=wait_response_timeout,
+                    job_id=job_id,
+                    branch="linked",
+                )
+                meaningful_execution_changed = False
+                wait_branch = "linked"
+            elif wait_for != "raw":
+                log.debug(
+                    "mcp.tool.job_wait.wait.enter",
+                    job_id=job_id,
+                    branch="meaningful",
                     cursor=cursor,
                     timeout_seconds=timeout_seconds,
                     wait_for=wait_for,
+                    wait_response_timeout=wait_response_timeout,
                 )
-                meaningful_execution_changed = False
-            elif wait_for != "raw":
                 (
                     snapshot,
                     changed,
                     stream_cursor,
                     meaningful_execution_changed,
-                ) = await self._wait_for_meaningful_change(
-                    job_id,
-                    cursor=cursor,
-                    timeout_seconds=timeout_seconds,
-                    wait_for=wait_for,
+                ) = await _await_job_wait_branch(
+                    self._wait_for_meaningful_change(
+                        job_id,
+                        cursor=cursor,
+                        timeout_seconds=timeout_seconds,
+                        wait_for=wait_for,
+                    ),
+                    timeout=wait_response_timeout,
+                    job_id=job_id,
+                    branch="meaningful",
                 )
                 stream_events = []
                 stream_has_more = False
+                wait_branch = "meaningful"
             else:
-                snapshot, changed = await self._job_manager.wait_for_change(
-                    job_id,
+                log.debug(
+                    "mcp.tool.job_wait.wait.enter",
+                    job_id=job_id,
+                    branch="raw",
                     cursor=cursor,
                     timeout_seconds=timeout_seconds,
+                    wait_for=wait_for,
+                    wait_response_timeout=wait_response_timeout,
+                )
+                snapshot, changed = await _await_job_wait_branch(
+                    self._job_manager.wait_for_change(
+                        job_id,
+                        cursor=cursor,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    timeout=wait_response_timeout,
+                    job_id=job_id,
+                    branch="raw",
                 )
                 stream_events = []
                 stream_cursor = cursor
                 stream_has_more = False
                 meaningful_execution_changed = False
+                wait_branch = "raw"
+        except TimeoutError:
+            log.debug(
+                "mcp.tool.job_wait.wait.timeout",
+                job_id=job_id,
+                cursor=cursor,
+                timeout_seconds=timeout_seconds,
+                timeout_seconds_requested=requested_timeout_seconds,
+                view=view,
+                stream=stream,
+                wait_for=wait_for,
+                elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+            )
+            return Result.ok(
+                _job_wait_internal_timeout_result(
+                    job_id=job_id,
+                    cursor=cursor,
+                    timeout_seconds=timeout_seconds,
+                    requested_timeout_seconds=requested_timeout_seconds,
+                    view=view,
+                    stream=stream,
+                    wait_for=wait_for,
+                )
+            )
         except ValueError as exc:
+            log.debug(
+                "mcp.tool.job_wait.not_found",
+                job_id=job_id,
+                cursor=cursor,
+                source_error=str(exc),
+            )
             return Result.err(
                 MCPToolError(
                     (
@@ -1233,7 +1530,20 @@ class JobWaitHandler:
                 )
             )
 
+        log.debug(
+            "mcp.tool.job_wait.wait.exit",
+            job_id=job_id,
+            branch=wait_branch,
+            changed=changed,
+            snapshot_status=snapshot.status.value,
+            snapshot_cursor=snapshot.cursor,
+            is_terminal=snapshot.is_terminal,
+            execution_id=snapshot.links.execution_id,
+            elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+        )
+
         execution_progress_changed = False
+        execution_scan_timed_out = False
         if stream == "linked":
             # Execution events are already part of the bounded linked page, and
             # `_wait_for_linked_change` pinned the cursor to that page boundary.
@@ -1246,22 +1556,93 @@ class JobWaitHandler:
             )
         elif snapshot.links.execution_id:
             response_cursor = max(snapshot.cursor, stream_cursor, cursor)
-            execution_events, execution_cursor = await self._event_store.get_events_after(
-                "execution",
-                snapshot.links.execution_id,
-                cursor,
-            )
-            if wait_for == "raw":
-                execution_progress_changed = any(
-                    event.type in _JOB_PROGRESS_EVENT_TYPES for event in execution_events
+            try:
+                log.debug(
+                    "mcp.tool.job_wait.execution_scan.enter",
+                    job_id=job_id,
+                    execution_id=snapshot.links.execution_id,
+                    cursor=cursor,
+                    limit=_JOB_EXECUTION_EVENT_LIMIT,
+                    timeout_seconds=_JOB_WAIT_EXECUTION_SCAN_TIMEOUT_SECONDS,
                 )
-            else:
-                execution_progress_changed = meaningful_execution_changed
-            response_cursor = max(response_cursor, execution_cursor)
-            if response_cursor != snapshot.cursor:
-                snapshot = replace(snapshot, cursor=response_cursor)
+                execution_events, execution_cursor = await asyncio.wait_for(
+                    self._event_store.get_events_after(
+                        "execution",
+                        snapshot.links.execution_id,
+                        cursor,
+                        limit=_JOB_EXECUTION_EVENT_LIMIT,
+                    ),
+                    timeout=_JOB_WAIT_EXECUTION_SCAN_TIMEOUT_SECONDS,
+                )
+                if wait_for == "raw":
+                    execution_progress_changed = any(
+                        event.type in _JOB_PROGRESS_EVENT_TYPES for event in execution_events
+                    )
+                else:
+                    execution_progress_changed = meaningful_execution_changed
+                response_cursor = max(response_cursor, execution_cursor)
+                if response_cursor != snapshot.cursor:
+                    snapshot = replace(snapshot, cursor=response_cursor)
+                log.debug(
+                    "mcp.tool.job_wait.execution_scan.exit",
+                    job_id=job_id,
+                    execution_id=snapshot.links.execution_id,
+                    event_count=len(execution_events),
+                    execution_cursor=execution_cursor,
+                    execution_progress_changed=execution_progress_changed,
+                    response_cursor=snapshot.cursor,
+                    elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+                )
+            except TimeoutError:
+                execution_scan_timed_out = True
+                log.debug(
+                    "mcp.tool.job_wait.execution_scan.timeout",
+                    job_id=job_id,
+                    execution_id=snapshot.links.execution_id,
+                    cursor=cursor,
+                    timeout_seconds=_JOB_WAIT_EXECUTION_SCAN_TIMEOUT_SECONDS,
+                    elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+                )
 
-        text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        render_timed_out = False
+        try:
+            log.debug(
+                "mcp.tool.job_wait.render.enter",
+                job_id=job_id,
+                view=view,
+                snapshot_status=snapshot.status.value,
+                snapshot_cursor=snapshot.cursor,
+                timeout_seconds=_JOB_WAIT_RENDER_TIMEOUT_SECONDS,
+            )
+            text, progress = await asyncio.wait_for(
+                _render_job_snapshot(snapshot, self._event_store),
+                timeout=_JOB_WAIT_RENDER_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            render_timed_out = True
+            progress = dict(_EMPTY_PROGRESS)
+            text = _render_compact_job_snapshot(
+                snapshot,
+                progress,
+                include_message=view == "summary",
+            )
+            if view == "full":
+                text += "\n\nFull job render timed out; poll again with compact view."
+            log.debug(
+                "mcp.tool.job_wait.render.timeout",
+                job_id=job_id,
+                view=view,
+                timeout_seconds=_JOB_WAIT_RENDER_TIMEOUT_SECONDS,
+                elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+            )
+        else:
+            log.debug(
+                "mcp.tool.job_wait.render.exit",
+                job_id=job_id,
+                view=view,
+                render_timed_out=False,
+                elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+            )
         stream_items = [_event_stream_item(event) for event in stream_events]
         relay_events: list[dict[str, object]] = []
         if stream == "linked" and (stream_events or snapshot.is_terminal):
@@ -1369,23 +1750,38 @@ class JobWaitHandler:
         elif view == "summary":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
             text += _compact_stream_suffix(stream_items, snapshot.cursor, has_more=stream_has_more)
-        return Result.ok(
-            MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-                is_error=_job_is_error(snapshot),
-                meta={
-                    **_job_snapshot_meta(snapshot),
-                    "changed": response_changed,
-                    "view": view,
-                    "stream": stream,
-                    "wait_for": wait_for,
-                    "stream_events": stream_items,
-                    "relay_events": relay_events,
-                    "stream_has_more": stream_has_more,
-                    **progress,
-                },
-            )
+        result = MCPToolResult(
+            content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+            is_error=_job_is_error(snapshot),
+            meta={
+                **_job_snapshot_meta(snapshot),
+                "changed": response_changed,
+                "view": view,
+                "stream": stream,
+                "wait_for": wait_for,
+                "timeout_seconds": timeout_seconds,
+                "timeout_seconds_requested": requested_timeout_seconds,
+                "timeout_seconds_capped": timeout_seconds != requested_timeout_seconds,
+                "execution_scan_timed_out": execution_scan_timed_out,
+                "render_timed_out": render_timed_out,
+                "stream_events": stream_items,
+                "relay_events": relay_events,
+                "stream_has_more": stream_has_more,
+                **progress,
+            },
         )
+        log.debug(
+            "mcp.tool.job_wait.return",
+            job_id=job_id,
+            status=snapshot.status.value,
+            changed=response_changed,
+            is_error=result.is_error,
+            cursor=snapshot.cursor,
+            execution_scan_timed_out=execution_scan_timed_out,
+            render_timed_out=render_timed_out,
+            elapsed_seconds=round(asyncio.get_running_loop().time() - started_at, 3),
+        )
+        return Result.ok(result)
 
     async def _wait_for_meaningful_change(
         self,
@@ -1549,24 +1945,28 @@ class JobResultHandler:
                 )
             )
 
-        try:
-            snapshot = await self._job_manager.get_snapshot(job_id)
-        except ValueError as exc:
-            return Result.err(
-                MCPToolError(
-                    f"Job handle not found: {job_id}. Result unavailable.",
-                    tool_name="ouroboros_job_result",
-                    error_code="job_handle_not_found",
-                    details={
-                        "job_id": job_id,
-                        "lifecycle_status": "invalid",
-                        "is_terminal": True,
-                        "result_available": False,
-                        "reason": "not_found",
-                        "source_error": str(exc),
-                    },
+        cached_snapshot = _get_cached_job_snapshot(self._job_manager, job_id)
+        if cached_snapshot is not None and cached_snapshot.is_terminal:
+            snapshot = cached_snapshot
+        else:
+            try:
+                snapshot = await self._job_manager.get_snapshot(job_id)
+            except ValueError as exc:
+                return Result.err(
+                    MCPToolError(
+                        f"Job handle not found: {job_id}. Result unavailable.",
+                        tool_name="ouroboros_job_result",
+                        error_code="job_handle_not_found",
+                        details={
+                            "job_id": job_id,
+                            "lifecycle_status": "invalid",
+                            "is_terminal": True,
+                            "result_available": False,
+                            "reason": "not_found",
+                            "source_error": str(exc),
+                        },
+                    )
                 )
-            )
 
         if not snapshot.is_terminal:
             return Result.ok(

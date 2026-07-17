@@ -713,6 +713,33 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
     return tuple(missing)
 
 
+def _revalidate_cached_verify_gate_outcome(
+    *,
+    spec: AcceptanceCriterionSpec,
+    cwd: str,
+    outcome: _VerifyGateOutcome,
+) -> _VerifyGateOutcome:
+    """Refresh filesystem evidence without replaying a cached command.
+
+    Verify commands may be non-idempotent, so an atomic result caches their
+    outcome for finalization. Expected artifacts live in the shared workspace,
+    however, and sibling ACs can delete or replace them after the atomic gate.
+    A cached success is therefore valid only while its artifact leg still
+    passes at the final acceptance boundary.
+    """
+    if not outcome.passed or not spec.expected_artifacts:
+        return outcome
+    missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+    if not missing_artifacts:
+        return outcome
+    return _VerifyGateOutcome(
+        passed=False,
+        reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
+        output_tail=outcome.output_tail,
+        missing_artifacts=missing_artifacts,
+    )
+
+
 def _collect_decomposition_depth_warning_paths(
     result: ACExecutionResult,
     *,
@@ -4697,13 +4724,14 @@ Respond with either ATOMIC or the structured JSON object only.
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # A contract-carrying AC (declares verify_command) delegates
-            # commands_run and tests_passed to the orchestrator's authoritative
-            # _run_ac_verify_gate. When it also declares expected_artifacts,
-            # files_touched is delegated to that gate's filesystem oracle too
-            # (see _effective_evidence_schema_for_ac).
+            # A contract-carrying AC (declares verify_command or expected
+            # artifacts) delegates commands_run and tests_passed to the
+            # orchestrator's authoritative _run_ac_verify_gate. When it declares
+            # expected_artifacts, files_touched is delegated to the same
+            # filesystem oracle so artifact work does not require fabricated
+            # transcript-shaped evidence.
             has_success_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
-                ac_spec.verify_command
+                ac_spec.verify_command or ac_spec.expected_artifacts
             )
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
@@ -4714,6 +4742,11 @@ Respond with either ATOMIC or the structured JSON object only.
             # so with the gate off we must retain the transcript-backed evidence
             # rather than drop it.
             verify_gate_active = self._run_verify_commands
+            verify_gate_outcome: _VerifyGateOutcome | None = None
+            if success and verify_gate_active and has_success_contract:
+                cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+                verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
@@ -4733,12 +4766,25 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
             )
+            verify_gate_replaces_all_evidence = bool(
+                verify_gate_outcome is not None
+                and self._execution_profile is not None
+                and not _effective_evidence_schema_for_ac(
+                    self._execution_profile,
+                    ac_content,
+                    has_success_contract=has_success_contract,
+                    has_expected_artifacts=has_expected_artifacts,
+                    verify_gate_active=verify_gate_active,
+                ).required
+            )
             fat_harness_error = self._fat_harness_acceptance_error(
                 runtime_success=success,
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
                 typed_error=typed_error,
                 verifier_verdict=verifier_verdict,
+                verify_gate_outcome=verify_gate_outcome,
+                verify_gate_replaces_all_evidence=verify_gate_replaces_all_evidence,
             )
             result_final_message = final_message
             if fat_harness_error is not None:
@@ -4886,6 +4932,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 typed_evidence_validation=typed_validation,
                 typed_evidence_error=typed_error,
                 atomic_verifier_verdict=verifier_verdict,
+                verify_gate_outcome=verify_gate_outcome,
                 error=fat_harness_error,
             )
 
@@ -5208,12 +5255,16 @@ Respond with either ATOMIC or the structured JSON object only.
         command = spec.verify_command
         if not command:
             return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        subprocess_kwargs: dict[str, Any] = {}
+        if os.name != "nt":
+            subprocess_kwargs["start_new_session"] = True
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                **subprocess_kwargs,
             )
         except Exception as exc:  # pragma: no cover - spawn failure is environmental
             return _VerifyGateOutcome(
@@ -5227,8 +5278,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 timeout=self._verify_command_timeout_seconds,
             )
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+            if os.name != "nt":
+                import signal
+
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
             return _VerifyGateOutcome(
@@ -5269,11 +5326,12 @@ Respond with either ATOMIC or the structured JSON object only.
 
         The contract gate applies when the spec carries a ``verify_command`` OR
         non-empty ``expected_artifacts``. Contract-less ACs and ACs that already
-        failed are returned untouched, so contract-less behavior — and the
-        single fat-harness failure event for an already-failed AC — is
-        preserved (no double-fail for one root cause).
+        failed are recovered only when the same contract passes independently,
+        so contract-less behavior — and the single fat-harness failure event
+        for an already-failed AC without a passing contract — is preserved
+        (no double-fail for one root cause).
         """
-        if not self._run_verify_commands or not result.success:
+        if not self._run_verify_commands:
             return result
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
@@ -5284,8 +5342,56 @@ Respond with either ATOMIC or the structured JSON object only.
             return result
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-        outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+        cached_outcome = result.verify_gate_outcome
+        if isinstance(cached_outcome, _VerifyGateOutcome):
+            outcome = _revalidate_cached_verify_gate_outcome(
+                spec=spec,
+                cwd=cwd,
+                outcome=cached_outcome,
+            )
+        else:
+            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
         if outcome.passed:
+            if not result.success and not result.is_blocked and not result.is_invalid:
+                from ouroboros.events.base import BaseEvent
+
+                recovery_message = (
+                    "Runtime reported failure, but the AC success contract passed: "
+                    "expected_artifacts/verify_command satisfied."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.recovered",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": ac_index,
+                            "ac_content": ac_text(spec),
+                            "verify_command": spec.verify_command,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "prior_error": result.error,
+                            "output_tail": outcome.output_tail,
+                        },
+                    )
+                )
+                log.info(
+                    "parallel_executor.ac.verify_gate_recovered",
+                    session_id=session_id,
+                    ac_index=ac_index,
+                    prior_error=result.error,
+                )
+                return replace(
+                    result,
+                    success=True,
+                    error=None,
+                    final_message=(result.final_message or recovery_message),
+                    outcome=ACExecutionOutcome.SUCCEEDED,
+                    verify_gate_outcome=outcome,
+                )
+            return result
+        if not result.success:
             return result
 
         from ouroboros.events.base import BaseEvent
@@ -5332,6 +5438,7 @@ Respond with either ATOMIC or the structured JSON object only.
             final_message=detail,
             outcome=ACExecutionOutcome.FAILED,
             atomic_verifier_verdict=verdict,
+            verify_gate_outcome=outcome,
         )
 
     async def _emit_ac_outcome_finalized(
@@ -5437,7 +5544,6 @@ Respond with either ATOMIC or the structured JSON object only.
         if not self._run_verify_commands:
             return frozenset()
         gated_out: set[int] = set()
-        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         for result in level_results:
             if result.success or result.outcome != ACExecutionOutcome.FAILED:
                 continue
@@ -5449,7 +5555,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 spec.verify_command or spec.expected_artifacts
             ):
                 continue
-            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+            cached_outcome = result.verify_gate_outcome
+            if isinstance(cached_outcome, _VerifyGateOutcome):
+                outcome = _revalidate_cached_verify_gate_outcome(
+                    spec=spec,
+                    cwd=cwd,
+                    outcome=cached_outcome,
+                )
+            else:
+                outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
             if not outcome.passed:
                 gated_out.add(ac_idx)
         return frozenset(gated_out)
@@ -5874,10 +5989,17 @@ Respond with either ATOMIC or the structured JSON object only.
         typed_validation: ValidationResult | None,
         typed_error: str | None,
         verifier_verdict: VerifierVerdict | None,
+        verify_gate_outcome: _VerifyGateOutcome | None = None,
+        verify_gate_replaces_all_evidence: bool = False,
     ) -> str | None:
         """Return the fat-harness rejection reason for an atomic leaf."""
         if not self._fat_harness_mode or not runtime_success:
             return None
+        if verify_gate_outcome is not None:
+            if not verify_gate_outcome.passed:
+                return f"Verify gate failed: {verify_gate_outcome.reason}"
+            if verify_gate_replaces_all_evidence:
+                return None
         if self._execution_profile is None:
             return "Fat-harness mode requires a loaded execution profile."
         if typed_evidence is None:
@@ -6038,6 +6160,9 @@ Respond with either ATOMIC or the structured JSON object only.
             "enforced": self._fat_harness_mode,
             "fat_harness_mode": self._fat_harness_mode,
             "enforcement_error": enforcement_error,
+            "has_success_contract": has_success_contract,
+            "has_expected_artifacts": has_expected_artifacts,
+            "verify_gate_active": verify_gate_active,
             "typed_evidence_present": typed_evidence is not None,
             "typed_evidence_valid": typed_validation.ok if typed_validation is not None else False,
             "typed_evidence_error": typed_error,

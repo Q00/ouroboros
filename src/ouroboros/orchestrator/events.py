@@ -9,6 +9,7 @@ Event Types:
     - orchestrator.session.failed: Session encountered fatal error
     - orchestrator.session.cancelled: Session was cancelled by user/auto-cleanup
     - orchestrator.session.paused: Session paused for resumption
+    - orchestrator.guidance.injected: Bounded guidance injection audit metadata
     - orchestrator.progress.updated: Progress checkpoint
     - orchestrator.task.started: Individual task started
     - orchestrator.task.completed: Individual task completed
@@ -29,6 +30,21 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.capabilities import CapabilityDescriptor, CapabilityGraph
 from ouroboros.orchestrator.policy import PolicyContext, PolicyDecision
 
+_MAX_GUIDANCE_REFS = 16
+_MAX_GUIDANCE_REF_VALUE_LENGTH = 512
+_GUIDANCE_REF_ALLOWED_KEYS = frozenset(
+    {
+        "id",
+        "stable_id",
+        "source",
+        "kind",
+        "stage",
+        "role",
+        "path",
+        "content_hash",
+        "size_bytes",
+    }
+)
 FRUGALITY_RETROSPECTIVE_EVENT_TYPE = "execution.frugality_retrospective.reported"
 
 
@@ -58,6 +74,42 @@ def create_session_started_event(
             "seed_id": seed_id,
             "seed_goal": seed_goal,
             "start_time": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_guidance_injected_event(
+    *,
+    session_id: str,
+    execution_id: str,
+    guidance_refs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    fragment_hash: str,
+    fragment_size_bytes: int,
+    delivery_mode: str,
+    injection_key: str = "start",
+) -> BaseEvent:
+    """Create bounded audit metadata for injected implementation guidance.
+
+    The event intentionally records references and content fingerprints only.
+    It must not carry the raw guidance body; ref serialization accepts only
+    the known provenance fields and bounds every scalar value.
+    """
+    return BaseEvent(
+        type="orchestrator.guidance.injected",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "guidance_refs": _serialize_guidance_refs(guidance_refs),
+            "fragment_hash": fragment_hash.strip()[:_MAX_GUIDANCE_REF_VALUE_LENGTH],
+            "fragment_size_bytes": max(fragment_size_bytes, 0),
+            "stage": "execute",
+            "role": "implementation",
+            "delivery_mode": delivery_mode.strip()[:_MAX_GUIDANCE_REF_VALUE_LENGTH],
+            "injection_key": injection_key.strip()[:_MAX_GUIDANCE_REF_VALUE_LENGTH],
+            "provenance_scope": "ouroboros_declared_guidance_only",
+            "injected_at": datetime.now(UTC).isoformat(),
         },
     )
 
@@ -376,6 +428,33 @@ def create_mcp_tools_loaded_event(
         aggregate_id=session_id,
         data=data,
     )
+
+
+def _serialize_guidance_refs(
+    guidance_refs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> list[dict[str, str]]:
+    serialized: list[dict[str, str]] = []
+    for ref in guidance_refs[:_MAX_GUIDANCE_REFS]:
+        if not isinstance(ref, dict):
+            continue
+        item: dict[str, str] = {}
+        for key, value in ref.items():
+            if not isinstance(key, str):
+                continue
+            normalized_key = key.strip()
+            if normalized_key not in _GUIDANCE_REF_ALLOWED_KEYS:
+                continue
+            if isinstance(value, str):
+                normalized_value = value.strip()
+            elif isinstance(value, int | float | bool):
+                normalized_value = str(value)
+            else:
+                continue
+            if normalized_value:
+                item[normalized_key] = normalized_value[:_MAX_GUIDANCE_REF_VALUE_LENGTH]
+        if item:
+            serialized.append(item)
+    return serialized
 
 
 def _serialize_policy_capability_evaluation(

@@ -1,0 +1,28 @@
+profile: documentation
+schema_version: 1
+axis: deliverable_artifact
+min_unit: "one documentation artifact or tightly coupled documentation section set with an explicit file or render verification command"
+cut_signal: "sub-AC names the documentation path and a concrete verification check"
+max_branching: 5
+must_produce:
+  - files_touched
+  - commands_run
+evidence_schema:
+  required:
+    - files_touched
+    - commands_run
+  rejected_if:
+    - "files_touched == []"
+verifier_capability: read_only_discovery
+verifier_focus: >
+  Confirm the declared documentation paths exist in the workspace and match the
+  acceptance criterion. Prefer the Seed verify_command and expected_artifacts
+  contract over worker self-reports.
+suggested_tools:
+  - Read
+  - Edit
+  - Write
+  - Bash
+  - Glob
+  - Grep
+suggested_model_tier: medium

@@ -47,6 +47,17 @@ async def test_job_wait_rejects_negative_timeout(event_store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_job_wait_rejects_non_integer_timeout(event_store) -> None:
+    handler = JobWaitHandler(event_store=event_store)
+
+    result = await handler.handle({"job_id": "job_missing", "timeout_seconds": "abc"})
+
+    assert result.is_err
+    assert result.error.tool_name == "ouroboros_job_wait"
+    assert result.error.message == "timeout_seconds must be a non-negative integer"
+
+
+@pytest.mark.asyncio
 async def test_detached_auto_status_invalid_handle_returns_stable_failure(event_store) -> None:
     job_id = "job_missing_detached_auto"
     handler = JobStatusHandler(event_store=event_store)

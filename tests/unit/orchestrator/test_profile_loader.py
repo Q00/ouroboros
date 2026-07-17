@@ -14,7 +14,15 @@ from ouroboros.orchestrator.profile_loader import (
     load_profile,
 )
 
-BUILTIN_PROFILES = ("analysis", "code", "research")
+BUILTIN_PROFILES = (
+    "analysis",
+    "artifact",
+    "code",
+    "document",
+    "documentation",
+    "presentation",
+    "research",
+)
 
 
 class TestBuiltinProfiles:
@@ -65,6 +73,14 @@ class TestBuiltinProfiles:
     def test_analysis_profile_requires_perspectives(self) -> None:
         profile = load_profile("analysis")
         assert "perspectives_compared" in profile.evidence_schema.required
+        assert profile.verifier_capability is VerifierCapability.READ_ONLY_DISCOVERY
+
+    @pytest.mark.parametrize("name", ("artifact", "document", "documentation", "presentation"))
+    def test_artifact_profiles_use_file_evidence_without_test_requirement(self, name: str) -> None:
+        profile = load_profile(name)
+        assert "files_touched" in profile.evidence_schema.required
+        assert "commands_run" in profile.evidence_schema.required
+        assert "tests_passed" not in profile.evidence_schema.required
         assert profile.verifier_capability is VerifierCapability.READ_ONLY_DISCOVERY
 
 

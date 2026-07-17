@@ -401,20 +401,6 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
         session_signal_hub=hub,
     )
     mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
-    signal = SessionSignal(
-        signal_id="sig_expire_at_boundary",
-        target_session_scope_id="exec_expire_ac_1",
-        target_session_attempt_id="exec_expire_ac_1_attempt_1",
-        expected_execution_id="exec_expire",
-        mode=SessionSignalMode.AFTER_TURN,
-        message="Apply only if this reaches the next safe boundary in time.",
-        source=SessionSignalSource.USER,
-        reason="Expiry boundary test.",
-        idempotency_key="expire_boundary_1",
-        # Keep the request-time window wide enough for slower CI runners; this
-        # test verifies expiry is rechecked at delivery, not at initial request.
-        expires_at=datetime.now(UTC) + timedelta(milliseconds=500),
-    )
     execution_task = asyncio.create_task(
         executor._execute_atomic_ac(
             ac_index=0,
@@ -430,8 +416,21 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        expires_at = datetime.now(UTC) + timedelta(seconds=1)
+        signal = SessionSignal(
+            signal_id="sig_expire_at_boundary",
+            target_session_scope_id="exec_expire_ac_1",
+            target_session_attempt_id="exec_expire_ac_1_attempt_1",
+            expected_execution_id="exec_expire",
+            mode=SessionSignalMode.AFTER_TURN,
+            message="Apply only if this reaches the next safe boundary in time.",
+            source=SessionSignalSource.USER,
+            reason="Expiry boundary test.",
+            idempotency_key="expire_boundary_1",
+            expires_at=expires_at,
+        )
         assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(max(0.0, (expires_at - datetime.now(UTC)).total_seconds()) + 0.05)
         runtime.release_first_turn.set()
 
         result = await asyncio.wait_for(execution_task, timeout=5)

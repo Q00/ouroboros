@@ -22,6 +22,7 @@ Classes:
 """
 
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -33,6 +34,8 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
 )
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
+
+_SAFE_PROJECT_GUIDANCE_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$")
 
 
 class ModelConfig(BaseModel, frozen=True):
@@ -223,6 +226,8 @@ class ExecutionConfig(BaseModel, frozen=True):
             ``off`` disables decomposition.
         context_pack: Whether to append a deterministic repo context pack
             (stack, verify commands, layout) to run worker system prompts.
+        project_guidance: Allowlist of project guidance ids to resolve from
+            fixed project-local paths under ``.ouroboros/guidance/<id>/GUIDANCE.md``.
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
@@ -236,6 +241,28 @@ class ExecutionConfig(BaseModel, frozen=True):
     n_version_tournament: bool = False
     decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight"
     context_pack: bool = True
+    project_guidance: tuple[str, ...] = ()
+
+    @field_validator("project_guidance")
+    @classmethod
+    def _validate_project_guidance(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject path-like or duplicate project guidance ids at config load."""
+        seen: set[str] = set()
+        validated: list[str] = []
+        for raw_id in value:
+            guidance_id = raw_id.strip()
+            if not _SAFE_PROJECT_GUIDANCE_ID_RE.fullmatch(guidance_id):
+                raise ValueError(
+                    "execution.project_guidance entries must be safe ids containing only "
+                    "letters, numbers, '.', '_', or '-' and must not be path segments"
+                )
+            if guidance_id in {".", ".."}:
+                raise ValueError("execution.project_guidance entries must not be '.' or '..'")
+            if guidance_id in seen:
+                raise ValueError(f"duplicate execution.project_guidance id: {guidance_id!r}")
+            seen.add(guidance_id)
+            validated.append(guidance_id)
+        return tuple(validated)
 
 
 class ResilienceConfig(BaseModel, frozen=True):
