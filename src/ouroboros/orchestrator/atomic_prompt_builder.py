@@ -45,7 +45,10 @@ def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
         return ""
     lines = ["SUCCESS CONTRACT for this AC:"]
     if spec.verify_command:
-        lines.append(f"- Run: {spec.verify_command} and report it in commands_run")
+        lines.append(
+            f"- Run locally before completion: {spec.verify_command}. "
+            "The verify gate re-runs it and records authoritative evidence."
+        )
     if spec.expected_artifacts:
         lines.append(
             "- Expected artifacts: "
