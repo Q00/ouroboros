@@ -504,7 +504,10 @@ async def test_remaining_timeout_is_clamped_after_prior_dispatch(tmp_path: Path)
     def _runner(argv, **kwargs):
         timeouts.append(kwargs["timeout"])
         if len(timeouts) == 1:
-            clock.value = 4.9
+            # Keep enough real wall-clock budget for the thread handoff while
+            # still proving that the second hook receives the remaining global
+            # budget instead of its full per-hook timeout.
+            clock.value = 3.0
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     observer = LockfileRewindObserver(
@@ -518,7 +521,7 @@ async def test_remaining_timeout_is_clamped_after_prior_dispatch(tmp_path: Path)
     await observer.observe(_snapshot())
 
     assert timeouts[0] == 5.0
-    assert timeouts[1] == pytest.approx(0.1)
+    assert timeouts[1] == pytest.approx(2.0)
 
 
 @pytest.mark.asyncio
