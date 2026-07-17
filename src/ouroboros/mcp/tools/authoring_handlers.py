@@ -698,6 +698,7 @@ def _build_question_advisory_request(
     mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
     advisory = mcp_tool_capability["orchestration"]["question_advisory_fanout"]
     request: dict[str, Any] = {
+        "contract_id": advisory["contract_id"],
         "session_id": session_id,
         "question_identity": stable_code_investigation_question_identity(question),
         "question": question,
@@ -765,6 +766,7 @@ def _attach_question_assist_requests(
         last_question=last_question,
     )
     meta["question_advisory_request"] = advisory_request
+    meta["question_advisory_contract_id"] = advisory_request["contract_id"]
     try:
         advisory_payloads = build_interview_question_advisory_subagents(advisory_request)
     except ValueError as exc:

@@ -239,6 +239,11 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     }
     assert result.value.meta["question_advisory_recommended"] is True
     advisory = result.value.meta["question_advisory_request"]
+    assert advisory["contract_id"] == "interview_question_advisory_fanout.v1"
+    assert (
+        result.value.meta["question_advisory_contract_id"]
+        == "interview_question_advisory_fanout.v1"
+    )
     assert advisory["session_id"] == "sess-817"
     assert advisory["question"] == "What edge case remains?"
     assert advisory["phase"] == "answer"
@@ -324,6 +329,7 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
     assert len(meta["question_advisory_subagents"]) == 5
     # ...but now stamped so the Codex host fans them out itself.
     assert meta["question_advisory_dispatch_mode"] == "host_driven"
+    assert meta["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert meta["question_advisory_host_action"] == "spawn_subagents"
     # Advisory lanes correlate by lane_id (persona is None on some lanes).
     assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
@@ -345,6 +351,7 @@ def test_question_advisory_sequential_runtime_emits_processing_contract() -> Non
 
     assert len(meta["question_advisory_subagents"]) == 5
     assert meta["question_advisory_dispatch_mode"] == "sequential"
+    assert meta["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert meta["question_advisory_host_action"] == "process_payloads_sequentially"
     assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
     assert (

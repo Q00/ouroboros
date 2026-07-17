@@ -154,12 +154,14 @@ def _advisory_meta(dispatch_mode: SubagentDispatchMode, **kwargs: Any) -> dict[s
 def test_advisory_producer_byte_identical_without_registry() -> None:
     """No registry -> emitted fan-out meta is the exact pre-registry contract."""
     host = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN)
+    assert host["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert host["question_advisory_dispatch_mode"] == "host_driven"
     assert host["question_advisory_host_action"] == "spawn_subagents"
     assert host["question_advisory_result_correlation_key"] == "context.lane_id"
     assert "question_advisory_fanout_id" not in host
 
     seq = _advisory_meta(SubagentDispatchMode.SEQUENTIAL)
+    assert seq["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert seq["question_advisory_dispatch_mode"] == "sequential"
     assert seq["question_advisory_host_action"] == "process_payloads_sequentially"
     assert seq["question_advisory_result_correlation_key"] == "context.lane_id"

@@ -481,6 +481,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "required": [
+            "contract_id",
             "session_id",
             "question_identity",
             "question",
@@ -495,6 +496,10 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
             "mcp_tool_capability",
         ],
         "properties": {
+            "contract_id": {
+                "const": "interview_question_advisory_fanout.v1",
+                "description": "Versioned wire contract for this advisory request.",
+            },
             "session_id": {
                 "type": "string",
                 "description": "Current Ouroboros interview session ID.",

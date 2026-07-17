@@ -4966,6 +4966,7 @@ def test_question_advisory_request_model_validates_parent_runtime_payload() -> N
 
     question = "Which users need this first?"
     request = {
+        "contract_id": fanout["contract_id"],
         "session_id": "sess-123",
         "question_identity": stable_code_investigation_question_identity(question),
         "question": question,
