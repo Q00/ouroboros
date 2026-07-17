@@ -37,6 +37,11 @@ from ouroboros.core.seed import (
     ac_texts,
 )
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    InterviewQuestionRecommendation,
+)
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
@@ -792,6 +797,96 @@ class TestSeedGeneratorInterviewContext:
         assert "RAW_TAIL" not in context
         assert "SUMMARY_TAIL" not in context
         assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
+
+    def test_context_promotes_only_the_user_selected_structured_choice(self) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        presentation = InterviewQuestionPresentation(
+            decision_id="first_outcome",
+            target_dimension="goal_clarity",
+            question="Which outcome should come first?",
+            choices=(
+                InterviewQuestionChoice(
+                    choice_id=1,
+                    meaning_key="task_list",
+                    label="A task list.",
+                ),
+                InterviewQuestionChoice(
+                    choice_id=2,
+                    meaning_key="prototype",
+                    label="A clickable prototype.",
+                ),
+                InterviewQuestionChoice(
+                    choice_id=3,
+                    meaning_key="launch_plan",
+                    label="A written launch plan.",
+                ),
+            ),
+            recommendation=InterviewQuestionRecommendation(
+                choice_id=1,
+                reason="it gives the next agent a bounded starting point",
+            ),
+            free_text_prompt="Reply with the number, or write your own answer.",
+        )
+        state = InterviewState(
+            interview_id="structured_selection",
+            initial_context="Build a planning tool",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="rendered question with choice scaffolding",
+                    question_presentation=presentation,
+                    user_response="2",
+                )
+            ],
+        )
+
+        context = generator._build_interview_context(state)
+
+        assert "Q: Which outcome should come first?" in context
+        assert "A: 2 - A clickable prototype." in context
+        assert "[user selected; source=generated_hypothesis]" in context
+        assert "A task list." not in context
+        assert "A written launch plan." not in context
+        assert "Recommendation" not in context
+
+    def test_context_omits_unselected_choices_for_free_text_answers(self) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        presentation = InterviewQuestionPresentation(
+            decision_id="first_outcome",
+            target_dimension="goal_clarity",
+            question="Which outcome should come first?",
+            choices=(
+                InterviewQuestionChoice(
+                    choice_id=1,
+                    meaning_key="task_list",
+                    label="A task list.",
+                ),
+                InterviewQuestionChoice(
+                    choice_id=2,
+                    meaning_key="prototype",
+                    label="A clickable prototype.",
+                ),
+            ),
+            free_text_prompt="Reply with the number, or write your own answer.",
+        )
+        state = InterviewState(
+            interview_id="structured_free_text",
+            initial_context="Build a planning tool",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="rendered question with choice scaffolding",
+                    question_presentation=presentation,
+                    user_response="Start with a command-line proof of concept.",
+                )
+            ],
+        )
+
+        context = generator._build_interview_context(state)
+
+        assert "A: Start with a command-line proof of concept." in context
+        assert "A task list." not in context
+        assert "A clickable prototype." not in context
 
 
 class TestSeedGeneratorErrorHandling:

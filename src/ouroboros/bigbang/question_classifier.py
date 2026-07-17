@@ -23,6 +23,13 @@ import structlog
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    QUESTION_PRESENTATION_RULES,
+    QUESTION_PRESENTATION_SCHEMA,
+    InterviewQuestionPresentation,
+    generated_question_contract_failures,
+    render_question_presentation,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -84,6 +91,7 @@ class ClassificationResult:
     defer_to_dev: bool = False
     decide_later: bool = False
     placeholder_response: str = ""
+    reframed_presentation: InterviewQuestionPresentation | None = None
 
     @property
     def output_type(self) -> ClassifierOutputType:
@@ -119,6 +127,8 @@ class ClassificationResult:
         if self.output_type == ClassifierOutputType.PASSTHROUGH:
             return self.original_question
         if self.output_type == ClassifierOutputType.REFRAMED:
+            if self.reframed_presentation is not None:
+                return render_question_presentation(self.reframed_presentation)
             return self.reframed_question
         if self.output_type in (
             ClassifierOutputType.DECIDE_LATER,
@@ -128,7 +138,8 @@ class ClassificationResult:
         return ""
 
 
-_CLASSIFICATION_SYSTEM_PROMPT = """\
+_CLASSIFICATION_SYSTEM_PROMPT = (
+    """\
 You are a question classifier for a Product Requirements Document (PM) interview.
 
 Your job is to determine whether a question generated during a requirements interview
@@ -165,16 +176,27 @@ or is premature and should be deferred to a later stage.
 1. If the question is PLANNING → return it unchanged
 2. If the question is DEVELOPMENT but can be reframed for a PM → provide a reframed version
    - Reframing means asking about the *business need* behind the technical question
-   - Example: "Which database should we use?" → "What are your data storage needs — \
-how much data, how fast does it need to be accessed, and do you need real-time updates?"
+   - Return the reframe as a structured presentation using the contract below
+   - Reframe the decision and choices for a PM audience; do not collapse the turn into an
+     open-ended or multi-decision question
 3. If the question is deeply technical with no PM-friendly reframe → mark as defer_to_dev=true
 4. If the question is premature or unknowable right now → mark as decide_later=true and \
 provide a placeholder_response that acknowledges the question and explains why it is deferred
 
+"""
+    + QUESTION_PRESENTATION_RULES
+    + """
+
+For `reframed_presentation`, use the same structured object shape below. Do not
+put a rendered question string in place of the object.
+"""
+    + QUESTION_PRESENTATION_SCHEMA
+    + """
 ## Response Format
 
 Respond ONLY with valid JSON:
-{"category": "planning"|"development"|"decide_later", "reframed_question": "...", \
+{"category": "planning"|"development"|"decide_later", "reframed_question": "compatibility string or empty", \
+"reframed_presentation": {"contract_version": "answerable_interview_turn.v1", "...": "..."} or null, \
 "reasoning": "...", "defer_to_dev": false|true, "decide_later": false|true, \
 "placeholder_response": "..."}
 
@@ -182,6 +204,7 @@ When decide_later=true, placeholder_response MUST contain a brief, professional 
 acknowledgment such as: "This will be determined after [prerequisite]. \
 Marking as a decision point for later."
 """
+)
 
 
 @dataclass
@@ -248,7 +271,7 @@ class QuestionClassifier:
             role="question_classification",
             model_is_explicit=self.model_is_explicit,
             temperature=self.temperature,
-            max_tokens=512,
+            max_tokens=1024,
         )
 
         result = await self.llm_adapter.complete(messages, config)
@@ -324,12 +347,27 @@ class QuestionClassifier:
         else:
             category = QuestionCategory.PLANNING
 
-        reframed = data.get("reframed_question", original_question)
-        if not reframed or not reframed.strip():
+        raw_reframed = data.get("reframed_question", original_question)
+        reframed = raw_reframed if isinstance(raw_reframed, str) else original_question
+        if not reframed.strip():
             reframed = original_question
 
+        reframed_presentation = None
+        raw_presentation = data.get("reframed_presentation")
+        if isinstance(raw_presentation, dict):
+            try:
+                candidate_presentation = InterviewQuestionPresentation.model_validate(
+                    raw_presentation
+                )
+                if not generated_question_contract_failures(candidate_presentation):
+                    reframed_presentation = candidate_presentation
+            except ValueError:
+                reframed_presentation = None
+
         is_decide_later = bool(data.get("decide_later", False))
+        defer_to_dev = bool(data.get("defer_to_dev", False))
         placeholder = data.get("placeholder_response", "")
+        reasoning = str(data.get("reasoning", ""))
 
         # Ensure decide-later always has a placeholder
         if is_decide_later and not placeholder:
@@ -341,12 +379,17 @@ class QuestionClassifier:
             if not placeholder:
                 placeholder = _DEFAULT_PLACEHOLDER
 
+        if category == QuestionCategory.DEVELOPMENT and not is_decide_later and not defer_to_dev:
+            if reframed_presentation is not None:
+                reframed = render_question_presentation(reframed_presentation)
+
         return ClassificationResult(
             original_question=original_question,
             category=category,
             reframed_question=reframed,
-            reasoning=data.get("reasoning", ""),
-            defer_to_dev=bool(data.get("defer_to_dev", False)),
+            reasoning=reasoning,
+            defer_to_dev=defer_to_dev,
             decide_later=is_decide_later,
             placeholder_response=placeholder,
+            reframed_presentation=reframed_presentation,
         )

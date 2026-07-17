@@ -20,6 +20,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.pm_interview import (
     _EXTRACTION_SYSTEM_PROMPT,
+    _OPENING_PRESENTATION,
     _PM_SYSTEM_PROMPT_PREFIX,
     PM_UNCERTAINTY_GUIDANCE,
     PMInterviewEngine,
@@ -31,8 +32,15 @@ from ouroboros.bigbang.question_classifier import (
     QuestionCategory,
     QuestionClassifier,
 )
+from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    InterviewQuestionRecommendation,
+    render_question_presentation,
+)
 from ouroboros.providers.base import (
     CompletionResponse,
     UsageInfo,
@@ -55,8 +63,65 @@ class TestPMUncertaintyGuidance:
         assert "decide_later_items" in _EXTRACTION_SYSTEM_PROMPT
 
 
-def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:
+_QUESTION_PAYLOADS: dict[str, str] = {}
+
+
+def _novice_presentation(topic: str) -> InterviewQuestionPresentation:
+    return InterviewQuestionPresentation(
+        decision_id="pm_test_decision",
+        target_dimension="goal_clarity",
+        question=f"Which {topic} should guide this decision?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="first_option",
+                label="Use the first bounded option.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="second_option",
+                label="Use the second bounded option.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=3,
+                meaning_key="defer_for_evidence",
+                label="Defer until more evidence is available.",
+            ),
+        ),
+        recommendation=InterviewQuestionRecommendation(
+            choice_id=1,
+            reason="a focused choice keeps the interview moving",
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
+
+
+def _novice_question(topic: str) -> str:
+    presentation = _novice_presentation(topic)
+    rendered = render_question_presentation(presentation)
+    _QUESTION_PAYLOADS[rendered] = presentation.model_dump_json()
+    return rendered
+
+
+def _mock_completion(content: str | None = None) -> CompletionResponse:
     """Create a mock completion response."""
+    content = content or _novice_question("product outcome")
+    if content in _QUESTION_PAYLOADS:
+        content = _QUESTION_PAYLOADS[content]
+    else:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            reframed = payload.get("reframed_question")
+            if (
+                isinstance(reframed, str)
+                and reframed in _QUESTION_PAYLOADS
+                and "reframed_presentation" not in payload
+            ):
+                payload["reframed_presentation"] = json.loads(_QUESTION_PAYLOADS[reframed])
+                content = json.dumps(payload)
     return CompletionResponse(
         content=content,
         model="claude-opus-4-6",
@@ -165,6 +230,7 @@ class TestOpeningQuestion:
         assert isinstance(question, str)
         assert len(question) > 0
         assert "build" in question.lower()
+        assert question == render_question_presentation(_OPENING_PRESENTATION)
 
     def test_get_opening_question_is_static(self) -> None:
         """get_opening_question is a static method — callable without instance."""
@@ -396,7 +462,7 @@ class TestAskNextQuestion:
         engine = _make_engine(adapter, tmp_path)
 
         # Mock inner engine to return a planning question
-        planning_q = "Who are the target users for this product?"
+        planning_q = _novice_question("target-user group")
 
         # First call: inner engine generates question
         # Second call: classifier classifies it as planning
@@ -436,10 +502,8 @@ class TestAskNextQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        dev_q = "Which database engine should we use — PostgreSQL or MongoDB?"
-        reframed_q = (
-            "What are your data storage needs — structured or flexible data, and how much volume?"
-        )
+        dev_q = _novice_question("database engine")
+        reframed_q = _novice_question("data-storage need")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -471,11 +535,89 @@ class TestAskNextQuestion:
         assert engine.classifications[0].category == QuestionCategory.DEVELOPMENT
 
     @pytest.mark.asyncio
+    async def test_invalid_reframe_is_repaired_to_one_pm_decision(self, tmp_path: Path) -> None:
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        original = _novice_question("database engine")
+        invalid_reframe = "What data do you store and how quickly must it load?"
+
+        adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(_mock_completion(original)),
+                Result.ok(
+                    _mock_completion(
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": invalid_reframe,
+                                "reasoning": "Reframed to a PM concern",
+                                "defer_to_dev": False,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+
+        state = InterviewState(
+            interview_id="test_invalid_reframe",
+            initial_context="Build a task manager",
+        )
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value != original
+        assert result.value == ("What data do you store?\nWrite your answer in your own words.")
+        assert state.pending_question_presentation is not None
+        assert state.pending_question_presentation.choices == ()
+        assert engine.classifications[-1].reframed_presentation == (
+            state.pending_question_presentation
+        )
+
+    @pytest.mark.asyncio
+    async def test_cross_locale_reframe_uses_localized_pm_fallback(self, tmp_path: Path) -> None:
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        original = _novice_question("database engine")
+
+        adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(_mock_completion(original)),
+                Result.ok(
+                    _mock_completion(
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": "What data do you store?",
+                                "reasoning": "Reframed to a PM concern",
+                                "defer_to_dev": False,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+        state = InterviewState(
+            interview_id="test_cross_locale_reframe",
+            initial_context="한국어로 작업 관리 도구를 만듭니다.",
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert state.pending_question_presentation is not None
+        assert state.pending_question_presentation.locale == "ko"
+        assert result.value == (
+            "개발팀이 기술 결정을 내릴 때 어떤 제품 우선순위를 따라야 하나요?\n"
+            "제품 우선순위를 직접 답변으로 작성하거나 개발 단계로 미룬다고 답하세요."
+        )
+
+    @pytest.mark.asyncio
     async def test_pm_steering_wrapper_accepts_prompt_budget_kwargs(self, tmp_path: Path) -> None:
         """PM prompt wrapper remains compatible with InterviewEngine prompt budgeting."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
-        planning_q = "Who are the target users?"
+        planning_q = _novice_question("target-user group")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -530,7 +672,7 @@ class TestAskNextQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        dev_q = "Should we use gRPC or REST for inter-service communication?"
+        dev_q = _novice_question("service communication protocol")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -596,7 +738,7 @@ class TestAskNextQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        dev_q1 = "Should we use gRPC or REST?"
+        dev_q1 = _novice_question("service communication protocol")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -636,7 +778,7 @@ class TestAskNextQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        question = "What problem does this solve?"
+        question = _novice_question("user problem")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -668,7 +810,7 @@ class TestAskNextQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        decide_later_q = "How should we handle scaling when we reach 1M users?"
+        decide_later_q = _novice_question("future scaling approach")
         placeholder = "This will be determined after MVP launch and initial user metrics. Marking as a decision point for later."
 
         adapter.complete = AsyncMock(
@@ -761,6 +903,31 @@ class TestPMInterviewContext:
         assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
         assert "Who are the target users?" in context
         assert "Small teams" in context
+
+    def test_context_promotes_only_the_selected_structured_choice(self, tmp_path: Path) -> None:
+        engine = _make_engine(tmp_path=tmp_path)
+        presentation = _novice_presentation("delivery outcome")
+        state = InterviewState(
+            interview_id="test_pm_structured_context",
+            initial_context="Build a task manager",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="rendered choice scaffolding",
+                    question_presentation=presentation,
+                    original_question="Which database engine should we use?",
+                    user_response="PM answer: 2",
+                )
+            ],
+        )
+
+        context = engine._build_interview_context(state)
+
+        assert "Q: Which delivery outcome should guide this decision?" in context
+        assert "Original technical question: Which database engine should we use?" in context
+        assert "A: PM answer: 2 - Use the second bounded option." in context
+        assert "Use the first bounded option." not in context
+        assert "Defer until more evidence is available." not in context
 
 
 class TestCheckCompletion:
@@ -900,8 +1067,8 @@ class TestRecordResponse:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        dev_q = "Which database engine should we use?"
-        reframed_q = "What are your data storage needs?"
+        dev_q = _novice_question("database engine")
+        reframed_q = _novice_question("data-storage need")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -935,18 +1102,30 @@ class TestRecordResponse:
 
         # Verify reframe map was populated
         assert reframed_q in engine._reframe_map
-        assert engine._reframe_map[reframed_q] == dev_q
+        assert engine._reframe_map[reframed_q] == (
+            "Which database engine should guide this decision?"
+        )
 
         # Record response — should bundle
-        r_result = await engine.record_response(state, "Structured relational data", reframed_q)
+        r_result = await engine.record_response(state, "1", reframed_q)
         assert r_result.is_ok
 
         # Verify bundled content in the round
         round_data = state.rounds[0]
-        assert dev_q in round_data.question
+        assert "Which database engine should guide this decision?" in round_data.question
+        assert "1. Use the first bounded option." not in round_data.question.splitlines()[0]
         assert reframed_q in round_data.question
-        assert "PM answer:" in round_data.user_response
-        assert "Structured relational data" in round_data.user_response
+        assert round_data.user_response == "PM answer: 1"
+        assert round_data.question_presentation == _novice_presentation("data-storage need")
+        assert round_data.original_question == ("Which database engine should guide this decision?")
+
+        seed_context = SeedGenerator(llm_adapter=AsyncMock())._build_interview_context(state)
+        assert (
+            "Original technical question: Which database engine should guide this decision?"
+            in seed_context
+        )
+        assert "A: PM answer: 1 - Use the first bounded option." in seed_context
+        assert "[user selected; source=generated_hypothesis]" in seed_context
 
         # Reframe map should be consumed
         assert reframed_q not in engine._reframe_map

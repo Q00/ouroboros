@@ -10,12 +10,12 @@ Covers:
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ouroboros.bigbang.interview import (
+    NOVICE_FRIENDLY_QUESTION_CONTRACT,
     InterviewEngine,
     InterviewRound,
     InterviewState,
@@ -25,6 +25,12 @@ from ouroboros.bigbang.interview import (
     select_question_candidate,
 )
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    InterviewQuestionRecommendation,
+    render_question_presentation,
+)
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
@@ -35,6 +41,44 @@ def _completion(content: str) -> CompletionResponse:
         usage=UsageInfo(prompt_tokens=100, completion_tokens=50, total_tokens=150),
         finish_reason="stop",
     )
+
+
+def _novice_presentation(
+    label: str,
+    *,
+    target_dimension: str = "constraint_clarity",
+) -> InterviewQuestionPresentation:
+    return InterviewQuestionPresentation(
+        decision_id=f"{label}_next_outcome",
+        target_dimension=target_dimension,
+        question=f"Which {label} outcome should guide the next step?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="primary_user_result",
+                label="Focus on the primary user result.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="operating_constraint",
+                label="Focus on the main operating constraint.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=3,
+                meaning_key="success_check",
+                label="Focus on the clearest success check.",
+            ),
+        ),
+        recommendation=InterviewQuestionRecommendation(
+            choice_id=1,
+            reason="the user result should guide later decisions",
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
+
+
+def _novice_question(label: str) -> str:
+    return render_question_presentation(_novice_presentation(label))
 
 
 class TestSelectQuestionCandidate:
@@ -104,9 +148,13 @@ class TestDimensionClarityFromBreakdown:
 
 class TestParseQuestionCandidate:
     def test_parses_json(self) -> None:
+        presentation = _novice_presentation(
+            "contrarian",
+            target_dimension="goal_clarity",
+        )
         candidate = _parse_question_candidate(
             "contrarian",
-            json.dumps({"question": "Why?", "target_dimension": "goal_clarity"}),
+            presentation.model_dump_json(),
         )
         assert candidate is not None
         assert candidate.persona == "contrarian"
@@ -170,16 +218,9 @@ class TestAskNextQuestionPanel:
                 persona = "architect"
             else:
                 persona = "researcher"
-            return Result.ok(
-                _completion(
-                    json.dumps(
-                        {
-                            "question": f"{persona}-question",
-                            "target_dimension": "constraint_clarity",
-                        }
-                    )
-                )
-            )
+            presentation = _novice_presentation(persona)
+            assert system.count(NOVICE_FRIENDLY_QUESTION_CONTRACT) == 1
+            return Result.ok(_completion(presentation.model_dump_json()))
 
         adapter = MagicMock()
         adapter.complete = AsyncMock(side_effect=_complete)
@@ -189,13 +230,40 @@ class TestAskNextQuestionPanel:
 
         result = await engine.ask_next_question(self._state_with_breakdown())
         assert result.is_ok
-        assert result.value == "contrarian-question"
+        assert result.value == _novice_question("contrarian")
+        assert adapter.complete.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_panel_discards_contract_violations(self, tmp_path) -> None:
+        async def _complete(messages, config):  # type: ignore[no-untyped-def]
+            del config
+            system = messages[0].content
+            if "researcher" in system:
+                content = _novice_presentation("researcher").model_dump_json()
+            else:
+                content = "What should this do and how should success be measured?"
+            return Result.ok(_completion(content))
+
+        adapter = MagicMock()
+        adapter.complete = AsyncMock(side_effect=_complete)
+        engine = InterviewEngine(
+            llm_adapter=adapter, state_dir=tmp_path, question_candidate_panel=True
+        )
+
+        result = await engine.ask_next_question(self._state_with_breakdown())
+
+        assert result.is_ok
+        assert result.value == _novice_question("researcher")
         assert adapter.complete.call_count == 3
 
     @pytest.mark.asyncio
     async def test_panel_falls_back_without_breakdown(self, tmp_path) -> None:
+        presentation = _novice_presentation("single-call")
+        question = render_question_presentation(presentation)
         adapter = MagicMock()
-        adapter.complete = AsyncMock(return_value=Result.ok(_completion("single-call question")))
+        adapter.complete = AsyncMock(
+            return_value=Result.ok(_completion(presentation.model_dump_json()))
+        )
         engine = InterviewEngine(
             llm_adapter=adapter, state_dir=tmp_path, question_candidate_panel=True
         )
@@ -211,5 +279,5 @@ class TestAskNextQuestionPanel:
         result = await engine.ask_next_question(state)
         assert result.is_ok
         # No breakdown -> single call fallback (one completion, verbatim).
-        assert result.value == "single-call question"
+        assert result.value == question
         assert adapter.complete.call_count == 1

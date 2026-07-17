@@ -21,14 +21,72 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    InterviewQuestionRecommendation,
+    render_question_presentation,
+)
 from ouroboros.providers.base import (
     CompletionResponse,
     UsageInfo,
 )
 
+_QUESTION_PAYLOADS: dict[str, str] = {}
 
-def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:
+
+def _novice_question(topic: str) -> str:
+    presentation = InterviewQuestionPresentation(
+        decision_id="classifier_test_decision",
+        target_dimension="goal_clarity",
+        question=f"Which {topic} should guide this decision?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="first_option",
+                label="Use the first bounded option.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="second_option",
+                label="Use the second bounded option.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=3,
+                meaning_key="defer_for_evidence",
+                label="Defer until more evidence is available.",
+            ),
+        ),
+        recommendation=InterviewQuestionRecommendation(
+            choice_id=1,
+            reason="a focused choice keeps the interview moving",
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
+    rendered = render_question_presentation(presentation)
+    _QUESTION_PAYLOADS[rendered] = presentation.model_dump_json()
+    return rendered
+
+
+def _mock_completion(content: str | None = None) -> CompletionResponse:
     """Create a mock completion response."""
+    content = content or _novice_question("product outcome")
+    if content in _QUESTION_PAYLOADS:
+        content = _QUESTION_PAYLOADS[content]
+    else:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            reframed = payload.get("reframed_question")
+            if (
+                isinstance(reframed, str)
+                and reframed in _QUESTION_PAYLOADS
+                and "reframed_presentation" not in payload
+            ):
+                payload["reframed_presentation"] = json.loads(_QUESTION_PAYLOADS[reframed])
+                content = json.dumps(payload)
     return CompletionResponse(
         content=content,
         model="claude-opus-4-6",
@@ -66,7 +124,7 @@ class TestClassifierReceivesFullContext:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        current_question = "What is the target market for this product?"
+        current_question = _novice_question("target-market direction")
 
         # Mock inner engine to return the question
         adapter.complete = AsyncMock(
@@ -132,7 +190,7 @@ class TestClassifierReceivesFullContext:
             ],
         )
 
-        next_question = "What success metrics matter most?"
+        next_question = _novice_question("success metric")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -192,7 +250,7 @@ class TestClassifierReceivesFullContext:
         engine.codebase_context = brownfield_ctx
         engine.classifier.codebase_context = brownfield_ctx
 
-        next_question = "What data needs to be stored?"
+        next_question = _novice_question("stored-data category")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -254,7 +312,7 @@ class TestClassifierReceivesFullContext:
             ],
         )
 
-        current_question = "What compliance requirements apply?"
+        current_question = _novice_question("compliance requirement")
 
         # Capture the actual LLM messages sent by the classifier
         captured_messages = []
@@ -321,7 +379,7 @@ class TestClassifierReceivesFullContext:
             initial_context=initial,
         )
 
-        next_q = "How many concurrent users do you expect?"
+        next_q = _novice_question("concurrent-user range")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -367,7 +425,7 @@ class TestClassifierReceivesFullContext:
             initial_context="Build a note-taking app",
         )
 
-        next_q = "What platforms should it run on?"
+        next_q = _novice_question("target platform")
 
         adapter.complete = AsyncMock(
             side_effect=[
@@ -485,7 +543,7 @@ class TestClassifierReceivesFullContext:
             ],
         )
 
-        current_q = "What priority levels should tasks have?"
+        current_q = _novice_question("task-priority model")
 
         captured_messages = []
 

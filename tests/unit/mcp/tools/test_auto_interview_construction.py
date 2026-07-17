@@ -146,6 +146,11 @@ def _assert_isolated_allowed_tools(factory_kwargs: dict[str, Any]) -> None:
     assert set(allowed_tools).isdisjoint(_TOOL_CALL_CAPABLE_LEAKAGE_PATHS)
 
 
+def _repaired_plain_question(question: str) -> str:
+    """Render the deterministic direct-input repair for legacy plain output."""
+    return f"{question}\nWrite your answer in your own words."
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
@@ -1176,7 +1181,9 @@ def test_auto_sub_interview_prompt_omits_code_exploration_and_tool_use_cues(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"].question == "What success criterion should the Seed optimize for first?"
+    assert captured["turn"].question == _repaired_plain_question(
+        "What success criterion should the Seed optimize for first?"
+    )
     constructed_handler = captured["pipeline"].interview_driver.backend.handler
     assert constructed_handler.suppress_tool_use_prompt_cues is True
     assert adapter.messages
@@ -1382,7 +1389,9 @@ def test_auto_sub_interview_envelope_ignores_parent_adapter_tool_context(
         )
 
     assert result.is_ok, result.error
-    assert captured["turn"].question == "What should the first auto interview question clarify?"
+    assert captured["turn"].question == _repaired_plain_question(
+        "What should the first auto interview question clarify?"
+    )
 
     constructed_handler = captured["pipeline"].interview_driver.backend.handler
     assert constructed_handler is not supplied_handler
@@ -1534,7 +1543,7 @@ def test_auto_sub_interview_spy_adapter_fails_on_any_tool_request(
     # the adapter's structured warning and ``raw_response`` marker.
     turn = captured["turn"]
     assert turn is not None, captured.get("error")
-    assert turn.question == "What is the primary user goal?"
+    assert turn.question == _repaired_plain_question("What is the primary user goal?")
     assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1685,7 +1694,9 @@ def test_auto_sub_interview_isolates_parent_skill_invocations(
     # envelope assertions below, not by failing the question.
     turn = captured["turn"]
     assert turn is not None, captured.get("error")
-    assert turn.question == "What should the first auto interview question clarify?"
+    assert turn.question == _repaired_plain_question(
+        "What should the first auto interview question clarify?"
+    )
     assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1842,7 +1853,9 @@ def test_auto_sub_interview_isolates_parent_agent_invocations(
     # envelope assertions below, not by failing the question.
     turn = captured["turn"]
     assert turn is not None, captured.get("error")
-    assert turn.question == "What should the first auto interview question clarify?"
+    assert turn.question == _repaired_plain_question(
+        "What should the first auto interview question clarify?"
+    )
     assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -1994,7 +2007,9 @@ def test_auto_sub_interview_isolates_parent_plugin_invocations(
     # envelope assertions below, not by failing the question.
     turn = captured["turn"]
     assert turn is not None, captured.get("error")
-    assert turn.question == "What should the first auto interview question clarify?"
+    assert turn.question == _repaired_plain_question(
+        "What should the first auto interview question clarify?"
+    )
     assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs
@@ -2158,7 +2173,9 @@ def test_auto_sub_interview_isolates_parent_hook_context(
     # envelope assertions below, not by failing the question.
     turn = captured["turn"]
     assert turn is not None, captured.get("error")
-    assert turn.question == "What should the first auto interview question clarify?"
+    assert turn.question == _repaired_plain_question(
+        "What should the first auto interview question clarify?"
+    )
     assert "error" not in captured
 
     factory_kwargs = mock_factory.call_args.kwargs

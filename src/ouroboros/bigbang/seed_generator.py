@@ -47,6 +47,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import expand_selected_choice_answer
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 log = structlog.get_logger()
@@ -633,9 +634,18 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
+            presentation = round_data.question_presentation
+            question = presentation.question if presentation is not None else round_data.question
+            parts.append(f"\nQ: {question}")
+            if presentation is not None:
+                if round_data.original_question:
+                    parts.append(f"Original technical question: {round_data.original_question}")
+                parts.extend(f"Question context: {item}" for item in presentation.context)
             if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+                answer = round_data.user_response
+                if presentation is not None:
+                    answer = expand_selected_choice_answer(presentation, answer)
+                parts.append(f"A: {answer}")
 
         return "\n".join(parts)
 

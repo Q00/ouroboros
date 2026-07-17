@@ -850,13 +850,16 @@ class PMInterviewHandler:
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
         # Record unanswered round
+        question_presentation = state.pending_question_presentation
         state.rounds.append(
             InterviewRound(
                 round_number=state.current_round_number,
                 question=question,
+                question_presentation=question_presentation,
                 user_response=None,
             )
         )
+        state.pending_question_presentation = None
         state.mark_updated()
 
         # Persist — check save result to avoid handing back a session that wasn't written
@@ -897,6 +900,8 @@ class PMInterviewHandler:
             "pending_reframe": pending_reframe,
             **diff,
         }
+        if question_presentation is not None:
+            meta["question_presentation"] = question_presentation.model_dump(mode="json")
 
         log.info(
             "pm_handler.started",
@@ -1129,12 +1134,29 @@ class PMInterviewHandler:
             if pending
             else (state.rounds[-1].question if state.rounds else "No question available.")
         )
+        question_presentation = (
+            pending.question_presentation
+            if pending is not None
+            else (state.rounds[-1].question_presentation if state.rounds else None)
+        )
 
         engine.restore_meta(meta)
         classification = _last_classification(engine)
         is_decide_later = classification == "decide_later"
         is_deferred = classification == "deferred"
         skip_eligible = is_decide_later or is_deferred
+
+        response_meta = {
+            "session_id": session_id,
+            "status": "interview_started",
+            "question": first_question,
+            "is_brownfield": state.is_brownfield,
+            "idempotent": True,
+            "classification": classification,
+            "skip_eligible": skip_eligible,
+        }
+        if question_presentation is not None:
+            response_meta["question_presentation"] = question_presentation.model_dump(mode="json")
 
         return Result.ok(
             MCPToolResult(
@@ -1147,15 +1169,7 @@ class PMInterviewHandler:
                     ),
                 ),
                 is_error=False,
-                meta={
-                    "session_id": session_id,
-                    "status": "interview_started",
-                    "question": first_question,
-                    "is_brownfield": state.is_brownfield,
-                    "idempotent": True,
-                    "classification": classification,
-                    "skip_eligible": skip_eligible,
-                },
+                meta=response_meta,
             )
         )
 
@@ -1191,7 +1205,8 @@ class PMInterviewHandler:
 
         # If no answer provided, re-display the pending question (retry/reconnect)
         if not answer and state.rounds and state.rounds[-1].user_response is None:
-            pending_question = state.rounds[-1].question
+            pending_round = state.rounds[-1]
+            pending_question = pending_round.question
             classification = _last_classification(engine)
             is_decide_later = classification == "decide_later"
             is_deferred = classification == "deferred"
@@ -1216,6 +1231,28 @@ class PMInterviewHandler:
                     f'answer="[deferred]" with session_id="{session_id}".'
                 )
 
+            response_meta = {
+                "session_id": session_id,
+                "input_type": "freeText",
+                "response_param": "answer",
+                "question": pending_question,
+                "is_complete": False,
+                "classification": classification,
+                "skip_eligible": skip_eligible,
+                "deferred_this_round": [],
+                "decide_later_this_round": [],
+                "interview_complete": False,
+                "pending_reframe": pending_reframe,
+                "new_deferred": [],
+                "new_decide_later": [],
+                "deferred_count": 0,
+                "decide_later_count": len(engine.deferred_items) + len(engine.decide_later_items),
+            }
+            if pending_round.question_presentation is not None:
+                response_meta["question_presentation"] = (
+                    pending_round.question_presentation.model_dump(mode="json")
+                )
+
             return Result.ok(
                 MCPToolResult(
                     content=(
@@ -1225,24 +1262,7 @@ class PMInterviewHandler:
                         ),
                     ),
                     is_error=False,
-                    meta={
-                        "session_id": session_id,
-                        "input_type": "freeText",
-                        "response_param": "answer",
-                        "question": pending_question,
-                        "is_complete": False,
-                        "classification": classification,
-                        "skip_eligible": skip_eligible,
-                        "deferred_this_round": [],
-                        "decide_later_this_round": [],
-                        "interview_complete": False,
-                        "pending_reframe": pending_reframe,
-                        "new_deferred": [],
-                        "new_decide_later": [],
-                        "deferred_count": 0,
-                        "decide_later_count": len(engine.deferred_items)
-                        + len(engine.decide_later_items),
-                    },
+                    meta=response_meta,
                 )
             )
 
@@ -1264,7 +1284,8 @@ class PMInterviewHandler:
         if answer and state.rounds:
             last_question = state.rounds[-1].question
             if state.rounds[-1].user_response is None:
-                state.rounds.pop()
+                pending_round = state.rounds.pop()
+                state.pending_question_presentation = pending_round.question_presentation
 
             # ── User chose to skip (decide later / defer to dev) ───
             # The main session detects classification via response_meta
@@ -1456,13 +1477,16 @@ class PMInterviewHandler:
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
         # Save unanswered round
+        question_presentation = state.pending_question_presentation
         state.rounds.append(
             InterviewRound(
                 round_number=state.current_round_number,
                 question=question,
+                question_presentation=question_presentation,
                 user_response=None,
             )
         )
+        state.pending_question_presentation = None
         state.mark_updated()
 
         save_result = await engine.save_state(state)
@@ -1501,6 +1525,8 @@ class PMInterviewHandler:
             "pending_reframe": pending_reframe,
             **diff,
         }
+        if question_presentation is not None:
+            response_meta["question_presentation"] = question_presentation.model_dump(mode="json")
 
         log.info(
             "pm_handler.question_asked",

@@ -2764,13 +2764,16 @@ class InterviewHandler:
                 # Record the question as an unanswered round so resume can find it
                 from ouroboros.bigbang.interview import InterviewRound
 
+                question_presentation = state.pending_question_presentation
                 state.rounds.append(
                     InterviewRound(
                         round_number=1,
                         question=question,
+                        question_presentation=question_presentation,
                         user_response=None,
                     )
                 )
+                state.pending_question_presentation = None
                 state.mark_updated()
 
                 # Persist state to disk so subsequent calls can resume
@@ -2815,6 +2818,10 @@ class InterviewHandler:
                         question=question,
                     ),
                 }
+                if question_presentation is not None:
+                    start_meta["question_presentation"] = question_presentation.model_dump(
+                        mode="json"
+                    )
                 if is_length_guard:
                     # Q00/ouroboros#831 (Direction A): surface the length-guard
                     # meta-directive via structured meta keys so clients can
@@ -3199,10 +3206,14 @@ class InterviewHandler:
                 else "initial"
             )
 
+            pending_presentation = None
             if not state.rounds:
                 pass
             elif state.rounds[-1].user_response is None:
                 pending_question = last_question or state.rounds[-1].question
+                pending_presentation = state.rounds[-1].question_presentation
+                if last_question and last_question != state.rounds[-1].question:
+                    pending_presentation = None
             else:
                 if not last_question:
                     return Result.err(
@@ -3231,6 +3242,7 @@ class InterviewHandler:
                 )
             if state.rounds and state.rounds[-1].user_response is None:
                 state.rounds.pop()
+            state.pending_question_presentation = pending_presentation
 
             record_result = await engine.record_response(state, answer, pending_question)
             if record_result.is_err:
@@ -3420,6 +3432,11 @@ class InterviewHandler:
                         question=pending_question,
                     ),
                 }
+                pending_presentation = state.rounds[-1].question_presentation
+                if pending_presentation is not None:
+                    resume_meta["question_presentation"] = pending_presentation.model_dump(
+                        mode="json"
+                    )
                 if resume_is_length_guard:
                     # Q00/ouroboros#831 (Direction A): structured signal
                     # when resuming an interview whose pending round is
@@ -3657,13 +3674,16 @@ class InterviewHandler:
         # Save pending question as unanswered round for next resume
         from ouroboros.bigbang.interview import InterviewRound
 
+        question_presentation = state.pending_question_presentation
         state.rounds.append(
             InterviewRound(
                 round_number=state.current_round_number,
                 question=question,
+                question_presentation=question_presentation,
                 user_response=None,
             )
         )
+        state.pending_question_presentation = None
         state.mark_updated()
 
         save_result = await engine.save_state(state)
@@ -3693,6 +3713,8 @@ class InterviewHandler:
                 question=question,
             ),
         }
+        if question_presentation is not None:
+            answer_meta["question_presentation"] = question_presentation.model_dump(mode="json")
         if intent_guard_report is not None:
             answer_meta["intent_guard"] = intent_guard_report.to_dict()
         if answer_is_length_guard:

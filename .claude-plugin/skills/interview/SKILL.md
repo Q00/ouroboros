@@ -35,6 +35,17 @@ Socratic interview to crystallize vague requirements into clear specifications.
 - Run the Restate gate before seed generation.
 - Require explicit user approval before suggesting or running seed generation.
 
+## Answerable Turn Contract
+
+- Each user-facing turn targets one primary unresolved ambiguity and one clear reply objective.
+- Use plain language and explain unavoidable specialized terms inline.
+- When choices reduce effort, offer two to four concise, non-overlapping options.
+- Always preserve direct input or a none-of-these path.
+- Recommendations are optional, evidence-based, and never become user intent without approval.
+- Generated choices are hypotheses. Do not forward them as answers until the user selects, edits, or approves one.
+- Use the same human language as the conversation and do not expose internal ambiguity, ontology, scoring, or workflow terminology.
+- When MCP returns `meta.question_presentation`, treat it as the canonical structured display contract and preserve its provenance fields.
+
 ## Usage
 
 ```
@@ -161,8 +172,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `meta.ask_user_directly=true`, treat it as a normal interview continuation,
    not as an MCP/provider/tool failure. Do **not** tell the user MCP failed, do
    not expose `reason_code`, and do not retry the MCP question generator. Ask
-   exactly one natural Socratic clarification question yourself, using the same
-   routing judgement as any other interview turn. Save the exact user-facing
+   exactly one answerable Socratic clarification turn yourself, following the
+   Answerable Turn Contract above. Save the exact user-facing
    question text. When the user answers, call:
    ```
    Tool: ouroboros_interview
@@ -193,12 +204,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      affect the answer.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
-   - `answer_simplifier` — turn the question into 2-3 easy choices or one
+   - `answer_simplifier` — turn the question into 2-4 easy choices or one
      concise draft answer.
    - `architecture_implications` — check whether the answer changes ownership,
      interfaces, rollout, or system shape.
 
-   Synthesize advisory results into a compact helper for the user: 2-3 answer
+   Synthesize advisory results into a compact helper for the user: 2-4 answer
    options, one recommended draft, or a short "I found these ambiguities" note.
    Do not forward advisory output to `ouroboros_interview` until the user
    approves, edits, or explicitly asks you to auto-confirm a safe answer.
@@ -687,7 +698,7 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 1. Read `src/ouroboros/agents/socratic-interviewer.md` and adopt that role
 2. **Pre-scan the codebase**: Use the active runtime's `inspect_code` capability to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, inspect key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
 3. Ask clarifying questions based on the user's topic and codebase context
-4. **Present each question using the active runtime's `ask_user` capability** with contextually relevant suggested answers (same format as Path A step 2)
+4. **Present each question using the active runtime's `ask_user` capability** following the Answerable Turn Contract, with contextually relevant suggested answers and a direct-input path
 5. Use the active runtime's `inspect_code` and `web_research` capabilities to explore further context if needed
 6. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
    - Track multiple independent ambiguity threads

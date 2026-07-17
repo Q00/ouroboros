@@ -40,10 +40,16 @@ def test_after_base_answer_unresolved_cue_emits_deterministic_contrast_question(
     question = build_reference_contrast_question(_cue())
 
     assert question == (
+        "Which role should this reference play in the project?\n"
         "Reference `Linear` (https://linear.app): Fast issue triage.\n"
-        "What should this project copy or avoid from that reference across: "
-        "surface look and language, workflow or structure, interaction qualities, "
-        "desired outcome, and assumptions we should reject?"
+        "1. Copy selected traits from its surface look and language, workflow or "
+        "structure, or interaction qualities.\n"
+        "2. Use it only to compare the desired outcome and assumptions we should "
+        "reject, without copying it directly.\n"
+        "3. Avoid its approach and state what should differ.\n"
+        "Recommended: 2, references should inform decisions without silently "
+        "becoming requirements.\n"
+        "Reply with the number, or write your own answer."
     )
     for required_phrase in (
         "surface look",
@@ -53,6 +59,18 @@ def test_after_base_answer_unresolved_cue_emits_deterministic_contrast_question(
         "assumptions we should reject",
     ):
         assert required_phrase in question
+
+
+def test_reference_contrast_uses_chinese_presentation_when_requested() -> None:
+    question = build_reference_contrast_question(_cue(), locale="zh")
+
+    assert question.startswith("这个参考资料在项目中应该发挥什么作用？")
+    assert "参考资料 `Linear`" in question
+    assert "1. 选择性参考它的视觉表达、工作流程或交互特征。" in question
+    assert "建议: 2" in question
+    assert question.endswith("可回复编号，或直接写出你的答案。")
+    assert "Which role" not in question
+    assert "Reply with" not in question
 
 
 def test_contrast_answer_creates_reference_derived_candidate_requiring_confirmation() -> None:

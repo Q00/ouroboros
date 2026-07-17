@@ -25,13 +25,25 @@ from ouroboros.core.requirement_candidate import (
 from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
+    QUESTION_PRESENTATION_PROMPT,
+    QUESTION_TARGET_DIMENSIONS,
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    InterviewQuestionRecommendation,
     InterviewTurnContext,
+    QuestionChoiceProvenance,
     ReferenceContrastResolution,
     ReferenceCue,
     ReferenceResolutionStatus,
-    build_reference_contrast_question,
+    build_fallback_question_presentation,
+    build_reference_contrast_presentation,
     detect_explicit_confusion_terms,
+    generated_question_contract_failures,
+    infer_question_locale,
     next_unresolved_reference,
+    parse_question_presentation,
+    render_question_presentation,
+    repair_question_presentation,
     select_glossary_injection,
 )
 from ouroboros.providers.base import (
@@ -90,15 +102,118 @@ _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 - The caller supplies any code or research context in answers.
 
 ## Response Format
-- Ask one focused question in 1-2 sentences.
+- Return exactly one JSON presentation object using the contract appended below.
 - Do not include a preamble.
-- End with the question.
+- Do not add a second question.
 
 ## Questioning Strategy
 - Target the biggest unresolved decision.
 - Prefer scope, non-goal, success criteria, ownership, risk, and verification questions.
 - For brownfield work, focus on intent and decisions rather than discovering what exists.
 """
+
+NOVICE_FRIENDLY_QUESTION_CONTRACT = QUESTION_PRESENTATION_PROMPT
+
+
+def _weakest_question_dimension(
+    ambiguity_breakdown: dict[str, Any] | None,
+) -> str:
+    dimension_clarity = _dimension_clarity_from_breakdown(ambiguity_breakdown)
+    return (
+        min(dimension_clarity, key=dimension_clarity.get) if dimension_clarity else "goal_clarity"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedInterviewQuestion:
+    """Rendered question plus optional structured provenance."""
+
+    text: str
+    presentation: InterviewQuestionPresentation
+    repair_used: bool = False
+    fallback_used: bool = False
+
+
+def resolve_novice_friendly_question(
+    question: str | InterviewQuestionPresentation,
+    *,
+    ambiguity_breakdown: dict[str, Any] | None = None,
+    source: str = "generated",
+    locale_hint: str = "en",
+    interview_id: str | None = None,
+    round_number: int | None = None,
+) -> ResolvedInterviewQuestion:
+    """Resolve provider or deterministic output without another LLM call."""
+    is_structured_input = isinstance(question, InterviewQuestionPresentation)
+    presentation = question if is_structured_input else parse_question_presentation(question)
+    expected_locale = locale_hint.split("-", 1)[0].casefold()
+    failures: tuple[str, ...] = ()
+    if presentation is not None and not is_structured_input:
+        failures = generated_question_contract_failures(presentation)
+        presentation_locale = presentation.locale.split("-", 1)[0]
+        if expected_locale in {"ko", "zh"} and presentation_locale != expected_locale:
+            failures = (*failures, "presentation locale does not match the conversation")
+    if presentation is not None and not failures:
+        return ResolvedInterviewQuestion(
+            text=render_question_presentation(presentation),
+            presentation=presentation,
+        )
+
+    if presentation is None:
+        failures = ("provider output is not a valid question presentation",)
+
+    repair_target = (
+        presentation.target_dimension
+        if presentation is not None
+        else _weakest_question_dimension(ambiguity_breakdown)
+    )
+    repair_locale = presentation.locale if presentation is not None else locale_hint
+    raw_locale = infer_question_locale(str(question))
+    locale_matches = presentation is None or presentation.locale.split("-", 1)[0] == expected_locale
+    repair_attempted = locale_matches and (
+        presentation is not None or raw_locale == expected_locale
+    )
+    if repair_attempted:
+        repaired = repair_question_presentation(
+            str(question),
+            target_dimension=repair_target,
+            locale=repair_locale,
+        )
+        if repaired is not None:
+            log.warning(
+                "interview.question_contract_repaired",
+                source=source,
+                interview_id=interview_id,
+                round_number=round_number,
+                output_chars=len(str(question)),
+                failures=failures,
+                repair_used=True,
+            )
+            return ResolvedInterviewQuestion(
+                text=render_question_presentation(repaired),
+                presentation=repaired,
+                repair_used=True,
+            )
+
+    fallback = build_fallback_question_presentation(
+        repair_target,
+        locale=locale_hint,
+    )
+    log.warning(
+        "interview.question_contract_violation",
+        source=source,
+        interview_id=interview_id,
+        round_number=round_number,
+        output_chars=len(str(question)),
+        failures=failures,
+        repair_attempted=repair_attempted,
+        fallback_used=True,
+    )
+    return ResolvedInterviewQuestion(
+        text=render_question_presentation(fallback),
+        presentation=fallback,
+        fallback_used=True,
+    )
 
 
 class InterviewPerspective(StrEnum):
@@ -169,6 +284,8 @@ class InterviewRound(BaseModel):
 
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
+    question_presentation: InterviewQuestionPresentation | None = None
+    original_question: str | None = None
     user_response: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -206,6 +323,7 @@ class InterviewState(BaseModel):
     reference_cues: tuple[ReferenceCue, ...] = Field(default_factory=tuple)
     reference_resolutions: tuple[ReferenceContrastResolution, ...] = Field(default_factory=tuple)
     pending_confused_terms: tuple[str, ...] = Field(default_factory=tuple)
+    pending_question_presentation: InterviewQuestionPresentation | None = None
     requirement_input_revision: int = Field(default=0, ge=0)
     requirement_distillation: RequirementDistillation | None = None
 
@@ -282,6 +400,12 @@ class InterviewState(BaseModel):
                     {
                         "round_number": round_data.round_number,
                         "question": round_data.question,
+                        "question_presentation": (
+                            round_data.question_presentation.model_dump(mode="json")
+                            if round_data.question_presentation is not None
+                            else None
+                        ),
+                        "original_question": round_data.original_question,
                         "user_response": round_data.user_response,
                     }
                     for round_data in self.rounds
@@ -354,6 +478,7 @@ class InterviewState(BaseModel):
 
     def next_adapter_question(self) -> str | None:
         """Return one deterministic post-base-frame adapter question."""
+        locale = infer_question_locale(self.initial_context)
         base_question_answered = any(
             round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION
             and bool(round_data.user_response)
@@ -371,15 +496,86 @@ class InterviewState(BaseModel):
             self.pending_confused_terms = ()
             if injection is not None:
                 self.mark_updated()
-                return (
-                    f"{injection.render()}\n\n"
-                    "Using your own words, what does that term need to mean for this project?"
+                if locale == "ko":
+                    question_text = "아래 용어 설명을 이 프로젝트에서 어떻게 적용해야 하나요?"
+                    labels = (
+                        "용어 설명을 그대로 사용합니다.",
+                        "프로젝트에 맞는 의미를 사용하고 차이를 설명합니다.",
+                        "해당 용어를 피하고 쉬운 표현을 사용합니다.",
+                    )
+                    reason = "공유된 의미가 오해를 줄일 수 있습니다"
+                    recommendation_label = "권장"
+                    free_text_prompt = "번호로 답하거나 직접 답변을 작성하세요."
+                    normalized_locale = "ko"
+                elif locale == "zh":
+                    question_text = "下面的术语说明应该如何用于这个项目？"
+                    labels = (
+                        "按原文使用术语说明。",
+                        "使用项目特定含义，并说明差异。",
+                        "避免该术语，改用简单表达。",
+                    )
+                    reason = "共享含义可以减少误解"
+                    recommendation_label = "建议"
+                    free_text_prompt = "可回复编号，或直接写出你的答案。"
+                    normalized_locale = "zh"
+                else:
+                    question_text = (
+                        "Which meaning should this project use for the glossary guidance below?"
+                    )
+                    labels = (
+                        "Use the glossary meaning as written.",
+                        "Use a project-specific meaning and explain the difference.",
+                        "Avoid the term and use plain language instead.",
+                    )
+                    reason = "a shared meaning reduces misunderstandings"
+                    recommendation_label = "Recommended"
+                    free_text_prompt = "Reply with the number, or write your own answer."
+                    normalized_locale = "en"
+                presentation = InterviewQuestionPresentation(
+                    decision_id="glossary_meaning",
+                    target_dimension="context_clarity",
+                    locale=normalized_locale,
+                    question=question_text,
+                    context=(injection.render(),),
+                    choices=tuple(
+                        InterviewQuestionChoice(
+                            choice_id=index,
+                            meaning_key=meaning_key,
+                            label=label,
+                            provenance=QuestionChoiceProvenance.REFERENCE_DERIVED,
+                        )
+                        for index, (meaning_key, label) in enumerate(
+                            zip(
+                                ("use_glossary", "project_specific", "avoid_term"),
+                                labels,
+                                strict=True,
+                            ),
+                            start=1,
+                        )
+                    ),
+                    recommendation=InterviewQuestionRecommendation(
+                        choice_id=1,
+                        label=recommendation_label,
+                        reason=reason,
+                    ),
+                    free_text_prompt=free_text_prompt,
                 )
+                resolved = resolve_novice_friendly_question(
+                    presentation,
+                    source="glossary_adapter",
+                )
+                self.pending_question_presentation = resolved.presentation
+                return resolved.text
 
         cue = next_unresolved_reference(self.reference_cues, self.reference_resolutions)
         if cue is None:
             return None
-        question = build_reference_contrast_question(cue)
+        resolved = resolve_novice_friendly_question(
+            build_reference_contrast_presentation(cue, locale=locale),
+            source="reference_adapter",
+        )
+        question = resolved.text
+        self.pending_question_presentation = resolved.presentation
         remaining = tuple(
             resolution
             for resolution in self.reference_resolutions
@@ -466,12 +662,7 @@ _QUESTION_CANDIDATE_PRIORITY: dict[str, int] = {
 
 # Ambiguity dimension keys a candidate may target (same keys ScoreBreakdown
 # uses, so K1's per-dimension output selects K2's question directly).
-QUESTION_CANDIDATE_DIMENSIONS: tuple[str, ...] = (
-    "goal_clarity",
-    "constraint_clarity",
-    "success_criteria_clarity",
-    "context_clarity",
-)
+QUESTION_CANDIDATE_DIMENSIONS = QUESTION_TARGET_DIMENSIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,6 +672,7 @@ class QuestionCandidate:
     persona: str
     question: str
     target_dimension: str
+    presentation: InterviewQuestionPresentation | None = None
 
 
 def select_question_candidate(
@@ -564,37 +756,20 @@ def _question_candidate_persona_roles() -> dict[str, str]:
 
 
 def _parse_question_candidate(persona: str, response: str) -> QuestionCandidate | None:
-    """Parse a persona candidate JSON ``{question, target_dimension}``.
+    """Parse one structured persona candidate.
 
-    Returns ``None`` on any parse failure or missing question so a single bad
-    candidate never breaks the panel (the others still select).
+    Returns ``None`` on parse or generated-provenance failure so one bad
+    candidate never breaks the panel.
     """
-    import json
-    import re
-
-    text = response.strip()
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    else:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            text = match.group(0)
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+    presentation = parse_question_presentation(response)
+    if presentation is None or generated_question_contract_failures(presentation):
         return None
-    if not isinstance(data, dict):
-        return None
-    question = str(data.get("question") or "").strip()
-    if not question:
-        return None
-    target = str(data.get("target_dimension") or "").strip()
-    if target not in QUESTION_CANDIDATE_DIMENSIONS:
-        # Unknown/blank target is tolerated: it simply ranks least-urgent in
-        # selection rather than dropping an otherwise valid question.
-        target = ""
-    return QuestionCandidate(persona=persona, question=question, target_dimension=target)
+    return QuestionCandidate(
+        persona=persona,
+        question=render_question_presentation(presentation),
+        target_dimension=presentation.target_dimension,
+        presentation=presentation,
+    )
 
 
 @dataclass
@@ -642,7 +817,7 @@ class InterviewEngine:
     _MAX_TOTAL_PROMPT_CHARS = AGENT_SDK_CLI_SAFE_PROMPT_CHARS
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MIN_SYSTEM_PROMPT_CHARS = 1200
-    _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
+    _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 900
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
     _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
     suppress_tool_use_prompt_cues: bool = False
@@ -753,6 +928,7 @@ class InterviewEngine:
         Returns:
             Result containing the next question or error.
         """
+        state.pending_question_presentation = None
         if state.is_complete and state.needs_initial_context_summary:
             return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
 
@@ -841,7 +1017,16 @@ class InterviewEngine:
                 config=config,
             )
             if candidate is not None:
-                return Result.ok(candidate)
+                resolved = resolve_novice_friendly_question(
+                    candidate.presentation or candidate.question,
+                    ambiguity_breakdown=state.ambiguity_breakdown,
+                    source="candidate_panel",
+                    locale_hint=infer_question_locale(state.initial_context),
+                    interview_id=state.interview_id,
+                    round_number=state.current_round_number,
+                )
+                state.pending_question_presentation = resolved.presentation
+                return Result.ok(resolved.text)
 
         result = await self.llm_adapter.complete(messages, config)
 
@@ -854,7 +1039,16 @@ class InterviewEngine:
             )
             return Result.err(result.error)
 
-        question = result.value.content.strip()
+        resolved = resolve_novice_friendly_question(
+            result.value.content,
+            ambiguity_breakdown=state.ambiguity_breakdown,
+            source="single_call",
+            locale_hint=infer_question_locale(effective_initial_context),
+            interview_id=state.interview_id,
+            round_number=state.current_round_number,
+        )
+        question = resolved.text
+        state.pending_question_presentation = resolved.presentation
 
         log.info(
             "interview.question_generated",
@@ -872,7 +1066,7 @@ class InterviewEngine:
         system_prompt: str,
         conversation_history: list[Message],
         config: CompletionConfig,
-    ) -> str | None:
+    ) -> QuestionCandidate | None:
         """Generate persona candidates and deterministically select one.
 
         Returns the selected question, or ``None`` to signal the caller should
@@ -900,7 +1094,7 @@ class InterviewEngine:
             target_dimension=selected.target_dimension,
             candidate_count=len(candidates),
         )
-        return selected.question
+        return selected
 
     async def _generate_question_candidates(
         self,
@@ -915,15 +1109,13 @@ class InterviewEngine:
 
         async def _one(persona: str) -> QuestionCandidate | None:
             role = persona_roles.get(persona, persona)
+            prompt_prefix = system_prompt.removesuffix(QUESTION_PRESENTATION_PROMPT).rstrip()
             persona_prompt = (
-                f"{system_prompt}\n\n"
+                f"{prompt_prefix}\n\n"
                 f"## Persona Lens: {persona} — {role}\n"
                 "Propose ONE clarifying question through this persona's lens, "
                 "aimed at the single ambiguity dimension you judge weakest.\n\n"
-                "Respond ONLY with JSON, no other text:\n"
-                '{"question": "string", "target_dimension": "goal_clarity" | '
-                '"constraint_clarity" | "success_criteria_clarity" | '
-                '"context_clarity"}'
+                f"{QUESTION_PRESENTATION_PROMPT}"
             )
             messages = [
                 Message(role=MessageRole.SYSTEM, content=persona_prompt),
@@ -940,8 +1132,23 @@ class InterviewEngine:
                 )
                 return None
             if result.is_err:
+                log.warning(
+                    "interview.question_candidate_provider_failed",
+                    interview_id=state.interview_id,
+                    persona=persona,
+                    error=str(result.error),
+                )
                 return None
-            return _parse_question_candidate(persona, result.value.content)
+            candidate = _parse_question_candidate(persona, result.value.content)
+            if candidate is None:
+                log.warning(
+                    "interview.question_candidate_parse_failed",
+                    interview_id=state.interview_id,
+                    persona=persona,
+                    output_chars=len(result.value.content),
+                )
+                return None
+            return candidate
 
         results = await asyncio.gather(*(_one(persona) for persona in QUESTION_CANDIDATE_PERSONAS))
         return [candidate for candidate in results if candidate is not None]
@@ -993,9 +1200,17 @@ class InterviewEngine:
         state.record_adapter_answer(question, user_response)
 
         # Create new round
+        question_presentation = state.pending_question_presentation
+        if (
+            question_presentation is not None
+            and render_question_presentation(question_presentation) != question
+        ):
+            question_presentation = None
+        state.pending_question_presentation = None
         round_data = InterviewRound(
             round_number=state.current_round_number,
             question=question,
+            question_presentation=question_presentation,
             user_response=user_response,
         )
 
@@ -1155,13 +1370,13 @@ class InterviewEngine:
         )
         prompt_initial_context = self._initial_context_for_system_prompt(context_for_prompt)
 
-        # For first round, add explicit instruction to start directly with a question
+        # For first round, require the structured answer immediately.
         if effective_round_number == 1:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
-                f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "
-                f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
-                f"Just ask a specific, clarifying question immediately.\n\n"
+                f"CRITICAL: Start your FIRST response with a DIRECT QUESTION in the "
+                f'"question" field of the required JSON presentation object. '
+                f"Return the object immediately without an introduction or prose outside JSON.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
@@ -1209,14 +1424,18 @@ class InterviewEngine:
 
         perspective_panel = self._build_perspective_panel_prompt(state)
 
-        _OVERHEAD = 20  # newlines, ellipsis, separators
+        required_suffix = NOVICE_FRIENDLY_QUESTION_CONTRACT
+        _OVERHEAD = 24  # newlines and separators
 
-        # Preserve the dynamic header first; it contains the capped initial
-        # context and first-turn instructions. Trim the optional panel/base
-        # prompt before falling back to hard-truncating the header.
-        available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
+        # Preserve the structured response contract at the end so later base
+        # prompt wording cannot override it. Trim optional panel/base content
+        # before shortening the dynamic header.
+        available_after_header = (
+            max_prompt_chars - len(dynamic_header) - len(required_suffix) - _OVERHEAD
+        )
         if available_after_header <= 0:
-            dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
+            header_budget = max(0, max_prompt_chars - len(required_suffix) - _OVERHEAD)
+            dynamic_header = dynamic_header[:header_budget]
             perspective_panel = ""
             base_budget = 0
         elif len(perspective_panel) > available_after_header:
@@ -1226,11 +1445,14 @@ class InterviewEngine:
             base_budget = available_after_header - len(perspective_panel)
 
         trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
-        full_prompt = f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}"
+        full_prompt = (
+            f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}\n\n{required_suffix}"
+        )
 
-        # Hard-truncate as final safety net
+        # Hard-truncate optional prefix content while retaining the contract.
         if len(full_prompt) > max_prompt_chars:
-            full_prompt = full_prompt[:max_prompt_chars]
+            prefix_budget = max(0, max_prompt_chars - len(required_suffix) - 2)
+            full_prompt = f"{full_prompt[:prefix_budget]}\n\n{required_suffix}"
 
         return full_prompt
 
@@ -1372,10 +1594,17 @@ class InterviewEngine:
 
     def _build_perspective_panel_prompt(self, state: InterviewState) -> str:
         """Build instructions for the internal perspective panel."""
+        active_perspectives = self._select_perspectives(state)
+        active_index = [
+            "## Perspective Panel",
+            "Apply every active lens before choosing the single reply objective:",
+            *(f"### {perspective.value}" for perspective in active_perspectives),
+            "",
+        ]
         if self.suppress_tool_use_prompt_cues:
             return "\n".join(
                 [
-                    "## Perspective Panel",
+                    *active_index,
                     "Silently check breadth, simplicity, architecture, and closure readiness.",
                     "Use those perspectives only to choose one clarifying question.",
                     "",
@@ -1389,15 +1618,15 @@ class InterviewEngine:
             )
         strategies = _load_interview_perspective_strategies()
         sections = [
-            "## Perspective Panel",
+            *active_index,
             "Before asking the next question, silently consult these internal agents.",
             "They are planning aids only. Emit exactly one final question to the user.",
             "",
         ]
 
-        for perspective in self._select_perspectives(state):
+        for perspective in active_perspectives:
             strategy = strategies[perspective]
-            sections.append(f"### {perspective.value}")
+            sections.append(f"#### {perspective.value} details")
             sections.append(f"Focus: {strategy.system_prompt}")
             if strategy.approach_instructions:
                 sections.append("Approach cues:")

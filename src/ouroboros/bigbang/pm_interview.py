@@ -48,6 +48,15 @@ from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    InterviewQuestionRecommendation,
+    expand_selected_choice_answer,
+    infer_question_locale,
+    render_question_presentation,
+    repair_question_presentation,
+)
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -77,11 +86,61 @@ Focus on: goal, user stories, constraints, success criteria, assumptions.
 
 """
 
-_OPENING_QUESTION = (
-    "What do you want to build? Tell me about the product or feature "
-    "you have in mind — the problem it solves, who it's for, and any "
-    "initial ideas you already have."
+_OPENING_PRESENTATION = InterviewQuestionPresentation(
+    decision_id="pm_starting_point",
+    target_dimension="goal_clarity",
+    question="Which starting point best describes the thing you want to build?",
+    choices=(
+        InterviewQuestionChoice(
+            choice_id=1,
+            meaning_key="new_product",
+            label="A new product or service.",
+        ),
+        InterviewQuestionChoice(
+            choice_id=2,
+            meaning_key="focused_feature",
+            label="A focused feature for an existing product.",
+        ),
+        InterviewQuestionChoice(
+            choice_id=3,
+            meaning_key="workflow_improvement",
+            label="An improvement to an existing workflow.",
+        ),
+    ),
+    recommendation=InterviewQuestionRecommendation(
+        choice_id=2,
+        reason="a focused feature gives the interview a concrete starting point",
+    ),
+    free_text_prompt="Reply with the number, or write your own answer.",
 )
+_OPENING_QUESTION = render_question_presentation(_OPENING_PRESENTATION)
+
+
+def _pm_safe_reframe_presentation(state: InterviewState) -> InterviewQuestionPresentation:
+    """Build a direct-input PM question without exposing a technical choice."""
+    locale = infer_question_locale(state.initial_context)
+    pending = state.pending_question_presentation
+    target_dimension = pending.target_dimension if pending is not None else "constraint_clarity"
+    if locale == "ko":
+        question = "개발팀이 기술 결정을 내릴 때 어떤 제품 우선순위를 따라야 하나요?"
+        free_text_prompt = "제품 우선순위를 직접 답변으로 작성하거나 개발 단계로 미룬다고 답하세요."
+    elif locale == "zh":
+        question = "开发团队做出技术决策时，应优先遵循哪个产品目标？"
+        free_text_prompt = "请直接写出产品目标，或说明应推迟到开发阶段。"
+    else:
+        question = "Which product priority should guide the development team's technical decision?"
+        free_text_prompt = (
+            "Write the product priority in your own words, or say it should be deferred "
+            "to development."
+        )
+    return InterviewQuestionPresentation(
+        decision_id="pm_priority_for_technical_decision",
+        target_dimension=target_dimension,
+        locale=locale,
+        question=question,
+        free_text_prompt=free_text_prompt,
+    )
+
 
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are a requirements extraction engine. Given a PM interview transcript,
@@ -506,6 +565,7 @@ class PMInterviewEngine:
         question = question_result.value
         if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
             return Result.ok(question)
+        source_presentation = state.pending_question_presentation
 
         # Classify the question
         context = self._build_interview_context(state)
@@ -560,9 +620,53 @@ class PMInterviewEngine:
             return Result.ok(classification.original_question)
 
         if output_type == ClassifierOutputType.REFRAMED:
-            # Use the reframed version and track the mapping
-            reframed = classification.question_for_pm
-            self._reframe_map[reframed] = classification.original_question
+            presentation = classification.reframed_presentation
+            if presentation is None:
+                candidate = classification.reframed_question.strip()
+                conversation_locale = infer_question_locale(state.initial_context)
+                if (
+                    candidate
+                    and candidate != classification.original_question.strip()
+                    and infer_question_locale(candidate) == conversation_locale
+                ):
+                    target_dimension = (
+                        source_presentation.target_dimension
+                        if source_presentation is not None
+                        else "constraint_clarity"
+                    )
+                    presentation = repair_question_presentation(
+                        candidate,
+                        target_dimension=target_dimension,
+                        locale=conversation_locale,
+                    )
+                fallback = "repaired_pm_reframe"
+                if presentation is None:
+                    presentation = _pm_safe_reframe_presentation(state)
+                    fallback = "pm_safe_direct_input"
+                reframed = render_question_presentation(presentation)
+                classification = replace(
+                    classification,
+                    reframed_question=reframed,
+                    reframed_presentation=presentation,
+                    reasoning=(
+                        f"{classification.reasoning} The PM reframe was repaired without "
+                        "returning the original technical question."
+                    ).strip(),
+                )
+                self.classifications[-1] = classification
+                log.warning(
+                    "pm.question_reframe_contract_violation",
+                    original=classification.original_question[:100],
+                    reframed=classification.reframed_question[:100],
+                    fallback=fallback,
+                )
+            reframed = render_question_presentation(presentation)
+            state.pending_question_presentation = presentation
+            self._reframe_map[reframed] = (
+                source_presentation.question
+                if source_presentation is not None
+                else classification.original_question.splitlines()[0]
+            )
             log.info(
                 "pm.question_reframed",
                 original=classification.original_question[:100],
@@ -611,6 +715,7 @@ class PMInterviewEngine:
         original_question = self._reframe_map.pop(question, None)
 
         if original_question is not None:
+            question_presentation = state.pending_question_presentation
             # Bundle the original technical question with the PM's answer
             bundled_question = (
                 f"[Original technical question: {original_question}]\n"
@@ -624,7 +729,12 @@ class PMInterviewEngine:
                 reframed_question=question[:100],
             )
 
-            return await self.inner.record_response(state, bundled_response, bundled_question)
+            result = await self.inner.record_response(state, bundled_response, bundled_question)
+            if result.is_ok and question_presentation is not None and state.rounds:
+                state.rounds[-1].question_presentation = question_presentation
+                state.rounds[-1].original_question = original_question.splitlines()[0]
+                state.mark_updated()
+            return result
 
         return await self.inner.record_response(state, user_response, question)
 
@@ -1179,9 +1289,18 @@ class PMInterviewEngine:
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
+            presentation = round_data.question_presentation
+            question = presentation.question if presentation is not None else round_data.question
+            parts.append(f"\nQ: {question}")
+            if round_data.original_question:
+                parts.append(f"Original technical question: {round_data.original_question}")
+            if presentation is not None:
+                parts.extend(f"Question context: {item}" for item in presentation.context)
             if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+                answer = round_data.user_response
+                if presentation is not None:
+                    answer = expand_selected_choice_answer(presentation, answer)
+                parts.append(f"A: {answer}")
 
         return "\n".join(parts)
 

@@ -15,6 +15,11 @@ from ouroboros.bigbang.question_classifier import (
     QuestionCategory,
 )
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    render_question_presentation,
+)
 from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
     PM_UNCERTAINTY_GUIDANCE,
@@ -76,6 +81,7 @@ def _make_state(
     state.is_complete = False
     state.is_brownfield = is_brownfield
     state.ambiguity_score = None
+    state.pending_question_presentation = None
     state.mark_updated = MagicMock()
     state.clear_stored_ambiguity = MagicMock()
     return state
@@ -646,8 +652,32 @@ class TestGetEngine:
         """MCP start response must show PM uncertainty guidance before question text."""
         engine = _make_engine_stub()
         state = _make_state(interview_id="pm_guidance")
+        presentation = InterviewQuestionPresentation(
+            decision_id="first_outcome",
+            target_dimension="goal_clarity",
+            question="Which outcome should come first?",
+            choices=(
+                InterviewQuestionChoice(
+                    choice_id=1,
+                    meaning_key="task_list",
+                    label="A task list.",
+                ),
+                InterviewQuestionChoice(
+                    choice_id=2,
+                    meaning_key="prototype",
+                    label="A clickable prototype.",
+                ),
+            ),
+            free_text_prompt="Reply with the number, or write your own answer.",
+        )
+        question = render_question_presentation(presentation)
+
+        async def _ask_next_question(current_state: InterviewState) -> Result[str, object]:
+            current_state.pending_question_presentation = presentation
+            return Result.ok(question)
+
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
-        engine.ask_next_question = AsyncMock(return_value=Result.ok("What should we build first?"))
+        engine.ask_next_question = AsyncMock(side_effect=_ask_next_question)
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "pm_guidance.json"))
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
@@ -656,7 +686,47 @@ class TestGetEngine:
         assert result.is_ok
         text = result.value.text_content
         assert PM_UNCERTAINTY_GUIDANCE in text
-        assert text.index(PM_UNCERTAINTY_GUIDANCE) < text.index("What should we build first?")
+        assert text.index(PM_UNCERTAINTY_GUIDANCE) < text.index("Which outcome should come first?")
+        assert result.value.meta["question_presentation"] == presentation.model_dump(mode="json")
+        assert state.rounds[-1].question_presentation == presentation
+        assert state.pending_question_presentation is None
+
+    @pytest.mark.asyncio
+    async def test_resume_response_restores_question_presentation_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        presentation = InterviewQuestionPresentation(
+            decision_id="first_outcome",
+            target_dimension="goal_clarity",
+            question="Which outcome should come first?",
+            free_text_prompt="Write your answer in your own words.",
+        )
+        state = InterviewState(
+            interview_id="pm_resume_presentation",
+            initial_context="Build a launch checklist",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=render_question_presentation(presentation),
+                    question_presentation=presentation,
+                    user_response=None,
+                )
+            ],
+        )
+        engine = _make_engine_stub()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler._handle_answer(
+            engine,
+            state.interview_id,
+            answer=None,
+            cwd=str(tmp_path),
+        )
+
+        assert result.is_ok
+        assert result.value.meta["question_presentation"] == presentation.model_dump(mode="json")
 
 
 # ── Action auto-detection tests (AC 13) ───────────────────────

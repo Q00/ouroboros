@@ -29,6 +29,11 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    render_question_presentation,
+)
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.subagent import synthesize_code_investigation_when_complete
@@ -64,6 +69,7 @@ class _StubInterviewEngine:
 
     state_dir: Path
     next_question: str = "What is the primary user persona?"
+    next_presentation: InterviewQuestionPresentation | None = None
     initial_state: InterviewState | None = None
     saved_states: list[InterviewState] = field(default_factory=list)
     record_calls: list[dict[str, str]] = field(default_factory=list)
@@ -84,6 +90,7 @@ class _StubInterviewEngine:
         return Result.ok(state)
 
     async def ask_next_question(self, state: InterviewState) -> Result[str, MCPServerError]:
+        state.pending_question_presentation = self.next_presentation
         return Result.ok(self.next_question)
 
     async def record_response(
@@ -132,6 +139,52 @@ async def _drain_bg_tasks(handler: InterviewHandler) -> None:
     """Flush the handler's fire-and-forget event tasks deterministically."""
     if handler._bg_tasks:
         await asyncio.gather(*handler._bg_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_start_response_exposes_and_persists_question_presentation(
+    tmp_path: Path,
+) -> None:
+    presentation = InterviewQuestionPresentation(
+        decision_id="primary_user",
+        target_dimension="goal_clarity",
+        question="Which user group should come first?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="new_users",
+                label="New users.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="maintainers",
+                label="Maintainers.",
+            ),
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
+    engine = _StubInterviewEngine(
+        state_dir=tmp_path,
+        next_question=render_question_presentation(presentation),
+        next_presentation=presentation,
+    )
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=_CapturingEventStore(),
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {"initial_context": "Build a CLI", "cwd": str(tmp_path)},
+    )
+
+    assert outcome.is_ok
+    assert outcome.value.meta["question_presentation"] == presentation.model_dump(mode="json")
+    saved_state = engine.saved_states[-1]
+    assert saved_state.rounds[-1].question_presentation == presentation
+    assert saved_state.pending_question_presentation is None
 
 
 def _find_event(events: list[BaseEvent], *, event_type: str) -> BaseEvent | None:
@@ -677,6 +730,13 @@ async def test_start_with_length_guard_question_marks_event(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) -> None:
     """Resume path (session_id only, no answer, pending round)."""
+    presentation = InterviewQuestionPresentation(
+        decision_id="main_goal",
+        target_dimension="goal_clarity",
+        question="What is the main goal?",
+        free_text_prompt="Write your answer in your own words.",
+    )
+    pending_question = render_question_presentation(presentation)
     pending_state = InterviewState(
         interview_id="interview_resume00000001",
         initial_context="ctx",
@@ -685,7 +745,8 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
     pending_state.rounds.append(
         InterviewRound(
             round_number=1,
-            question="What is the main goal?",
+            question=pending_question,
+            question_presentation=presentation,
             user_response=None,
         )
     )
@@ -710,9 +771,10 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
     _assert_code_investigation_request(
         outcome.value.meta,
         session_id=pending_state.interview_id,
-        question="What is the main goal?",
+        question=pending_question,
     )
     assert outcome.value.meta["interview_reasoning"]["pending_question"] is True
+    assert outcome.value.meta["question_presentation"] == presentation.model_dump(mode="json")
     await _drain_bg_tasks(handler)
 
     diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")
@@ -725,7 +787,7 @@ async def test_resume_pending_emits_response_diagnostic_event(tmp_path: Path) ->
     assert diagnostic.data["timings_ms"]["question_generation"] is None
     assert diagnostic.data["timings_ms"]["advisory_build"] >= 0
     # Transcript chars must include the pending question text length.
-    assert diagnostic.data["transcript_chars"] >= len("What is the main goal?")
+    assert diagnostic.data["transcript_chars"] >= len(pending_question)
 
 
 @pytest.mark.asyncio
