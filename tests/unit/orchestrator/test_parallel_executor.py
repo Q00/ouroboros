@@ -2003,38 +2003,32 @@ def test_correlated_tool_result_name_requires_one_exact_call_id_match() -> None:
     )
 
 
-def test_effective_schema_drops_tests_passed_for_contract_ac() -> None:
-    """A declared verify_command drops tests_passed from the required evidence set."""
+def test_effective_schema_delegates_contract_command_evidence() -> None:
+    """An active contract gate replaces transcript command and test evidence."""
     profile = load_profile("code")
-    assert "tests_passed" in profile.evidence_schema.required
 
-    legacy = _effective_evidence_schema_for_ac(profile, "Implement the module.")
-    assert "tests_passed" in legacy.required
-
-    contract = _effective_evidence_schema_for_ac(
+    schema = _effective_evidence_schema_for_ac(
         profile,
         "Implement the module.",
         has_success_contract=True,
         verify_gate_active=True,
     )
-    assert "tests_passed" not in contract.required
-    # Without declared expected_artifacts, there is no filesystem oracle for
-    # files_touched, so it stays transcript-gated.
-    assert "files_touched" in contract.required
-    assert "commands_run" in contract.required
 
-    artifact_contract = _effective_evidence_schema_for_ac(
+    assert schema.required == ("files_touched",)
+
+    artifact_schema = _effective_evidence_schema_for_ac(
         profile,
         "Implement the module.",
         has_success_contract=True,
         has_expected_artifacts=True,
         verify_gate_active=True,
     )
-    assert artifact_contract.required == ("commands_run",)
+
+    assert artifact_schema.required == ()
 
 
-def test_legacy_ac_keeps_files_touched_required_even_with_expected_artifacts_flag() -> None:
-    """Expected artifacts only delegate files_touched when a verify command is present."""
+def test_legacy_ac_keeps_transcript_backed_evidence() -> None:
+    """Legacy ACs retain every transcript-backed required evidence field."""
     profile = load_profile("code")
 
     schema = _effective_evidence_schema_for_ac(
@@ -2044,18 +2038,11 @@ def test_legacy_ac_keeps_files_touched_required_even_with_expected_artifacts_fla
         has_expected_artifacts=True,
     )
 
-    assert "files_touched" in schema.required
-    assert "tests_passed" in schema.required
+    assert schema.required == ("files_touched", "commands_run", "tests_passed")
 
 
-def test_contract_ac_retains_evidence_when_verify_gate_inactive() -> None:
-    """With the verify gate disabled there is no oracle to delegate to.
-
-    ``_apply_verify_gate`` returns early when ``run_verify_commands`` is False, so
-    dropping ``tests_passed`` / ``files_touched`` would leave a contract AC with an
-    unbacked, self-reported artifact and no check. The fail-safe default retains
-    the transcript-backed evidence.
-    """
+def test_contract_ac_retains_transcript_backed_evidence_when_verify_gate_inactive() -> None:
+    """A disabled contract gate cannot replace transcript-backed evidence."""
     profile = load_profile("code")
 
     schema = _effective_evidence_schema_for_ac(
@@ -2066,13 +2053,11 @@ def test_contract_ac_retains_evidence_when_verify_gate_inactive() -> None:
         verify_gate_active=False,
     )
 
-    assert "files_touched" in schema.required
-    assert "tests_passed" in schema.required
-    assert "commands_run" in schema.required
+    assert schema.required == ("files_touched", "commands_run", "tests_passed")
 
 
-def test_contract_ac_drops_delegated_fields_only_when_verify_gate_active() -> None:
-    """The delegation drop fires only once the verify gate is confirmed active."""
+def test_contract_ac_with_artifacts_delegates_all_evidence_when_verify_gate_active() -> None:
+    """An active contract gate replaces all evidence when it checks artifacts too."""
     profile = load_profile("code")
 
     schema = _effective_evidence_schema_for_ac(
@@ -2083,16 +2068,14 @@ def test_contract_ac_drops_delegated_fields_only_when_verify_gate_active() -> No
         verify_gate_active=True,
     )
 
-    assert schema.required == ("commands_run",)
+    assert schema.required == ()
 
 
-def test_contract_ac_verifier_delegates_tests_passed() -> None:
-    """Contract AC: the transcript verifier does not gate tests_passed at all.
+def test_contract_ac_verifier_delegates_command_evidence() -> None:
+    """Contract ACs do not transcript-gate commands_run or tests_passed.
 
-    Only files_touched + commands_run are checked; the tests_passed check is
-    delegated to the orchestrator verify-gate. Evidence with no tests_passed field
-    still passes the transcript verifier, so worker sample-input variance in the
-    verification command is irrelevant here.
+    Only files_touched is checked without expected artifacts; command execution and
+    test success are delegated to the orchestrator verify gate.
     """
     executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
     verdict = executor._verify_atomic_evidence_against_runtime_messages(
@@ -2110,8 +2093,8 @@ def test_contract_ac_verifier_delegates_tests_passed() -> None:
     assert verdict.passed is True, verdict.reasons
 
 
-def test_contract_ac_with_expected_artifacts_verifier_delegates_files_touched() -> None:
-    """Contract AC artifacts are verified by the filesystem gate, not transcript claims."""
+def test_contract_ac_with_expected_artifacts_verifier_delegates_all_evidence() -> None:
+    """Contract AC artifacts and command execution are verified by the gate."""
     executor = _file_scope_executor("/private/tmp/ooo-repro-blos")
     verdict = executor._verify_atomic_evidence_against_runtime_messages(
         messages=_greeting_repro_messages("/private/tmp/ooo-repro-blos/hello.py"),
@@ -4798,13 +4781,12 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_ran"] is False
 
     @pytest.mark.asyncio
-    async def test_contract_ac_with_artifacts_accepts_unbacked_files_touched_claim(
+    async def test_contract_ac_with_artifacts_ignores_transcript_claims(
         self,
         tmp_path,
     ) -> None:
-        """A contract AC delegates artifact proof to the verify gate filesystem oracle."""
+        """The verify gate owns artifact and command proof for contract ACs."""
         command = "python -c \"print('OK')\""
-        command_json = command.replace("\\", "\\\\").replace('"', '\\"')
         (tmp_path / "hello.py").write_text(
             "def greet(name):\n    return f'Hello, {name}'\n",
             encoding="utf-8",
@@ -4815,7 +4797,7 @@ class TestParallelACExecutor:
             "```json\n"
             "{"
             '"files_touched":["not-backed-by-transcript.py"],'
-            f'"commands_run":["{command_json}"]'
+            '"commands_run":0'
             "}\n"
             "```",
             native_session_id="codex-session-contract-artifact-delegation",
@@ -4859,19 +4841,22 @@ class TestParallelACExecutor:
         assert result.success is True
         assert result.error is None
         assert result.typed_evidence is not None
-        assert result.typed_evidence.data == {"commands_run": [command]}
+        assert result.typed_evidence.data == {}
         assert runtime.last_prompt is not None
-        assert "directly (commands_run)" in runtime.last_prompt
+        assert "directly (commands_run)" not in runtime.last_prompt
         assert "ensure they exist in the workspace" in runtime.last_prompt
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["required_fields"] == ["commands_run"]
+        assert evidence_event.data["required_fields"] == []
         assert evidence_event.data["typed_evidence_valid"] is True
         assert evidence_event.data["verifier_passed"] is True
-        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == ["files_touched"]
+        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == [
+            "files_touched",
+            "commands_run",
+        ]
 
     @pytest.mark.asyncio
     async def test_contract_ac_missing_artifact_rejected_when_verify_gate_disabled(
@@ -4881,10 +4866,10 @@ class TestParallelACExecutor:
         """Reproduced blocker: with the verify gate off, delegation must not fire.
 
         ``run_verify_commands=False`` makes ``_apply_verify_gate`` return early, so
-        the filesystem oracle never checks ``expected_artifacts``. If the schema
-        still dropped ``files_touched``/``tests_passed``, a contract AC could
-        complete with only ``commands_run`` evidence and no artifact on disk. The
-        verify-gate-active guard keeps those fields required (transcript-backed),
+        neither the filesystem oracle nor command exit status verifies the contract.
+        If the schema still dropped ``commands_run``/``tests_passed``/``files_touched``,
+        a contract AC could complete without transcript-backed evidence or an
+        artifact on disk. The verify-gate-active guard keeps those fields required,
         so the worker's self-reported evidence fails and the AC is not accepted.
         """
         command = "python -c \"print('OK')\""
@@ -4939,8 +4924,9 @@ class TestParallelACExecutor:
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        # files_touched/tests_passed remain required because the gate is off.
+        # files_touched, commands_run, and tests_passed remain required because the gate is off.
         assert "files_touched" in evidence_event.data["required_fields"]
+        assert "commands_run" in evidence_event.data["required_fields"]
         assert "tests_passed" in evidence_event.data["required_fields"]
         assert evidence_event.data["typed_evidence_valid"] is False
 
