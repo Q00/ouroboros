@@ -275,6 +275,7 @@ economics:
   escalation_threshold: 2       # Retry attempt escalation begins; then +1 tier per retry
   downgrade_success_streak: 5   # Consecutive successes before downgrading tier
   parked_retry_backoff_seconds: 300.0  # Backoff once an AC is parked for operator attention
+  lateral_escalation_enabled: false    # Opt-in: never give up on a maxed-out AC (default off)
   tiers:
     frugal:
       cost_factor: 1
@@ -323,7 +324,8 @@ economics:
 | `default_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frugal"` | The starting tier used when no task-specific override applies. |
 | `escalation_threshold` | `int >= 1` | `2` | The retry attempt at which tier escalation begins. From this attempt onward the tier climbs one notch per retry (progressive), capped at the frontier tier. Top-level and untrusted decomposed work start at the base tier. Only a decomposed child with explicit trust authorization starts one tier lower, so that trusted-child ladder may require one additional retry to reach the same frontier ceiling. Current live decomposition supplies no such trust authorization. |
 | `downgrade_success_streak` | `int >= 1` | `5` | Number of consecutive successes at the current tier before downgrading to the previous tier. |
-| `parked_retry_backoff_seconds` | `float >= 1.0` | `300.0` | Backoff between retries once a root AC has exhausted the lateral-persona escalation ladder (all 5 personas tried, still failing at maximum strength) and is "parked for operator" attention. Such an AC never surfaces a final FAILED status; it keeps retrying at this cadence instead of the ordinary retry interval. |
+| `parked_retry_backoff_seconds` | `float >= 1.0` | `300.0` | Backoff between retries once a root AC has exhausted the lateral-persona escalation ladder (all 5 personas tried, still failing at maximum strength) and is "parked for operator" attention. Such an AC never surfaces a final FAILED status; it keeps retrying at this cadence instead of the ordinary retry interval. Only takes effect when `lateral_escalation_enabled` is `true`. |
+| `lateral_escalation_enabled` | `bool` | `false` | Opt-in switch for the lateral-persona escalation ladder itself. When `false` (default), a root AC that exhausts its retry budget at maximum strength surfaces FAILED exactly as before. Enabling this is a significant behavior change — such an AC can now retry indefinitely — so it mirrors `shadow_replay`'s explicit-opt-in posture rather than being on by default. |
 | `tiers` | `dict[str, TierConfig]` | (see above) | Tier definitions keyed by name. |
 
 **`TierConfig` fields:**

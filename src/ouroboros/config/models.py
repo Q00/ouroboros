@@ -113,6 +113,15 @@ class EconomicsConfig(BaseModel, frozen=True):
             longer, clearly-bounded cadence instead of the ordinary retry
             interval, so it stays operator-visible without hammering the
             backend.
+        lateral_escalation_enabled: Opt-in switch for the lateral-persona
+            escalation ladder itself. Default OFF: a root AC that has
+            exhausted its retry budget at maximum strength normally surfaces
+            FAILED (today's behavior, unchanged) — enabling this trades that
+            for "never gives up", which is a significant behavior change
+            (an AC can now retry indefinitely at ``parked_retry_backoff_seconds``
+            cadence) that must be an explicit opt-in, not a default for
+            every run, mirroring ``shadow_replay``'s experiment-lever
+            posture.
     """
 
     default_tier: Literal["frugal", "standard", "frontier"] = "frugal"
@@ -120,6 +129,7 @@ class EconomicsConfig(BaseModel, frozen=True):
     escalation_threshold: int = Field(default=2, ge=1)
     downgrade_success_streak: int = Field(default=5, ge=1)
     parked_retry_backoff_seconds: float = Field(default=300.0, ge=1.0)
+    lateral_escalation_enabled: bool = False
 
 
 class LLMConfig(BaseModel, frozen=True):
