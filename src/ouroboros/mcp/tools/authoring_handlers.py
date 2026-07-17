@@ -3299,19 +3299,6 @@ class InterviewHandler:
                     )
                     pending_presentation = relayed_presentation
 
-            if (
-                parse_numeric_choice_answer(str(answer)) is not None
-                and pending_presentation is None
-            ):
-                return Result.err(
-                    MCPToolError(
-                        "Cannot record a numeric choice without its question presentation. "
-                        "Retry with the presentation JSON or exact rendered choices as "
-                        "'last_question'.",
-                        tool_name="ouroboros_interview",
-                    )
-                )
-
             intent_guard_report = _guard_interview_answer(
                 state=state,
                 question=pending_question,

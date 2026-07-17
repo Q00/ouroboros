@@ -353,6 +353,47 @@ async def test_in_process_answer_recovers_structured_last_question(
 
 
 @pytest.mark.asyncio
+async def test_in_process_numeric_answer_to_stored_plain_question_remains_valid(
+    tmp_path: Path,
+) -> None:
+    session_id = "interview_plain_numeric_answer"
+    question = "How many maintainers should the first release support?"
+    state = InterviewState(
+        interview_id=session_id,
+        initial_context="Build a maintainer dashboard",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=question,
+                user_response=None,
+            )
+        ],
+    )
+    engine = _FakeInterviewEngine(state_dir=tmp_path, states={session_id: state})
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=AsyncMock(),
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {
+            "session_id": session_id,
+            "answer": "2",
+        }
+    )
+    await handler.close()
+
+    assert outcome.is_err
+    assert "Question generation timed out" in str(outcome.error)
+    assert engine.recorded_presentations[-1] is None
+    assert engine.states[session_id].rounds[-1].question == question
+    assert engine.states[session_id].rounds[-1].user_response == "2"
+
+
+@pytest.mark.asyncio
 async def test_tool_envelope_failure_after_answer_hands_off_without_mcp_error(
     tmp_path: Path,
 ) -> None:
