@@ -64,12 +64,63 @@ DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
 MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS = 3500
-INITIAL_CONTEXT_SUMMARY_QUESTION = (
+LEGACY_INITIAL_CONTEXT_SUMMARY_QUESTION = (
     "Your saved initial context is too long to safely send to the interview "
     "model without risking CLI prompt failure. Please reply with a concise "
     "summary of the full context, including goals, constraints, and success "
     "criteria. I will use that summary for the next interview question."
 )
+_INITIAL_CONTEXT_SUMMARY_PRESENTATIONS = {
+    "en": InterviewQuestionPresentation(
+        decision_id="initial_context_summary",
+        target_dimension="context_clarity",
+        locale="en",
+        question="What concise summary should I use for this project context?",
+        context=("Include the main goal, must-keep limits, and observable success.",),
+        free_text_prompt="Write one concise summary in your own words.",
+    ),
+    "ko": InterviewQuestionPresentation(
+        decision_id="initial_context_summary",
+        target_dimension="context_clarity",
+        locale="ko",
+        question="이 프로젝트의 긴 초기 맥락을 대신할 간결한 요약은 무엇인가요?",
+        context=("핵심 목표, 반드시 지켜야 할 제한, 관찰 가능한 성공 기준을 포함하세요.",),
+        free_text_prompt="한 문단으로 간결하게 직접 작성하세요.",
+    ),
+    "zh": InterviewQuestionPresentation(
+        decision_id="initial_context_summary",
+        target_dimension="context_clarity",
+        locale="zh",
+        question="我应该用什么简短摘要来代替这段较长的项目背景？",
+        context=("请包含主要目标、必须遵守的限制和可观察的成功标准。",),
+        free_text_prompt="请直接写出一段简短答案。",
+    ),
+}
+INITIAL_CONTEXT_SUMMARY_PRESENTATION = _INITIAL_CONTEXT_SUMMARY_PRESENTATIONS["en"]
+INITIAL_CONTEXT_SUMMARY_QUESTION = render_question_presentation(
+    INITIAL_CONTEXT_SUMMARY_PRESENTATION
+)
+_INITIAL_CONTEXT_SUMMARY_QUESTIONS = frozenset(
+    render_question_presentation(presentation)
+    for presentation in _INITIAL_CONTEXT_SUMMARY_PRESENTATIONS.values()
+)
+
+
+def _initial_context_summary_presentation(initial_context: str) -> InterviewQuestionPresentation:
+    locale = infer_question_locale(initial_context)
+    return _INITIAL_CONTEXT_SUMMARY_PRESENTATIONS.get(
+        locale,
+        INITIAL_CONTEXT_SUMMARY_PRESENTATION,
+    )
+
+
+def is_initial_context_summary_question(question: str) -> bool:
+    """Recognize current and persisted legacy summary-recovery turns."""
+    return question in _INITIAL_CONTEXT_SUMMARY_QUESTIONS or (
+        question == LEGACY_INITIAL_CONTEXT_SUMMARY_QUESTION
+    )
+
+
 INITIAL_CONTEXT_SUMMARY_REQUIRED = (
     "[Initial context exceeds the prompt-safe size and no user summary has been "
     "recorded yet. Ask the user to provide a concise summary before scoring or "
@@ -343,7 +394,7 @@ class InterviewState(BaseModel):
         if len(self.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
             return False
         return not any(
-            round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION
+            is_initial_context_summary_question(round_data.question)
             and bool(round_data.user_response)
             for round_data in self.rounds
         )
@@ -480,7 +531,7 @@ class InterviewState(BaseModel):
         """Return one deterministic post-base-frame adapter question."""
         locale = infer_question_locale(self.initial_context)
         base_question_answered = any(
-            round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+            not is_initial_context_summary_question(round_data.question)
             and bool(round_data.user_response)
             for round_data in self.rounds
         )
@@ -621,7 +672,7 @@ def prompt_safe_initial_context(state: InterviewState) -> str:
     if len(state.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
         return state.initial_context
     for round_data in reversed(state.rounds):
-        if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
+        if is_initial_context_summary_question(round_data.question) and round_data.user_response:
             return _truncate_prompt_safe_context(round_data.user_response)
     return INITIAL_CONTEXT_SUMMARY_REQUIRED
 
@@ -930,7 +981,9 @@ class InterviewEngine:
         """
         state.pending_question_presentation = None
         if state.is_complete and state.needs_initial_context_summary:
-            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            presentation = _initial_context_summary_presentation(state.initial_context)
+            state.pending_question_presentation = presentation
+            return Result.ok(render_question_presentation(presentation))
 
         if state.is_complete:
             return Result.err(
@@ -942,7 +995,9 @@ class InterviewEngine:
             )
         effective_initial_context = self._effective_initial_context(state)
         if effective_initial_context is None:
-            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+            presentation = _initial_context_summary_presentation(state.initial_context)
+            state.pending_question_presentation = presentation
+            return Result.ok(render_question_presentation(presentation))
 
         adapter_question = state.next_adapter_question()
         if adapter_question is not None:
@@ -1656,7 +1711,7 @@ class InterviewEngine:
             sum(
                 1
                 for round_data in state.rounds
-                if round_data.question != self._INITIAL_CONTEXT_SUMMARY_QUESTION
+                if not is_initial_context_summary_question(round_data.question)
             )
             + 1
         )
@@ -1707,7 +1762,7 @@ class InterviewEngine:
             messages.append(Message(role=MessageRole.USER, content=user_content))
 
         for round_data in state.rounds:
-            if round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION:
+            if is_initial_context_summary_question(round_data.question):
                 continue
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
             if round_data.user_response:

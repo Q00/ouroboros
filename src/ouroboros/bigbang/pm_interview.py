@@ -30,11 +30,11 @@ from ouroboros.bigbang.brownfield import (
 )
 from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
 from ouroboros.bigbang.interview import (
-    INITIAL_CONTEXT_SUMMARY_QUESTION,
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
     initial_context_summary_missing,
+    is_initial_context_summary_question,
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
@@ -424,8 +424,13 @@ class PMInterviewEngine:
             response_length=len(user_response),
         )
 
+        opening_response = expand_selected_choice_answer(
+            _OPENING_PRESENTATION,
+            user_response.strip(),
+        )
+
         return await self.start_interview(
-            initial_context=user_response.strip(),
+            initial_context=opening_response,
             interview_id=interview_id,
             brownfield_repos=brownfield_repos,
         )
@@ -563,7 +568,7 @@ class PMInterviewEngine:
             return question_result
 
         question = question_result.value
-        if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+        if is_initial_context_summary_question(question):
             return Result.ok(question)
         source_presentation = state.pending_question_presentation
 
@@ -1048,7 +1053,7 @@ class PMInterviewEngine:
         answered_rounds = sum(
             1
             for r in state.rounds
-            if r.user_response is not None and r.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+            if r.user_response is not None and not is_initial_context_summary_question(r.question)
         )
 
         # ── Ambiguity check (only after minimum rounds) ────────────────
@@ -1142,7 +1147,8 @@ class PMInterviewEngine:
         substantive_rounds = [
             round_data
             for round_data in state.rounds
-            if round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response
+            if not is_initial_context_summary_question(round_data.question)
+            and round_data.user_response
         ]
         if not substantive_rounds:
             return Result.err(
@@ -1287,7 +1293,7 @@ class PMInterviewEngine:
         parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
         for round_data in state.rounds:
-            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+            if is_initial_context_summary_question(round_data.question):
                 continue
             presentation = round_data.question_presentation
             question = presentation.question if presentation is not None else round_data.question

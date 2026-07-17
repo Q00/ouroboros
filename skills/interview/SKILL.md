@@ -167,6 +167,17 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 2. **For each question from MCP, apply the routing paths below:**
 
+   **Plugin child presentation relay**:
+   If the MCP response has `status="delegated_to_subagent"` and
+   `dispatch_mode="plugin"`, wait for the plugin-managed child result. For
+   interview turns, the child returns one Answerable Turn JSON presentation.
+   Render its `question`, `context`, numbered `choices`, optional
+   `recommendation`, and `free_text_prompt` for the user without changing their
+   meaning. Keep the exact child JSON. When the user answers, pass that JSON as
+   `last_question` with `answer`; MCP will validate it, persist the canonical
+   rendered question, and retain generated-choice provenance. Plain-text
+   `last_question` remains a compatibility fallback.
+
    **Parent-session question handoff**:
    If an MCP response includes `meta.status="parent_question_required"` or
    `meta.ask_user_directly=true`, treat it as a normal interview continuation,
@@ -174,7 +185,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    not expose `reason_code`, and do not retry the MCP question generator. Ask
    exactly one answerable Socratic clarification turn yourself, following the
    Answerable Turn Contract above. Save the exact user-facing
-   question text. When the user answers, call:
+   question text. If the user answers with a choice number, expand the transported
+   answer to include the selected choice label and mark it as user-selected before
+   resuming. When the user answers, call:
    ```
    Tool: ouroboros_interview
    Arguments:

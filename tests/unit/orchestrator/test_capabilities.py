@@ -191,7 +191,12 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     ),
     "ouroboros_lineage_status": ("lineage_id",),
     "ouroboros_measure_drift": ("session_id", "current_output", "seed_content"),
-    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id"),
+    "ouroboros_pm_interview": (
+        "initial_context",
+        "cwd",
+        "session_id",
+        "last_question",
+    ),
     "ouroboros_qa": (
         "artifact",
         "quality_bar",

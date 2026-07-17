@@ -267,6 +267,20 @@ class TestOpeningQuestion:
         assert "Build a dashboard" in result.value.initial_context
 
     @pytest.mark.asyncio
+    async def test_ask_opening_and_start_expands_numeric_choice(self, tmp_path: Path) -> None:
+        """A numbered opening reply keeps the selected product meaning."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+
+        result = await engine.ask_opening_and_start(user_response="2")
+
+        assert result.is_ok
+        assert result.value.initial_context == (
+            "2 - A focused feature for an existing product. "
+            "[user selected; source=generated_hypothesis]"
+        )
+
+    @pytest.mark.asyncio
     async def test_ask_opening_and_start_empty_response_errors(self, tmp_path: Path) -> None:
         """ask_opening_and_start rejects empty responses."""
         engine = _make_engine(tmp_path=tmp_path)

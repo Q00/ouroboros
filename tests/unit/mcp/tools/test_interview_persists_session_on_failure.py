@@ -19,6 +19,11 @@ import pytest
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    render_question_presentation,
+)
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
@@ -49,6 +54,7 @@ class _FakeInterviewEngine:
     states: dict[str, InterviewState] = field(default_factory=dict)
     question_error: Any | None = None
     question_exception: Exception | None = None
+    recorded_presentations: list[InterviewQuestionPresentation | None] = field(default_factory=list)
 
     async def start_interview(
         self, initial_context: str, cwd: str | None = None, interview_id: str | None = None
@@ -89,6 +95,7 @@ class _FakeInterviewEngine:
         user_response: str,
         question: str,
     ) -> Result[InterviewState, MCPServerError]:
+        self.recorded_presentations.append(state.pending_question_presentation)
         state.rounds.append(
             InterviewRound(
                 round_number=state.current_round_number,
@@ -168,9 +175,23 @@ async def test_tool_envelope_question_failure_hands_off_to_parent_session(
     assert meta["reason_code"] == "question_generation_envelope_violation"
     assert meta["question_source"] == "parent_session"
     assert meta["provider_error_type"] == "ToolUseBlockViolation"
+    assert meta["question_contract"] == {
+        "contract_version": "answerable_interview_turn.v1",
+        "one_reply_objective": True,
+        "choice_count": {"minimum": 2, "maximum": 4, "optional": True},
+        "allow_free_text": True,
+        "generated_choice_provenance": "generated_hypothesis",
+        "numeric_answer_transport": (
+            "retain_raw_answer_and_expand_selected_label_in_requirement_context"
+        ),
+        "forbid_internal_process_terms": True,
+    }
 
     response_text = mcp_result.content[0].text
-    assert "Ask the user exactly one natural Socratic clarification question" in response_text
+    assert "Ask the user exactly one answerable clarification turn" in response_text
+    assert "two to four non-overlapping choices when helpful" in response_text
+    assert "always allow a direct answer" in response_text
+    assert "expand the answer with the selected choice label" in response_text
     assert "Do not mention MCP" in response_text
     assert "last_question=<the exact question you asked>" in response_text
     assert (tmp_path / f"interview_{session_id}.json").exists()
@@ -268,6 +289,67 @@ async def test_first_question_parent_handoff_resume_records_last_question(
     persisted_state = engine.states[session_id]
     assert persisted_state.rounds[-1].question == "What should the CLI do first?"
     assert persisted_state.rounds[-1].user_response == "It should scaffold plugin manifests."
+
+
+@pytest.mark.asyncio
+async def test_in_process_answer_recovers_structured_last_question(
+    tmp_path: Path,
+) -> None:
+    presentation = InterviewQuestionPresentation(
+        decision_id="first_outcome",
+        target_dimension="goal_clarity",
+        question="Which outcome should come first?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="small_workflow",
+                label="Ship a small workflow.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="full_workflow",
+                label="Cover the full workflow.",
+            ),
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
+    session_id = "interview_structured_relay"
+    state = InterviewState(
+        interview_id=session_id,
+        initial_context="Build a planning tool",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question="(stale parent placeholder)",
+                user_response=None,
+            )
+        ],
+    )
+    engine = _FakeInterviewEngine(state_dir=tmp_path, states={session_id: state})
+    handler = InterviewHandler(
+        interview_engine=engine,
+        event_store=AsyncMock(),
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=tmp_path,
+    )
+
+    outcome = await handler.handle(
+        {
+            "session_id": session_id,
+            "answer": "2",
+            "last_question": presentation.model_dump_json(),
+        }
+    )
+    await handler.close()
+
+    assert outcome.is_err
+    assert "Question generation timed out" in str(outcome.error)
+    assert engine.recorded_presentations[-1] == presentation
+    assert engine.states[session_id].rounds[-1].question == render_question_presentation(
+        presentation
+    )
+    assert engine.states[session_id].rounds[-1].user_response == "2"
 
 
 @pytest.mark.asyncio

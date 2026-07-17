@@ -21,9 +21,9 @@ import yaml
 
 from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD, AmbiguityScore
 from ouroboros.bigbang.interview import (
-    INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewState,
     initial_context_summary_missing,
+    is_initial_context_summary_question,
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.requirement_distillation import (
@@ -632,7 +632,7 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 parts.append(f"\nCodebase Paths: {rendered_paths}")
 
         for round_data in state.rounds:
-            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+            if is_initial_context_summary_question(round_data.question):
                 continue
             presentation = round_data.question_presentation
             question = presentation.question if presentation is not None else round_data.question

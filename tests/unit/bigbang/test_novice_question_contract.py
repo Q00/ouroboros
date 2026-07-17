@@ -18,10 +18,18 @@ from ouroboros.bigbang.ambiguity import (
     qualifies_for_seed_completion,
 )
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    LEGACY_INITIAL_CONTEXT_SUMMARY_QUESTION,
+    MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     NOVICE_FRIENDLY_QUESTION_CONTRACT,
     InterviewEngine,
+    InterviewRound,
     InterviewState,
+    InterviewStatus,
+    is_initial_context_summary_question,
+    prompt_safe_initial_context,
 )
+from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     QUESTION_PRESENTATION_CONTRACT_VERSION,
@@ -31,6 +39,7 @@ from ouroboros.interview_adapters import (
     QuestionChoiceProvenance,
     generated_question_contract_failures,
     parse_question_presentation,
+    recover_relayed_question_presentation,
     render_question_presentation,
     rendered_question_contract_failures,
     repair_question_presentation,
@@ -134,6 +143,67 @@ def test_non_english_presentation_is_validated_structurally() -> None:
     assert rendered_question_contract_failures(rendered) == ()
 
 
+def test_plugin_relay_recovers_rendered_choices() -> None:
+    presentation = _presentation().model_copy(
+        update={"context": ("Use the first release as the comparison point.",)}
+    )
+
+    recovered = recover_relayed_question_presentation(render_question_presentation(presentation))
+
+    assert recovered is not None
+    assert render_question_presentation(recovered) == render_question_presentation(presentation)
+    assert recovered.context == presentation.context
+    assert recovered.recommendation == presentation.recommendation
+    assert tuple(choice.label for choice in recovered.choices) == tuple(
+        choice.label for choice in presentation.choices
+    )
+    assert all(
+        choice.provenance is QuestionChoiceProvenance.GENERATED_HYPOTHESIS
+        for choice in recovered.choices
+    )
+
+
+def test_plugin_relay_does_not_trust_generated_user_goal_provenance() -> None:
+    unsafe = _presentation(
+        target_dimension="constraint_clarity",
+        provenance=QuestionChoiceProvenance.USER_GOAL,
+    )
+
+    recovered = recover_relayed_question_presentation(unsafe.model_dump_json())
+
+    assert recovered is not None
+    assert recovered.target_dimension == "constraint_clarity"
+    assert all(
+        choice.provenance is QuestionChoiceProvenance.GENERATED_HYPOTHESIS
+        for choice in recovered.choices
+    )
+
+
+@pytest.mark.parametrize(
+    ("context", "expected_failure"),
+    (
+        (
+            "Current ambiguity score: 0.42.",
+            "provider-generated context uses internal interview terminology",
+        ),
+        (
+            "What budget should we use?",
+            "only the question field may contain a reply objective",
+        ),
+    ),
+)
+def test_provider_context_cannot_bypass_the_answerable_turn_contract(
+    context: str,
+    expected_failure: str,
+) -> None:
+    presentation = _presentation().model_copy(update={"context": (context,)})
+
+    failures = generated_question_contract_failures(presentation)
+
+    assert expected_failure in failures
+    assert rendered_question_contract_failures(render_question_presentation(presentation))
+
+
 def test_repair_preserves_decision_without_inventing_false_choices() -> None:
     repaired = repair_question_presentation(
         "What should this do and how should success be measured?",
@@ -146,6 +216,20 @@ def test_repair_preserves_decision_without_inventing_false_choices() -> None:
     assert repaired.choices == ()
     assert repaired.recommendation is None
     assert render_question_presentation(repaired).endswith("Write your answer in your own words.")
+
+
+def test_repair_replaces_a_prompt_that_hides_the_direct_input_path() -> None:
+    unsafe = _presentation(provenance=QuestionChoiceProvenance.USER_GOAL).model_dump(mode="json")
+    unsafe["free_text_prompt"] = "Reply with 1, 2, or 3."
+
+    repaired = repair_question_presentation(
+        InterviewQuestionPresentation.model_validate(unsafe).model_dump_json(),
+        target_dimension="goal_clarity",
+        locale="en",
+    )
+
+    assert repaired is not None
+    assert repaired.free_text_prompt == "Reply with the number, or write your own answer."
 
 
 def test_hidden_multiple_questions_are_rejected() -> None:
@@ -365,6 +449,35 @@ async def test_runtime_repairs_generated_provenance_spoofing(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_removes_unsafe_generated_context_without_an_extra_call(tmp_path) -> None:
+    unsafe = _presentation(target_dimension="constraint_clarity").model_copy(
+        update={
+            "context": (
+                "Current ambiguity score: 0.42.",
+                "What budget should we use?",
+            )
+        }
+    )
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(return_value=Result.ok(_completion(unsafe.model_dump_json())))
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path)
+    state = InterviewState(
+        interview_id="unsafe_generated_context",
+        initial_context="Build a simple project planning app.",
+    )
+
+    result = await engine.ask_next_question(state)
+
+    assert result.is_ok
+    assert state.pending_question_presentation is not None
+    assert state.pending_question_presentation.target_dimension == "constraint_clarity"
+    assert state.pending_question_presentation.context == ()
+    assert "ambiguity" not in result.value.casefold()
+    assert "budget" not in result.value.casefold()
+    adapter.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_record_response_persists_the_exact_question_presentation(tmp_path) -> None:
     presentation = _presentation()
     adapter = MagicMock()
@@ -380,6 +493,167 @@ async def test_record_response_persists_the_exact_question_presentation(tmp_path
     assert result.is_ok
     assert state.rounds[-1].question_presentation == presentation
     assert state.pending_question_presentation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case_name", "initial_context", "question", "answer", "expected_answer"),
+    (
+        (
+            "vague product idea",
+            "I have a vague idea for a planning product.",
+            "Which first outcome should this product idea focus on?",
+            "2",
+            "2 - Outcome 2. [user selected; source=generated_hypothesis]",
+        ),
+        (
+            "maintainer performance report",
+            "Build a performance report for maintainers.",
+            "Which report result would help maintainers most?",
+            "Show regressions by subsystem and commit.",
+            "Show regressions by subsystem and commit.",
+        ),
+        (
+            "nontechnical onboarding",
+            "Improve onboarding for nontechnical users.",
+            "Which onboarding result should a new nontechnical user see first?",
+            "1",
+            "1 - Outcome 1. [user selected; source=generated_hypothesis]",
+        ),
+    ),
+)
+async def test_golden_transcript_survives_persistence_and_seed_context(
+    case_name: str,
+    initial_context: str,
+    question: str,
+    answer: str,
+    expected_answer: str,
+    tmp_path,
+) -> None:
+    presentation = _presentation(question=question)
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        return_value=Result.ok(_completion(presentation.model_dump_json()))
+    )
+    engine = InterviewEngine(llm_adapter=adapter, state_dir=tmp_path / case_name)
+    state = (await engine.start_interview(initial_context, interview_id=case_name)).value
+    rendered = (await engine.ask_next_question(state)).value
+
+    record_result = await engine.record_response(state, answer, rendered)
+    assert record_result.is_ok
+    save_result = await engine.save_state(state)
+    assert save_result.is_ok
+
+    restored = (await engine.load_state(case_name)).value
+    context = SeedGenerator(
+        llm_adapter=object(),
+        model="test-model",
+        output_dir=tmp_path / "seeds",
+    )._build_interview_context(restored)
+
+    assert restored.rounds[-1].question_presentation == presentation
+    assert f"Q: {question}" in context
+    assert f"A: {expected_answer}" in context
+
+
+@pytest.mark.asyncio
+async def test_length_guard_is_an_answerable_structured_turn(tmp_path) -> None:
+    engine = InterviewEngine(llm_adapter=object(), state_dir=tmp_path)
+    state = InterviewState(
+        interview_id="length_guard_contract",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+    )
+
+    result = await engine.ask_next_question(state)
+
+    assert result.is_ok
+    assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
+    assert state.pending_question_presentation is not None
+    assert result.value == render_question_presentation(state.pending_question_presentation)
+    assert rendered_question_contract_failures(result.value) == ()
+    assert "ambiguity" not in result.value.casefold()
+    assert "interview model" not in result.value.casefold()
+
+
+@pytest.mark.asyncio
+async def test_completed_length_guard_persists_the_structured_turn(tmp_path) -> None:
+    engine = InterviewEngine(llm_adapter=object(), state_dir=tmp_path)
+    state = InterviewState(
+        interview_id="completed_length_guard_contract",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        status=InterviewStatus.COMPLETED,
+    )
+
+    question_result = await engine.ask_next_question(state)
+    record_result = await engine.record_response(
+        state,
+        "Build a CLI with no new dependencies and a smoke test.",
+        question_result.value,
+    )
+
+    assert question_result.is_ok
+    assert record_result.is_ok
+    assert state.status is InterviewStatus.IN_PROGRESS
+    assert state.rounds[-1].question == INITIAL_CONTEXT_SUMMARY_QUESTION
+    assert state.rounds[-1].question_presentation is not None
+    assert state.pending_question_presentation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "initial_context", "expected_question"),
+    (
+        (
+            "ko",
+            "프로젝트 목표와 제약 조건을 정리합니다.",
+            "이 프로젝트의 긴 초기 맥락을 대신할 간결한 요약은 무엇인가요?",
+        ),
+        (
+            "zh",
+            "整理项目目标、限制和成功标准。",
+            "我应该用什么简短摘要来代替这段较长的项目背景？",
+        ),
+    ),
+)
+async def test_length_guard_follows_the_conversation_language(
+    locale: str,
+    initial_context: str,
+    expected_question: str,
+    tmp_path,
+) -> None:
+    engine = InterviewEngine(llm_adapter=object(), state_dir=tmp_path)
+    state = InterviewState(
+        interview_id=f"localized_length_guard_{locale}",
+        initial_context=initial_context * MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
+    )
+
+    result = await engine.ask_next_question(state)
+
+    assert result.is_ok
+    assert state.pending_question_presentation is not None
+    assert state.pending_question_presentation.locale == locale
+    assert result.value.startswith(expected_question)
+    assert is_initial_context_summary_question(result.value)
+    assert rendered_question_contract_failures(result.value) == ()
+
+
+def test_legacy_length_guard_summary_remains_loadable() -> None:
+    state = InterviewState(
+        interview_id="legacy_length_guard",
+        initial_context="x" * (MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS + 1),
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=LEGACY_INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Build a CLI with no new dependencies and a smoke test.",
+            )
+        ],
+    )
+
+    assert state.needs_initial_context_summary is False
+    assert prompt_safe_initial_context(state) == (
+        "Build a CLI with no new dependencies and a smoke test."
+    )
 
 
 def test_existing_seed_readiness_semantics_remain_unchanged() -> None:

@@ -14,7 +14,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    render_question_presentation,
+)
 from ouroboros.persistence.event_store import EventStore
 
 # ---------------------------------------------------------------------------
@@ -47,6 +54,27 @@ def _make_capturing_save(
         return Result.ok(state_dir / f"interview_{state.interview_id}.json")
 
     return _save
+
+
+def _plugin_choice_presentation() -> InterviewQuestionPresentation:
+    return InterviewQuestionPresentation(
+        decision_id="first_outcome",
+        target_dimension="goal_clarity",
+        question="Which first outcome should this product deliver?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="task_list",
+                label="A focused task list.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="prototype",
+                label="A clickable prototype.",
+            ),
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -751,6 +779,46 @@ class TestInterviewLastQuestionRoundtrip:
         assert state.rounds[0].question == "(continued from subagent)"
         assert state.rounds[0].user_response == "Python please"
 
+    async def test_numeric_answer_without_last_question_fails_closed(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "ses_lq_missing_numeric",
+                "answer": "2",
+            }
+        )
+
+        assert result.is_err
+        assert "numeric choice" in str(result.error)
+        assert "last_question" in str(result.error)
+        assert self.saved_states == []
+
+    async def test_structured_last_question_preserves_selected_choice_for_seed(
+        self,
+        handler,
+        tmp_path: Path,
+    ) -> None:
+        presentation = _plugin_choice_presentation()
+
+        result = await handler.handle(
+            {
+                "session_id": "ses_lq_structured",
+                "answer": "2",
+                "last_question": presentation.model_dump_json(),
+            }
+        )
+
+        assert result.is_ok
+        state = self.saved_states[0]
+        assert state.rounds[0].question == render_question_presentation(presentation)
+        assert state.rounds[0].question_presentation == presentation
+        context = SeedGenerator(
+            llm_adapter=object(),
+            model="test-model",
+            output_dir=tmp_path,
+        )._build_interview_context(state)
+        assert "A: 2 - A clickable prototype. " in context
+        assert "[user selected; source=generated_hypothesis]" in context
+
     async def test_last_question_updates_existing_round(self, monkeypatch, handler) -> None:
         """When round exists with question but no answer, last_question updates it."""
 
@@ -802,6 +870,7 @@ class TestInterviewLastQuestionRoundtrip:
         data = json.loads(result.value.content[0].text)
         # response_shape keys are merged at top level of body (see build_subagent_result)
         assert "last_question" in data.get("next_turn_hint", "")
+        assert "presentation JSON" in data["next_turn_hint"]
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +959,47 @@ class TestPMInterviewLastQuestionRoundtrip:
         assert state.rounds[0].question == "(continued from subagent)"
         assert state.rounds[0].user_response == "B2B SaaS"
 
+    async def test_numeric_answer_without_last_question_fails_closed(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "ses_pm_lq_missing_numeric",
+                "answer": "2",
+            }
+        )
+
+        assert result.is_err
+        assert "numeric choice" in str(result.error)
+        assert "last_question" in str(result.error)
+        assert self.saved_states == []
+
+    async def test_structured_last_question_preserves_selected_choice_for_pm_seed_context(
+        self,
+        handler,
+    ) -> None:
+        presentation = _plugin_choice_presentation()
+
+        result = await handler.handle(
+            {
+                "session_id": "ses_pm_lq_structured",
+                "answer": "2",
+                "last_question": presentation.model_dump_json(),
+            }
+        )
+
+        assert result.is_ok
+        state = self.saved_states[0]
+        assert state.rounds[0].question == render_question_presentation(presentation)
+        assert state.rounds[0].question_presentation == presentation
+        pm_engine = PMInterviewEngine(
+            inner=MagicMock(),
+            classifier=MagicMock(),
+            llm_adapter=MagicMock(),
+            model="test-model",
+        )
+        context = pm_engine._build_interview_context(state)
+        assert "A: 2 - A clickable prototype. " in context
+        assert "[user selected; source=generated_hypothesis]" in context
+
     async def test_last_question_updates_existing_round(self, monkeypatch, handler) -> None:
         """Existing unanswered round + last_question → question text updated."""
 
@@ -939,3 +1049,4 @@ class TestPMInterviewLastQuestionRoundtrip:
         data = json.loads(result.value.content[0].text)
         # response_shape keys are merged at top level (see build_subagent_result)
         assert "last_question" in data.get("next_turn_hint", "")
+        assert "presentation JSON" in data["next_turn_hint"]

@@ -34,12 +34,12 @@ from ouroboros.bigbang.ambiguity import (
     qualifies_for_seed_completion,
 )
 from ouroboros.bigbang.interview import (
-    INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
     InterviewStatus,
+    is_initial_context_summary_question,
 )
 from ouroboros.bigbang.requirement_distillation import (
     build_promoted_reference_seed,
@@ -55,6 +55,10 @@ from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
     detect_explicit_confusion_terms,
+    parse_numeric_choice_answer,
+    question_presentation_contract_metadata,
+    recover_relayed_question_presentation,
+    render_question_presentation,
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
@@ -619,16 +623,9 @@ def _compute_transcript_chars(state: InterviewState) -> int:
 
 
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
-    """Attach the current ambiguity score to a question for display.
-
-    The text format uses ``(ambiguity: <score>)`` without the milestone
-    label to preserve backward compatibility with downstream consumers
-    that parse the score via regex.  Milestone data is available in the
-    structured ``meta.milestone`` field of the MCP response.
-    """
-    if score is None:
-        return question
-    return f"(ambiguity: {score.overall_score:.2f}) {question}"
+    """Keep internal scoring in structured metadata, not novice-facing text."""
+    del score
+    return question
 
 
 def _build_code_investigation_request(
@@ -826,7 +823,7 @@ def _is_initial_context_length_guard_question(question: str) -> bool:
     re-send a shorter summary — so MCP responses carrying it must carry a
     distinguishing meta signal.  See Q00/ouroboros#831.
     """
-    return question == INITIAL_CONTEXT_SUMMARY_QUESTION
+    return is_initial_context_summary_question(question)
 
 
 def _length_guard_meta_fields() -> dict[str, Any]:
@@ -1877,10 +1874,14 @@ class InterviewHandler:
                         type=ContentType.TEXT,
                         text=(
                             f"Session {session_id}\n\n"
-                            "Ask the user exactly one natural Socratic clarification "
-                            "question yourself. Do not mention MCP, provider failures, "
-                            "tool envelopes, retries, or internal recovery. When the "
-                            "user answers, call ouroboros_interview with "
+                            "Ask the user exactly one answerable clarification turn "
+                            "yourself: one plain-language decision, two to four "
+                            "non-overlapping choices when helpful, and always allow a "
+                            "direct answer. Do not mention MCP, provider failures, tool "
+                            "envelopes, retries, internal recovery, ambiguity scores, or "
+                            "ontology. If the user selects by number, expand the answer with "
+                            "the selected choice label and mark it as user-selected. Then call "
+                            "ouroboros_interview with "
                             f'session_id="{session_id}", answer=<user answer>, and '
                             "last_question=<the exact question you asked>."
                         ),
@@ -1896,6 +1897,7 @@ class InterviewHandler:
                     "last_question_required": True,
                     "reason_code": _QUESTION_GENERATION_ENVELOPE_REASON_CODE,
                     "question_source": "parent_session",
+                    "question_contract": question_presentation_contract_metadata(),
                     "provider_error_type": provider_error_type,
                     "ambiguity_score": score.overall_score if score is not None else None,
                     "milestone": _milestone_for_score(score),
@@ -2015,10 +2017,6 @@ class InterviewHandler:
             )
         )
 
-        score_line = ""
-        if score is not None:
-            score_line = f"(ambiguity: {score.overall_score:.2f}) Ready for Seed generation.\n"
-
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -2026,7 +2024,7 @@ class InterviewHandler:
                         type=ContentType.TEXT,
                         text=(
                             f"Interview completed. Session ID: {session_id}\n\n"
-                            f"{score_line}"
+                            "Ready for Seed generation.\n"
                             f'Generate a Seed with: session_id="{session_id}"'
                         ),
                     ),
@@ -2101,12 +2099,13 @@ class InterviewHandler:
                     name="last_question",
                     type=ToolInputType.STRING,
                     description=(
-                        "The question text from the previous child session's response. "
+                        "The rendered question text or structured presentation JSON from "
+                        "the previous child session's response. "
                         "In plugin mode each dispatch creates a new child session whose "
                         "questions are not automatically persisted server-side. Pass the "
-                        "child's last question here when submitting an answer so the "
-                        "interview transcript preserves the real question text instead "
-                        "of a placeholder."
+                        "child's presentation here when submitting an answer so the "
+                        "interview transcript preserves the real question and generated-choice "
+                        "provenance instead of a placeholder."
                     ),
                     required=False,
                 ),
@@ -2356,6 +2355,25 @@ class InterviewHandler:
             state = load_result.value
             plugin_state = state
             plugin_state_changed = state.merge_turn_context(turn_context)
+            relayed_presentation = (
+                recover_relayed_question_presentation(
+                    last_question,
+                    expected_presentation=state.pending_question_presentation,
+                )
+                if isinstance(last_question, str) and last_question.strip()
+                else None
+            )
+            if (
+                relayed_presentation is None
+                and not last_question
+                and state.pending_question_presentation is not None
+            ):
+                relayed_presentation = state.pending_question_presentation
+            relayed_question = (
+                render_question_presentation(relayed_presentation)
+                if relayed_presentation is not None
+                else last_question
+            )
             # Record answer into persisted state.
             # In plugin mode each dispatch = new child session. The child
             # generates questions but can't write back to server-side state.
@@ -2366,12 +2384,30 @@ class InterviewHandler:
             # question) and passes it back here so we can persist the real
             # question text instead of a placeholder.
             if answer:
+                existing_presentation = (
+                    state.rounds[-1].question_presentation
+                    if state.rounds and state.rounds[-1].user_response is None
+                    else None
+                )
+                if (
+                    parse_numeric_choice_answer(str(answer)) is not None
+                    and relayed_presentation is None
+                    and existing_presentation is None
+                ):
+                    return Result.err(
+                        MCPToolError(
+                            "Cannot record a numeric choice without its question presentation. "
+                            "Retry with the child presentation JSON or exact rendered choices "
+                            "as 'last_question'.",
+                            tool_name="ouroboros_interview",
+                        )
+                    )
                 if state.is_complete:
                     state.status = InterviewStatus.IN_PROGRESS
                     state.clear_stored_ambiguity()
                     state.completion_candidate_streak = 0
                 if state.rounds and state.rounds[-1].user_response is None:
-                    question_text = last_question or state.rounds[-1].question
+                    question_text = relayed_question or state.rounds[-1].question
                     plugin_intent_guard_report = _guard_interview_answer(
                         state=state,
                         question=question_text,
@@ -2388,8 +2424,9 @@ class InterviewHandler:
                     # If last_question was provided, update the question text
                     # in case the existing one is a stale placeholder from a
                     # previous partial persistence.
-                    if last_question:
-                        state.rounds[-1].question = last_question
+                    if relayed_question:
+                        state.rounds[-1].question = relayed_question
+                        state.rounds[-1].question_presentation = relayed_presentation
                     state.rounds[-1].user_response = answer
                     state.record_adapter_answer(question_text, answer)
                 else:
@@ -2399,7 +2436,9 @@ class InterviewHandler:
                     # (callers that don't supply last_question yet).
                     from ouroboros.bigbang.interview import InterviewRound
 
-                    question_text = last_question if last_question else "(continued from subagent)"
+                    question_text = (
+                        relayed_question if relayed_question else "(continued from subagent)"
+                    )
                     plugin_intent_guard_report = _guard_interview_answer(
                         state=state,
                         question=question_text,
@@ -2416,6 +2455,7 @@ class InterviewHandler:
                         InterviewRound(
                             round_number=len(state.rounds) + 1,
                             question=question_text,
+                            question_presentation=relayed_presentation,
                             user_response=answer,
                         )
                     )
@@ -2423,6 +2463,7 @@ class InterviewHandler:
                 detected_terms = detect_explicit_confusion_terms(answer)
                 if detected_terms:
                     state.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
+                state.pending_question_presentation = None
                 state.invalidate_requirement_distillation()
                 plugin_state_changed = True
             # Build transcript from persisted rounds
@@ -2465,9 +2506,10 @@ class InterviewHandler:
                     next_action="wait for OpenCode child interview response",
                 ),
                 "next_turn_hint": (
-                    "When the user answers, pass the child session's "
-                    "question text as 'last_question' alongside 'answer' "
-                    "to preserve interview transcript fidelity."
+                    "Render the child question presentation for the user. When the user "
+                    "answers, pass the child presentation JSON (preferred) or exact rendered "
+                    "question as 'last_question' alongside 'answer' so selected-choice meaning "
+                    "and transcript fidelity are preserved."
                 ),
                 **(
                     {"intent_guard": plugin_intent_guard_report.to_dict()}
@@ -3168,8 +3210,17 @@ class InterviewHandler:
                     is_brownfield=state.is_brownfield,
                 )
 
+            pending_presentation = None
             if not state.rounds and last_question:
-                pending_question = last_question
+                pending_presentation = recover_relayed_question_presentation(
+                    last_question,
+                    expected_presentation=state.pending_question_presentation,
+                )
+                pending_question = (
+                    render_question_presentation(pending_presentation)
+                    if pending_presentation is not None
+                    else last_question
+                )
             elif not state.rounds:
                 return Result.err(
                     MCPToolError(
@@ -3206,16 +3257,26 @@ class InterviewHandler:
                 else "initial"
             )
 
-            pending_presentation = None
-            if not state.rounds:
-                pass
-            elif state.rounds[-1].user_response is None:
-                pending_question = last_question or state.rounds[-1].question
-                pending_presentation = state.rounds[-1].question_presentation
-                if last_question and last_question != state.rounds[-1].question:
-                    pending_presentation = None
+            if state.rounds and state.rounds[-1].user_response is None:
+                stored_presentation = state.rounds[-1].question_presentation
+                pending_question = state.rounds[-1].question
+                pending_presentation = stored_presentation
+                if last_question:
+                    relayed_presentation = recover_relayed_question_presentation(
+                        last_question,
+                        expected_presentation=(
+                            stored_presentation or state.pending_question_presentation
+                        ),
+                    )
+                    if relayed_presentation is not None:
+                        pending_question = render_question_presentation(relayed_presentation)
+                        pending_presentation = relayed_presentation
+                    else:
+                        pending_question = last_question
+                        if last_question != state.rounds[-1].question:
+                            pending_presentation = None
             else:
-                if not last_question:
+                if state.rounds and not last_question:
                     return Result.err(
                         MCPToolError(
                             "Cannot record answer - the previous round is "
@@ -3226,7 +3287,30 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-                pending_question = last_question
+                if state.rounds:
+                    relayed_presentation = recover_relayed_question_presentation(
+                        last_question,
+                        expected_presentation=state.pending_question_presentation,
+                    )
+                    pending_question = (
+                        render_question_presentation(relayed_presentation)
+                        if relayed_presentation is not None
+                        else last_question
+                    )
+                    pending_presentation = relayed_presentation
+
+            if (
+                parse_numeric_choice_answer(str(answer)) is not None
+                and pending_presentation is None
+            ):
+                return Result.err(
+                    MCPToolError(
+                        "Cannot record a numeric choice without its question presentation. "
+                        "Retry with the presentation JSON or exact rendered choices as "
+                        "'last_question'.",
+                        tool_name="ouroboros_interview",
+                    )
+                )
 
             intent_guard_report = _guard_interview_answer(
                 state=state,

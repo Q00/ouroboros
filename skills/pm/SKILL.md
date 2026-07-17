@@ -59,6 +59,17 @@ Arguments:
 
 After every MCP response, do these three things:
 
+**Plugin child relay**: If the response has
+`status="delegated_to_subagent"` and `dispatch_mode="plugin"`, wait for the
+plugin-managed child result instead of showing the dispatch receipt as the PM
+question. For `start`, `resume`, and `answer`, the child returns one Answerable
+Turn JSON presentation. Render its question, context, numbered choices,
+optional recommendation, and direct-input prompt without changing their
+meaning. Keep the exact child JSON and include it as `last_question` with the
+user's next `answer`; MCP validates and persists the structured presentation so
+a numeric choice keeps its selected meaning. For `generate`, consume the child
+result as Seed YAML rather than as a question presentation.
+
 **A. Show alerts** (if present in `meta`):
 - `meta.deferred_this_round` → print `[DEV → deferred] "question"`
 - `meta.decide_later_this_round` → print `[DEV → decide-later] "question"`
@@ -100,6 +111,7 @@ Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
   <meta.response_param>: <user's answer or "[decide_later]" or "[deferred]">
+  last_question: <exact plugin child JSON presentation, when plugin-dispatched>
 ```
 
 **D. Check completion:**

@@ -6,7 +6,10 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from ouroboros.bigbang.interview import INITIAL_CONTEXT_SUMMARY_QUESTION, InterviewState
+from ouroboros.bigbang.interview import (
+    InterviewState,
+    is_initial_context_summary_question,
+)
 from ouroboros.core.requirement_candidate import (
     CandidateContentSource,
     CandidateResolution,
@@ -31,6 +34,7 @@ from ouroboros.core.seed import (
 from ouroboros.interview_adapters import (
     ReferenceResolutionStatus,
     candidates_from_contrast_answer,
+    expand_selected_choice_answer,
 )
 
 _EXPLICIT_REQUIREMENT_RE = re.compile(
@@ -124,8 +128,13 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
 
     for round_data in state.rounds:
         answer = (round_data.user_response or "").strip()
-        if not answer or round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+        if not answer or is_initial_context_summary_question(round_data.question):
             continue
+        if round_data.question_presentation is not None:
+            answer = expand_selected_choice_answer(
+                round_data.question_presentation,
+                answer,
+            )
         reference_cue = reference_by_question.get(round_data.question)
         if reference_cue is not None:
             if reference_cue.reference_id in resolved_reference_ids:

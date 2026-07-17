@@ -702,11 +702,35 @@ class TestBuildInterviewSubagent:
         )
 
         assert "## Question-first Advisory Fanout" in p.prompt
-        assert "1. Show the interview question first." in p.prompt
+        assert "presentation's `question` field" in p.prompt
+        assert "in the `context` array" in p.prompt
         assert "code_context" in p.prompt
         assert "ambiguity_contrarian" in p.prompt
         assert "answer_simplifier" in p.prompt
         assert p.context["question_advisory_strategy"] == "plugin_child_question_first_advisory"
+        assert p.context["question_presentation_contract"]["contract_version"] == (
+            "answerable_interview_turn.v1"
+        )
+        assert p.context["question_presentation_contract"]["allow_free_text"] is True
+
+    def test_plugin_interview_prompt_uses_only_compact_interviewer_sections(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="start",
+            initial_context="Build a planning assistant",
+        )
+
+        for section in (
+            "## CRITICAL ROLE BOUNDARIES",
+            "## CONTEXT BOUNDARIES",
+            "## RESPONSE FORMAT",
+            "## QUESTIONING STRATEGY",
+        ):
+            assert section in p.prompt
+        assert "Treat `[from-code]`/`[from-research]` as facts" in p.prompt
+        assert "Keep all deliverables and ambiguity tracks active" in p.prompt
+        assert "ask one final closure question" in p.prompt
+        assert len(p.prompt) < 5_000
 
 
 class TestBuildInterviewQuestionAdvisorySubagents:
@@ -1009,6 +1033,8 @@ class TestBuildPmInterviewSubagent:
             action="generate",
         )
         assert "generate" in p.prompt.lower() or "seed" in p.prompt.lower()
+        assert "question-presentation JSON" in p.prompt
+        assert "Return exactly one JSON presentation object" not in p.prompt
 
     def test_context_preserves_all_fields(self) -> None:
         p = build_pm_interview_subagent(
@@ -1021,6 +1047,22 @@ class TestBuildPmInterviewSubagent:
         assert p.context["session_id"] == "sess-123"
         assert p.context["action"] == "start"
         assert p.context["selected_repos"] == ["/repo1", "/repo2"]
+        assert p.context["question_presentation_contract"]["contract_version"] == (
+            "answerable_interview_turn.v1"
+        )
+
+    def test_question_actions_use_compact_presentation_prompt(self) -> None:
+        p = build_pm_interview_subagent(
+            session_id="sess-123",
+            action="start",
+            initial_context="site",
+        )
+
+        assert "## RESPONSE FORMAT" in p.prompt
+        assert "Respond ONLY with one JSON object" in p.prompt
+        assert "Treat `[from-code]`/`[from-research]` as facts" in p.prompt
+        assert "ask one final closure question" in p.prompt
+        assert len(p.prompt) < 4_000
 
 
 # ---------------------------------------------------------------------------

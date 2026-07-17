@@ -834,10 +834,10 @@ async def test_resume_without_pending_question_reports_generation_timing(
 
 
 @pytest.mark.asyncio
-async def test_resume_pending_ambiguity_prefix_reflects_full_response_text(
+async def test_resume_pending_keeps_ambiguity_only_in_structured_metadata(
     tmp_path: Path,
 ) -> None:
-    """The diagnostic flag is about the emitted body, not the embedded question."""
+    """Internal scoring stays out of the novice-facing response body."""
     pending_state = InterviewState(
         interview_id="interview_resume00000002",
         initial_context="ctx",
@@ -866,7 +866,8 @@ async def test_resume_pending_ambiguity_prefix_reflects_full_response_text(
     assert outcome.is_ok
     response_text = outcome.value.content[0].text
     assert response_text.startswith("Session ")
-    assert "(ambiguity: 0.42)" in response_text
+    assert "ambiguity" not in response_text.casefold()
+    assert outcome.value.meta["ambiguity_score"] == 0.42
     await _drain_bg_tasks(handler)
 
     diagnostic = _find_event(event_store.events, event_type="interview.response.emitted")

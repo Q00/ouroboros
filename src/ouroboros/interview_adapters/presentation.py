@@ -64,6 +64,10 @@ QUESTION_PRESENTATION_PROMPT = (
 
 _DECISION_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,127}$")
 _CHOICE_LINE_PATTERN = re.compile(r"^\s*([1-4])[\).:]\s+(.+?)\s*$")
+_RECOMMENDATION_LINE_PATTERN = re.compile(
+    r"^\s*(?P<label>[^:：]{1,80})[:：]\s*(?P<choice_id>[1-4])\s*[,，]\s*"
+    r"(?P<reason>.+?)\s*$"
+)
 _PRIMARY_DECISION_SPLIT_PATTERN = re.compile(
     r"\s+(?:and|,\s*)\s*(?=(?:what|which|who|when|where|why|how|should|"
     r"do\s+you|does\s+this|is\s+this|are\s+these|would\s+you|can\s+you|"
@@ -249,16 +253,50 @@ class InterviewQuestionPresentation(_StrictFrozenModel):
         return self
 
 
+def question_presentation_contract_metadata() -> dict[str, Any]:
+    """Return the machine-readable contract used by host-managed fallbacks."""
+    return {
+        "contract_version": QUESTION_PRESENTATION_CONTRACT_VERSION,
+        "one_reply_objective": True,
+        "choice_count": {"minimum": 2, "maximum": 4, "optional": True},
+        "allow_free_text": True,
+        "generated_choice_provenance": QuestionChoiceProvenance.GENERATED_HYPOTHESIS.value,
+        "numeric_answer_transport": (
+            "retain_raw_answer_and_expand_selected_label_in_requirement_context"
+        ),
+        "forbid_internal_process_terms": True,
+    }
+
+
 def generated_question_contract_failures(
     presentation: InterviewQuestionPresentation,
 ) -> tuple[str, ...]:
     """Return provider-output failures that are not intrinsic model errors."""
+    failures: list[str] = []
     if any(
         choice.provenance is not QuestionChoiceProvenance.GENERATED_HYPOTHESIS
         for choice in presentation.choices
     ):
-        return ("provider-generated choices must remain generated hypotheses",)
-    return ()
+        failures.append("provider-generated choices must remain generated hypotheses")
+
+    supporting_text = (
+        *presentation.context,
+        *(choice.label for choice in presentation.choices),
+        *(
+            (presentation.recommendation.label, presentation.recommendation.reason)
+            if presentation.recommendation is not None
+            else ()
+        ),
+        presentation.free_text_prompt,
+    )
+    if any(_ends_with_question_mark(value) for value in supporting_text):
+        failures.append("only the question field may contain a reply objective")
+
+    context_text = "\n".join(presentation.context).casefold()
+    if any(_contains_phrase(context_text, term) for term in _INTERNAL_INTERVIEW_TERMS):
+        failures.append("provider-generated context uses internal interview terminology")
+
+    return tuple(failures)
 
 
 def expand_selected_choice_answer(
@@ -267,14 +305,10 @@ def expand_selected_choice_answer(
 ) -> str:
     """Expand a numeric reply only after the user selected a presented choice."""
     normalized_answer = answer.strip()
-    numeric_answer = normalized_answer
-    if numeric_answer.casefold().startswith("pm answer:"):
-        numeric_answer = numeric_answer.split(":", 1)[1].strip()
-    numeric_answer = numeric_answer.rstrip(".)")
-    if not numeric_answer.isdigit():
+    selected_id = parse_numeric_choice_answer(normalized_answer)
+    if selected_id is None:
         return answer
 
-    selected_id = int(numeric_answer)
     selected = next(
         (choice for choice in presentation.choices if choice.choice_id == selected_id),
         None,
@@ -285,6 +319,18 @@ def expand_selected_choice_answer(
         f"{normalized_answer} - {selected.label} "
         f"[user selected; source={selected.provenance.value}]"
     )
+
+
+def parse_numeric_choice_answer(answer: str) -> int | None:
+    """Return a bounded choice id when an answer is only a numeric selection."""
+    numeric_answer = answer.strip()
+    if numeric_answer.casefold().startswith("pm answer:"):
+        numeric_answer = numeric_answer.split(":", 1)[1].strip()
+    numeric_answer = numeric_answer.rstrip(".)")
+    if not numeric_answer.isdigit():
+        return None
+    selected_id = int(numeric_answer)
+    return selected_id if 1 <= selected_id <= 4 else None
 
 
 def repair_question_presentation(
@@ -301,12 +347,16 @@ def repair_question_presentation(
     raw_question = ""
     raw_choices: list[str] = []
     context: tuple[str, ...] = ()
+    recommendation_parts: tuple[int, str, str] | None = None
+    free_text_prompt = ""
     if isinstance(payload, dict):
         raw_question = str(payload.get("question") or "").strip()
         raw_context = payload.get("context")
         if isinstance(raw_context, list):
             context = tuple(
-                str(item).strip()[:2000] for item in raw_context[:4] if str(item).strip()
+                value
+                for item in raw_context[:4]
+                if (value := str(item).strip()[:2000]) and _is_safe_generated_context_line(value)
             )
         choices = payload.get("choices")
         if isinstance(choices, list):
@@ -316,6 +366,21 @@ def repair_question_presentation(
                 label = str(choice.get("label") or "").strip()
                 if label:
                     raw_choices.append(label[:500])
+        raw_recommendation = payload.get("recommendation")
+        if isinstance(raw_recommendation, dict):
+            try:
+                recommendation_choice_id = int(raw_recommendation.get("choice_id"))
+            except (TypeError, ValueError):
+                recommendation_choice_id = 0
+            recommendation_label = str(raw_recommendation.get("label") or "").strip()
+            recommendation_reason = str(raw_recommendation.get("reason") or "").strip()
+            if recommendation_label and recommendation_reason:
+                recommendation_parts = (
+                    recommendation_choice_id,
+                    recommendation_label[:80],
+                    recommendation_reason[:500],
+                )
+        free_text_prompt = str(payload.get("free_text_prompt") or "").strip()
     else:
         lines = tuple(line.strip() for line in text.splitlines() if line.strip())
         raw_question = next(
@@ -333,6 +398,27 @@ def repair_question_presentation(
             for line in lines
             if (match := _CHOICE_LINE_PATTERN.fullmatch(line)) is not None
         ][:4]
+        free_text_prompt = lines[-1] if lines and _looks_like_answer_instruction(lines[-1]) else ""
+        recommendation_line = lines[-2] if free_text_prompt and len(lines) >= 2 else ""
+        recommendation_match = _RECOMMENDATION_LINE_PATTERN.fullmatch(recommendation_line)
+        if recommendation_match is not None:
+            recommendation_parts = (
+                int(recommendation_match.group("choice_id")),
+                recommendation_match.group("label").strip(),
+                _trim_terminal_punctuation(recommendation_match.group("reason")),
+            )
+        excluded_lines = {
+            raw_question,
+            free_text_prompt,
+            recommendation_line if recommendation_match is not None else "",
+        }
+        context = tuple(
+            line[:2000]
+            for line in lines[1:]
+            if line not in excluded_lines
+            and _CHOICE_LINE_PATTERN.fullmatch(line) is None
+            and _is_safe_generated_context_line(line)
+        )[:4]
 
     question = _repair_primary_question(raw_question)
     if question is None:
@@ -353,6 +439,15 @@ def repair_question_presentation(
         target_dimension if target_dimension in QUESTION_TARGET_DIMENSIONS else "goal_clarity"
     )
     normalized_locale = _normalize_supported_locale(locale)
+    recommendation = None
+    if recommendation_parts is not None:
+        choice_id, label, reason = recommendation_parts
+        if 1 <= choice_id <= len(distinct_choices):
+            recommendation = InterviewQuestionRecommendation(
+                choice_id=choice_id,
+                label=label,
+                reason=reason,
+            )
     try:
         return InterviewQuestionPresentation(
             decision_id=f"repaired_{normalized_dimension}",
@@ -368,7 +463,14 @@ def repair_question_presentation(
                 )
                 for index, label in enumerate(distinct_choices, start=1)
             ),
-            free_text_prompt=_free_text_prompt(normalized_locale, bool(distinct_choices)),
+            recommendation=recommendation,
+            free_text_prompt=(
+                free_text_prompt[:500]
+                if free_text_prompt
+                and _looks_like_answer_instruction(free_text_prompt)
+                and not _ends_with_question_mark(free_text_prompt)
+                else _free_text_prompt(normalized_locale, bool(distinct_choices))
+            ),
         )
     except ValidationError:
         return None
@@ -410,7 +512,7 @@ def rendered_question_contract_failures(text: str) -> tuple[str, ...]:
     if not _looks_like_answer_instruction(lines[-1]):
         failures.append("must explicitly preserve a direct-input answer path")
 
-    authored_text = "\n".join(authored_lines).casefold()
+    authored_text = "\n".join(lines).casefold()
     if any(_contains_phrase(authored_text, term) for term in _INTERNAL_INTERVIEW_TERMS):
         failures.append("uses internal interview terminology")
 
@@ -429,6 +531,39 @@ def parse_question_presentation(text: str) -> InterviewQuestionPresentation | No
         return InterviewQuestionPresentation.model_validate(payload)
     except ValidationError:
         return None
+
+
+def recover_relayed_question_presentation(
+    text: str,
+    *,
+    target_dimension: str = "goal_clarity",
+    expected_presentation: InterviewQuestionPresentation | None = None,
+) -> InterviewQuestionPresentation | None:
+    """Recover a plugin-relayed question without trusting generated provenance."""
+    presentation = parse_question_presentation(text)
+    if expected_presentation is not None and (
+        presentation == expected_presentation
+        or (
+            presentation is not None
+            and render_question_presentation(presentation)
+            == render_question_presentation(expected_presentation)
+        )
+        or text.strip() == render_question_presentation(expected_presentation)
+    ):
+        return expected_presentation
+    if presentation is not None:
+        if not generated_question_contract_failures(presentation):
+            return presentation
+    elif "\n" not in text and "\r" not in text:
+        return None
+
+    return repair_question_presentation(
+        text,
+        target_dimension=(
+            presentation.target_dimension if presentation is not None else target_dimension
+        ),
+        locale=presentation.locale if presentation is not None else infer_question_locale(text),
+    )
 
 
 def render_question_presentation(presentation: InterviewQuestionPresentation) -> str:
@@ -550,6 +685,7 @@ def _looks_like_answer_instruction(line: str) -> bool:
             "own words",
             "direct answer",
             "직접 답변",
+            "직접 작성",
             "答案",
         )
     )
@@ -558,6 +694,17 @@ def _looks_like_answer_instruction(line: str) -> bool:
 def _looks_like_recommendation(line: str) -> bool:
     lowered = line.casefold()
     return lowered.startswith(("recommended:", "권장:", "建议:", "建议："))
+
+
+def _ends_with_question_mark(value: str) -> bool:
+    return value.rstrip().endswith(_QUESTION_MARKS)
+
+
+def _is_safe_generated_context_line(value: str) -> bool:
+    lowered = value.casefold()
+    return not _ends_with_question_mark(value) and not any(
+        _contains_phrase(lowered, term) for term in _INTERNAL_INTERVIEW_TERMS
+    )
 
 
 def _extract_json_mapping(text: str) -> dict[str, Any] | None:
@@ -596,7 +743,10 @@ __all__ = [
     "expand_selected_choice_answer",
     "generated_question_contract_failures",
     "infer_question_locale",
+    "parse_numeric_choice_answer",
     "parse_question_presentation",
+    "question_presentation_contract_metadata",
+    "recover_relayed_question_presentation",
     "repair_question_presentation",
     "rendered_question_contract_failures",
     "render_question_presentation",

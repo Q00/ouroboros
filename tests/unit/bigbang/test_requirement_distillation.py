@@ -23,12 +23,16 @@ from ouroboros.core.requirement_candidate import (
 )
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
     InterviewTurnContext,
     ReferenceContrastResolution,
     ReferenceCue,
     ReferenceOrigin,
     ReferenceResolutionStatus,
+    build_reference_contrast_presentation,
     build_reference_contrast_question,
+    render_question_presentation,
 )
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
@@ -140,6 +144,91 @@ def test_reference_contrast_does_not_promote_inferred_acceptance_criteria() -> N
 
     assert applied.promotion.is_ready_for_seed
     assert applied.requirements["acceptance_criteria"] == ""
+
+
+def test_reference_numeric_choice_keeps_selected_meaning_in_distillation() -> None:
+    cue = ReferenceCue(
+        reference_id="linear",
+        label="Linear-like",
+        origin=ReferenceOrigin.USER_TEXT,
+    )
+    presentation: InterviewQuestionPresentation = build_reference_contrast_presentation(cue)
+    question = render_question_presentation(presentation)
+    state = InterviewState(
+        interview_id="reference-numeric-choice",
+        initial_context="Build a Linear-like issue tool",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=question,
+                question_presentation=presentation,
+                user_response="2",
+            )
+        ],
+        reference_cues=(cue,),
+        reference_resolutions=(
+            ReferenceContrastResolution(
+                reference_id="linear",
+                status=ReferenceResolutionStatus.RESOLVED,
+                asked_question=question,
+                answer="2",
+            ),
+        ),
+    )
+
+    distillation = build_requirement_distillation(state)
+
+    contrast = next(
+        candidate
+        for candidate in distillation.candidates
+        if candidate.candidate_id == "round-1:linear:contrast"
+    )
+    assert contrast.text.startswith("2 - Use it only to compare the desired outcome")
+    assert "[user selected; source=reference_derived]" in contrast.text
+
+
+def test_generated_numeric_choice_can_be_confirmed_as_a_requirement() -> None:
+    presentation = InterviewQuestionPresentation(
+        decision_id="authentication_requirement",
+        target_dimension="constraint_clarity",
+        question="Which authentication requirement should the first release use?",
+        choices=(
+            InterviewQuestionChoice(
+                choice_id=1,
+                meaning_key="sso_required",
+                label="Must support SSO.",
+            ),
+            InterviewQuestionChoice(
+                choice_id=2,
+                meaning_key="password_only",
+                label="Password login is enough.",
+            ),
+        ),
+        free_text_prompt="Reply with the number, or write your own answer.",
+    )
+    state = InterviewState(
+        interview_id="generated-numeric-requirement",
+        initial_context="Build an admin portal",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=render_question_presentation(presentation),
+                question_presentation=presentation,
+                user_response="1",
+            )
+        ],
+    )
+
+    distillation = build_requirement_distillation(state)
+
+    requirement = next(
+        candidate
+        for candidate in distillation.candidates
+        if candidate.candidate_id == "round-1:requirement"
+    )
+    assert requirement.text.startswith("1 - Must support SSO.")
+    assert "[user selected; source=generated_hypothesis]" in requirement.text
+    assert requirement.resolution is CandidateResolution.CONFIRMED
 
 
 def test_unresolved_reference_blocks_seed_generation() -> None:

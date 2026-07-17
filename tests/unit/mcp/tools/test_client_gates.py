@@ -115,6 +115,8 @@ async def test_seed_ready_response_exposes_required_client_gates() -> None:
     )
 
     assert result.is_ok
+    assert "ambiguity" not in result.value.text_content.casefold()
+    assert result.value.meta["ambiguity_score"] == 0.1
     assert result.value.meta["required_client_gates"] == (
         "seed_ready_acceptance_guard",
         "restate_goal_approved",

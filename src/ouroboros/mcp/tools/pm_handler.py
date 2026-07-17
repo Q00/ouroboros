@@ -42,6 +42,11 @@ from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    parse_numeric_choice_answer,
+    recover_relayed_question_presentation,
+    render_question_presentation,
+)
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -392,12 +397,13 @@ class PMInterviewHandler:
                     name="last_question",
                     type=ToolInputType.STRING,
                     description=(
-                        "The question text from the previous child session's response. "
+                        "The rendered question text or structured presentation JSON from "
+                        "the previous child session's response. "
                         "In plugin mode each dispatch creates a new child session whose "
                         "questions are not automatically persisted server-side. Pass the "
-                        "child's last question here when submitting an answer so the "
-                        "PM interview transcript preserves the real question text instead "
-                        "of a placeholder."
+                        "child's presentation here when submitting an answer so the PM "
+                        "interview transcript preserves the real question and generated-choice "
+                        "provenance instead of a placeholder."
                     ),
                     required=False,
                 ),
@@ -644,13 +650,51 @@ class PMInterviewHandler:
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
                 if answer:
+                    relayed_presentation = (
+                        recover_relayed_question_presentation(
+                            last_question,
+                            expected_presentation=state.pending_question_presentation,
+                        )
+                        if isinstance(last_question, str) and last_question.strip()
+                        else None
+                    )
+                    if (
+                        relayed_presentation is None
+                        and not last_question
+                        and state.pending_question_presentation is not None
+                    ):
+                        relayed_presentation = state.pending_question_presentation
+                    relayed_question = (
+                        render_question_presentation(relayed_presentation)
+                        if relayed_presentation is not None
+                        else last_question
+                    )
+                    existing_presentation = (
+                        state.rounds[-1].question_presentation
+                        if state.rounds and state.rounds[-1].user_response is None
+                        else None
+                    )
+                    if (
+                        parse_numeric_choice_answer(str(answer)) is not None
+                        and relayed_presentation is None
+                        and existing_presentation is None
+                    ):
+                        return Result.err(
+                            MCPToolError(
+                                "Cannot record a numeric choice without its question "
+                                "presentation. Retry with the child presentation JSON or exact "
+                                "rendered choices as 'last_question'.",
+                                tool_name="ouroboros_pm_interview",
+                            )
+                        )
                     if state.rounds and state.rounds[-1].user_response is None:
                         # Round exists with question but no answer yet — fill it.
                         # If last_question was provided, update the question text
                         # in case the existing one is a stale placeholder from a
                         # previous partial persistence.
-                        if last_question:
-                            state.rounds[-1].question = last_question
+                        if relayed_question:
+                            state.rounds[-1].question = relayed_question
+                            state.rounds[-1].question_presentation = relayed_presentation
                         state.rounds[-1].user_response = answer
                     else:
                         # No rounds yet or all answered — append new round.
@@ -660,15 +704,17 @@ class PMInterviewHandler:
                         from ouroboros.bigbang.interview import InterviewRound
 
                         question_text = (
-                            last_question if last_question else "(continued from subagent)"
+                            relayed_question if relayed_question else "(continued from subagent)"
                         )
                         state.rounds.append(
                             InterviewRound(
                                 round_number=len(state.rounds) + 1,
                                 question=question_text,
+                                question_presentation=relayed_presentation,
                                 user_response=answer,
                             )
                         )
+                    state.pending_question_presentation = None
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:
@@ -697,9 +743,10 @@ class PMInterviewHandler:
                     "status": DELEGATED_TO_SUBAGENT,
                     "dispatch_mode": "plugin",
                     "next_turn_hint": (
-                        "When the user answers, pass the child session's "
-                        "question text as 'last_question' alongside 'answer' "
-                        "to preserve PM interview transcript fidelity."
+                        "Render the child question presentation for the user. When the user "
+                        "answers, pass the child presentation JSON (preferred) or exact rendered "
+                        "question as 'last_question' alongside 'answer' so selected-choice meaning "
+                        "and PM transcript fidelity are preserved."
                     ),
                 },
             )

@@ -20,9 +20,9 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ouroboros.bigbang.interview import (
-    INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewState,
     initial_context_summary_missing,
+    is_initial_context_summary_question,
     prompt_safe_initial_context,
 )
 from ouroboros.config import get_llm_model_for_role
@@ -588,7 +588,7 @@ class AmbiguityScorer:
         parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
         for round_data in state.rounds:
-            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+            if is_initial_context_summary_question(round_data.question):
                 continue
             parts.append(f"\nQ: {round_data.question}")
             if round_data.user_response:

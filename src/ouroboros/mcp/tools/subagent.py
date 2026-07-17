@@ -1145,6 +1145,30 @@ Return ONLY the JSON verdict object. No other text."""
     )
 
 
+def _load_compact_socratic_interviewer_prompt() -> str:
+    """Load the interview SSOT without overflowing plugin child budgets."""
+    from ouroboros.agents.loader import extract_section, load_agent_prompt
+
+    full_prompt = load_agent_prompt("socratic-interviewer")
+    section_names = (
+        "CRITICAL ROLE BOUNDARIES",
+        "CONTEXT BOUNDARIES",
+        "RESPONSE FORMAT",
+        "QUESTIONING STRATEGY",
+    )
+    try:
+        sections = tuple(
+            f"## {name}\n{extract_section(full_prompt, name)}" for name in section_names
+        )
+    except KeyError:
+        return full_prompt
+    preserved_controls = """## Preserved Controls
+- Treat `[from-code]`/`[from-research]` as facts; ask about intent.
+- Keep all deliverables and ambiguity tracks active; zoom out after several turns on one thread.
+- When scope, non-goals, outputs, and verification are explicit, ask one final closure question."""
+    return "# Socratic Interviewer\n\n" + "\n\n".join((*sections, preserved_controls))
+
+
 def build_interview_subagent(
     *,
     session_id: str,
@@ -1165,16 +1189,21 @@ def build_interview_subagent(
         transcript: Full conversation history (Q&A pairs) for context
             continuity across subagent invocations.
     """
-    from ouroboros.agents.loader import load_agent_prompt
+    from ouroboros.interview_adapters import (
+        QUESTION_PRESENTATION_PROMPT,
+        question_presentation_contract_metadata,
+    )
 
-    system_prompt = load_agent_prompt("socratic-interviewer")
+    system_prompt = (
+        f"{_load_compact_socratic_interviewer_prompt()}\n\n{QUESTION_PRESENTATION_PROMPT}"
+    )
     seed_closer_summary = _load_seed_closer_summary()
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
-1. Show the interview question first.
-2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
-   answer_simplifier, architecture_implications.
-3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
+1. Put the interview question in the presentation's `question` field.
+2. Put any compact helper from code_context, web_context, ambiguity_contrarian,
+   answer_simplifier, or architecture_implications in the `context` array.
+3. Keep choices hypothetical and preserve the direct-answer path."""
 
     transcript_section = ""
     if transcript:
@@ -1233,7 +1262,8 @@ Begin the interview. Ask your first clarifying question."""
 
 Continue the Socratic interview. The user has answered your previous question.
 Analyze their answer, update your understanding, score current ambiguity,
-and ask the next clarifying question or declare ready only after the Seed-ready Guard passes.
+and ask the next clarifying question. When the Seed-ready Guard passes, ask one
+final closure question; never emit a readiness status instead of a presentation.
 {seed_ready_guard}
 {plugin_question_advisory}
 
@@ -1277,6 +1307,7 @@ Continue the interview."""
         ),
         "adapter_question": adapter_question,
         "question_advisory_strategy": "plugin_child_question_first_advisory",
+        "question_presentation_contract": question_presentation_contract_metadata(),
     }
 
     return build_subagent_payload(
@@ -1822,9 +1853,17 @@ def build_pm_interview_subagent(
     Args:
         transcript: Full conversation history for context continuity.
     """
-    from ouroboros.agents.loader import load_agent_prompt
+    from ouroboros.interview_adapters import (
+        QUESTION_PRESENTATION_PROMPT,
+        question_presentation_contract_metadata,
+    )
 
-    system_prompt = load_agent_prompt("socratic-interviewer")
+    system_prompt = _load_compact_socratic_interviewer_prompt()
+    question_system_prompt = f"{system_prompt}\n\n{QUESTION_PRESENTATION_PROMPT}"
+    generation_system_prompt = (
+        "You are a product requirements synthesizer. Return the requested complete "
+        "Seed YAML, not an interview question or question-presentation JSON."
+    )
 
     repos_section = ""
     if selected_repos:
@@ -1837,7 +1876,7 @@ def build_pm_interview_subagent(
         transcript_section = f"\n## Conversation History\n{transcript}\n"
 
     if action == "start" and initial_context:
-        prompt = f"""{system_prompt}
+        prompt = f"""{question_system_prompt}
 
 ---
 
@@ -1856,7 +1895,7 @@ constraints.
 Begin the PM interview. Ask your first question about product requirements."""
 
     elif (action == "answer" or action == "resume") and answer:
-        prompt = f"""{system_prompt}
+        prompt = f"""{question_system_prompt}
 
 ---
 
@@ -1874,7 +1913,7 @@ Analyze their answer, classify requirements, and ask the next question.
 Continue the PM interview."""
 
     elif action == "generate":
-        prompt = f"""{system_prompt}
+        prompt = f"""{generation_system_prompt}
 
 ---
 
@@ -1890,7 +1929,7 @@ acceptance criteria discussed.
 Generate the complete seed YAML specification."""
 
     else:
-        prompt = f"""{system_prompt}
+        prompt = f"""{question_system_prompt}
 
 ---
 
@@ -1908,6 +1947,7 @@ Continue the PM interview."""
         "answer": answer,
         "cwd": cwd,
         "selected_repos": selected_repos,
+        "question_presentation_contract": question_presentation_contract_metadata(),
     }
 
     return build_subagent_payload(

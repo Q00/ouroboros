@@ -17,6 +17,12 @@ import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
+from ouroboros.interview_adapters import (
+    InterviewQuestionChoice,
+    InterviewQuestionPresentation,
+    QuestionChoiceProvenance,
+    render_question_presentation,
+)
 
 # ---------------------------------------------------------------------------
 # Shared mock helper for plugin I/O
@@ -251,6 +257,135 @@ class TestInterviewHandlerSubagentDispatch:
         payload = result.value.meta["_subagent"]
         assert payload["tool_name"] == "ouroboros_interview"
         assert "Use Python" in payload["prompt"]
+
+    async def test_answer_persists_relayed_question_presentation(
+        self, handler, monkeypatch
+    ) -> None:
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        saved_states: list[InterviewState] = []
+
+        async def _capture_save(
+            state_dir: Path,
+            state: InterviewState,
+        ) -> Result[Path, str]:
+            saved_states.append(state.model_copy(deep=True))
+            return Result.ok(state_dir / f"interview_{state.interview_id}.json")
+
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+        presentation = InterviewQuestionPresentation(
+            decision_id="first_outcome",
+            target_dimension="goal_clarity",
+            question="Which outcome should come first?",
+            choices=(
+                InterviewQuestionChoice(
+                    choice_id=1,
+                    meaning_key="fast_start",
+                    label="Ship a small first workflow.",
+                ),
+                InterviewQuestionChoice(
+                    choice_id=2,
+                    meaning_key="broad_start",
+                    label="Cover the full workflow first.",
+                ),
+            ),
+            free_text_prompt="Reply with the number, or write your own answer.",
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-123",
+                "answer": "2",
+                "last_question": presentation.model_copy(
+                    update={
+                        "choices": tuple(
+                            choice.model_copy(
+                                update={"provenance": QuestionChoiceProvenance.GENERATED_HYPOTHESIS}
+                            )
+                            for choice in presentation.choices
+                        )
+                    }
+                ).model_dump_json(),
+            }
+        )
+
+        assert result.is_ok
+        persisted = saved_states[-1].rounds[-1]
+        assert persisted.question == render_question_presentation(presentation)
+        assert persisted.question_presentation == presentation
+        assert persisted.user_response == "2"
+        assert "selected-choice meaning" in result.value.meta["next_turn_hint"]
+
+    async def test_answer_trusts_exact_server_pending_reference_presentation(
+        self, handler, monkeypatch
+    ) -> None:
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        presentation = InterviewQuestionPresentation(
+            decision_id="reference_role",
+            target_dimension="context_clarity",
+            question="Which role should this reference play?",
+            choices=(
+                InterviewQuestionChoice(
+                    choice_id=1,
+                    meaning_key="selective_copy",
+                    label="Copy selected traits.",
+                    provenance=QuestionChoiceProvenance.REFERENCE_DERIVED,
+                ),
+                InterviewQuestionChoice(
+                    choice_id=2,
+                    meaning_key="compare_only",
+                    label="Use it only for comparison.",
+                    provenance=QuestionChoiceProvenance.REFERENCE_DERIVED,
+                ),
+            ),
+            free_text_prompt="Reply with the number, or write your own answer.",
+        )
+        state = InterviewState(
+            interview_id="sess-123",
+            initial_context="Build a reference-aware tool",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What outcome matters most?",
+                    user_response="Fast triage.",
+                )
+            ],
+            pending_question_presentation=presentation,
+        )
+        saved_states: list[InterviewState] = []
+
+        async def _load_pending(
+            state_dir: Path,
+            session_id: str,
+        ) -> Result[InterviewState, str]:
+            del state_dir, session_id
+            return Result.ok(state)
+
+        async def _capture_save(
+            state_dir: Path,
+            saved: InterviewState,
+        ) -> Result[Path, str]:
+            saved_states.append(saved.model_copy(deep=True))
+            return Result.ok(state_dir / f"interview_{saved.interview_id}.json")
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_pending)
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-123",
+                "answer": "2",
+                "last_question": presentation.model_dump_json(),
+            }
+        )
+
+        assert result.is_ok
+        persisted_state = saved_states[-1]
+        persisted_round = persisted_state.rounds[-1]
+        assert persisted_round.question_presentation == presentation
+        assert persisted_round.user_response == "2"
+        assert persisted_state.pending_question_presentation is None
 
     async def test_resume_returns_subagent(self, handler) -> None:
         result = await handler.handle(
@@ -576,6 +711,56 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert result.is_ok
         payload = result.value.meta["_subagent"]
         assert "React + Node.js" in payload["prompt"]
+
+    async def test_resume_persists_relayed_question_presentation(
+        self, handler, monkeypatch
+    ) -> None:
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        saved_states: list[InterviewState] = []
+
+        async def _capture_save(
+            state_dir: Path,
+            state: InterviewState,
+        ) -> Result[Path, str]:
+            saved_states.append(state.model_copy(deep=True))
+            return Result.ok(state_dir / f"interview_{state.interview_id}.json")
+
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+        presentation = InterviewQuestionPresentation(
+            decision_id="primary_user",
+            target_dimension="goal_clarity",
+            question="Which user group should come first?",
+            choices=(
+                InterviewQuestionChoice(
+                    choice_id=1,
+                    meaning_key="new_users",
+                    label="New users.",
+                ),
+                InterviewQuestionChoice(
+                    choice_id=2,
+                    meaning_key="maintainers",
+                    label="Maintainers.",
+                ),
+            ),
+            free_text_prompt="Reply with the number, or write your own answer.",
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-123",
+                "action": "resume",
+                "answer": "2",
+                "last_question": presentation.model_dump_json(),
+            }
+        )
+
+        assert result.is_ok
+        persisted = saved_states[-1].rounds[-1]
+        assert persisted.question == render_question_presentation(presentation)
+        assert persisted.question_presentation == presentation
+        assert persisted.user_response == "2"
+        assert "selected-choice meaning" in result.value.meta["next_turn_hint"]
 
     async def test_generate_returns_subagent(self, handler) -> None:
         result = await handler.handle(
