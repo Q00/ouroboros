@@ -460,20 +460,22 @@ class TestPeriodicCheckpointer:
     async def test_periodic_checkpointer_calls_callback(self) -> None:
         """PeriodicCheckpointer calls callback at regular intervals."""
         call_count = 0
+        second_call = asyncio.Event()
 
         async def callback():
             nonlocal call_count
             call_count += 1
+            if call_count >= 2:
+                second_call.set()
 
         checkpointer = PeriodicCheckpointer(callback, interval=0.1)
         await checkpointer.start()
 
-        # Wait for a few intervals
-        await asyncio.sleep(0.35)
+        try:
+            await asyncio.wait_for(second_call.wait(), timeout=2)
+        finally:
+            await checkpointer.stop()
 
-        await checkpointer.stop()
-
-        # Should have been called at least 2-3 times
         assert call_count >= 2
 
     async def test_periodic_checkpointer_stops_cleanly(self) -> None:
@@ -500,20 +502,23 @@ class TestPeriodicCheckpointer:
     async def test_periodic_checkpointer_handles_callback_errors(self) -> None:
         """PeriodicCheckpointer continues after callback errors."""
         call_count = 0
+        second_call = asyncio.Event()
 
         async def failing_callback():
             nonlocal call_count
             call_count += 1
+            if call_count >= 2:
+                second_call.set()
             raise ValueError("Test error")
 
         checkpointer = PeriodicCheckpointer(failing_callback, interval=0.1)
         await checkpointer.start()
 
-        await asyncio.sleep(0.35)
+        try:
+            await asyncio.wait_for(second_call.wait(), timeout=2)
+        finally:
+            await checkpointer.stop()
 
-        await checkpointer.stop()
-
-        # Should have been called multiple times despite errors
         assert call_count >= 2
 
 

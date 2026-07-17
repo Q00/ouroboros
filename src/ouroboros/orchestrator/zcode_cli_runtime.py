@@ -28,10 +28,7 @@ Model selection:
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
-import plistlib
 from typing import Any
 
 import structlog
@@ -45,6 +42,10 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
 from ouroboros.runtime.child_env import build_child_env
+from ouroboros.zcode_cli_launcher import (
+    build_zcode_command_prefix,
+    resolve_zcode_electron_node_path,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -88,9 +89,6 @@ _CHILD_ENV_STRIP_KEYS = (
     "ELECTRON_RUN_AS_NODE",
     "NODE_OPTIONS",
 )
-_ZCODE_SCRIPT_SUFFIXES = (".cjs", ".js", ".mjs")
-_ZCODE_NODE_BUNDLE_METADATA = ".node-bundle-meta.json"
-_ZCODE_ELECTRON_NODE_RUNTIME = "electron-node"
 
 
 class ZcodeCLIRuntime(CodexCliRuntime):
@@ -197,7 +195,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
             startup_output_timeout_seconds=startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=stdout_idle_timeout_seconds,
         )
-        self._electron_node_path = self._resolve_app_bundle_electron_node()
+        self._electron_node_path = resolve_zcode_electron_node_path(self._cli_path)
         # zcode has no --model flag, so a non-default model requested here
         # cannot reach the CLI. Surface it loudly rather than silently
         # dropping it — the caller believes a specific model was selected
@@ -289,100 +287,6 @@ class ZcodeCLIRuntime(CodexCliRuntime):
 
         return get_zcode_cli_path()
 
-    def _resolve_app_bundle_electron_node(self) -> str | None:
-        """Return the bundled Electron executable for an electron-node script.
-
-        Official ZCode macOS bundles mark ``Resources/glm/zcode.cjs`` with a
-        sibling ``.node-bundle-meta.json`` whose runtime is ``electron-node``.
-        That script imports Node features such as ``node:sqlite`` which are not
-        available in older system Node installations. ZCode itself launches
-        the script through the app's Electron executable with
-        ``ELECTRON_RUN_AS_NODE=1``; mirror that measured packaging contract.
-
-        Standalone scripts outside a ``.app`` bundle intentionally return
-        ``None`` and keep the existing ``node <script>`` behavior.
-        """
-        if not self._cli_path:
-            return None
-
-        cli_path = Path(str(self._cli_path))
-        if cli_path.suffix.lower() not in _ZCODE_SCRIPT_SUFFIXES:
-            return None
-
-        contents_dir = next(
-            (
-                parent
-                for parent in cli_path.parents
-                if parent.name == "Contents" and parent.parent.suffix.lower() == ".app"
-            ),
-            None,
-        )
-        if contents_dir is None:
-            return None
-
-        metadata_path = cli_path.with_name(_ZCODE_NODE_BUNDLE_METADATA)
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except OSError as exc:
-            msg = f"ZCode app-bundle CLI metadata is missing or unreadable: {metadata_path}: {exc}"
-            raise RuntimeError(msg) from exc
-        except json.JSONDecodeError as exc:
-            msg = f"ZCode app-bundle CLI metadata is invalid JSON: {metadata_path}: {exc}"
-            raise RuntimeError(msg) from exc
-
-        if not isinstance(metadata, dict):
-            msg = f"ZCode app-bundle CLI metadata must be a JSON object: {metadata_path}"
-            raise RuntimeError(msg)
-
-        runtime = metadata.get("runtime")
-        if runtime != _ZCODE_ELECTRON_NODE_RUNTIME:
-            msg = (
-                "ZCode app-bundle CLI metadata declares unsupported runtime "
-                f"{runtime!r} in {metadata_path}; expected "
-                f"{_ZCODE_ELECTRON_NODE_RUNTIME!r}"
-            )
-            raise RuntimeError(msg)
-
-        entry = metadata.get("entry")
-        if entry != cli_path.name:
-            msg = (
-                "ZCode app-bundle CLI metadata entry does not match the configured "
-                f"script in {metadata_path}: expected {cli_path.name!r}, got {entry!r}"
-            )
-            raise RuntimeError(msg)
-
-        info_plist = contents_dir / "Info.plist"
-        try:
-            with info_plist.open("rb") as stream:
-                bundle_info = plistlib.load(stream)
-        except (OSError, plistlib.InvalidFileException) as exc:
-            msg = f"ZCode app bundle metadata is present but {info_plist} is unreadable: {exc}"
-            raise RuntimeError(msg) from exc
-
-        if not isinstance(bundle_info, dict):
-            msg = f"ZCode app bundle metadata must be a dictionary: {info_plist}"
-            raise RuntimeError(msg)
-
-        executable_name = bundle_info.get("CFBundleExecutable")
-        if not isinstance(executable_name, str) or not executable_name:
-            msg = f"ZCode app bundle is missing CFBundleExecutable in {info_plist}"
-            raise RuntimeError(msg)
-        if executable_name in {".", ".."} or "/" in executable_name or "\\" in executable_name:
-            msg = (
-                "ZCode app bundle CFBundleExecutable must be a file name without "
-                f"path separators: {executable_name!r} in {info_plist}"
-            )
-            raise RuntimeError(msg)
-
-        electron_node = contents_dir / "MacOS" / executable_name
-        if not electron_node.is_file() or not os.access(electron_node, os.X_OK):
-            msg = (
-                "ZCode app bundle declares an electron-node CLI but its bundled "
-                f"runtime is not executable: {electron_node}"
-            )
-            raise RuntimeError(msg)
-        return str(electron_node)
-
     # -- Command construction ----------------------------------------------
 
     def _build_command(
@@ -447,12 +351,7 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         if cli_path is None:
             msg = "zcode CLI path could not be resolved (set OUROBOROS_ZCODE_CLI_PATH or orchestrator.zcode_cli_path)"
             raise RuntimeError(msg)
-        if self._electron_node_path is not None:
-            prefix = [self._electron_node_path, cli_path]
-        elif cli_path.lower().endswith(_ZCODE_SCRIPT_SUFFIXES):
-            prefix = ["node", cli_path]
-        else:
-            prefix = [cli_path]
+        prefix = build_zcode_command_prefix(cli_path, self._electron_node_path)
         command = prefix + [
             "--json",
             "--prompt",

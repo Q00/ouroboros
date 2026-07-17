@@ -1,8 +1,8 @@
 # Zcode CLI Runtime
 
-Run Ouroboros workflows through Z.ai's locally installed ZCode coding agent.
-The runtime supports either the macOS app-bundle `zcode.cjs` entry script or a
-`zcode` executable available on `PATH`.
+Run Ouroboros workflows and completion-backed authoring through Z.ai's locally
+installed ZCode coding agent. The runtime supports either the macOS app-bundle
+`zcode.cjs` entry script or a `zcode` executable available on `PATH`.
 
 > The vendor does not currently publish a stable CLI or JSON-output contract.
 > This adapter is pinned to behavior measured from Zcode CLI 0.15.0 and 0.15.2
@@ -59,13 +59,24 @@ binaries and are invoked directly. `NODE_OPTIONS` is removed from both Node
 launch shapes so a project or parent process cannot preload JavaScript into the
 vendor CLI.
 
-## Runtime-only backend
+## Runtime and LLM backend
 
-Zcode drives agentic execution but is not an Ouroboros LLM-completion backend.
-Keep a completion-capable value such as `claude_code`, `codex`, or `litellm` in
-`llm.backend` for interview, seed generation, evaluation, and QA handlers.
-Direct `ZcodeCLIRuntime` construction defaults those auxiliary calls to
-`claude_code`, matching the other runtime-only adapters.
+Zcode can drive both agentic execution and Ouroboros completion roles. Set the
+runtime independently with `ouroboros setup --runtime zcode`, or select Zcode
+for interview, Seed generation, evaluation, and QA through:
+
+```bash
+export OUROBOROS_LLM_BACKEND=zcode
+```
+
+Commands that expose an explicit backend flag also accept `--llm-backend
+zcode`. The completion adapter uses the same measured `--prompt --json`
+summary contract as the runtime, returns the top-level `response`, and validates
+requested `json_object` or `json_schema` output before accepting a result.
+
+Zcode owns model selection in its configuration and exposes no `--model` flag.
+Requested Ouroboros model names are therefore not reported as observed effective
+identity unless a trusted Zcode output or configuration source confirms them.
 
 ## Headless contract
 
@@ -134,7 +145,7 @@ output timeout for their expected task duration.
 | Intermediate tool events | No, not present in measured stdout |
 | Targeted session resume | Yes, via `--resume <sessionId>` |
 | Per-call model override | No, model selection is Zcode-owned |
-| LLM-completion backend | No, runtime-only |
+| LLM-completion backend | Yes, via the buffered JSON summary adapter |
 | Setup-owned instruction artifact | No, capability guide rendering is the fallback |
 
 ## Troubleshooting

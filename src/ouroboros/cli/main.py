@@ -44,6 +44,7 @@ from ouroboros.cli.commands import (
     tui,
     uninstall,
     workflow_ir,
+    zcode,
 )
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
 from ouroboros.cli.formatters import console
@@ -118,6 +119,7 @@ app.add_typer(plugin.app, name="plugin")
 app.add_typer(resume.app, name="resume")
 app.add_typer(uninstall.app, name="uninstall")
 app.add_typer(workflow_ir.app, name="workflow-ir")
+app.add_typer(zcode.app, name="zcode")
 app.command(name="dispatch", hidden=True)(dispatch.dispatch_command)
 
 
@@ -165,6 +167,7 @@ def main(
 
         ouroboros init "Build a REST API"     Start interview
         ouroboros run seed.yaml               Execute workflow
+        ouroboros zcode "Build a REST API"    Start with Zcode
         ouroboros monitor                     Launch TUI monitor
 
     Use [bold cyan]ouroboros COMMAND --help[/] for command-specific help.

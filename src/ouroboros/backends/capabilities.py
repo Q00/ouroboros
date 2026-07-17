@@ -524,14 +524,13 @@ _CAPABILITIES: tuple[BackendCapability, ...] = (
     BackendCapability(
         # Zcode (Z.ai GLM-5.x desktop agent) — the app-bundle ``zcode.cjs``
         # script runs through ZCode's bundled Electron/Node runtime and emits
-        # one JSON summary. Runtime-only: it does not back
-        # structured LLM completions or auto-interview answering (no LLM
-        # adapter factory), matching the antigravity/grok runtime-only contract.
+        # one JSON summary. The LLM adapter consumes that same measured summary
+        # contract for structured completions and interview answering.
         name="zcode",
         aliases=("zcode_cli",),
         supports_runtime=True,
-        supports_llm=False,
-        supports_interview_driver=False,
+        supports_llm=True,
+        supports_interview_driver=True,
         switchable_runtime=True,
         cli_name="zcode",
         cli_config_key="zcode_cli_path",

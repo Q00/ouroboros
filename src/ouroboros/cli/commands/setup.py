@@ -2140,14 +2140,14 @@ def _setup_gemini(gemini_path: str) -> None:
 
 
 def _setup_runtime_only_backend(backend: str, cli_path: str, cli_config_key: str) -> None:
-    """Configure a runtime-only backend (Antigravity / Grok / Zcode).
+    """Configure runtime setup for Antigravity, Grok, or Zcode.
 
-    These backends drive the agentic orchestrator runtime but have no
-    LLM-completion adapter (``supports_llm=False``), so this intentionally sets
-    ONLY ``orchestrator.runtime_backend`` + the CLI path and leaves
-    ``llm.backend`` untouched (it is a completion-only contract that rejects
-    these backends). No setup-owned instruction artifact is installed yet — a
-    documented gap in ``docs/runtime-guides/skill-capability-guides.md``.
+    This setup path intentionally sets only ``orchestrator.runtime_backend`` and
+    the CLI path. Antigravity and Grok are runtime-only; Zcode also supports
+    explicit LLM-completion selection, but setup does not silently move
+    ``llm.backend`` because that changes authoring/evaluation traffic.
+    No setup-owned instruction artifact is installed yet — a documented gap in
+    ``docs/runtime-guides/skill-capability-guides.md``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
