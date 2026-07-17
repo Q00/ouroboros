@@ -351,13 +351,35 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
         return None
 
     @staticmethod
+    def _usage_token_count(value: object, *, default: int = 0) -> int:
+        """Return one non-negative integral token count from CLI metadata."""
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return value if value >= 0 else default
+        if isinstance(value, float):
+            return int(value) if value >= 0 and value.is_integer() else default
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized.isascii() and normalized.isdigit():
+                return int(normalized)
+        return default
+
+    @staticmethod
     def _extract_usage(usage: Any) -> UsageInfo:
         """Extract token usage from zcode's ``usage`` summary object."""
         if not isinstance(usage, dict):
             return UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0)
-        prompt = int(usage.get("inputTokens") or usage.get("input_tokens") or 0)
-        completion = int(usage.get("outputTokens") or usage.get("output_tokens") or 0)
-        total = int(usage.get("totalTokens") or usage.get("total_tokens") or (prompt + completion))
+        prompt = ZcodeCliLLMAdapter._usage_token_count(
+            usage.get("inputTokens", usage.get("input_tokens"))
+        )
+        completion = ZcodeCliLLMAdapter._usage_token_count(
+            usage.get("outputTokens", usage.get("output_tokens"))
+        )
+        total = ZcodeCliLLMAdapter._usage_token_count(
+            usage.get("totalTokens", usage.get("total_tokens")),
+            default=prompt + completion,
+        )
         return UsageInfo(
             prompt_tokens=prompt,
             completion_tokens=completion,
@@ -442,6 +464,9 @@ class ZcodeCliLLMAdapter(CodexCliLLMAdapter):
                     details={"timed_out": True},
                 )
             )
+        except asyncio.CancelledError:
+            await self._terminate_process(process)
+            raise
 
         stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
         stderr = stderr_bytes.decode("utf-8", errors="replace").strip()

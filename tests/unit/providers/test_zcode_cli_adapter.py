@@ -513,6 +513,43 @@ async def test_complete_timeout_terminates_process() -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_cancellation_terminates_process() -> None:
+    process = _HangingProcess()
+    adapter = _make_adapter(max_retries=1)
+
+    with _patch_subprocess(process):
+        task = asyncio.create_task(
+            adapter.complete(
+                [Message(role=MessageRole.USER, content="x")],
+                CompletionConfig(model="default"),
+            )
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert process.terminated is True
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"inputTokens": "unknown", "outputTokens": 2}, (0, 2, 2)),
+        ({"inputTokens": float("inf"), "outputTokens": 2}, (0, 2, 2)),
+        ({"inputTokens": {"value": 1}, "outputTokens": "3"}, (0, 3, 3)),
+        ({"inputTokens": -1, "outputTokens": 2, "totalTokens": -4}, (0, 2, 2)),
+    ],
+)
+def test_extract_usage_tolerates_malformed_metadata(
+    usage: dict[str, Any], expected: tuple[int, int, int]
+) -> None:
+    parsed = ZcodeCliLLMAdapter._extract_usage(usage)
+
+    assert (parsed.prompt_tokens, parsed.completion_tokens, parsed.total_tokens) == expected
+
+
+@pytest.mark.asyncio
 async def test_complete_missing_usage_defaults_to_zero() -> None:
     """A summary without a ``usage`` object yields zeroed UsageInfo, not a crash."""
     process = _FakeProcess(
