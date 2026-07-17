@@ -1140,7 +1140,12 @@ def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
     return current
 
 
-def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
+def _has_explicit_codex_model_override(
+    config_dict: dict,
+    role: str,
+    *,
+    preserve_shipped_defaults: bool,
+) -> bool:
     """Return True when an existing model setting should beat setup defaults."""
     for path, shipped_default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
         value = _get_nested_value(config_dict, path)
@@ -1149,12 +1154,16 @@ def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
         if _is_codex_setup_unset_model_value(value):
             continue
         if _is_codex_setup_shipped_default_value(value, shipped_default):
+            if preserve_shipped_defaults:
+                return True
             continue
         if _is_codex_setup_default_sentinel(value):
             continue
         if isinstance(value, list | tuple) and _is_codex_setup_shipped_default_roster(
             value, shipped_default
         ):
+            if preserve_shipped_defaults:
+                return True
             continue
         if _is_codex_setup_default_sentinel_roster(value):
             continue
@@ -1215,33 +1224,59 @@ def _is_codex_setup_shipped_default_roster(
     )
 
 
-def _apply_codex_default_model_sentinel(config_dict: dict) -> None:
-    """Persist Codex-safe defaults while preserving explicit user choices."""
+def _remove_codex_default_model_overrides(
+    config_dict: dict,
+    *,
+    remove_shipped_defaults: bool,
+) -> None:
+    """Remove unambiguous defaults without erasing existing explicit pins.
+
+    Freshly generated config has known setup-owned shipped defaults, so those
+    literals can be removed. Existing config has no provenance bit: a shipped
+    literal may be a deliberate user pin, so runtime backend normalization must
+    handle it without rewriting the persisted choice.
+    """
     for section_name, key, shipped_default in _CODEX_DEFAULT_MODEL_TARGETS:
+        if section_name not in config_dict:
+            continue
         section = _ensure_mapping_section(config_dict, section_name)
-        current = section.get(key)
+        if key not in section:
+            continue
+        current = section[key]
         if (
             _is_codex_setup_unset_model_value(current)
             or _is_codex_setup_default_sentinel(current)
-            or _is_codex_setup_shipped_default_value(current, shipped_default)
+            or (
+                remove_shipped_defaults
+                and _is_codex_setup_shipped_default_value(current, shipped_default)
+            )
         ):
-            section[key] = _CODEX_DEFAULT_MODEL_SENTINEL
+            section.pop(key, None)
 
     for section_name, key, shipped_roster in _CODEX_DEFAULT_MODEL_LIST_TARGETS:
+        if section_name not in config_dict:
+            continue
         section = _ensure_mapping_section(config_dict, section_name)
-        current = section.get(key)
+        if key not in section:
+            continue
+        current = section[key]
         if _is_codex_setup_unset_model_value(current) or (
             isinstance(current, list | tuple)
             and (
                 _is_codex_setup_default_sentinel_roster(current)
-                or _is_codex_setup_shipped_default_roster(current, shipped_roster)
+                or (
+                    remove_shipped_defaults
+                    and _is_codex_setup_shipped_default_roster(current, shipped_roster)
+                )
             )
         ):
-            section[key] = [_CODEX_DEFAULT_MODEL_SENTINEL] * len(shipped_roster)
+            section.pop(key, None)
 
 
 def _install_codex_default_llm_profiles(
     config_dict: dict,
+    *,
+    preserve_shipped_defaults: bool,
 ) -> tuple[list[str], list[str], list[str]]:
     """Install missing provider-neutral Ouroboros task profiles for Codex setup.
 
@@ -1274,7 +1309,11 @@ def _install_codex_default_llm_profiles(
 
     added_role_profiles: list[str] = []
     for role, profile_name in _CODEX_DEFAULT_LLM_ROLE_PROFILES.items():
-        if role in llm_role_profiles or _has_explicit_codex_model_override(config_dict, role):
+        if role in llm_role_profiles or _has_explicit_codex_model_override(
+            config_dict,
+            role,
+            preserve_shipped_defaults=preserve_shipped_defaults,
+        ):
             continue
         llm_role_profiles[role] = profile_name
         added_role_profiles.append(role)
@@ -1310,8 +1349,9 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_existed = config_path.exists()
 
-    if config_path.exists():
+    if config_existed:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
         create_default_config(config_dir)
@@ -1330,9 +1370,13 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
         llm_config = _ensure_mapping_section(config_dict, "llm")
         llm_config["backend"] = "codex"
 
-        _apply_codex_default_model_sentinel(config_dict)
+        _remove_codex_default_model_overrides(
+            config_dict,
+            remove_shipped_defaults=not config_existed,
+        )
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
-            config_dict
+            config_dict,
+            preserve_shipped_defaults=config_existed,
         )
     except ValueError as exc:
         print_error(f"Invalid config.yaml structure: {exc}")

@@ -404,6 +404,46 @@ class TestCodexCliLLMAdapter:
 
         assert "mcp_servers.ouroboros.enabled=false" not in command
 
+    @pytest.mark.asyncio
+    async def test_complete_passes_strict_mcp_override_as_subprocess_argv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The transient Ouroboros disable reaches the actual child process argv."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+        captured_command: tuple[str, ...] = ()
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            nonlocal captured_command
+            captured_command = command
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Isolated answer", encoding="utf-8")
+            return _FakeProcess(returncode=0)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Answer without Ouroboros MCP.")],
+                CompletionConfig(model="default"),
+            )
+
+        override_index = captured_command.index("-c")
+        assert captured_command[override_index : override_index + 2] == (
+            "-c",
+            "mcp_servers.ouroboros.enabled=false",
+        )
+        assert result.is_ok
+
     def test_build_command_prefers_profile_over_model(self) -> None:
         """Codex task profiles use --profile and avoid a conflicting --model."""
         adapter = CodexCliLLMAdapter(cli_path="codex")
