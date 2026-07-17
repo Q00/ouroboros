@@ -6041,7 +6041,7 @@ class TestZombieJobReconciliation:
         owner_start_time: float | None,
         session_id: str | None = None,
         execution_id: str | None = None,
-    ) -> None:
+    ) -> JobManager:
         writer = JobManager(store)
         data: dict = {
             "job_type": "execute_seed",
@@ -6057,6 +6057,7 @@ class TestZombieJobReconciliation:
             data["owner_pid"] = owner_pid
             data["owner_start_time"] = owner_start_time
         await writer._append_event("mcp.job.created", job_id, data)
+        return writer
 
     async def test_running_job_reconciled_to_interrupted_when_owner_dead(self, tmp_path) -> None:
         store = _build_store(tmp_path)
@@ -6124,6 +6125,55 @@ class TestZombieJobReconciliation:
                 "mcp.job.created",
                 "mcp.job.failed",
             ]
+        finally:
+            await store.close()
+
+    async def test_job_wait_does_not_serve_stale_cache_after_linked_terminal(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        try:
+            manager = await self._seed_running_job(
+                store,
+                "job_wait_linked_terminal_failed",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id="orch_wait_terminal_failed",
+                execution_id="exec_wait_terminal_failed",
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait_terminal_failed",
+                    data={
+                        "session_id": "orch_wait_terminal_failed",
+                        "status": "failed",
+                        "error_message": "Orchestrator execution failed: boom",
+                    },
+                )
+            )
+
+            handler = JobWaitHandler(event_store=store, job_manager=manager)
+            with patch.object(
+                job_manager_module,
+                "is_process_identity_alive",
+                return_value=False,
+            ):
+                result = await handler.handle(
+                    {
+                        "job_id": "job_wait_linked_terminal_failed",
+                        "cursor": 0,
+                        "timeout_seconds": 5,
+                        "view": "compact",
+                    }
+                )
+
+            assert result.is_ok
+            assert result.value.meta["status"] == JobStatus.FAILED.value
+            assert result.value.meta["is_terminal"] is True
+            assert result.value.meta.get("live_snapshot") is not True
+            assert "failed" in result.value.text_content
         finally:
             await store.close()
 

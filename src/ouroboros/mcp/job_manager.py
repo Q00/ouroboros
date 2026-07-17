@@ -387,8 +387,22 @@ class JobManager:
         self._live_snapshots: dict[str, JobSnapshot] = {}
 
     def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
-        """Return the latest in-process snapshot for jobs this manager owns."""
-        return self._live_snapshots.get(job_id)
+        """Return a snapshot that is safe to use without durable reconciliation.
+
+        The in-process cache is updated from persisted job events, but a
+        non-terminal entry can outlive the task that owned the job.  Once that
+        happens, :meth:`get_snapshot` must inspect linked execution evidence
+        and owner liveness before callers report the job as still running.
+        Terminal snapshots are monotonic, while a non-terminal snapshot is a
+        valid fast path only while this manager still owns a live job task.
+        """
+        snapshot = self._live_snapshots.get(job_id)
+        if snapshot is None or snapshot.is_terminal:
+            return snapshot
+        task = self._tasks.get(job_id)
+        if task is not None and not task.done():
+            return snapshot
+        return None
 
     def _merge_live_snapshot(self, job_id: str, data: dict[str, Any], *, cursor: int) -> None:
         """Keep a non-authoritative live snapshot for responsive MCP polling."""
