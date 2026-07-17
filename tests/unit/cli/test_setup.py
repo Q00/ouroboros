@@ -1089,13 +1089,15 @@ class TestCodexSetup:
         "configured_model",
         [DEFAULT_SONNET_MODEL, "claude-sonnet-4-20250514"],
     )
-    def test_setup_codex_preserves_existing_shipped_literal_as_possible_explicit_pin(
+    def test_setup_codex_preserves_existing_shipped_literal_and_installs_role_profile(
         self,
         tmp_path: Path,
         configured_model: str,
     ) -> None:
-        """Existing shipped literals lack provenance and must not be erased."""
+        """Persisted shipped literals must not suppress Codex role routing."""
         from ouroboros.config import loader as config_loader
+        from ouroboros.providers.base import CompletionConfig
+        from ouroboros.providers.profiles import resolve_completion_profile
 
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -1127,15 +1129,23 @@ class TestCodexSetup:
 
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == configured_model
-        assert "qa" not in config_dict["llm_role_profiles"]
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
 
         loaded = config_loader.load_config(config_path)
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(config_loader, "load_config", return_value=loaded),
+            patch("ouroboros.providers.profiles.load_config", return_value=loaded),
         ):
             assert config_loader.get_qa_model(backend="codex") == "default"
             assert config_loader.get_qa_model(backend="litellm") == configured_model
+            resolved = resolve_completion_profile(
+                CompletionConfig(model="default", role="qa"),
+                backend="codex",
+            )
+
+        assert resolved.profile_name == "frontier"
+        assert resolved.backend_profile == "ouroboros-frontier"
 
     @pytest.mark.parametrize("roster", [[], [" ", "\t"]])
     def test_setup_codex_treats_blank_models_as_unset(
@@ -1240,12 +1250,19 @@ class TestCodexSetup:
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
         assert config_dict["llm_role_profiles"]["consensus_vote"] == "deep"
 
+    @pytest.mark.parametrize(
+        "configured_consensus_opus",
+        [DEFAULT_CONSENSUS_OPUS_MODEL, "openrouter/anthropic/claude-opus-4-6"],
+    )
     def test_setup_codex_preserves_backend_specific_default_resolution(
         self,
         tmp_path: Path,
+        configured_consensus_opus: str,
     ) -> None:
         """Codex setup must not poison later Claude or LiteLLM model resolution."""
         from ouroboros.config import loader as config_loader
+        from ouroboros.providers.base import CompletionConfig
+        from ouroboros.providers.profiles import resolve_completion_profile
 
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -1262,7 +1279,7 @@ class TestCodexSetup:
                     "consensus": {
                         "models": [
                             "openrouter/openai/gpt-4o",
-                            DEFAULT_CONSENSUS_OPUS_MODEL,
+                            configured_consensus_opus,
                             "openrouter/google/gemini-2.5-pro",
                         ],
                     },
@@ -1282,16 +1299,23 @@ class TestCodexSetup:
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["llm"]["qa_model"] == DEFAULT_SONNET_MODEL
+        assert config_dict["consensus"]["models"][1] == configured_consensus_opus
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+        assert config_dict["llm_role_profiles"]["consensus_vote"] == "deep"
+
         loaded = config_loader.load_config(config_path)
         consensus_roster = (
             "openrouter/openai/gpt-4o",
-            DEFAULT_CONSENSUS_OPUS_MODEL,
+            configured_consensus_opus,
             "openrouter/google/gemini-2.5-pro",
         )
 
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(config_loader, "load_config", return_value=loaded),
+            patch("ouroboros.providers.profiles.load_config", return_value=loaded),
         ):
             assert config_loader.get_qa_model(backend="codex") == "default"
             assert config_loader.get_clarification_model(backend="codex") == "default"
@@ -1307,6 +1331,14 @@ class TestCodexSetup:
                 assert config_loader.get_clarification_model(backend=backend) == DEFAULT_OPUS_MODEL
                 assert config_loader.get_semantic_model(backend=backend) == DEFAULT_OPUS_MODEL
                 assert config_loader.get_consensus_models(backend=backend) == consensus_roster
+
+            resolved = resolve_completion_profile(
+                CompletionConfig(model="default", role="consensus_vote"),
+                backend="codex",
+            )
+
+        assert resolved.profile_name == "deep"
+        assert resolved.backend_profile == "ouroboros-deep"
 
     def test_setup_codex_model_normalization_is_idempotent(self, tmp_path: Path) -> None:
         """Repeated setup should not reintroduce or churn removed model defaults."""
