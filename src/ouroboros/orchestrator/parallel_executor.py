@@ -116,6 +116,7 @@ from ouroboros.orchestrator.decomposition_policy import (
     validate_decomposition_proposal,
 )
 from ouroboros.orchestrator.effort_routing import (
+    DEFAULT_EFFORT_CEILING,
     assess_investment,
     resolve_execute_effort,
 )
@@ -288,6 +289,7 @@ from ouroboros.orchestrator.level_context import (
     serialize_level_contexts,
 )
 from ouroboros.orchestrator.model_routing import (
+    DEFAULT_TIER_CEILING,
     decide_model,
     resolve_execute_model,
     tier_from_profile_hint,
@@ -6058,6 +6060,7 @@ Respond with either ATOMIC or the structured JSON object only.
         ac_idx: int,
         result: ACExecutionResult,
         retry_attempt: int,
+        same_runtime_retry_available: bool = True,
     ) -> bool:
         """Whether ``result`` is a failure at this root AC's maximum strength.
 
@@ -6079,6 +6082,27 @@ Respond with either ATOMIC or the structured JSON object only.
         assessment's real "high effort" dispatch could get reported as a
         terminal "xhigh" here: one notch of the investment-authorized
         cheapening the real dispatch applies, then never subtracted back out.
+
+        Args:
+            same_runtime_retry_available: Whether a FUTURE same-runtime retry
+                of this root AC could still happen under this run's
+                configuration. Defaults to ``True`` (the ordinary case: some
+                same-runtime retry budget remains, so it is meaningful to ask
+                "would the NEXT retry already be at ceiling"). ``False`` is
+                for the ``self._ac_retry_attempts <= 0`` case (Fix 6 redo,
+                round 3 follow-up review): when the operator configured ZERO
+                same-runtime retries, there is definitionally no future
+                same-runtime dispatch that could ever climb this AC to a
+                higher tier/effort, so ``retry_attempt`` (always ``0`` here,
+                since the AC never got to retry) must not be used to gate
+                ladder eligibility — that premise ("a higher tier might
+                arrive on a future same-runtime retry") is categorically
+                false by construction. Each ACTIVELY-configured routing axis
+                is instead treated as already at this run's ceiling for it
+                (a dormant axis, resolved as ``None``, stays dormant) —
+                eligibility is decided by ``success``/``is_decomposed`` alone
+                for those axes, regardless of what raw tier/effort the
+                single dispatch happened to run at.
         """
         ac_criterion = seed.acceptance_criteria[ac_idx]
         investment_spec = (
@@ -6099,11 +6123,18 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             investment_assessment=investment_assessment,
         )
+        model_tier = model_decision.tier
+        effort_level = effort_decision.level
+        if not same_runtime_retry_available:
+            if model_tier is not None:
+                model_tier = DEFAULT_TIER_CEILING
+            if effort_level is not None:
+                effort_level = DEFAULT_EFFORT_CEILING
         return is_terminal_state_failure(
             success=result.success,
             is_decomposed=result.is_decomposed,
-            model_tier=model_decision.tier,
-            effort_level=effort_decision.level,
+            model_tier=model_tier,
+            effort_level=effort_level,
         )
 
     async def _load_decomposition_attestation(
@@ -6370,6 +6401,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_idx=ac_idx,
                 result=current_result,
                 retry_attempt=current_retry_attempt,
+                # Fix 6 redo (round 3 follow-up review): only the VERY FIRST
+                # check of a zero-same-runtime-retry-budget AC (before this
+                # loop has redispatched it even once) has the false premise
+                # "a higher tier might arrive on a future same-runtime
+                # retry" -- there is categorically no such future dispatch
+                # under this config. Once ``engaged`` (this loop has already
+                # redispatched at least once, via the ladder's OWN retry
+                # counter, independent of ``self._ac_retry_attempts``),
+                # normal ceiling semantics resume unchanged.
+                same_runtime_retry_available=engaged or self._ac_retry_attempts > 0,
             )
             if not terminal:
                 if not engaged:

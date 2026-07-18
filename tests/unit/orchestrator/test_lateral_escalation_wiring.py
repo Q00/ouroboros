@@ -1237,6 +1237,97 @@ class TestZeroRetryBudgetStillEngagesLadder:
         assert kwargs["result"] is initial_failure
         assert kwargs["retry_termination_reason"] == "budget_exhausted"
 
+    @pytest.mark.asyncio
+    async def test_zero_budget_ladder_genuinely_engages_with_realistic_router(self) -> None:
+        """Fix 6 redo (round 3 follow-up review): every test above MOCKS
+        ``_maybe_run_lateral_escalation_ladder`` -- they only prove it gets
+        CALLED, never that it actually ENGAGES. A mocked-call test would NOT
+        have caught the actual bug: ``_root_ac_terminal_state`` gates ladder
+        eligibility on ``is_terminal_state_failure(..., retry_attempt=0)``,
+        and for a REALISTICALLY configured router (base tier below the
+        frontier ceiling -- the common case, unlike
+        ``_make_executor_with_active_ladder``'s fixture which starts
+        ALREADY at the ceiling, the edge case the finding notes accidentally
+        worked before this fix) that resolves to a non-ceiling tier at
+        ``retry_attempt=0`` -- exactly what a zero-same-runtime-retry-budget
+        AC's one and only dispatch always is. Before this redo, the ladder
+        declined on its very first check and fell straight through to plain
+        recovery-exhausted, never redispatching at all.
+
+        This test drives the REAL, unmocked ladder through
+        ``_run_batch_with_verify_and_retry`` and asserts a genuine SECOND
+        dispatch happens with a real breakthrough success -- the only way
+        that is observable is if the ladder actually engaged.
+        """
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._ac_retry_attempts = 0
+        # A REALISTIC router: base tier is "standard", one notch below the
+        # "frontier" ceiling, with an escalation threshold high enough that
+        # retry_attempt=0 -- the only attempt a zero-budget config's
+        # ORDINARY dispatch ever makes -- does not itself resolve to the
+        # ceiling tier.
+        executor._model_router = ModelRouter(
+            tier_models={
+                "frugal": "model-frugal",
+                "standard": "model-standard",
+                "frontier": "model-frontier",
+            },
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=5,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._reasoning_effort = "medium"  # also below the "xhigh" ceiling
+
+        initial_failure = _failed_result(error="stuck at maximum strength")
+        breakthrough = _success_result()
+
+        dispatch_calls: list[int] = []
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(len(dispatch_calls) + 1)
+            if len(dispatch_calls) == 1:
+                return [initial_failure]
+            return [breakthrough]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        # The genuine unmocked engagement signal: a SECOND dispatch actually
+        # happened. Before this redo, the ladder would have declined on its
+        # first (and only) check, so ``dispatch_calls`` would have stayed
+        # ``[1]`` and ``results[0]`` would have been the STALE
+        # ``initial_failure``, finalized as plain recovery-exhausted.
+        assert len(dispatch_calls) >= 2
+        assert results[0] is breakthrough
+        executor._emit_recovery_exhausted.assert_not_awaited()
+
 
 class TestTerminalEligibilityRecheckedEachIteration:
     """Fix 4 (round 2, BLOCKING): terminal-state eligibility must be
