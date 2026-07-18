@@ -699,6 +699,14 @@ MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
+# Round-6 Findings #3/#4: how many long-cadence background retries a
+# correctness-bearing durable write gets after its bounded FOREGROUND
+# retries are exhausted, before the process finally gives up loudly. At the
+# default parked cadence (300s) this is ~4 hours of retrying — "keep
+# retrying at a longer interval rather than giving up silently" — while
+# still bounded, so a truly unwritable store does not spin a leaked task
+# forever after the run ends.
+_DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS = 48
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 
 
@@ -1122,6 +1130,11 @@ class ParallelACExecutor:
         # by ``ac_index``. Injectable sleep so tests never wait through a real
         # backoff duration.
         self._lateral_escalation_states: dict[int, LateralEscalationState] = {}
+        # Round-6 Findings #3/#4: background tasks still retrying a
+        # correctness-bearing durable write whose bounded foreground retries
+        # were exhausted. Held here so the tasks are not garbage-collected
+        # mid-flight and tests can await them deterministically.
+        self._deferred_durable_write_tasks: set[asyncio.Task[None]] = set()
         # Round-6 Finding #1: the ACTUAL in-flight dispatch-attempt number
         # durably recorded by the latest ``lateral_escalation_progressed``
         # event for each root AC, reconstructed alongside
@@ -6817,6 +6830,51 @@ Respond with either ATOMIC or the structured JSON object only.
         self._lateral_escalation_states[ac_idx] = state
         return state
 
+    def _schedule_deferred_durable_write(
+        self,
+        *,
+        write: Callable[[], Awaitable[bool]],
+        on_persisted: Callable[[], None] | None,
+        log_key: str,
+        **log_context: Any,
+    ) -> None:
+        """Keep retrying an exhausted correctness-bearing write in the background.
+
+        Round-6 Findings #3/#4 (BLOCKING), same underlying problem for two
+        different event types: once a durable write's bounded FOREGROUND
+        retries are spent, just logging and moving on leaves the durable log
+        permanently missing a record whose absence reads as different state
+        on replay ("still parked/escalating" for a resolved ladder episode;
+        "never attested" for an attested decomposition round). Instead of
+        giving up silently, the write keeps retrying at the long
+        operator-visible parked cadence in a background task — bounded at
+        :data:`_DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS` so a truly unwritable
+        store does not leak a spinning task forever — and only runs
+        ``on_persisted`` (e.g. clearing the in-memory state the durable log
+        can now corroborate) once the write actually lands. The final
+        give-up is loud and leaves any fail-closed in-memory substitute in
+        place.
+        """
+
+        async def _retry_loop() -> None:
+            for _ in range(_DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS):
+                await self._sleep(self._parked_retry_backoff_seconds)
+                try:
+                    persisted = await write()
+                except Exception as exc:  # noqa: BLE001 - store may be closing down.
+                    log.warning(f"{log_key}.deferred_write_error", error=str(exc), **log_context)
+                    persisted = False
+                if persisted:
+                    if on_persisted is not None:
+                        on_persisted()
+                    log.info(f"{log_key}.deferred_write_recovered", **log_context)
+                    return
+            log.error(f"{log_key}.deferred_write_gave_up", **log_context)
+
+        task = asyncio.create_task(_retry_loop())
+        self._deferred_durable_write_tasks.add(task)
+        task.add_done_callback(self._deferred_durable_write_tasks.discard)
+
     async def _resolve_escalation_success(
         self, *, ac_idx: int, execution_id: str, session_id: str
     ) -> None:
@@ -6854,12 +6912,41 @@ Respond with either ATOMIC or the structured JSON object only.
             if resolved_persisted:
                 break
         if not resolved_persisted:
+            # Round-6 Finding #3 (BLOCKING, superseding the log-and-move-on
+            # stance): clearing the in-memory state while the durable log
+            # still says parked/escalating leaves every replay-based
+            # projection (board/HUD/conductor) stuck on that stale record
+            # forever, with nothing left even trying to fix it. Keep the
+            # in-memory state (the live process stays honest about the
+            # unresolved durable record) and keep retrying the write at the
+            # long parked cadence in the background — only a write that
+            # actually LANDS clears the state, exactly as the foreground
+            # success path does below.
             log.error(
                 "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
                 ac_idx=ac_idx,
                 execution_id=execution_id,
                 node_id=resolved_node_id,
             )
+
+            def _clear_in_memory_state() -> None:
+                self._lateral_escalation_states.pop(ac_idx, None)
+                self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+
+            self._schedule_deferred_durable_write(
+                write=lambda: self._event_emitter.emit_ac_parked_resolved(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=resolved_node_id,
+                    root_ac_index=ac_idx,
+                ),
+                on_persisted=_clear_in_memory_state,
+                log_key="parallel_executor.lateral_escalation.resolved",
+                ac_idx=ac_idx,
+                execution_id=execution_id,
+                node_id=resolved_node_id,
+            )
+            return
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
 
@@ -6902,6 +6989,10 @@ Respond with either ATOMIC or the structured JSON object only.
             if interrupted_persisted:
                 break
         if not interrupted_persisted:
+            # Round-6 Finding #3's convention applies to this terminal write
+            # too: keep the in-memory state until the durable log can
+            # corroborate the episode's end, and keep retrying the write at
+            # the long parked cadence in the background.
             log.error(
                 "parallel_executor.lateral_escalation.interrupted_write_failed_correctness_risk",
                 ac_idx=ac_idx,
@@ -6909,6 +7000,26 @@ Respond with either ATOMIC or the structured JSON object only.
                 node_id=node_id,
                 reason=reason,
             )
+
+            def _clear_in_memory_state() -> None:
+                self._lateral_escalation_states.pop(ac_idx, None)
+                self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+
+            self._schedule_deferred_durable_write(
+                write=lambda: self._event_emitter.emit_lateral_escalation_interrupted(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=node_id,
+                    root_ac_index=ac_idx,
+                    reason=reason,
+                ),
+                on_persisted=_clear_in_memory_state,
+                log_key="parallel_executor.lateral_escalation.interrupted",
+                ac_idx=ac_idx,
+                execution_id=execution_id,
+                node_id=node_id,
+            )
+            return
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
 

@@ -2701,3 +2701,96 @@ class TestNonSuccessLadderExitsResolveDurableState:
         cold = self._durable_ladder_executor(memory_event_store)
         state = await cold._load_lateral_escalation_state(0, execution_id="exec-1")
         assert state == LateralEscalationState()
+
+
+class TestResolvedWriteExhaustionRetriesInBackground:
+    """Round-6 Finding #3 (BLOCKING): when the ``parked_resolved`` write's
+    bounded foreground retries were ALL exhausted, the executor logged,
+    cleared its in-memory state, and returned success anyway — leaving the
+    durable projections (board/HUD/conductor) stuck on parked/escalating
+    forever with nothing left even trying to fix it. The write must keep
+    retrying at the long parked cadence in the background, and the
+    in-memory state may only clear once the durable log actually
+    corroborates the resolution."""
+
+    @pytest.mark.asyncio
+    async def test_exhausted_resolved_write_keeps_state_and_retries_in_background(
+        self,
+    ) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        executor._lateral_escalation_states[0] = LateralEscalationState(
+            consecutive_terminal_failures=3,
+            personas_tried=(ThinkingPersona.HACKER,),
+        )
+        # All 3 foreground retries fail; the FIRST background retry lands.
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(
+            side_effect=[False, False, False, True]
+        )
+
+        await executor._resolve_escalation_success(
+            ac_idx=0, execution_id="exec-1", session_id="s1"
+        )
+
+        # The foreground call returned (a genuine success is never held
+        # hostage) but the in-memory state was NOT silently cleared: the
+        # durable log still says escalating, and the live process stays
+        # honest about that.
+        assert 0 in executor._lateral_escalation_states
+        assert executor._deferred_durable_write_tasks
+
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        # Once the background write landed, the state cleared — same as the
+        # foreground success path.
+        assert 0 not in executor._lateral_escalation_states
+        assert executor._event_emitter.emit_ac_parked_resolved.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_background_gives_up_loudly_but_never_clears_unresolved_state(
+        self,
+    ) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        executor._lateral_escalation_states[0] = LateralEscalationState(
+            consecutive_terminal_failures=3,
+            personas_tried=(ThinkingPersona.HACKER,),
+        )
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=False)
+
+        await executor._resolve_escalation_success(
+            ac_idx=0, execution_id="exec-1", session_id="s1"
+        )
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        # Bounded give-up: the in-memory state stays "escalating" (the
+        # fail-closed direction) rather than silently pretending the
+        # durable log was fixed.
+        assert 0 in executor._lateral_escalation_states
+        from ouroboros.orchestrator.parallel_executor import (
+            _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS,
+        )
+
+        assert executor._event_emitter.emit_ac_parked_resolved.await_count == (
+            3 + _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS
+        )
+
+    @pytest.mark.asyncio
+    async def test_persisted_resolution_still_clears_state_immediately(self) -> None:
+        """Negative control: the ordinary foreground success path is
+        unchanged — no background task, state cleared immediately."""
+        executor = _make_executor_with_active_ladder()
+        executor._lateral_escalation_states[0] = LateralEscalationState(
+            consecutive_terminal_failures=3,
+            personas_tried=(ThinkingPersona.HACKER,),
+        )
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=True)
+
+        await executor._resolve_escalation_success(
+            ac_idx=0, execution_id="exec-1", session_id="s1"
+        )
+
+        assert 0 not in executor._lateral_escalation_states
+        assert not executor._deferred_durable_write_tasks
