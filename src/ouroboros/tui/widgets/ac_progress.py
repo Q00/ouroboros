@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -259,6 +260,23 @@ class ACProgressWidget(Widget):
 
     def watch_acceptance_criteria(self, _new_criteria: list[ACProgressItem]) -> None:
         """React to acceptance_criteria changes."""
+        self.refresh(recompose=True)
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recompute item truncation for the new width (Fix 9, P2).
+
+        Items are truncated at compose time using ``_content_max_width()``,
+        which reads the widget's width at that moment. Without this handler,
+        resizing the terminal afterward never updates the truncation budget:
+        an item truncated (or left whole) for the OLD width stays exactly as
+        it was until an unrelated ``acceptance_criteria`` update happens to
+        force a recompose. A full recompose (the same mechanism
+        ``watch_acceptance_criteria`` already uses for content changes) is
+        cheap here — this widget always rebuilds from scratch, it never
+        patches items in place — and ``compose()`` re-reads
+        ``_content_max_width()`` fresh every time.
+        """
+        del event
         self.refresh(recompose=True)
 
     def watch_completed_count(self, _new_count: int) -> None:

@@ -2,9 +2,18 @@
 
 from unittest.mock import MagicMock
 
+from textual import events
+from textual.geometry import Size
+
 from ouroboros.tui.widgets.ac_progress import ACProgressItem, ACProgressWidget
 from ouroboros.tui.widgets.ac_tree import ACTreeWidget
 from ouroboros.tui.widgets.phase_progress import PhaseIndicator, PhaseProgressWidget
+
+
+def _resize_event(width: int = 30, height: int = 24) -> events.Resize:
+    """Build a minimal ``events.Resize`` for directly invoking ``on_resize``."""
+    size = Size(width, height)
+    return events.Resize(size=size, virtual_size=size)
 
 
 class TestPhaseIndicator:
@@ -433,6 +442,63 @@ class TestACTreeWidget:
 
         assert widget._label_max_width() == 50
 
+    def test_on_resize_retruncates_root_and_child_labels(self) -> None:
+        """Fix 9 (P2, PR #1648 review): labels are computed once at compose
+        time using the widget's width at that moment; without a resize
+        handler, resizing the terminal afterward never updates the
+        truncation budget. A simulated resize (here, a narrower budget
+        exactly as ``_label_max_width`` would report after a real terminal
+        shrink) must re-truncate every rendered label — root AND children."""
+        long_content = "N" * 100
+        tree_data = {
+            "root_id": "ac_root",
+            "nodes": {
+                "ac_root": {
+                    "id": "ac_root",
+                    "content": long_content,
+                    "depth": 0,
+                    "status": "pending",
+                    "is_atomic": False,
+                    "children_ids": ["ac_child"],
+                },
+                "ac_child": {
+                    "id": "ac_child",
+                    "content": long_content,
+                    "depth": 1,
+                    "status": "pending",
+                    "is_atomic": True,
+                    "children_ids": [],
+                },
+            },
+        }
+        widget = ACTreeWidget(tree_data=tree_data)
+        tree = next(w for w in widget.compose() if hasattr(w, "root"))
+
+        initial_root_label = str(tree.root.label)
+        child_node = widget._node_map["ac_child"]
+        initial_child_label = str(child_node.label)
+        # Unmounted defaults: root truncates at 30, other nodes at 50.
+        assert long_content[:30] in initial_root_label
+        assert long_content[:50] in initial_child_label
+
+        # Simulate resizing to a much narrower terminal.
+        widget._label_max_width = lambda **_kwargs: 10  # type: ignore[method-assign]
+        widget.on_resize(_resize_event(width=25))
+
+        resized_root_label = str(tree.root.label)
+        resized_child_label = str(child_node.label)
+        assert resized_root_label != initial_root_label
+        assert resized_child_label != initial_child_label
+        assert long_content[:10] in resized_root_label
+        assert long_content[:10] in resized_child_label
+
+    def test_on_resize_before_compose_is_a_no_op(self) -> None:
+        """A resize delivered before the tree has ever been built (no
+        ``_tree_widget``/``_node_map`` yet) must not raise."""
+        widget = ACTreeWidget()
+
+        widget.on_resize(_resize_event())  # must not raise
+
     def test_mark_node_atomic(self) -> None:
         """Test marking a node as atomic."""
         tree_data = {
@@ -622,3 +688,18 @@ class TestACProgressWidget:
         widget = ACProgressWidget()
 
         assert widget._content_max_width() == 45
+
+    def test_on_resize_forces_a_recompose(self) -> None:
+        """Fix 9 (P2, PR #1648 review): items are truncated at compose time
+        using the widget's width at that moment; without a resize handler,
+        resizing the terminal afterward never updates the truncation budget
+        (the same class of bug as ``ACTreeWidget``, but this widget always
+        rebuilds from scratch rather than patching items in place, so a full
+        recompose — the same mechanism ``watch_acceptance_criteria`` already
+        uses for content changes — is the correct, minimal fix)."""
+        widget = ACProgressWidget()
+        widget.refresh = MagicMock()  # type: ignore[method-assign]
+
+        widget.on_resize(_resize_event())
+
+        widget.refresh.assert_called_once_with(recompose=True)

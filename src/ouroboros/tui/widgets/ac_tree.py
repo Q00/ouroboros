@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -146,6 +147,16 @@ class ACTreeWidget(Widget):
             return max(_MIN_LABEL_WIDTH, width - _LABEL_WIDTH_RESERVED_CHARS)
         return default
 
+    def _format_root_label(self, root_content: str) -> str:
+        """Truncate the root's own label to the widget's current width.
+
+        Kept separate from :meth:`_format_node_label` because the root label
+        (passed straight to ``Tree(...)``) never carries a status icon
+        prefix, unlike every other node's label.
+        """
+        root_width = self._label_max_width(default=_DEFAULT_ROOT_LABEL_WIDTH)
+        return root_content[:root_width] + "..." if len(root_content) > root_width else root_content
+
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
         yield Label("AC Decomposition Tree", classes="header")
@@ -159,12 +170,7 @@ class ACTreeWidget(Widget):
             root_label = "AC Tree"
             if root_id and root_id in nodes:
                 root_content = nodes[root_id].get("content", "AC Tree")
-                root_width = self._label_max_width(default=_DEFAULT_ROOT_LABEL_WIDTH)
-                root_label = (
-                    root_content[:root_width] + "..."
-                    if len(root_content) > root_width
-                    else root_content
-                )
+                root_label = self._format_root_label(root_content)
 
             tree: Tree[str] = Tree(root_label)
             tree.show_root = True
@@ -382,6 +388,45 @@ class ACTreeWidget(Widget):
                 continue
             is_current = node_id == self.current_ac_id
             tree_node.set_label(self._format_node_label(node_data, is_current))
+
+    def _resync_labels_for_current_width(self) -> None:
+        """Re-render every node's label at the widget's CURRENT available width.
+
+        Reuses the same per-node formatting :meth:`_sync_existing_nodes`
+        already applies for ordinary content/status updates, with one
+        exception: the root's own label is re-truncated via
+        :meth:`_format_root_label` (no status-icon prefix), matching how
+        :meth:`compose` originally built it.
+        """
+        if self._tree_widget is None or not self._node_map:
+            return
+        data = self._tree_data_cache or self.tree_data
+        nodes = data.get("nodes")
+        if not isinstance(nodes, dict):
+            return
+        root_id = data.get("root_id")
+        for node_id, tree_node in self._node_map.items():
+            node_data = nodes.get(node_id)
+            if not isinstance(node_data, dict):
+                continue
+            if node_id == root_id:
+                tree_node.set_label(self._format_root_label(node_data.get("content", "AC Tree")))
+                continue
+            is_current = node_id == self.current_ac_id
+            tree_node.set_label(self._format_node_label(node_data, is_current))
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recompute label truncation for the new width (Fix 9, P2).
+
+        Labels are computed once — at compose time — using the widget's
+        width at that moment. Without this handler, resizing the terminal
+        afterward never updates the truncation budget: a label truncated (or
+        left whole) for the OLD width stays exactly as it was until some
+        unrelated tree/status update happens to force a resync or full
+        recompose.
+        """
+        del event
+        self._resync_labels_for_current_width()
 
     def update_node_status(self, ac_id: str, status: str) -> None:
         """Update status of a single node without recompose.
