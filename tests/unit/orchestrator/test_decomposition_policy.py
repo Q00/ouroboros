@@ -307,6 +307,143 @@ class TestProposalValidation:
         assert parse_decomposition_proposal(payload) is None
 
 
+def _artifact_payload(
+    first: list[str],
+    second: list[str],
+) -> dict[str, object]:
+    payload = _proposal_payload()
+    children = payload["children"]
+    assert isinstance(children, list)
+    children[0]["expected_artifacts"] = first
+    children[1]["expected_artifacts"] = second
+    return payload
+
+
+class TestChildExpectedArtifactsSchema:
+    def test_round_trips_expected_artifacts(self) -> None:
+        child = DecompositionChild(
+            description="Implement parser for persisted policy records",
+            coverage_claims=("record schema is parsed",),
+            verification_hint="unit tests cover round trip",
+            expected_artifacts=("src/parser.py", "tests/test_parser.py"),
+        )
+        restored = DecompositionChild.from_dict(child.to_dict())
+        assert restored is not None
+        assert restored.expected_artifacts == ("src/parser.py", "tests/test_parser.py")
+
+    def test_from_dict_defaults_to_empty_for_old_payloads(self) -> None:
+        # Old serialized proposals predate this field entirely -- they must
+        # keep parsing, with an empty artifact slice.
+        child = DecompositionChild.from_dict(
+            {
+                "description": "Implement parser",
+                "coverage_claims": ["record schema is parsed"],
+                "verification_hint": "unit tests",
+            }
+        )
+        assert child is not None
+        assert child.expected_artifacts == ()
+
+    def test_rejects_duplicate_expected_artifacts(self) -> None:
+        with pytest.raises(ValueError):
+            DecompositionChild(
+                description="Implement parser",
+                coverage_claims=("claim",),
+                verification_hint="hint",
+                expected_artifacts=("src/parser.py", "src/parser.py"),
+            )
+
+
+class TestArtifactPartitionValidation:
+    """Safety invariants 2 and 3: the decomposer cannot self-author its own
+    artifact oracle -- children may only claim exact members of the PARENT's
+    seed-authored ``expected_artifacts``, exactly once, covering all of it."""
+
+    PARENT_ARTIFACTS = ("src/a.py", "src/b.py", "docs/spec.md")
+
+    def test_exact_partition_passes_and_parses(self) -> None:
+        payload = _artifact_payload(["src/a.py", "docs/spec.md"], ["src/b.py"])
+        errors = validate_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert errors == ()
+        proposal = parse_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert isinstance(proposal, DecompositionProposal)
+        assert proposal.children[0].expected_artifacts == ("src/a.py", "docs/spec.md")
+        assert proposal.children[1].expected_artifacts == ("src/b.py",)
+
+    def test_rejects_invented_artifact_path(self) -> None:
+        """Invariant 2: a child can never claim a path outside the parent's
+        own declared set -- rejected at proposal time."""
+        payload = _artifact_payload(["src/a.py", "src/EVIL.py"], ["src/b.py", "docs/spec.md"])
+        errors = validate_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert any("not one of the parent's declared expected_artifacts" in e for e in errors)
+        assert (
+            parse_decomposition_proposal(payload, parent_expected_artifacts=self.PARENT_ARTIFACTS)
+            is None
+        )
+
+    def test_rejects_artifact_claimed_by_two_children(self) -> None:
+        """Invariant 3: no double-crediting -- an artifact belongs to exactly
+        one child."""
+        payload = _artifact_payload(["src/a.py", "docs/spec.md"], ["src/a.py", "src/b.py"])
+        errors = validate_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert any("already claimed by another child" in e for e in errors)
+        assert (
+            parse_decomposition_proposal(payload, parent_expected_artifacts=self.PARENT_ARTIFACTS)
+            is None
+        )
+
+    def test_rejects_unclaimed_parent_artifact(self) -> None:
+        payload = _artifact_payload(["src/a.py"], ["src/b.py"])
+        errors = validate_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert any(
+            "parent expected_artifacts not fully assigned" in e and "docs/spec.md" in e
+            for e in errors
+        )
+        assert (
+            parse_decomposition_proposal(payload, parent_expected_artifacts=self.PARENT_ARTIFACTS)
+            is None
+        )
+
+    def test_rejects_non_list_expected_artifacts(self) -> None:
+        payload = _artifact_payload(["src/a.py"], [])
+        children = payload["children"]
+        assert isinstance(children, list)
+        children[1]["expected_artifacts"] = "src/b.py"
+        errors = validate_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert any("expected_artifacts must be a list" in e for e in errors)
+
+    def test_child_without_artifacts_is_allowed_when_siblings_cover_parent(self) -> None:
+        # A child may carry no artifact slice as long as the union across all
+        # children still equals the parent's set exactly.
+        payload = _artifact_payload(["src/a.py", "src/b.py", "docs/spec.md"], [])
+        errors = validate_decomposition_proposal(
+            payload, parent_expected_artifacts=self.PARENT_ARTIFACTS
+        )
+        assert errors == ()
+
+    def test_no_parent_artifacts_is_a_complete_no_op(self) -> None:
+        """Invariant 4 (structural leg): when the parent declares no
+        expected_artifacts, this validation never fires -- payloads with or
+        without the field validate exactly as before this feature."""
+        assert validate_decomposition_proposal(_proposal_payload()) == ()
+        with_field = _artifact_payload(["src/whatever.py"], [])
+        assert validate_decomposition_proposal(with_field) == ()
+        proposal = parse_decomposition_proposal(with_field)
+        assert isinstance(proposal, DecompositionProposal)
+
+
 class TestLegacyAndTraceHelpers:
     def test_legacy_unverified_split_is_never_trustworthy(self) -> None:
         record = legacy_unverified_split_decision(

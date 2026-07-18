@@ -25,6 +25,12 @@ MAX_EVIDENCE_REF_CHARS = 160
 MAX_CHILD_DESCRIPTION_CHARS = 500
 MAX_COVERAGE_CLAIMS = 8
 MAX_COVERAGE_CLAIM_CHARS = 240
+# A child's ``expected_artifacts`` is a slice of the PARENT's own seed-authored
+# ``expected_artifacts``. The union across at most MAX_CHILDREN children must
+# equal the parent's full set, so a single child may legitimately need to carry
+# most of an artifact-rich parent's contract -- bound generously, but bounded.
+MAX_CHILD_EXPECTED_ARTIFACTS = 32
+MAX_EXPECTED_ARTIFACT_CHARS = 500
 MAX_VERIFICATION_HINT_CHARS = 300
 MAX_RATIONALE_CHARS = 1_000
 MAX_PROPOSAL_REPR_CHARS = 10_000
@@ -144,11 +150,24 @@ class DecompositionTraceSummary:
 
 @dataclass(frozen=True, slots=True)
 class DecompositionChild:
-    """One child task in a structured decomposition proposal."""
+    """One child task in a structured decomposition proposal.
+
+    ``expected_artifacts`` is this child's assigned slice of the PARENT AC's
+    own seed-authored ``expected_artifacts``. It is the child's per-child-local
+    success contract: the orchestrator checks exactly these paths (with a
+    pre-dispatch existence snapshot) to produce genuine per-sibling verify
+    evidence for the gate-anchored decomposition attestation. Structural
+    validation (:func:`validate_decomposition_proposal`) rejects any entry that
+    is not an exact member of the parent's declared set, so the decomposer can
+    never invent its own oracle. Empty for parents that declare no artifacts
+    (and for all pre-existing serialized proposals -- fully backward
+    compatible).
+    """
 
     description: str
     coverage_claims: tuple[str, ...] = field(default_factory=tuple)
     verification_hint: str = ""
+    expected_artifacts: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.description, str):
@@ -177,15 +196,29 @@ class DecompositionChild:
         if _has_duplicate_fingerprints(claims):
             msg = "coverage_claims must not contain duplicates"
             raise ValueError(msg)
+        artifacts = _bounded_strings(
+            self.expected_artifacts,
+            field_name="expected_artifacts",
+            max_count=MAX_CHILD_EXPECTED_ARTIFACTS,
+            max_chars=MAX_EXPECTED_ARTIFACT_CHARS,
+            require_nonblank=True,
+        )
+        # Artifact entries are filesystem paths: exact-string duplicates are
+        # rejected (fingerprint collapsing would wrongly merge distinct paths).
+        if len(set(artifacts)) != len(artifacts):
+            msg = "expected_artifacts must not contain duplicates"
+            raise ValueError(msg)
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "coverage_claims", claims)
         object.__setattr__(self, "verification_hint", verification_hint)
+        object.__setattr__(self, "expected_artifacts", artifacts)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "description": self.description,
             "coverage_claims": list(self.coverage_claims),
             "verification_hint": self.verification_hint,
+            "expected_artifacts": list(self.expected_artifacts),
         }
 
     @classmethod
@@ -197,6 +230,9 @@ class DecompositionChild:
                 description=data["description"],
                 coverage_claims=_read_string_list(data.get("coverage_claims", ())),
                 verification_hint=data["verification_hint"],
+                # Absent in older serialized proposals and in proposals for
+                # parents that declare no artifacts -- default to empty.
+                expected_artifacts=_read_string_list(data.get("expected_artifacts", ())),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -429,12 +465,16 @@ def parse_decomposition_proposal(
     parent_text: str = "",
     min_children: int = MIN_CHILDREN,
     max_children: int = MAX_CHILDREN,
+    parent_expected_artifacts: tuple[str, ...] = (),
 ) -> DecompositionProposal | None:
     """Parse and structurally validate a decomposer proposal.
 
     This check is intentionally structural. A passing proposal has a valid
     shape, non-duplicate child text/claims, and an explicit parent coverage
-    claim, but it does not prove semantic MECE.
+    claim, but it does not prove semantic MECE. When
+    ``parent_expected_artifacts`` is non-empty, the children's
+    ``expected_artifacts`` must also form an exact partition of that set (see
+    :func:`validate_decomposition_proposal`).
     """
 
     errors = validate_decomposition_proposal(
@@ -442,6 +482,7 @@ def parse_decomposition_proposal(
         parent_text=parent_text,
         min_children=min_children,
         max_children=max_children,
+        parent_expected_artifacts=parent_expected_artifacts,
     )
     if errors:
         return None
@@ -454,8 +495,25 @@ def validate_decomposition_proposal(
     parent_text: str = "",
     min_children: int = MIN_CHILDREN,
     max_children: int = MAX_CHILDREN,
+    parent_expected_artifacts: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    """Return structural validation errors for a proposal payload."""
+    """Return structural validation errors for a proposal payload.
+
+    When ``parent_expected_artifacts`` is non-empty, the children's
+    ``expected_artifacts`` fields must together form an exact partition of it:
+
+    * every entry must be an exact string member of the parent's declared set
+      (a child can never invent an artifact path -- the anti-self-grading
+      safety property);
+    * no artifact may be claimed by more than one child (mutual exclusivity,
+      no double-crediting);
+    * every parent artifact must be claimed by exactly one child (the split
+      must actually cover the parent's whole artifact contract).
+
+    When ``parent_expected_artifacts`` is empty, children's
+    ``expected_artifacts`` are neither required nor validated here -- the
+    field is a no-op and behavior matches the pre-feature code exactly.
+    """
 
     errors: list[str] = []
     if isinstance(data, str | bytes) or not isinstance(data, Mapping):
@@ -480,6 +538,8 @@ def validate_decomposition_proposal(
 
     child_fingerprints: set[str] = set()
     coverage_fingerprints: set[str] = set()
+    claimed_artifacts: set[str] = set()
+    parent_artifact_set = set(parent_expected_artifacts)
     parent_fingerprint = _fingerprint(parent_text)
     for index, child_raw in enumerate(children_raw):
         if not isinstance(child_raw, Mapping):
@@ -497,6 +557,38 @@ def validate_decomposition_proposal(
         if child_fingerprint in child_fingerprints:
             errors.append(f"child {index} duplicates another child")
         child_fingerprints.add(child_fingerprint)
+
+        if parent_artifact_set:
+            # Anti-self-grading partition check: each entry must exactly match
+            # one of the PARENT's seed-authored expected_artifacts (fixed
+            # before the decomposer ever ran), and no artifact may be claimed
+            # twice. The exact-union leg runs after the loop.
+            artifacts_raw = child_raw.get("expected_artifacts", ())
+            if not isinstance(artifacts_raw, Sequence) or isinstance(artifacts_raw, str | bytes):
+                errors.append(f"child {index} expected_artifacts must be a list")
+            else:
+                if len(artifacts_raw) > MAX_CHILD_EXPECTED_ARTIFACTS:
+                    errors.append(f"child {index} has too many expected_artifacts")
+                for artifact_index, artifact in enumerate(artifacts_raw):
+                    if not isinstance(artifact, str) or not artifact.strip():
+                        errors.append(
+                            f"child {index} expected_artifacts entry {artifact_index} "
+                            "must be a non-empty string"
+                        )
+                        continue
+                    if artifact not in parent_artifact_set:
+                        errors.append(
+                            f"child {index} expected_artifacts entry {artifact_index} "
+                            "is not one of the parent's declared expected_artifacts"
+                        )
+                        continue
+                    if artifact in claimed_artifacts:
+                        errors.append(
+                            f"child {index} expected_artifacts entry {artifact_index} "
+                            "is already claimed by another child"
+                        )
+                        continue
+                    claimed_artifacts.add(artifact)
 
         claims = child_raw.get("coverage_claims")
         if not isinstance(claims, Sequence) or isinstance(claims, str | bytes):
@@ -528,6 +620,17 @@ def validate_decomposition_proposal(
             errors.append(f"child {index} verification_hint must be non-empty")
         elif len(hint) > MAX_VERIFICATION_HINT_CHARS:
             errors.append(f"child {index} verification_hint is too large")
+
+    if parent_artifact_set:
+        unclaimed = sorted(parent_artifact_set - claimed_artifacts)
+        if unclaimed:
+            # The union of all children's expected_artifacts must equal the
+            # parent's declared set EXACTLY. A proposal that leaves any parent
+            # artifact unassigned does not actually partition the parent's
+            # contract and must not structurally pass as MECE-on-artifacts.
+            errors.append(
+                "parent expected_artifacts not fully assigned to children: " + ", ".join(unclaimed)
+            )
 
     return tuple(errors)
 
