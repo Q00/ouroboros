@@ -34,8 +34,15 @@ from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.harness.decomposition_attestation import (
+    DecompositionAttestation,
+    DecompositionTrustVerdict,
+)
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
-from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ExecutionNodeIdentity,
+    build_ac_runtime_identity,
+)
 from ouroboros.orchestrator.frugality_proof import (
     EVENT_AC_OUTCOME_FINALIZED,
     EVENT_SHADOW_REPLAY,
@@ -255,11 +262,20 @@ def _shadow_events(events: list) -> list:
 
 # -- Layer 1: proof contract closes with real emitter payloads ----------------
 class _EmitterHarness:
-    """Emit the four proof-axis events for one AC via the REAL emitter."""
+    """Emit the proof-axis events for one AC via the REAL emitter.
+
+    Mirrors production shape: sub-AC identities carry a real
+    ``ExecutionNodeIdentity`` (so every axis event has a joinable
+    ``parent_node_id``), and each decomposition round is closed with the REAL
+    gate-anchored ``execution.ac.decomposition_attested`` event — since the
+    Round-7 fail-closed fix, a decomposed-child row with no joinable parent
+    identity or no trustworthy attestation never counts in the proof.
+    """
 
     def __init__(self) -> None:
         self.events: list = []
         self._finalized_roots: set[tuple[str, int]] = set()
+        self._attested_rounds: set[tuple[str, int]] = set()
 
         async def _safe_emit(event) -> bool:
             self.events.append(event)
@@ -278,14 +294,34 @@ class _EmitterHarness:
         effort_mode: str = "enforced",
         trustworthy: bool = True,
     ) -> None:
+        root_node_identity = ExecutionNodeIdentity.root(
+            execution_context_id=run_id,
+            ac_index=0,
+        )
         identity = build_ac_runtime_identity(
             1,
             execution_context_id=run_id,
             is_sub_ac=True,
             parent_ac_index=0,
             sub_ac_index=sub_index,
+            node_identity=root_node_identity.child(sub_index),
         )
         session_id = f"sess-{run_id}"
+        if (run_id, 0) not in self._attested_rounds:
+            self._attested_rounds.add((run_id, 0))
+            await self.emitter.emit_decomposition_attested(
+                execution_id=run_id,
+                session_id=session_id,
+                node_identity=root_node_identity,
+                attestation=DecompositionAttestation(
+                    node_id=root_node_identity.node_id,
+                    verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+                    failed_axis=None,
+                    failed_sibling_id=None,
+                    reason="all sibling gates and the parent gate passed",
+                ),
+                retry_attempt=0,
+            )
         await self.emitter.emit_effort_routed(
             runtime_identity=identity,
             execution_id=run_id,

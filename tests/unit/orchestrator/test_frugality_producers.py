@@ -42,9 +42,17 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
-from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
+from ouroboros.harness.decomposition_attestation import (
+    DecompositionAttestation,
+    DecompositionTrustVerdict,
+)
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ExecutionNodeIdentity,
+    build_ac_runtime_identity,
+)
 from ouroboros.orchestrator.frugality_proof import (
     EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_DECOMPOSITION_ATTESTED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
     EVENT_MODEL_ROUTED,
@@ -214,6 +222,7 @@ async def _run_one_ac(
     is_sub_ac: bool = True,
     retry_attempt: int = 0,
     decomposition_trustworthy: bool = False,
+    node_identity: ExecutionNodeIdentity | None = None,
 ):
     return await executor._execute_atomic_ac(
         ac_index=1,
@@ -228,6 +237,7 @@ async def _run_one_ac(
         is_sub_ac=is_sub_ac,
         parent_ac_index=0 if is_sub_ac else None,
         sub_ac_index=0 if is_sub_ac else None,
+        node_identity=node_identity,
         retry_attempt=retry_attempt,
         decomposition_trustworthy=decomposition_trustworthy,
     )
@@ -497,7 +507,10 @@ class TestTokenAttribution:
 
 
 # -- Producer 2: deliver verdict (seed AC4, observe-only) ---------------------
-def _runtime_identity(ac_id_index: int = 1):
+def _runtime_identity(
+    ac_id_index: int = 1,
+    node_identity: ExecutionNodeIdentity | None = None,
+):
     return build_ac_runtime_identity(
         ac_id_index,
         execution_context_id="exec_frugal",
@@ -505,6 +518,7 @@ def _runtime_identity(ac_id_index: int = 1):
         parent_ac_index=0,
         sub_ac_index=0,
         retry_attempt=0,
+        node_identity=node_identity,
     )
 
 
@@ -712,6 +726,10 @@ class TestDeliverVerdict:
                     "baseline_tier": "standard",
                     "baseline_model": "claude-sonnet",
                     "decomposition_trustworthy": True,
+                    # Round-7 fail-closed proof admission: a decomposed-child
+                    # row only counts with joinable parent identity AND a real
+                    # trustworthy attestation for the attempt.
+                    "parent_node_id": "exec_frugal_node_0",
                     "root_ac_index": 0,
                     "retry_attempt": 0,
                 },
@@ -724,6 +742,15 @@ class TestDeliverVerdict:
                     "retry_attempt": 0,
                     "success": True,
                     "is_decomposed": True,
+                },
+            },
+            {
+                "type": EVENT_DECOMPOSITION_ATTESTED,
+                "data": {
+                    "node_id": "exec_frugal_node_0",
+                    "execution_id": "exec_frugal",
+                    "retry_attempt": 0,
+                    "trustworthy": True,
                 },
             },
         ]
@@ -1031,6 +1058,10 @@ class TestDeliverVerdict:
 # -- Consumer: run-end proof evaluation (runner) -----------------------------
 def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> list[dict]:
     root_ac_index = int(ac_id.rsplit("-", 1)[-1]) if ac_id.rsplit("-", 1)[-1].isdigit() else 0
+    # Round-7 fail-closed proof admission: a decomposed-child row only counts
+    # with joinable parent identity AND a real trustworthy gate-anchored
+    # attestation for the attempt, so the fabricated stream carries both.
+    parent_node_id = f"{run_id}_node_{root_ac_index}"
     return [
         {
             "type": EVENT_EFFORT_ROUTED,
@@ -1089,6 +1120,7 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
                 "baseline_tier": "standard",
                 "baseline_model": "claude-sonnet",
                 "decomposition_trustworthy": True,
+                "parent_node_id": parent_node_id,
                 "root_ac_index": root_ac_index,
                 "retry_attempt": 0,
             },
@@ -1101,6 +1133,15 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
                 "retry_attempt": 0,
                 "success": True,
                 "is_decomposed": True,
+            },
+        },
+        {
+            "type": EVENT_DECOMPOSITION_ATTESTED,
+            "data": {
+                "node_id": parent_node_id,
+                "execution_id": run_id,
+                "retry_attempt": 0,
+                "trustworthy": True,
             },
         },
     ]
@@ -1387,12 +1428,35 @@ class TestProducedEventsMatchProofContract:
             # reasoning_effort intentionally omitted: shipped default is None.
         )
 
+        # Mirror production: sub-AC events carry a real node identity (joinable
+        # ``parent_node_id``), and the finished round is closed with the REAL
+        # gate-anchored attestation — required for a decomposed-child row to
+        # count since the Round-7 fail-closed proof-admission fix.
+        root_node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec_frugal",
+            ac_index=0,
+        )
+        child_node_identity = root_node_identity.child(0)
         result = await _run_one_ac(
             executor,
             is_sub_ac=True,
             decomposition_trustworthy=True,
+            node_identity=child_node_identity,
         )
-        identity = _runtime_identity()
+        identity = _runtime_identity(node_identity=child_node_identity)
+        await executor._event_emitter.emit_decomposition_attested(
+            execution_id="exec_frugal",
+            session_id="sess_frugal",
+            node_identity=root_node_identity,
+            attestation=DecompositionAttestation(
+                node_id=root_node_identity.node_id,
+                verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason="all sibling gates and the parent gate passed",
+            ),
+            retry_attempt=0,
+        )
         await executor._event_emitter.emit_deliver_verdict(
             runtime_identity=identity,
             execution_id="exec_frugal",

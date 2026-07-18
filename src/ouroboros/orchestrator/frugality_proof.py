@@ -602,7 +602,25 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         # attestation exists for every one of its attempts; ambiguous
         # parentage (``parent_node_id_invalid``) excludes the row for the
         # same reason instead of silently skipping the override.
+        #
+        # Round-7 fix (Finding #5): the SAME reasoning extends to a
+        # decomposed-child row whose ``parent_node_id`` is ABSENT entirely
+        # (legacy stream predating the field, or a producer that dropped it).
+        # The earlier round only failed closed for present-but-unattested and
+        # ambiguous parentage; an absent field fell through with
+        # ``attestation_trustworthy=True``, admitting the row into the proof
+        # on the WEAKER proposal-time shadow-replay snapshot alone — no real
+        # gate-anchored attestation evidence ever required. That made the one
+        # row shape that can never be joined to an attestation the EASIEST to
+        # admit, again ranking degraded telemetry above present telemetry.
+        # A decomposed-child row with no joinable parent identity is therefore
+        # excluded fail-closed; top-level rows (``is_decomposed_child=False``)
+        # never count in the proof regardless, so they keep the permissive
+        # default.
         parent_node_id = v.get("parent_node_id")
+        row_is_decomposed_child = bool(v.get("is_decomposed_child")) and not v.get(
+            "decomposition_flag_invalid", False
+        )
         attestation_trustworthy = True
         if v.get("parent_node_id_invalid", False):
             attestation_trustworthy = False
@@ -614,16 +632,15 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 ):
                     attestation_trustworthy = False
                     break
+        elif row_is_decomposed_child:
+            attestation_trustworthy = False
 
         rows.append(
             FrugalityTriadRow(
                 ac_id=v["ac_id"],
                 seed_run_id=v.get("seed_run_id"),
                 root_ac_index=root_index if isinstance(root_index, int) else None,
-                is_decomposed_child=(
-                    bool(v.get("is_decomposed_child"))
-                    and not v.get("decomposition_flag_invalid", False)
-                ),
+                is_decomposed_child=row_is_decomposed_child,
                 decomposition_trustworthy=(
                     bool(baselines)
                     and all(value[3] for value in baselines.values())

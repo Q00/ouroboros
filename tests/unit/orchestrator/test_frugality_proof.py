@@ -23,6 +23,10 @@ def _evt(etype: str, **data) -> dict:
     return {"type": etype, "data": data}
 
 
+#: Sentinel: derive a joinable ``parent_node_id`` from (run, root_ac_index).
+_AUTO_PARENT: object = object()
+
+
 def _triad_events(
     ac: str,
     run: str,
@@ -30,9 +34,20 @@ def _triad_events(
     retry_attempt: int = 0,
     root_ac_index: int = 0,
     final_success: bool = True,
+    parent_node_id: object = _AUTO_PARENT,
     **effort_overrides,
 ) -> list[dict]:
-    """A full, accepted model/token/grounding/baseline row for one attempt."""
+    """A full, accepted model/token/grounding/baseline row for one attempt.
+
+    Round-7 Finding #5: a decomposed-child row now also needs joinable parent
+    identity plus a real TRUSTWORTHY gate-anchored attestation for the attempt
+    to count in the proof, so the default helper output carries both. Pass
+    ``parent_node_id=None`` to build a legacy row with the field absent
+    entirely (and no attestation event).
+    """
+    resolved_parent = (
+        f"node-{run}-root-{root_ac_index}" if parent_node_id is _AUTO_PARENT else parent_node_id
+    )
     effort = {
         "ac_id": ac,
         "seed_run_id": run,
@@ -43,6 +58,32 @@ def _triad_events(
         "is_decomposed_child": True,
     }
     effort.update(effort_overrides)
+    shadow_replay_data = {
+        "ac_id": ac,
+        "seed_run_id": run,
+        "root_ac_index": root_ac_index,
+        "retry_attempt": retry_attempt,
+        "baseline_token_spend": 100.0,
+        "baseline_mode": "shadow_replay",
+        "baseline_tier": "standard",
+        "baseline_model": "claude-sonnet-4-6",
+        "decomposition_trustworthy": True,
+    }
+    if resolved_parent is not None:
+        shadow_replay_data["parent_node_id"] = resolved_parent
+    attestation_events = (
+        [
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id=resolved_parent,
+                seed_run_id=run,
+                retry_attempt=retry_attempt,
+                trustworthy=True,
+            )
+        ]
+        if resolved_parent is not None
+        else []
+    )
     return [
         _evt(EVENT_EFFORT_ROUTED, **effort),
         _evt(
@@ -64,18 +105,7 @@ def _triad_events(
             retry_attempt=retry_attempt,
             token_spend=80.0,
         ),
-        _evt(
-            EVENT_SHADOW_REPLAY,
-            ac_id=ac,
-            seed_run_id=run,
-            root_ac_index=root_ac_index,
-            retry_attempt=retry_attempt,
-            baseline_token_spend=100.0,
-            baseline_mode="shadow_replay",
-            baseline_tier="standard",
-            baseline_model="claude-sonnet-4-6",
-            decomposition_trustworthy=True,
-        ),
+        _evt(EVENT_SHADOW_REPLAY, **shadow_replay_data),
         _evt(
             EVENT_DELIVER_VERDICT,
             ac_id=ac,
@@ -94,6 +124,7 @@ def _triad_events(
             success=final_success,
             is_decomposed=True,
         ),
+        *attestation_events,
     ]
 
 
@@ -676,17 +707,47 @@ class TestDecompositionAttestedOverride:
         assert row.decomposition_trustworthy is False
         assert not row.counts_in_proof
 
-    def test_row_without_parent_node_id_keeps_prior_behavior(self) -> None:
-        """A legacy row with NO ``parent_node_id`` at all cannot be joined to
-        any attestation round; the attestation override machinery leaves it
-        untouched (its trust still comes from the shadow-replay snapshot
-        alone), exactly as before."""
-        events = _triad_events("ac1", "r1", retry_attempt=0)
+    def test_row_without_parent_node_id_is_excluded_fail_closed(self) -> None:
+        """Round-7 Finding #5: a decomposed-child row with NO
+        ``parent_node_id`` at all (legacy stream predating the field, or a
+        producer that dropped it) can never be joined to any gate-anchored
+        attestation round. It previously fell through with
+        ``attestation_trustworthy=True`` and was admitted into the proof on
+        the WEAKER proposal-time shadow-replay snapshot alone — no real
+        attestation evidence ever required — making the one row shape that
+        can never be attested the easiest to admit. It now fails closed the
+        same way as present-but-unattested and ambiguous parentage: excluded
+        from ``counts_in_proof``."""
+        events = _triad_events("ac1", "r1", retry_attempt=0, parent_node_id=None)
 
         row = assemble_triads(events)[0]
 
+        assert row.decomposition_trustworthy is False
+        assert not row.counts_in_proof
+
+    def test_top_level_row_without_parent_node_id_keeps_permissive_default(self) -> None:
+        """Scope control for the Round-7 fail-closed fix: a TOP-LEVEL row
+        (``is_decomposed_child=False``) legitimately has no parent and no
+        attestation round; the absent-parent fail-closed rule must not sweep
+        it into ``decomposition_trustworthy=False``. It stays excluded from
+        the proof anyway because ``counts_in_proof`` requires
+        ``is_decomposed_child``."""
+        events = _triad_events(
+            "ac1",
+            "r1",
+            retry_attempt=0,
+            parent_node_id=None,
+            is_decomposed_child=False,
+        )
+        for event in events:
+            if event["type"] == EVENT_MODEL_ROUTED:
+                event["data"]["is_decomposed_child"] = False
+
+        row = assemble_triads(events)[0]
+
+        assert row.is_decomposed_child is False
         assert row.decomposition_trustworthy is True
-        assert row.counts_in_proof
+        assert not row.counts_in_proof
 
     def test_conflicting_parent_node_ids_exclude_row(self) -> None:
         """Ambiguous parentage: a row reporting two different decomposition
