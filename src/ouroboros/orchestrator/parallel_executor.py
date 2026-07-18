@@ -1168,17 +1168,27 @@ class ParallelACExecutor:
         # mid-dispatch (re-run the persona)" from "dispatch completed, crash
         # before the NEXT durable transition". The finalized marker — emitted
         # right after every ladder dispatch returns — makes that distinction
-        # exact, and its ``success`` field says WHICH completed outcome the
-        # crash interrupted: ``True`` means a real success whose
-        # episode-resolution write never landed (resume must resolve the
-        # episode as SUCCESS, never fabricate a failure or consume another
-        # persona), ``False`` means an already-tried-and-failed persona
-        # (advance PAST it instead of re-running it under the same attempt
-        # identity), and ``None`` means no finalized outcome exists — the
-        # dispatch was genuinely in flight and must be re-run. Reconstructed
-        # alongside ``_lateral_escalation_resume_attempts`` during replay and
+        # exact, and its ``(success, is_decomposed)`` fields say WHICH
+        # completed outcome the crash interrupted: ``success=True`` means a
+        # real success whose episode-resolution write never landed (resume
+        # must resolve the episode as SUCCESS, never fabricate a failure or
+        # consume another persona), ``success=False`` means an
+        # already-tried-and-failed dispatch (advance PAST it instead of
+        # re-running it under the same attempt identity), and ``None`` means
+        # no finalized outcome exists — the dispatch was genuinely in flight
+        # and must be re-run. ``is_decomposed=True`` on a finalized failure
+        # (round-8 finding #2) means the completed dispatch came back
+        # DECOMPOSED rather than staying atomic — the ladder's established
+        # terminal exit for that outcome is ``redispatch_decomposed`` (stop
+        # advancing personas; cheaper untried room exists), so resume must
+        # preserve the flag on the reconstructed prior result instead of
+        # collapsing it to a plain atomic failure that would dispatch yet
+        # another persona. Reconstructed alongside
+        # ``_lateral_escalation_resume_attempts`` during replay and
         # consumed (popped) by ``_resume_escalated_ac``.
-        self._lateral_escalation_resume_attempt_finalized: dict[int, bool | None] = {}
+        self._lateral_escalation_resume_attempt_finalized: dict[
+            int, tuple[bool, bool] | None
+        ] = {}
         # Round-7 follow-up finding: ``lateral_escalation_progressed
         # (parked=True)`` is persisted BEFORE the separate
         # ``parked_for_operator`` event. If that second write fails and the
@@ -6895,19 +6905,24 @@ Respond with either ATOMIC or the structured JSON object only.
         latest_progressed_data: dict[str, Any] | None = None
         # Round-7 Finding #4 (extended by round 8): attempt numbers this root
         # AC has a durably FINALIZED outcome for, mapped to that outcome's
-        # ``success`` flag. ``execution.ac.outcome_finalized`` is emitted
-        # right after every ladder dispatch returns (post verify-gate), so
-        # its presence for the attempt number the latest ``progressed`` event
-        # recorded proves that dispatch COMPLETED — the crash happened after
-        # it, not mid-dispatch — and the ``success`` value says whether the
-        # completed outcome was a real SUCCESS (resume must resolve the
-        # episode, never discard it as a failure) or a failure (resume
-        # advances past the persona). Correlated by ``root_ac_index`` +
-        # ``retry_attempt`` (the event carries no node_id); an unparseable
-        # attempt or success value is simply not collected, which degrades to
-        # the pre-fix "re-run the in-flight persona" posture rather than
-        # skipping a persona that never really ran or misreading a success.
-        finalized_attempts: dict[int, bool] = {}
+        # ``(success, is_decomposed)`` flags. ``execution.ac.outcome_finalized``
+        # is emitted right after every ladder dispatch returns (post
+        # verify-gate), so its presence for the attempt number the latest
+        # ``progressed`` event recorded proves that dispatch COMPLETED — the
+        # crash happened after it, not mid-dispatch — and the ``success``
+        # value says whether the completed outcome was a real SUCCESS
+        # (resume must resolve the episode, never discard it as a failure)
+        # or a failure (resume advances past the persona). ``is_decomposed``
+        # (round-8 finding #2) distinguishes a failure that stayed atomic
+        # (ladder advances to the next persona) from one whose dispatch came
+        # back DECOMPOSED — the ladder's established terminal exit for that
+        # is ``redispatch_decomposed``, never another persona. Correlated by
+        # ``root_ac_index`` + ``retry_attempt`` (the event carries no
+        # node_id); an unparseable attempt, success, or is_decomposed value
+        # is simply not collected, which degrades to the pre-fix "re-run the
+        # in-flight persona" posture rather than skipping a persona that
+        # never really ran or misreading a success.
+        finalized_attempts: dict[int, tuple[bool, bool]] = {}
         # Round-7 follow-up finding: whether the CURRENT episode's dedicated
         # ``parked_for_operator`` event actually landed. Reset on the same
         # episode-closing events that reset reconstruction, so a prior
@@ -6920,13 +6935,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 if isinstance(data, dict) and data.get("root_ac_index") == ac_idx:
                     raw_finalized_attempt = data.get("retry_attempt")
                     raw_finalized_success = data.get("success")
+                    raw_finalized_decomposed = data.get("is_decomposed")
                     if (
                         isinstance(raw_finalized_attempt, int)
                         and not isinstance(raw_finalized_attempt, bool)
                         and raw_finalized_attempt >= 0
                         and isinstance(raw_finalized_success, bool)
+                        and isinstance(raw_finalized_decomposed, bool)
                     ):
-                        finalized_attempts[raw_finalized_attempt] = raw_finalized_success
+                        finalized_attempts[raw_finalized_attempt] = (
+                            raw_finalized_success,
+                            raw_finalized_decomposed,
+                        )
                 continue
             if event_type not in {
                 "execution.ac.parked_for_operator",
@@ -7401,12 +7421,14 @@ Respond with either ATOMIC or the structured JSON object only.
         # BEFORE its dispatch runs, so the restored "in-flight" attempt may
         # in fact have COMPLETED before the crash — the durably-finalized
         # outcome for exactly that attempt number, when present, says so, and
-        # its ``success`` value says WHICH completed outcome the crash
-        # interrupted. Consumed (popped) here so a later resolution/
-        # termination never sees a stale value.
-        in_flight_finalized_success = self._lateral_escalation_resume_attempt_finalized.pop(
-            ac_idx, None
+        # its ``(success, is_decomposed)`` values say WHICH completed outcome
+        # the crash interrupted. Consumed (popped) here so a later
+        # resolution/termination never sees a stale value.
+        in_flight_finalized = self._lateral_escalation_resume_attempt_finalized.pop(ac_idx, None)
+        in_flight_finalized_success: bool | None = (
+            None if in_flight_finalized is None else in_flight_finalized[0]
         )
+        in_flight_finalized_decomposed = in_flight_finalized is not None and in_flight_finalized[1]
         if in_flight_finalized_success is True:
             # The dispatch durably SUCCEEDED; the crash landed in the window
             # between that success and the episode-resolution write (which
@@ -7495,6 +7517,14 @@ Respond with either ATOMIC or the structured JSON object only.
         # redispatch entirely and hand the AC straight to the ladder, which
         # advances PAST the completed step (personas are never repeated once
         # recorded) under a NEW attempt number.
+        # Round-8 finding #2: the marker's ``is_decomposed`` flag is
+        # preserved on the reconstructed prior result. A finalized dispatch
+        # that came back DECOMPOSED must take the ladder's established
+        # ``redispatch_decomposed`` terminal exit (the not-engaged branch of
+        # ``_maybe_run_lateral_escalation_ladder`` closes the episode
+        # durably) — collapsing it to a plain atomic failure would instead
+        # advance the ladder and dispatch another persona against an AC
+        # whose atomic premise no longer holds.
         if in_flight_finalized_success is False:
             completed_prior = ACExecutionResult(
                 ac_index=ac_idx,
@@ -7503,10 +7533,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 error=(
                     "Execution restarted mid-escalation AFTER the in-flight "
                     "attempt's dispatch had already completed with a durably "
-                    "finalized failure; advancing the lateral-escalation "
-                    "ladder past it instead of re-running the same attempt."
+                    "finalized "
+                    + (
+                        "DECOMPOSED outcome; closing the lateral-escalation "
+                        "episode via the decomposed terminal exit instead of "
+                        "re-running the attempt or advancing the persona ladder."
+                        if in_flight_finalized_decomposed
+                        else "failure; advancing the lateral-escalation "
+                        "ladder past it instead of re-running the same attempt."
+                    )
                 ),
                 retry_attempt=ac_retry_attempts[ac_idx],
+                is_decomposed=in_flight_finalized_decomposed,
             )
             return await self._finalize_batch_ac_with_escalation(
                 seed=seed,

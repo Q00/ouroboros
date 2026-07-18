@@ -2722,6 +2722,99 @@ class TestResumeReentersLadderAtRestoredPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_durably_finalized_decomposed_outcome_closes_episode_without_new_persona(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Round-8 finding #2 (decomposed sub-case): the in-flight dispatch
+        durably completed with ``is_decomposed=True`` — the attempt became a
+        decomposed result rather than a simple atomic pass/fail — and the
+        crash landed before the episode-closing write. The ladder's
+        established terminal exit for a decomposed redispatch is
+        ``redispatch_decomposed`` (round 6/7): stop advancing personas and
+        durably close the episode. Resume must honor that: the marker's
+        ``is_decomposed`` flag must be preserved on the reconstructed prior
+        result so the ladder takes the decomposed exit, NEVER collapsed to a
+        plain atomic failure that advances the ladder and dispatches yet
+        another persona."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.HACKER.value],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": ThinkingPersona.HACKER.value,
+                    "retry_attempt": 7,
+                },
+            )
+        )
+        # The dispatch this progression preceded COMPLETED before the crash —
+        # as a DECOMPOSED (non-atomic) failed outcome — but the episode-
+        # closing ``interrupted`` write never landed.
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 7,
+                    "success": False,
+                    "outcome": None,
+                    "is_decomposed": True,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock()
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        # The finalized decomposed outcome is honored as-is: no re-run of the
+        # completed attempt, no NEW persona dispatched against an AC whose
+        # atomic premise no longer holds.
+        executor._execute_ac_batch.assert_not_called()
+        assert results[0].success is False
+        assert results[0].is_decomposed is True
+        events = await memory_event_store.replay("execution", "exec-1")
+        progressed_after_resume = [
+            event
+            for event in events[2:]  # skip the two pre-seeded crash-era events
+            if event.type == "execution.ac.lateral_escalation_progressed"
+            and event.data.get("node_id") == node_id
+        ]
+        # No persona advance was recorded — the ladder took the decomposed
+        # terminal exit instead of cycling personas.
+        assert progressed_after_resume == []
+        # The episode is durably CLOSED through the round-6/7 non-success
+        # terminal transition with the established decomposed reason, so a
+        # later cold resume never re-enters stale ladder state.
+        interrupted = [
+            event
+            for event in events
+            if event.type == "execution.ac.lateral_escalation_interrupted"
+            and event.data.get("node_id") == node_id
+        ]
+        assert len(interrupted) == 1
+        assert interrupted[0].data.get("reason") == "redispatch_decomposed"
+        later = self._cold_start_executor(memory_event_store)
+        assert (
+            await later._load_lateral_escalation_state(0, execution_id="exec-1")
+            == LateralEscalationState()
+        )
+
+    @pytest.mark.asyncio
     async def test_stale_finalized_marker_from_closed_episode_does_not_skip_later_episode_attempt(
         self, memory_event_store: EventStore
     ) -> None:
