@@ -5264,6 +5264,77 @@ class OrchestratorRunner:
             )
         )
 
+    async def _open_lateral_escalation_episodes(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Detect OPEN lateral-escalation episodes in this execution's durable log.
+
+        Round-8 finding #4: ``resume_session`` cannot restore ladder/parked
+        state (it bypasses ``ParallelACExecutor``), so before proceeding it
+        must know whether any AC has an escalation episode with no terminal
+        resolution yet. Mirrors the episode-open/closed semantics of
+        ``ParallelACExecutor._load_lateral_escalation_state`` (the durable
+        source of truth): a ``lateral_escalation_progressed`` or
+        ``parked_for_operator`` event opens/continues a node's episode; a
+        ``parked_resolved`` or ``lateral_escalation_interrupted`` event
+        closes it. Events are keyed by ``node_id`` in log order, same as the
+        loader.
+
+        Returns:
+            A list (possibly empty) of open episodes — each with
+            ``node_id``, ``root_ac_index``, and ``parked`` — on a successful
+            read. ``None`` when every replay attempt raised: callers MUST
+            treat that as "we don't know" and fail closed, mirroring
+            ``ParallelACExecutor._replay_with_retry``'s contract.
+        """
+        aggregate_id = execution_id or session_id
+        events: list[Any] | None = None
+        for attempt in range(3):
+            try:
+                events = await self._event_store.replay("execution", aggregate_id)
+                break
+            except Exception as e:
+                log.warning(
+                    "orchestrator.runner.resume_escalation_scan.replay_retry",
+                    aggregate_id=aggregate_id,
+                    attempt=attempt + 1,
+                    error=str(e),
+                )
+                if attempt < 2:
+                    await asyncio.sleep(min(1.0 * (2**attempt), 5.0))
+        if events is None:
+            return None
+        open_by_node: dict[str, dict[str, Any]] = {}
+        for event in events:
+            event_type = getattr(event, "type", None)
+            data = getattr(event, "data", None)
+            if not isinstance(data, dict):
+                continue
+            node_id = data.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                continue
+            if event_type in {
+                "execution.ac.lateral_escalation_progressed",
+                "execution.ac.parked_for_operator",
+            }:
+                open_by_node[node_id] = {
+                    "node_id": node_id,
+                    "root_ac_index": data.get("root_ac_index"),
+                    "parked": (
+                        event_type == "execution.ac.parked_for_operator"
+                        or bool(data.get("parked"))
+                    ),
+                }
+            elif event_type in {
+                "execution.ac.parked_resolved",
+                "execution.ac.lateral_escalation_interrupted",
+            }:
+                open_by_node.pop(node_id, None)
+        return list(open_by_node.values())
+
     async def resume_session(
         self,
         session_id: str,
@@ -5273,23 +5344,28 @@ class OrchestratorRunner:
 
         Reconstructs session state from events and continues execution.
 
-        KNOWN LIMITATION (documented, not yet fixed): this resume path drives
-        a SINGLE ``adapter.execute_task`` stream and bypasses the parallel AC
-        executor entirely — it never constructs a ``ParallelACExecutor``, so
-        none of the per-AC lateral-escalation machinery runs here:
-        ``_resume_escalated_ac``, ``_load_lateral_escalation_state``, and the
-        RC3 checkpoint recovery block are all unreachable from this path. An
-        AC that was parked or mid-persona-escalation-ladder before a
-        ``--resume-session`` / MCP ``is_resume`` restart will therefore
-        restart its escalation from scratch (fresh retry budget, no
-        long-backoff parked cadence, already-tried personas repeated) instead
-        of re-entering the ladder at its durable phase. Mid-ladder durability
-        is only guaranteed for the crash-restart flow that re-dispatches
-        through ``ParallelACExecutor.execute_parallel`` (checkpoint
-        recovery). Fixing this would require re-architecting how this path
-        dispatches ACs — see the existing fat-harness / investment-metadata
-        resume blocks below, which exist for the same structural reason (this
-        path cannot enforce per-AC executor semantics).
+        KNOWN LIMITATION (round 8: now REJECTED, not silent): this resume
+        path drives a SINGLE ``adapter.execute_task`` stream and bypasses
+        the parallel AC executor entirely — it never constructs a
+        ``ParallelACExecutor``, so none of the per-AC lateral-escalation
+        machinery runs here: ``_resume_escalated_ac``,
+        ``_load_lateral_escalation_state``, and the RC3 checkpoint recovery
+        block are all unreachable from this path. An AC that was parked or
+        mid-persona-escalation-ladder before a ``--resume-session`` / MCP
+        ``is_resume`` restart would therefore restart its escalation from
+        scratch (fresh retry budget, no long-backoff parked cadence,
+        already-tried personas repeated) instead of re-entering the ladder
+        at its durable phase. Round-8 finding #4: rather than silently
+        changing those durable semantics, sessions with OPEN escalation
+        state (or an unreadable escalation log) are now REJECTED with an
+        actionable error — see the ``_open_lateral_escalation_episodes``
+        gate below, following the same pattern as the fat-harness /
+        investment-metadata rejection blocks (this path cannot enforce
+        per-AC executor semantics). Mid-ladder durability is only guaranteed
+        for the flow that re-dispatches through
+        ``ParallelACExecutor.execute_parallel`` (checkpoint recovery).
+        Routing THIS path through checkpointed parallel execution remains
+        the eventual fix and is out of scope here.
 
         Args:
             session_id: Session to resume.
@@ -5379,6 +5455,79 @@ class OrchestratorRunner:
                         "execution_id": tracker.execution_id,
                         "investment_metadata_present": True,
                         "resume_blocked": "investment_authority_required",
+                    },
+                )
+            )
+
+        # Round-8 finding #4 (BLOCKING): this single-stream resume path
+        # bypasses ``ParallelACExecutor`` entirely, so it can never restore
+        # an AC that is parked or mid-lateral-escalation-ladder — resuming
+        # such a session here would silently reset the ladder (fresh retry
+        # budget, no parked cadence, already-tried personas repeated),
+        # silently changing durable semantics. Following the two rejection
+        # blocks above (the review's explicit "reject rather than silently
+        # changing semantics" option): detect open escalation episodes in
+        # the execution's durable log and REFUSE to proceed. An unreadable
+        # log also rejects (fail closed — proceeding on "we don't know"
+        # would be the same silent semantics change). Sessions with no open
+        # escalation state (the common case; the ladder is opt-in and
+        # defaults off) proceed exactly as before.
+        open_escalations = await self._open_lateral_escalation_episodes(
+            execution_id=tracker.execution_id,
+            session_id=session_id,
+        )
+        if open_escalations is None or open_escalations:
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+            )
+            if open_escalations is None:
+                message = (
+                    "Resume is blocked because this session's durable event log "
+                    "could not be read to rule out open lateral-escalation "
+                    "(parked / mid-persona-ladder) state, which this resume path "
+                    "cannot safely restore. Failing closed rather than silently "
+                    "resetting a possibly-open escalation ladder. Retry once the "
+                    "event store is reachable, or re-run the seed through the "
+                    "standard execution path (`ooo run`), whose checkpoint "
+                    "recovery re-enters the ladder at its durable phase."
+                )
+                blocked_reason = "escalation_state_unreadable"
+                details_extra: dict[str, Any] = {}
+            else:
+                ac_indices = sorted(
+                    {
+                        episode["root_ac_index"]
+                        for episode in open_escalations
+                        if isinstance(episode.get("root_ac_index"), int)
+                    }
+                )
+                message = (
+                    "Resume is blocked because this session has acceptance "
+                    f"criteria with OPEN lateral-escalation state (AC index(es) "
+                    f"{ac_indices or 'unknown'}: parked for operator or "
+                    "mid-persona-ladder with no terminal resolution recorded). "
+                    "This resume path drives a single execution stream and "
+                    "cannot restore the ladder's durable phase — proceeding "
+                    "would silently reset it (fresh retry budget, parked "
+                    "cadence dropped, already-tried personas repeated). "
+                    "Re-run the seed through the standard execution path "
+                    "(`ooo run` / execute), whose ParallelACExecutor checkpoint "
+                    "recovery re-enters the ladder at its durable phase; a "
+                    "checkpoint-based `--resume-session` equivalent does not "
+                    "exist yet (known limitation)."
+                )
+                blocked_reason = "open_lateral_escalation_state"
+                details_extra = {"open_escalations": open_escalations}
+            return Result.err(
+                OrchestratorError(
+                    message=message,
+                    details={
+                        "session_id": session_id,
+                        "execution_id": tracker.execution_id,
+                        "resume_blocked": blocked_reason,
+                        **details_extra,
                     },
                 )
             )

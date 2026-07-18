@@ -1710,6 +1710,224 @@ class TestOrchestratorRunner:
         release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("event_type", "extra_data"),
+        [
+            (
+                "execution.ac.lateral_escalation_progressed",
+                {
+                    "personas_tried": ["hacker"],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": "hacker",
+                    "retry_attempt": 4,
+                },
+            ),
+            (
+                "execution.ac.parked_for_operator",
+                {
+                    "personas_tried": ["hacker", "contrarian"],
+                    "consecutive_terminal_failures": 6,
+                    "backoff_seconds": 300.0,
+                    "reason": "all personas exhausted",
+                },
+            ),
+        ],
+        ids=["mid_ladder", "parked"],
+    )
+    async def test_resume_with_open_escalation_state_is_rejected(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        event_type: str,
+        extra_data: dict[str, Any],
+    ) -> None:
+        """Round-8 finding #4 (BLOCKING) regression: a session whose durable
+        log records an OPEN lateral-escalation episode (mid-persona-ladder
+        or parked, with no terminal resolution event) must be REJECTED by
+        ``resume_session`` — this path bypasses ``ParallelACExecutor`` and
+        would silently reset the ladder (fresh budget, parked cadence
+        dropped, personas repeated), silently changing durable semantics.
+        Uses a REAL event store seeded with the exact durable events the
+        ladder emits."""
+        from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+        try:
+            node_id = ExecutionNodeIdentity.root(
+                execution_context_id="exec_resume", ac_index=0
+            ).node_id
+            await event_store.append(
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="execution",
+                    aggregate_id="exec_resume",
+                    data={
+                        "execution_id": "exec_resume",
+                        "session_id": "sess_resume",
+                        "node_id": node_id,
+                        "root_ac_index": 0,
+                        **extra_data,
+                    },
+                )
+            )
+            runner = OrchestratorRunner(
+                mock_adapter,
+                event_store,
+                mock_console,
+                task_workspace=_task_workspace(),
+            )
+            running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+                SessionStatus.RUNNING
+            )
+
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    return_value=Result.ok(running_tracker),
+                ),
+                patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
+                patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
+                patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+            ):
+                result = await runner.resume_session("sess_resume", sample_seed)
+
+            assert result.is_err
+            assert "Resume is blocked" in result.error.message
+            assert "OPEN lateral-escalation state" in result.error.message
+            assert result.error.details["resume_blocked"] == "open_lateral_escalation_state"
+            open_episodes = result.error.details["open_escalations"]
+            assert len(open_episodes) == 1
+            assert open_episodes[0]["root_ac_index"] == 0
+            assert open_episodes[0]["parked"] is (
+                event_type == "execution.ac.parked_for_operator"
+            )
+            # Never silently proceeded: no tools set up, no dispatch, lock
+            # released like the other rejection blocks.
+            get_merged_tools.assert_not_called()
+            execute_task.assert_not_called()
+            release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        finally:
+            await event_store.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "closing_event_type",
+        ["execution.ac.parked_resolved", "execution.ac.lateral_escalation_interrupted"],
+        ids=["resolved", "interrupted"],
+    )
+    async def test_escalation_scan_treats_terminally_closed_episodes_as_clear(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        closing_event_type: str,
+    ) -> None:
+        """Companion control: an episode CLOSED by either terminal event
+        (success resolution or non-success interruption) must not block the
+        common resume path — the gate only rejects genuinely open state."""
+        from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+        try:
+            node_id = ExecutionNodeIdentity.root(
+                execution_context_id="exec_resume", ac_index=0
+            ).node_id
+            await event_store.append(
+                BaseEvent(
+                    type="execution.ac.lateral_escalation_progressed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_resume",
+                    data={
+                        "execution_id": "exec_resume",
+                        "session_id": "sess_resume",
+                        "node_id": node_id,
+                        "root_ac_index": 0,
+                        "personas_tried": ["hacker"],
+                        "consecutive_terminal_failures": 3,
+                        "parked": False,
+                        "persona": "hacker",
+                        "retry_attempt": 4,
+                    },
+                )
+            )
+            await event_store.append(
+                BaseEvent(
+                    type=closing_event_type,
+                    aggregate_type="execution",
+                    aggregate_id="exec_resume",
+                    data={
+                        "execution_id": "exec_resume",
+                        "session_id": "sess_resume",
+                        "node_id": node_id,
+                        "root_ac_index": 0,
+                    },
+                )
+            )
+            runner = OrchestratorRunner(
+                mock_adapter,
+                event_store,
+                mock_console,
+                task_workspace=_task_workspace(),
+            )
+
+            open_episodes = await runner._open_lateral_escalation_episodes(
+                execution_id="exec_resume", session_id="sess_resume"
+            )
+
+            assert open_episodes == []
+        finally:
+            await event_store.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_with_unreadable_escalation_log_fails_closed(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """When the escalation scan cannot read the durable log at all,
+        resume must fail CLOSED (reject) — proceeding on "we don't know"
+        would be the same silent semantics change as proceeding on known
+        open state."""
+        mock_event_store.replay = AsyncMock(side_effect=RuntimeError("store down"))
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(running_tracker),
+            ),
+            patch("asyncio.sleep", AsyncMock()),
+            patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
+            patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_err
+        assert "Resume is blocked" in result.error.message
+        assert result.error.details["resume_blocked"] == "escalation_state_unreadable"
+        get_merged_tools.assert_not_called()
+        execute_task.assert_not_called()
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
     async def test_resume_session_tool_setup_failure_cleans_up_workspace_lock(
         self,
         mock_adapter: MagicMock,
