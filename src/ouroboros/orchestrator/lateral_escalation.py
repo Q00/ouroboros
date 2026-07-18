@@ -30,6 +30,36 @@ should keep retrying at a much longer, operator-visible backoff cadence
 (:class:`~ouroboros.config.models.EconomicsConfig.parked_retry_backoff_seconds`)
 so the AC is never silently abandoned.
 
+**The actual persona-cycling order is PATTERN-AWARE, not a fixed linear
+list** (Fix 8, round 2 review — clarifying a docs/behavior mismatch, not a
+functional bug). Because persona selection reuses
+:func:`~ouroboros.auto.lateral_routing.select_persona_for_qa_failure`
+verbatim, this ladder inherits that function's REAL selection order:
+
+1. The failure text is classified into a
+   :class:`~ouroboros.resilience.stagnation.StagnationPattern` (SPINNING /
+   OSCILLATION / NO_DRIFT / DIMINISHING_RETURNS) and routed to that
+   pattern's affinity persona first (``hacker`` / ``architect`` /
+   ``researcher`` / ``simplifier`` respectively).
+2. ``contrarian`` next, as that function's universal fallback — REGARDLESS
+   OF PATTERN — once the primary has already been tried.
+3. Then whatever remains of the deterministic chain
+   ``hacker → architect → researcher → simplifier``.
+
+For a GENERIC/unclassified failure (the common case here: this ladder only
+ever passes a single free-form failure-text string, no structured QA
+differences/suggestions, so an ambiguous or keyword-free failure classifies
+as the SPINNING fallback), the resulting order is therefore
+``hacker → contrarian → architect → researcher → simplifier`` — CONTRARIAN
+SECOND, not last. An earlier PR description for this ladder stated a
+simplified fixed order (hacker → architect → researcher → simplifier →
+contrarian) that does not match this actual, intentional behavior; that
+description was corrected rather than this selector, because
+``select_persona_for_qa_failure`` is a SHARED, already-tested contract the
+UNSTUCK_LATERAL auto-pipeline (RFC #809 Phase 2.2b) also depends on —
+changing its order here would be a behavior change for that other caller
+too, not a bug fix.
+
 A genuinely infra-fatal failure (adapter crash, auth failure, an uncaught
 exception — anything that is not a structured, retryable verify-gate/quality
 failure) must never enter this ladder at all. That distinction already exists
@@ -215,6 +245,11 @@ def advance_lateral_escalation(
             apply_long_backoff=False,
         )
 
+    # Pattern-aware selection (see the module docstring's "actual
+    # persona-cycling order" section): the primary pattern-affinity persona
+    # first, then ``contrarian`` as the universal fallback, then whatever
+    # remains of hacker/architect/researcher/simplifier. NOT a fixed linear
+    # list ending in contrarian.
     next_persona = select_persona_for_qa_failure(
         (failure_text,) if failure_text else (),
         (),

@@ -124,6 +124,37 @@ class TestAdvanceLateralEscalation:
         assert len(seen) == len(set(seen)) == TOTAL_PERSONA_COUNT
         assert state.parked is False  # not parked until personas are EXHAUSTED
 
+    def test_generic_failure_persona_order_is_pattern_aware_not_fixed_linear(self) -> None:
+        """Fix 8 (P2, round 2 review): documents/locks in the REAL
+        persona-cycling order for a generic/unclassified failure (no
+        ``failure_text``, or text with no pattern-specific keyword match --
+        both classify as the SPINNING fallback pattern). Persona selection
+        reuses ``select_persona_for_qa_failure`` verbatim, whose order is
+        pattern-primary first, THEN ``contrarian`` as the universal
+        fallback, THEN the rest of the deterministic chain -- NOT the fixed
+        linear list (hacker -> architect -> researcher -> simplifier ->
+        contrarian) an earlier PR description stated. See the module
+        docstring's "actual persona-cycling order" section for the full
+        explanation of why the DESCRIPTION was corrected instead of this
+        selector."""
+        state = LateralEscalationState(
+            consecutive_terminal_failures=_LATERAL_ESCALATION_THRESHOLD - 1
+        )
+        order: list[ThinkingPersona] = []
+        for _ in range(TOTAL_PERSONA_COUNT):
+            step = advance_lateral_escalation(state, terminal_state_failure=True)
+            assert step.persona is not None
+            order.append(step.persona)
+            state = step.state
+
+        assert order == [
+            ThinkingPersona.HACKER,
+            ThinkingPersona.CONTRARIAN,
+            ThinkingPersona.ARCHITECT,
+            ThinkingPersona.RESEARCHER,
+            ThinkingPersona.SIMPLIFIER,
+        ]
+
     def test_all_personas_exhausted_parks(self) -> None:
         state = LateralEscalationState(
             consecutive_terminal_failures=_LATERAL_ESCALATION_THRESHOLD - 1
