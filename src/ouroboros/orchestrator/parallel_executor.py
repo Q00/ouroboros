@@ -6951,6 +6951,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 latest_state_type = None
                 latest_progressed_data = None
                 parked_operator_event_seen = False
+                # Round-8 finding #2: finalized-attempt markers are episode-
+                # scoped too. Attempt numbers can restart after a closed
+                # episode (``ac_retry_attempts`` reinitializes and the
+                # max()-based restore is gated on escalation history
+                # EXISTING, which a closed episode resets), so a stale
+                # marker from a CLOSED episode could otherwise correlate
+                # with a LATER episode's in-flight attempt number and make
+                # resume skip a persona whose dispatch never actually ran —
+                # treating an untried escalation option as exhausted. Same
+                # discipline as the resets above: nothing from a closed
+                # episode may satisfy a later episode's gap.
+                finalized_attempts.clear()
             else:
                 if event_type == "execution.ac.parked_for_operator":
                     parked_operator_event_seen = True

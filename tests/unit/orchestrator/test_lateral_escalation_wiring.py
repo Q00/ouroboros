@@ -2722,6 +2722,131 @@ class TestResumeReentersLadderAtRestoredPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_stale_finalized_marker_from_closed_episode_does_not_skip_later_episode_attempt(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Round-8 finding #2 reproduction: finalized-attempt markers must be
+        episode-scoped. Episode 1 finalized attempt 3 (hacker's dispatch
+        completed with a failure) and then CLOSED via ``interrupted``.
+        Episode 2 later starts for the same root AC — attempt numbers can
+        restart after a closed episode — writes its own
+        ``progressed(retry_attempt=3, persona=researcher)`` and genuinely
+        crashes MID-DISPATCH (no matching ``outcome_finalized``). Resume
+        must RE-RUN researcher's attempt: the buggy loader accumulated
+        finalized markers across the whole history, so episode 1's stale
+        "attempt 3 finalized" marker made resume believe researcher's
+        attempt already completed and skip it — recording researcher as
+        tried without ever running it, i.e. treating an untried escalation
+        option as exhausted."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.HACKER.value],
+                    "consecutive_terminal_failures": 2,
+                    "parked": False,
+                    "persona": ThinkingPersona.HACKER.value,
+                    "retry_attempt": 3,
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 3,
+                    "success": False,
+                    "outcome": None,
+                    "is_decomposed": False,
+                },
+            )
+        )
+        # Episode 1 CLOSES: a non-success terminal exit.
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_interrupted",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "reason": "ladder redispatch produced a non-retryable result",
+                },
+            )
+        )
+        # Episode 2: a NEW escalation episode reaches the same attempt
+        # number and crashes mid-dispatch — researcher never actually ran
+        # to completion, so there is NO matching ``outcome_finalized``.
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.RESEARCHER.value],
+                    "consecutive_terminal_failures": 1,
+                    "parked": False,
+                    "persona": ThinkingPersona.RESEARCHER.value,
+                    "retry_attempt": 3,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Exactly ONE dispatch: researcher's genuinely-interrupted attempt,
+        # RE-RUN — not skipped as already-finalized, not replaced by an
+        # advance to a different persona.
+        assert len(dispatch_calls) == 1
+        first_prompt = dispatch_calls[0]["retry_prompts"][0]  # type: ignore[index]
+        assert ThinkingPersona.RESEARCHER.value in first_prompt.lower()
+        events = await memory_event_store.replay("execution", "exec-1")
+        # No ladder advance happened before researcher actually ran: the
+        # persona history was never extended past researcher by the resume
+        # itself (the re-run succeeded, so the episode resolved directly).
+        progressed_after_resume = [
+            event
+            for event in events[4:]  # skip the four pre-seeded crash-era events
+            if event.type == "execution.ac.lateral_escalation_progressed"
+            and event.data.get("node_id") == node_id
+        ]
+        assert progressed_after_resume == []
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+
+    @pytest.mark.asyncio
     async def test_fresh_ac_without_escalation_history_keeps_ordinary_path(
         self, memory_event_store: EventStore
     ) -> None:
