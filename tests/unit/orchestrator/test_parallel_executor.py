@@ -3303,7 +3303,13 @@ class TestInfraFatalExemption:
         case into ``infra_fatal=True`` and skipped real retry/escalation
         opportunities — the forbidden false-negative — mirroring the earlier
         round's caution that kept generic ``"PiError"`` out of the
-        allowlist. It must remain retryable."""
+        allowlist. It must remain retryable.
+
+        Extended for Round-8 Finding #1: the adapter's terminal error path
+        now also mirrors the exception's message into the structured
+        ``error`` field — this control mirrors that exact shape and proves
+        an ordinary message with no vetted infra-fatal phrase STILL
+        classifies retryable (the fix did not blanket-mark this path)."""
 
         class _OrdinaryRuntimeErrorRuntime:
             _runtime_handle_backend = "claude"
@@ -3329,6 +3335,7 @@ class TestInfraFatalExemption:
                     data={
                         "subtype": "error",
                         "error_type": "RuntimeError",
+                        "error": "business validation failed",
                     },
                 )
 
@@ -3355,6 +3362,85 @@ class TestInfraFatalExemption:
         assert result.success is False
         assert result.infra_fatal is False
         assert executor._is_retryable_failure(result) is True
+
+    @pytest.mark.asyncio
+    async def test_sdk_exception_with_fatal_message_and_generic_type_marks_infra_fatal(
+        self,
+    ) -> None:
+        """Round-8 Finding #1 regression: an SDK-raised exception reaching
+        ``adapter.py``'s non-transient terminal fallback with a TYPE outside
+        the narrow ``_INFRA_FATAL_ERROR_TYPES`` allowlist but a MESSAGE
+        carrying a vetted infra-fatal phrase (a permanent auth failure that
+        happened to raise a generic exception type) used to classify
+        ``infra_fatal=False`` unconditionally: the fallback populated only
+        ``error_type``, never the structured ``error`` field the
+        classifier's content scan reads. With the adapter now mirroring the
+        exception message into ``data["error"]`` (the same convention
+        kiro_adapter/pi_runtime/worker_runtime follow), the vetted narrow
+        content patterns can evaluate it and the condition fails immediately
+        instead of retrying/escalating forever."""
+
+        class _AuthFailureRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                # The adapter's EXACT post-fix terminal shape for
+                # ``raise RuntimeError("authentication failed: ...")``:
+                # generic error_type (not allowlisted) + the exception's own
+                # message mirrored into the structured ``error`` field.
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        "Task execution failed: authentication failed: "
+                        "invalid credentials for configured account"
+                    ),
+                    data={
+                        "subtype": "error",
+                        "error_type": "RuntimeError",
+                        "error": (
+                            "authentication failed: invalid credentials "
+                            "for configured account"
+                        ),
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_AuthFailureRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_auth_failure",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_auth_failure",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
 
     @pytest.mark.asyncio
     async def test_kiro_cli_not_found_result_message_marks_infra_fatal(self) -> None:

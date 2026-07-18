@@ -1095,9 +1095,51 @@ class TestClaudeAgentAdapter:
         assert messages[1].data == {
             "subtype": "error",
             "error_type": "RuntimeError",
+            # Round-8 Finding #1: the terminal error path mirrors the raised
+            # exception's own message into the structured ``error`` field so
+            # the leaf dispatcher's narrow infra-fatal content scan can
+            # evaluate it. A generic "boom" carries no vetted infra-fatal
+            # phrase, so downstream classification stays retryable.
+            "error": "boom",
             "session_id": "sess_456",
         }
         assert messages[1].resume_handle == messages[0].resume_handle
+
+    @pytest.mark.asyncio
+    async def test_execute_task_error_result_mirrors_exception_message_into_error_field(
+        self,
+    ) -> None:
+        """Round-8 Finding #1 regression: an SDK exception reaching the
+        non-transient terminal fallback whose TYPE is not in the leaf
+        dispatcher's narrow ``_INFRA_FATAL_ERROR_TYPES`` allowlist used to
+        yield ``error_type`` only — ``data["error"]`` was never populated on
+        this path (unlike kiro_adapter/pi_runtime/worker_runtime), so the
+        classifier's vetted content scan could never see a genuinely
+        permanent condition's message and classified it retryable
+        unconditionally. The adapter must mirror the exception's own message
+        into the structured ``error`` field."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+        fatal_detail = "authentication failed: invalid credentials for configured account"
+
+        async def mock_query(*, prompt: str, options: Any):
+            assert options is not None
+            if False:  # pragma: no cover - makes this an async generator
+                yield None
+            raise RuntimeError(fatal_detail)
+
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", sdk_modules):
+            messages = [message async for message in adapter.execute_task("test prompt")]
+
+        assert messages, "terminal error path must still yield a final result message"
+        final = messages[-1]
+        assert final.type == "result"
+        assert final.is_error
+        assert final.data["error_type"] == "RuntimeError"
+        # The structured field carries the exception's OWN message (not agent
+        # narrative), so the narrow infra-fatal content patterns can match.
+        assert final.data["error"] == fatal_detail
 
     @pytest.mark.asyncio
     async def test_execute_task_to_result_preserves_runtime_handle_contract(self) -> None:

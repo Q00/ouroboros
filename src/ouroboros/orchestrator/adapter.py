@@ -1690,6 +1690,23 @@ class ClaudeAgentAdapter:
                     data = {
                         "subtype": "error",
                         "error_type": type(e).__name__,
+                        # Round-8 fix (Finding #1): mirror the raised
+                        # exception's own message into the structured
+                        # ``data["error"]`` field, matching the convention
+                        # kiro_adapter/pi_runtime/worker_runtime already
+                        # follow. The leaf dispatcher's infra-fatal
+                        # classifier only content-scans this dedicated field
+                        # (never the free-text ``content`` narrative), so
+                        # without it an exception whose TYPE is not in the
+                        # narrow ``_INFRA_FATAL_ERROR_TYPES`` allowlist but
+                        # whose MESSAGE carries a vetted infra-fatal phrase
+                        # (e.g. an SDK-level auth failure raising a generic
+                        # exception type) was unconditionally classified
+                        # retryable. This is the exception's own message —
+                        # not agent narrative — so the narrow
+                        # ``_INFRA_FATAL_CONTENT_PATTERNS`` scan is safe to
+                        # apply to it.
+                        "error": str(e),
                     }
                     if current_session_id:
                         data["session_id"] = current_session_id
@@ -1714,6 +1731,9 @@ class ClaudeAgentAdapter:
                 data={
                     "subtype": "error",
                     "error_type": type(last_error).__name__,
+                    # Round-8 fix (Finding #1): same structured mirror as the
+                    # in-loop terminal path above.
+                    "error": str(last_error),
                     **({"session_id": current_session_id} if current_session_id else {}),
                 },
                 resume_handle=current_runtime_handle,
