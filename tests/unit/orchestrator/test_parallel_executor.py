@@ -3035,6 +3035,13 @@ class TestInfraFatalExemption:
         this fix, that structured result always produced ``infra_fatal=False``
         (only a RAISED exception set it), so a missing CLI entered the
         infinite retry/parking loop instead of surfacing immediately.
+
+        Fix 4 redo: the classifier now only scans the structured
+        ``data["error"]`` field (never free-text ``content``), so this mock
+        mirrors what ``worker_runtime.py``'s real translation layer produces
+        for this case -- ``WorkerTurn.error`` is mirrored into BOTH
+        ``content`` and ``data["error"]`` (see ``worker_runtime.py``'s
+        ``**({"error": turn.error} if turn.error else {})``).
         """
 
         class _CliMissingRuntime:
@@ -3055,10 +3062,11 @@ class TestInfraFatalExemption:
                 return self._permission_mode
 
             async def execute_task(self, **kwargs: Any):
+                error_text = "claude CLI not found: [Errno 2] No such file or directory: 'claude'"
                 yield AgentMessage(
                     type="result",
-                    content="claude CLI not found: [Errno 2] No such file or directory: 'claude'",
-                    data={"subtype": "error"},
+                    content=error_text,
+                    data={"subtype": "error", "error": error_text},
                 )
 
         event_store, _appended_events = _make_replaying_event_store()
@@ -3091,7 +3099,13 @@ class TestInfraFatalExemption:
         reports model/auth failures as an ordinary final error message
         (``error_type`` stays the adapter's generic tag, not a distinguishing
         exception class), so the classifier must also recognize well-known
-        auth-failure phrasing in the message CONTENT, not just ``error_type``.
+        auth-failure phrasing in the message's structured error field.
+
+        Fix 4 redo: the classifier now only scans the structured
+        ``data["error"]`` field (never free-text ``content``), so this mock
+        mirrors what ``pi_runtime.py``'s real translation layer produces for
+        a ``stopReason: "error"`` turn -- the extracted ``errorMessage`` is
+        mirrored into BOTH ``content`` and ``data["error"]``.
         """
 
         class _AuthFailingRuntime:
@@ -3112,10 +3126,11 @@ class TestInfraFatalExemption:
                 return self._permission_mode
 
             async def execute_task(self, **kwargs: Any):
+                error_text = "Request failed: 401 Unauthorized - invalid api key provided"
                 yield AgentMessage(
                     type="result",
-                    content="Request failed: 401 Unauthorized - invalid api key provided",
-                    data={"subtype": "error", "error_type": "PiError"},
+                    content=error_text,
+                    data={"subtype": "error", "error_type": "PiError", "error": error_text},
                 )
 
         event_store, _appended_events = _make_replaying_event_store()
@@ -3141,6 +3156,72 @@ class TestInfraFatalExemption:
         assert result.success is False
         assert result.infra_fatal is True
         assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_infra_fatal_phrase_in_narrative_content_only_is_not_infra_fatal(self) -> None:
+        """Fix 4 redo (round 3 follow-up review): regression test for the
+        exact false-positive scenario the review found. The agent's own
+        free-text final message (``content``) quotes a failing build's
+        stderr containing an infra-fatal-sounding phrase ("no such file or
+        directory"), but the structured ``data["error"]`` field is absent --
+        this is an ORDINARY task failure, not an infra-fatal one. Before this
+        redo, the classifier scanned ``content`` too and would have wrongly
+        set ``infra_fatal=True`` here, short-circuiting
+        ``_is_retryable_failure()`` to ``False`` and skipping every retry and
+        lateral-escalation option -- exactly what this project's mandate
+        forbids.
+        """
+
+        class _OrdinaryBuildFailureRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        "the build failed: npm ERR! path /app\n"
+                        "npm ERR! no such file or directory, open '/app/package.json'"
+                    ),
+                    data={"subtype": "error"},
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_OrdinaryBuildFailureRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_narrative",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_narrative",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is False
+        assert executor._is_retryable_failure(result) is True
 
     @pytest.mark.asyncio
     async def test_ordinary_verify_failure_result_message_is_not_infra_fatal(self) -> None:

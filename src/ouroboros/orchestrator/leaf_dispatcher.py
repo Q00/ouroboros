@@ -82,6 +82,23 @@ class LeafDispatchState:
 # message here just keeps the pre-existing (already-tolerated) retry
 # behavior, while a false positive would wrongly skip real retry/escalation
 # opportunities for an ordinary AC failure -- the worse outcome.
+#
+# Fix 4 redo (round 3 follow-up review): the content-pattern scan used to
+# also search ``message.content`` -- but ``content`` is the agent/model's own
+# free-text final message, which routinely quotes a failing build/test's
+# stderr ("npm ERR! ... no such file or directory") or narrates a legitimate
+# business-logic 401 returned by an API call it invoked. Scanning that
+# narrative for infra-fatal phrases produced false positives that
+# short-circuited ``_is_retryable_failure()`` to ``False`` on an ORDINARY
+# task failure -- exactly the "fail while escalation remains untried"
+# outcome this project forbids. Both adapters that need this classification
+# put a genuine infra failure into the dedicated, structured
+# ``data["error"]`` field instead: ``worker_runtime.py`` mirrors
+# ``WorkerTurn.error`` there (covers ``claude_worker_runtime.py``'s "claude
+# CLI not found"), and ``pi_runtime.py`` mirrors its extracted
+# ``errorMessage``/``error`` field there for the ``stopReason: "error"``
+# case. The content-pattern scan is therefore restricted to that structured
+# field only -- never the free-text narrative in ``message.content``.
 _INFRA_FATAL_ERROR_TYPES = frozenset(
     {
         "FileNotFoundError",
@@ -113,12 +130,22 @@ def _is_infra_fatal_error_message(message: AgentMessage) -> bool:
 
     Only meaningful for ``message.is_final and message.is_error`` — an
     ordinary tool-call/narrative message is never inspected.
+
+    The content-pattern scan below is deliberately restricted to the
+    structured ``data["error"]`` field. ``message.content`` is the agent's
+    own free-text final message and MUST NOT be scanned: it routinely quotes
+    a failing build/test's stderr or narrates a legitimate business-logic
+    error the agent's own tool call received, and matching infra-fatal
+    phrases against that narrative produces false positives that wrongly
+    skip real retry/escalation opportunities for an ordinary AC failure.
     """
     error_type = message.data.get("error_type")
     if isinstance(error_type, str) and error_type in _INFRA_FATAL_ERROR_TYPES:
         return True
     error_detail = message.data.get("error")
-    content = f"{message.content} {error_detail or ''}".lower()
+    if not isinstance(error_detail, str) or not error_detail:
+        return False
+    content = error_detail.lower()
     return any(pattern in content for pattern in _INFRA_FATAL_CONTENT_PATTERNS)
 
 

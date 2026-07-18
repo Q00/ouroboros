@@ -358,6 +358,10 @@ async def test_agent_stop_reason_error_overrides_zero_exit() -> None:
         "subtype": "error",
         "returncode": 0,
         "error_type": "PiError",
+        # Fix 4 redo: the extracted ``errorMessage`` is also mirrored into the
+        # structured ``error`` field so infra-fatal classification (which
+        # must not scan free-text ``content``) can still see it.
+        "error": "OpenAI API error (401)",
     }
     assert result.resume_handle is not None
     assert result.resume_handle.native_session_id == "session-1"

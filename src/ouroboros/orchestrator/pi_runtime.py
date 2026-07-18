@@ -584,6 +584,16 @@ class PiRuntime:
                         "subtype": "error",
                         "returncode": returncode,
                         "error_type": self._runtime_error_type,
+                        # Mirrors ``worker_runtime.py``'s ``WorkerTurn.error`` ->
+                        # ``data["error"]`` bridge: this whole branch is the
+                        # process/protocol-level failure path (nonzero exit or a
+                        # dedicated ``stopReason: "error"``/``errorMessage``
+                        # signal), never ordinary agent narrative, so callers
+                        # that classify infra-fatal errors (see
+                        # ``leaf_dispatcher._is_infra_fatal_error_message``) have
+                        # a structured field to inspect instead of having to
+                        # scan free-text ``content``.
+                        "error": final_message,
                     },
                     resume_handle=current_handle,
                 )
