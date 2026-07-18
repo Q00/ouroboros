@@ -3280,12 +3280,39 @@ class ParallelACExecutor:
                     )
                 else:
                     missing_after = _missing_expected_artifacts(assigned_artifacts, artifact_cwd)
+                    # Round-11 Finding #3 (BLOCKING): file existence alone is
+                    # NOT sufficient artifact-axis evidence. A child can write
+                    # its assigned artifacts as an EARLY step of its own
+                    # dispatch and then fail later, so crediting the axis on
+                    # files-on-disk while the child's own dispatch reported
+                    # failure would launder a genuinely failed child into a
+                    # passing sibling axis — and, combined with a passing
+                    # parent-gate re-run, into a false TRUSTWORTHY round
+                    # verdict. Credit therefore requires BOTH legs: every
+                    # assigned path absent before and present after dispatch,
+                    # AND the child's own dispatch reporting success. A failed
+                    # dispatch (result.success is False, an exception, or a
+                    # missing result) with files present is real, evaluated
+                    # NEGATIVE evidence (passed=False, driving the round
+                    # UNTRUSTWORTHY), not an unevaluable (False, None) axis:
+                    # we do have evidence here — it is just negative.
+                    child_result = sub_results[idx]
+                    child_dispatch_succeeded = (
+                        isinstance(child_result, ACExecutionResult) and child_result.success
+                    )
                     if missing_after:
                         child_artifact_attributions[idx] = (
                             True,
                             False,
                             "assigned expected_artifacts missing after dispatch: "
                             + ", ".join(missing_after),
+                        )
+                    elif not child_dispatch_succeeded:
+                        child_artifact_attributions[idx] = (
+                            True,
+                            False,
+                            "child dispatch reported failure despite creating assigned "
+                            "artifacts: " + ", ".join(assigned_artifacts),
                         )
                     else:
                         child_artifact_attributions[idx] = (

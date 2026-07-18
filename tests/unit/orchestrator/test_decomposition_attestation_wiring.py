@@ -616,7 +616,11 @@ def _artifact_split_decision(
     )
 
 
-def _make_live_artifact_executor(tmp_path, writes_per_dispatch: list[tuple[str, ...]]):
+def _make_live_artifact_executor(
+    tmp_path,
+    writes_per_dispatch: list[tuple[str, ...]],
+    dispatch_success: list[bool] | None = None,
+):
     """Build an executor whose stub RUNTIME adapter performs REAL file writes.
 
     Only the runtime transport is a double; children dispatch through the real
@@ -624,6 +628,11 @@ def _make_live_artifact_executor(tmp_path, writes_per_dispatch: list[tuple[str, 
     existence check runs against the real filesystem under ``tmp_path``. Each
     sequential dispatch pops the next tuple of relative paths and creates
     those files -- modeling what that child's agent session actually produced.
+    ``dispatch_success`` optionally scripts, per sequential dispatch, whether
+    the runtime reports success (``[TASK_COMPLETE]``/subtype ``success``) or a
+    late failure AFTER the file writes already happened (no completion marker,
+    subtype ``error``) -- modeling a child that wrote its artifacts as an
+    early step and then failed.
     """
     from tests.unit.orchestrator.test_parallel_executor import (
         _FinalMessageRuntime,
@@ -637,6 +646,11 @@ def _make_live_artifact_executor(tmp_path, writes_per_dispatch: list[tuple[str, 
                     target = tmp_path / relative_path
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text("produced", encoding="utf-8")
+            if dispatch_success:
+                self._success = dispatch_success.pop(0)
+                self._final_message = (
+                    "[TASK_COMPLETE]" if self._success else "hit an error after writing files"
+                )
             async for message in super().execute_task(*args, **kwargs):
                 yield message
 
@@ -841,6 +855,72 @@ class TestPerChildArtifactSliceOracle:
         assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
         assert attestation.failed_sibling_id == "0"
         assert "out_a.txt" in attestation.reason
+
+    @pytest.mark.asyncio
+    async def test_failed_child_with_artifacts_on_disk_is_untrustworthy(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Round-11 Finding #3 regression (BLOCKING): a child that writes its
+        assigned artifacts as an EARLY step of its own dispatch and then fails
+        later (dispatch reports success=False) must NOT earn artifact-axis
+        credit just because the files exist on disk. Before the fix, the
+        post-dispatch check consulted only file existence, graded this child
+        passed=True, and -- with the parent's own artifact gate also passing
+        over the files on disk -- laundered a round containing a GENUINELY
+        FAILED child into a false TRUSTWORTHY verdict. The failed dispatch is
+        real, evaluated negative evidence: the axis must be passed=False (not
+        the unevaluable False/None shape) and the round UNTRUSTWORTHY."""
+        import ouroboros.orchestrator.parallel_executor as pe
+
+        # Child 0 writes out_a.txt but its dispatch FAILS afterwards; child 1
+        # genuinely creates out_b.txt and succeeds. Every parent artifact is
+        # on disk at the end, so the parent-gate re-run passes -- exactly the
+        # combination that used to mint the false TRUSTWORTHY.
+        executor = _make_live_artifact_executor(
+            tmp_path,
+            writes_per_dispatch=[("out_a.txt",), ("out_b.txt",)],
+            dispatch_success=[False, True],
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-8", ac_index=0)
+        decision = _artifact_split_decision(
+            node_identity.node_id, slices=(("out_a.txt",), ("out_b.txt",))
+        )
+
+        real_attest = pe.attest_decomposition
+        captured_siblings: list[tuple[SiblingVerifyOutcome, ...]] = []
+
+        def _capturing_attest(*, node_id, siblings, parent):
+            captured_siblings.append(siblings)
+            return real_attest(node_id=node_id, siblings=siblings, parent=parent)
+
+        monkeypatch.setattr(pe, "attest_decomposition", _capturing_attest)
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-8")
+        )
+
+        # Sanity: the failed child's own dispatch genuinely reported failure,
+        # and its assigned artifact genuinely exists on disk.
+        assert result.sub_results[0].success is False
+        assert (tmp_path / "out_a.txt").exists()
+
+        # The failed child's artifact axis is real NEGATIVE evidence, never a
+        # files-on-disk pass and never merely unevaluable.
+        assert captured_siblings
+        failed_axis = captured_siblings[-1][0]
+        assert failed_axis.has_verify_command is True
+        assert failed_axis.passed is False
+        assert "dispatch reported failure" in failed_axis.reason
+        # The genuinely successful sibling keeps its earned credit.
+        clean_axis = captured_siblings[-1][1]
+        assert clean_axis.passed is True
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.trustworthy is False
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "0"
 
     @pytest.mark.asyncio
     async def test_slice_outside_parent_contract_is_never_credited(self, tmp_path) -> None:
