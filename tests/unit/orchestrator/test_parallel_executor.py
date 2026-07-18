@@ -3162,6 +3162,202 @@ class TestInfraFatalExemption:
         assert executor._is_retryable_failure(result) is False
 
     @pytest.mark.asyncio
+    async def test_runtime_handle_error_result_message_marks_infra_fatal(self) -> None:
+        """Round-7 Finding #1 reproduction: ``adapter.py``'s
+        ``_execution_dispatch_error_message`` already tags a stale /
+        backend-incompatible runtime-handle dispatch failure with the
+        purpose-built ``RuntimeHandleError`` type, but the classifier's
+        allowlist was never updated, so the correctly structured signal
+        classified ``infra_fatal=False`` and the unusable handle entered the
+        ordinary retry / parking ladder forever. This mock mirrors the
+        adapter's exact message shape (structured ``error_type`` only, no
+        ``error`` detail field)."""
+
+        class _StaleHandleRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        "Task execution failed: runtime handle is incompatible "
+                        "with this runtime."
+                    ),
+                    data={
+                        "subtype": "error",
+                        "error_type": "RuntimeHandleError",
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_StaleHandleRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_handle",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_handle",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_sdk_cli_not_found_exception_result_marks_infra_fatal(self) -> None:
+        """Round-7 Finding #1 ("exhausted SDK exceptions" half): when the
+        Claude Agent SDK raises ``CLINotFoundError`` (the ``claude`` CLI
+        binary cannot be located), ``adapter.py``'s terminal error path emits
+        a final result tagged ``error_type=type(e).__name__`` =
+        ``"CLINotFoundError"`` — the SDK's own purpose-built exception class,
+        never raised by task-level code. Retrying can never install the CLI,
+        so this must classify infra-fatal instead of entering the
+        retry/escalation ladder. This mock mirrors the adapter's exact
+        raised-exception message shape (``error_type`` only, no structured
+        ``error`` detail field)."""
+
+        class _CliMissingRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        "Task execution failed: Claude Code not found at: claude. "
+                        "Install with: npm install -g @anthropic-ai/claude-code"
+                    ),
+                    data={
+                        "subtype": "error",
+                        "error_type": "CLINotFoundError",
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_CliMissingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_cli_missing",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_cli_missing",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_ordinary_runtime_error_result_is_not_infra_fatal(self) -> None:
+        """Round-7 Finding #1 negative control: a generic builtin
+        ``RuntimeError`` raised for a NON-infra reason (ordinary task/business
+        failure) reaches the adapter's terminal error path as
+        ``error_type="RuntimeError"``. Blanket-allowlisting the generic
+        builtin name (as the review suggested) would have swept exactly this
+        case into ``infra_fatal=True`` and skipped real retry/escalation
+        opportunities — the forbidden false-negative — mirroring the earlier
+        round's caution that kept generic ``"PiError"`` out of the
+        allowlist. It must remain retryable."""
+
+        class _OrdinaryRuntimeErrorRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content="Task execution failed: business validation failed",
+                    data={
+                        "subtype": "error",
+                        "error_type": "RuntimeError",
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_OrdinaryRuntimeErrorRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_runtime_error",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_runtime_error",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is False
+        assert executor._is_retryable_failure(result) is True
+
+    @pytest.mark.asyncio
     async def test_kiro_cli_not_found_result_message_marks_infra_fatal(self) -> None:
         """Round-5 Finding #5 audit: ``kiro_adapter.py``'s CLI-missing path.
 

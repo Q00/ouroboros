@@ -116,6 +116,34 @@ _INFRA_FATAL_ERROR_TYPES = frozenset(
         # is safe because it is only ever emitted for the ImportError of the
         # SDK package itself, never for ordinary task failures.
         "SDKNotInstalledError",
+        # Round-7 fix (Finding #1): ``adapter.py``'s
+        # ``_execution_dispatch_error_message`` already tags a stale /
+        # backend-incompatible runtime-handle dispatch failure with this
+        # SPECIFIC purpose-built type (never raised by task code, only
+        # constructed for the unknown/unsupported-runtime-backend dispatch
+        # failure) — but the allowlist was never updated, so the correctly
+        # structured signal stayed invisible and the unusable handle entered
+        # the ordinary retry / parking ladder forever. Redispatching with the
+        # same handle can never cure a handle the runtime cannot decode.
+        "RuntimeHandleError",
+        # Round-7 fix (Finding #1, "exhausted SDK exceptions" half): when the
+        # Claude Agent SDK's ``query()`` raises because the ``claude`` CLI
+        # binary itself is missing, ``adapter.py``'s terminal error path
+        # propagates the SDK's own purpose-built exception class name via
+        # ``type(e).__name__`` — ``CLINotFoundError`` (claude_agent_sdk
+        # ``_errors.py``; subclass of ``ClaudeSDKError``, only raised when the
+        # CLI executable cannot be located). Retrying can never install the
+        # CLI, exactly like ``SDKNotInstalledError`` above. NOTE: the review
+        # also suggested allowlisting bare ``"RuntimeError"`` for this path —
+        # deliberately NOT done: the installed ``claude_agent_sdk`` never
+        # raises ``RuntimeError`` (verified against its sources), while this
+        # codebase and arbitrary task-level code raise the generic builtin for
+        # ordinary non-infra failures in dozens of places. Blanket-matching a
+        # generic builtin name would mark retryable/escalatable failures
+        # infra-fatal — the forbidden false-negative — matching the same
+        # caution that kept generic ``"PiError"`` out of this set in a prior
+        # round.
+        "CLINotFoundError",
     }
 )
 
