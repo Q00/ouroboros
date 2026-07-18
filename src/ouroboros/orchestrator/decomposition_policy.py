@@ -173,7 +173,7 @@ class DecompositionChild:
             max_chars=MAX_VERIFICATION_HINT_CHARS,
         )
         verify_command = (
-            _bounded_nonblank_text(
+            _bounded_literal_nonblank_text(
                 self.verify_command,
                 field_name="verify_command",
                 max_chars=MAX_VERIFICATION_HINT_CHARS,
@@ -181,7 +181,7 @@ class DecompositionChild:
             if self.verify_command is not None
             else None
         )
-        expected_artifacts = _bounded_strings(
+        expected_artifacts = _bounded_literal_strings(
             self.expected_artifacts,
             field_name="expected_artifacts",
             max_count=MAX_COVERAGE_CLAIMS,
@@ -565,9 +565,9 @@ def validate_decomposition_proposal(
         if verify_command is not None:
             if not isinstance(verify_command, str):
                 errors.append(f"child {index} verify_command must be a string")
-            elif not _normalize_spaces(verify_command):
+            elif not verify_command.strip():
                 errors.append(f"child {index} verify_command must be non-empty")
-            elif len(verify_command) > MAX_VERIFICATION_HINT_CHARS:
+            elif len(verify_command.strip()) > MAX_VERIFICATION_HINT_CHARS:
                 errors.append(f"child {index} verify_command is too large")
         if not isinstance(expected_artifacts, Sequence) or isinstance(
             expected_artifacts, str | bytes
@@ -575,11 +575,11 @@ def validate_decomposition_proposal(
             errors.append(f"child {index} expected_artifacts must be a list")
         else:
             for artifact_index, artifact in enumerate(expected_artifacts):
-                if not isinstance(artifact, str) or not _normalize_spaces(artifact):
+                if not isinstance(artifact, str) or not artifact.strip():
                     errors.append(
                         f"child {index} expected artifact {artifact_index} must be a non-empty string"
                     )
-                elif len(artifact) > MAX_VERIFICATION_HINT_CHARS:
+                elif len(artifact.strip()) > MAX_VERIFICATION_HINT_CHARS:
                     errors.append(f"child {index} expected artifact {artifact_index} is too large")
 
     return tuple(errors)
@@ -739,6 +739,25 @@ def _bounded_text(text: str, *, field_name: str, max_chars: int) -> str:
     return redact_and_truncate_text(stripped, max_chars=max_chars)
 
 
+def _bounded_literal_nonblank_text(text: str, *, field_name: str, max_chars: int) -> str:
+    text = _bounded_literal_text(text, field_name=field_name, max_chars=max_chars)
+    if not text:
+        msg = f"{field_name} must be non-empty"
+        raise ValueError(msg)
+    return text
+
+
+def _bounded_literal_text(text: str, *, field_name: str, max_chars: int) -> str:
+    if not isinstance(text, str):
+        msg = f"{field_name} must be a string"
+        raise ValueError(msg)
+    stripped = text.strip()
+    if len(stripped) > max_chars:
+        msg = f"{field_name} exceeds {max_chars} characters"
+        raise ValueError(msg)
+    return stripped
+
+
 def _bounded_strings(
     values: Sequence[str],
     *,
@@ -764,6 +783,34 @@ def _bounded_strings(
             raise ValueError(msg)
         if normalized:
             bounded.append(normalized)
+    return tuple(bounded)
+
+
+def _bounded_literal_strings(
+    values: Sequence[str],
+    *,
+    field_name: str,
+    max_count: int,
+    max_chars: int,
+    require_nonblank: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, str | bytes):
+        msg = f"{field_name} must be a sequence of strings"
+        raise ValueError(msg)
+    if len(values) > max_count:
+        msg = f"{field_name} must contain at most {max_count} items"
+        raise ValueError(msg)
+    bounded: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            msg = f"{field_name} must contain only strings"
+            raise ValueError(msg)
+        bounded_value = _bounded_literal_text(value, field_name=field_name, max_chars=max_chars)
+        if require_nonblank and not bounded_value:
+            msg = f"{field_name} must not contain blank strings"
+            raise ValueError(msg)
+        if bounded_value:
+            bounded.append(bounded_value)
     return tuple(bounded)
 
 

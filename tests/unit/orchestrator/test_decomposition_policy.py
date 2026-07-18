@@ -304,6 +304,24 @@ class TestProposalValidation:
         assert second.expected_artifacts == ("reports/trust-invariants.json",)
         assert DecompositionProposal.from_dict(proposal.to_dict()) == proposal
 
+    def test_child_executable_contract_preserves_literal_spacing(self) -> None:
+        payload = _proposal_payload()
+        children = payload["children"]
+        assert isinstance(children, list)
+        first = children[0]
+        second = children[1]
+        assert isinstance(first, dict)
+        assert isinstance(second, dict)
+        first["verify_command"] = "  grep -q 'a  b' \"my  report.txt\"  "
+        second["expected_artifacts"] = ["  reports/my  report.txt  "]
+
+        proposal = parse_decomposition_proposal(payload)
+
+        assert isinstance(proposal, DecompositionProposal)
+        first_child, second_child = proposal.children
+        assert first_child.verify_command == "grep -q 'a  b' \"my  report.txt\""
+        assert second_child.expected_artifacts == ("reports/my  report.txt",)
+
     def test_rejects_invalid_child_executable_contract_fields(self) -> None:
         payload = _proposal_payload()
         children = payload["children"]

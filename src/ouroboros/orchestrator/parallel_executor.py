@@ -2629,13 +2629,25 @@ class ParallelACExecutor:
             final_sub_results=final_sub_results,
             ac_spec=ac_spec,
         )
-        self._decomposition_attestations[node_identity.node_id] = attestation
-        await self._event_emitter.emit_decomposition_attested(
+        attestation_persisted = await self._event_emitter.emit_decomposition_attested(
             execution_id=execution_id,
             session_id=session_id,
             node_identity=node_identity,
             attestation=attestation,
         )
+        if not attestation_persisted:
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                success=False,
+                error="decomposition attestation persistence failed; withholding child-tier trust",
+                retry_attempt=retry_attempt,
+                depth=depth,
+                is_decomposed=True,
+                sub_results=tuple(final_sub_results),
+                infra_fatal=True,
+            )
+        self._decomposition_attestations[node_identity.node_id] = attestation
 
         return ACExecutionResult(
             ac_index=ac_index,
@@ -2738,11 +2750,33 @@ class ParallelACExecutor:
             if not isinstance(data, Mapping) or data.get("node_id") != node_identity.node_id:
                 continue
             restored = self._decomposition_attestation_from_event_data(data)
-            if restored is not None:
-                latest = restored
+            latest = (
+                restored
+                if restored is not None
+                else self._untrustworthy_decomposition_attestation(
+                    node_identity.node_id,
+                    reason=(
+                        "malformed decomposition attestation replayed; withholding child-tier trust"
+                    ),
+                )
+            )
         if latest is not None:
             self._decomposition_attestations[node_identity.node_id] = latest
         return latest
+
+    @staticmethod
+    def _untrustworthy_decomposition_attestation(
+        node_id: str,
+        *,
+        reason: str,
+    ) -> DecompositionAttestation:
+        return DecompositionAttestation(
+            node_id=node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason=reason,
+        )
 
     @staticmethod
     def _decomposition_attestation_from_event_data(
@@ -6021,8 +6055,6 @@ Respond with either ATOMIC or the structured JSON object only.
         if cached is not None:
             return cached
 
-        from ouroboros.resilience.lateral import ThinkingPersona
-
         node_id = ExecutionNodeIdentity.root(
             execution_context_id=execution_id, ac_index=ac_idx
         ).node_id
@@ -6062,34 +6094,53 @@ Respond with either ATOMIC or the structured JSON object only.
 
         state = LateralEscalationState()
         if latest_state_data is not None and not resolved:
-            raw_personas = latest_state_data.get("personas_tried")
-            personas: tuple[ThinkingPersona, ...] = ()
-            if isinstance(raw_personas, list):
-                recovered: list[ThinkingPersona] = []
-                for raw_value in raw_personas:
-                    try:
-                        recovered.append(ThinkingPersona(raw_value))
-                    except ValueError:
-                        continue
-                personas = tuple(recovered)
-            raw_streak = latest_state_data.get("consecutive_terminal_failures")
-            streak = (
-                raw_streak
-                if isinstance(raw_streak, int) and not isinstance(raw_streak, bool)
-                else 0
-            )
-            raw_parked = latest_state_data.get("parked")
-            parked = raw_parked if isinstance(raw_parked, bool) else False
-            if latest_state_event_type == "execution.ac.parked_for_operator":
-                parked = True
-            state = LateralEscalationState(
-                consecutive_terminal_failures=streak,
-                personas_tried=personas,
-                parked=parked,
+            state = self._lateral_escalation_state_from_event_data(
+                latest_state_data,
+                latest_state_event_type=latest_state_event_type,
             )
 
         self._lateral_escalation_states[ac_idx] = state
         return state
+
+    @staticmethod
+    def _lateral_escalation_state_from_event_data(
+        data: Mapping[str, Any],
+        *,
+        latest_state_event_type: str | None,
+    ) -> LateralEscalationState:
+        from ouroboros.resilience.lateral import ThinkingPersona
+
+        raw_personas = data.get("personas_tried")
+        if not isinstance(raw_personas, list):
+            msg = "lateral escalation personas_tried must be a list"
+            raise ValueError(msg)
+        personas: list[ThinkingPersona] = []
+        for raw_value in raw_personas:
+            if not isinstance(raw_value, str):
+                msg = "lateral escalation persona values must be strings"
+                raise ValueError(msg)
+            personas.append(ThinkingPersona(raw_value))
+
+        raw_streak = data.get("consecutive_terminal_failures")
+        if not isinstance(raw_streak, int) or isinstance(raw_streak, bool) or raw_streak < 0:
+            msg = "lateral escalation consecutive_terminal_failures must be a non-negative integer"
+            raise ValueError(msg)
+
+        raw_parked = data.get("parked")
+        if raw_parked is None and latest_state_event_type == "execution.ac.parked_for_operator":
+            parked = True
+        elif not isinstance(raw_parked, bool):
+            msg = "lateral escalation parked must be a boolean"
+            raise ValueError(msg)
+        else:
+            parked = raw_parked
+            if latest_state_event_type == "execution.ac.parked_for_operator":
+                parked = True
+        return LateralEscalationState(
+            consecutive_terminal_failures=raw_streak,
+            personas_tried=tuple(personas),
+            parked=parked,
+        )
 
     @staticmethod
     def _lateral_state_persistence_failure(
@@ -6149,7 +6200,7 @@ Respond with either ATOMIC or the structured JSON object only.
         system_prompt: str,
         level_contexts: list[LevelContext],
         execution_counters: dict[str, int] | None,
-    ) -> ACExecutionResult | None:
+    ) -> ACExecutionResult | BaseException | None:
         """Task 2: never let a root AC give up at maximum strength.
 
         Called once this AC's ORDINARY retry budget is exhausted. A genuinely
@@ -6311,17 +6362,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=session_id,
                     execution_id=execution_id,
                 )
-                await self._emit_ac_outcome_finalized(
-                    result=candidate,
-                    root_ac_index=ac_idx,
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
 
             if not isinstance(candidate, ACExecutionResult):
                 # Infra-fatal mid-ladder: exempt, hand back to the caller's
                 # existing exception handling rather than looping forever.
-                return await self._resolve_lateral_escalation_state(
+                persistence_failure = await self._resolve_lateral_escalation_state(
                     execution_id=execution_id,
                     session_id=session_id,
                     node_id=node_id,
@@ -6330,6 +6375,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_attempt=current_retry_attempt,
                     reason="candidate was not an ACExecutionResult",
                 )
+                return persistence_failure if persistence_failure is not None else candidate
             if candidate.success:
                 # Breakthrough: every ladder entry emitted a durable
                 # lateral_escalation_step, so every exit must emit the companion
@@ -6345,6 +6391,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
                 if persistence_failure is not None:
                     return persistence_failure
+                await self._emit_ac_outcome_finalized(
+                    result=candidate,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
                 return candidate
 
             current_result = candidate
@@ -6358,7 +6410,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_attempt=current_retry_attempt,
                     reason="non-retryable redispatch result",
                 )
-                return persistence_failure if persistence_failure is not None else candidate
+                if persistence_failure is not None:
+                    return persistence_failure
+                await self._emit_ac_outcome_finalized(
+                    result=candidate,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                return candidate
             terminal = await self._root_ac_terminal_state(
                 seed=seed,
                 ac_idx=ac_idx,
@@ -6375,7 +6435,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_attempt=current_retry_attempt,
                     reason="non-terminal redispatch result",
                 )
-                return persistence_failure if persistence_failure is not None else candidate
+                if persistence_failure is not None:
+                    return persistence_failure
+                await self._emit_ac_outcome_finalized(
+                    result=candidate,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                return candidate
 
     async def _run_batch_with_verify_and_retry(
         self,

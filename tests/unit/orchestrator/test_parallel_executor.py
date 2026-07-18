@@ -20,6 +20,10 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.decomposition_attestation import (
+    DecompositionAttestation,
+    DecompositionTrustVerdict,
+)
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
@@ -29,7 +33,14 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
-from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
+from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionChild,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+)
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
@@ -3098,6 +3109,268 @@ class TestInfraFatalExemption:
         )
 
         assert escalated is None
+
+
+class TestDurableReplayFailClosed:
+    @pytest.mark.asyncio
+    async def test_decomposition_attestation_emit_failure_blocks_and_does_not_cache(
+        self,
+    ) -> None:
+        executor = _make_executor()
+        executor._event_store.replay = AsyncMock(return_value=[])
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec_attest_emit", ac_index=0
+        )
+        decision = DecompositionDecisionRecord(
+            node_id=node_identity.node_id,
+            source=DecompositionSource.BOUNCE,
+            disposition=DecompositionDisposition.SPLIT,
+            reasons=("test split",),
+            children=(
+                DecompositionChild(
+                    description="Child one",
+                    coverage_claims=("one",),
+                    verification_hint="pytest one",
+                    verify_command="pytest tests/one.py -q",
+                ),
+                DecompositionChild(
+                    description="Child two",
+                    coverage_claims=("two",),
+                    verification_hint="pytest two",
+                    expected_artifacts=("reports/two.txt",),
+                ),
+            ),
+            structural_status=StructuralCheckStatus.PASSED,
+            semantic_status=SemanticAttestationStatus.ESTABLISHED,
+            trustworthy=True,
+        )
+        attestation = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+            failed_axis=None,
+            failed_sibling_id=None,
+            reason="parent gate passed",
+        )
+        executor._execute_single_ac = AsyncMock(
+            side_effect=[
+                ACExecutionResult(ac_index=0, ac_content="Child one", success=True),
+                ACExecutionResult(ac_index=1, ac_content="Child two", success=True),
+            ]
+        )
+        executor._attest_decomposition_round = AsyncMock(return_value=(attestation, None))
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(return_value=False)
+
+        result = await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="Parent AC",
+            session_id="orch_attest_emit",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            execution_id="exec_attest_emit",
+            level_contexts=[],
+            retry_attempt=0,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="parent-ac",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert "attestation persistence failed" in (result.error or "")
+        assert node_identity.node_id not in executor._decomposition_attestations
+
+    @pytest.mark.asyncio
+    async def test_malformed_matching_attestation_replay_withholds_trust(self) -> None:
+        executor = _make_executor()
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec_attest_malformed", ac_index=0
+        )
+        executor._event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="execution.ac.decomposition_attested",
+                    aggregate_type="execution",
+                    aggregate_id="exec_attest_malformed",
+                    data={
+                        "node_id": node_identity.node_id,
+                        "verdict": DecompositionTrustVerdict.TRUSTWORTHY.value,
+                        "failed_axis": None,
+                        "failed_sibling_id": None,
+                        "reason": "older trustworthy attestation",
+                    },
+                ),
+                BaseEvent(
+                    type="execution.ac.decomposition_attested",
+                    aggregate_type="execution",
+                    aggregate_id="exec_attest_malformed",
+                    data={"node_id": node_identity.node_id, "verdict": "not-a-verdict"},
+                ),
+            ]
+        )
+
+        attestation = await executor._load_decomposition_attestation(
+            node_identity=node_identity,
+            execution_id="exec_attest_malformed",
+        )
+
+        assert attestation is not None
+        assert attestation.trustworthy is False
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert "malformed" in attestation.reason
+
+    @pytest.mark.asyncio
+    async def test_malformed_lateral_state_replay_returns_infra_fatal_result(self) -> None:
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._root_ac_terminal_state = AsyncMock(return_value=True)
+        node_id = ExecutionNodeIdentity.root(
+            execution_context_id="exec_lateral_bad", ac_index=0
+        ).node_id
+        executor._event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="execution.ac.lateral_escalation_step",
+                    aggregate_type="execution",
+                    aggregate_id="exec_lateral_bad",
+                    data={
+                        "node_id": node_id,
+                        "personas_tried": ["not-a-persona"],
+                        "consecutive_terminal_failures": "2",
+                        "parked": False,
+                    },
+                )
+            ]
+        )
+        seed = Seed(
+            goal="Ship",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Parent AC"),),
+            ontology_schema=OntologySchema(name="DurableReplay", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        result = await executor._maybe_run_lateral_escalation_ladder(
+            seed=seed,
+            ac_idx=0,
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="Parent AC",
+                success=False,
+                error="verify_command failed",
+            ),
+            ac_retry_attempts={0: 0},
+            session_id="orch_lateral_bad",
+            execution_id="exec_lateral_bad",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            execution_counters=None,
+        )
+
+        assert isinstance(result, ACExecutionResult)
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert "state reconstruction failed" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_lateral_success_resolves_before_outcome_finalized(self) -> None:
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._event_store.replay = AsyncMock(return_value=[])
+        executor._root_ac_terminal_state = AsyncMock(return_value=True)
+        executor._execute_ac_batch = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Parent AC",
+                    success=True,
+                    final_message="done",
+                )
+            ]
+        )
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._event_emitter.emit_ac_lateral_escalation_step = AsyncMock(return_value=True)
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=False)
+        seed = Seed(
+            goal="Ship",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Parent AC"),),
+            ontology_schema=OntologySchema(name="LateralOrder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        result = await executor._maybe_run_lateral_escalation_ladder(
+            seed=seed,
+            ac_idx=0,
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="Parent AC",
+                success=False,
+                error="verify_command failed",
+            ),
+            ac_retry_attempts={0: 0},
+            session_id="orch_lateral_order",
+            execution_id="exec_lateral_order",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            execution_counters=None,
+        )
+
+        assert isinstance(result, ACExecutionResult)
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert "resolution persistence failed" in (result.error or "")
+        executor._emit_ac_outcome_finalized.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lateral_raw_exception_survives_resolution(self) -> None:
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._event_store.replay = AsyncMock(return_value=[])
+        executor._root_ac_terminal_state = AsyncMock(return_value=True)
+        raw_error = RuntimeError("redispatch crashed")
+        executor._execute_ac_batch = AsyncMock(return_value=[raw_error])
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._event_emitter.emit_ac_lateral_escalation_step = AsyncMock(return_value=True)
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=True)
+        seed = Seed(
+            goal="Ship",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Parent AC"),),
+            ontology_schema=OntologySchema(name="LateralRaw", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        result = await executor._maybe_run_lateral_escalation_ladder(
+            seed=seed,
+            ac_idx=0,
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="Parent AC",
+                success=False,
+                error="verify_command failed",
+            ),
+            ac_retry_attempts={0: 0},
+            session_id="orch_lateral_raw",
+            execution_id="exec_lateral_raw",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            execution_counters=None,
+        )
+
+        assert result is raw_error
+        executor._emit_ac_outcome_finalized.assert_not_awaited()
 
 
 class TestParallelACExecutor:
