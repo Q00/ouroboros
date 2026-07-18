@@ -249,9 +249,10 @@ class TestLadderProgression:
         assert len(seen_prompts) == len(set(seen_prompts))
         # Escalation state is cleared on breakthrough.
         assert 0 not in executor._lateral_escalation_states
-        # Fix 8: this AC was never parked, so there is no badge to clear —
-        # emitting a resolution event here would be a spurious no-op event.
-        executor._event_emitter.emit_ac_parked_resolved.assert_not_awaited()
+        # Every ladder entry emits ``lateral_escalation_step`` before
+        # redispatch, so every ladder exit needs a durable resolution event even
+        # when the AC never reached parked state.
+        executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_all_personas_exhausted_emits_parked_event(self) -> None:
@@ -364,6 +365,55 @@ class TestLadderProgression:
         )
         assert kwargs["consecutive_terminal_failures"] == 1
         assert kwargs["parked"] is False
+
+    @pytest.mark.asyncio
+    async def test_lateral_step_persistence_failure_fails_closed_before_redispatch(self) -> None:
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_ac_lateral_escalation_step = AsyncMock(return_value=False)
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is False
+        assert outcome.infra_fatal is True
+        assert "lateral escalation step persistence failed" in (outcome.error or "")
+        executor._execute_ac_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_parked_ladder_exit_emits_resolution_before_returning_success(self) -> None:
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=True)
+
+        async def succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resolution_persistence_failure_fails_closed_on_ladder_exit(self) -> None:
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=False)
+
+        async def succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is False
+        assert outcome.infra_fatal is True
+        assert "resolution persistence failed" in (outcome.error or "")
 
     @pytest.mark.asyncio
     async def test_mid_ladder_infra_fatal_result_replaces_older_quality_failure(self) -> None:
@@ -625,6 +675,22 @@ class TestLateralEscalationStateDurability:
         state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
 
         assert state == LateralEscalationState()
+
+    @pytest.mark.asyncio
+    async def test_replay_failure_returns_infra_fatal_ladder_result(self) -> None:
+        store = AsyncMock()
+        store.replay = AsyncMock(side_effect=RuntimeError("event store unavailable"))
+        executor = _make_executor_with_active_ladder()
+        executor._event_store = store
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is False
+        assert outcome.infra_fatal is True
+        assert "state reconstruction failed" in (outcome.error or "")
+        executor._execute_ac_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_in_memory_cache_hit_skips_replay(self, memory_event_store: EventStore) -> None:

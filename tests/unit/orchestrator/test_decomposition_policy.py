@@ -177,6 +177,29 @@ class TestTrustInvariant:
                 trustworthy=True,
             )
 
+    def test_trusted_split_requires_executable_child_contracts(self) -> None:
+        with pytest.raises(ValueError, match="trustworthy split"):
+            DecompositionDecisionRecord(
+                node_id="n1",
+                source=DecompositionSource.PREFLIGHT,
+                disposition=DecompositionDisposition.SPLIT,
+                children=(
+                    DecompositionChild(
+                        description="child one",
+                        coverage_claims=("one is covered",),
+                        verification_hint="manual inspection",
+                    ),
+                    DecompositionChild(
+                        description="child two",
+                        coverage_claims=("two is covered",),
+                        verification_hint="manual inspection",
+                    ),
+                ),
+                structural_status=StructuralCheckStatus.PASSED,
+                semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                trustworthy=True,
+            )
+
     def test_split_child_count_is_bounded_even_when_untrusted(self) -> None:
         with pytest.raises(ValueError, match="split decisions"):
             DecompositionDecisionRecord(

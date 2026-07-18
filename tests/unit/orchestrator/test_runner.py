@@ -358,11 +358,13 @@ class TestACExecutionResult:
                     description="Implement config field",
                     coverage_claims=("config",),
                     verification_hint="unit",
+                    verify_command="pytest tests/unit/config -q",
                 ),
                 DecompositionChild(
                     description="Wire runner field",
                     coverage_claims=("runner",),
                     verification_hint="unit",
+                    verify_command="pytest tests/unit/orchestrator/test_runner.py -q",
                 ),
             ),
             structural_status=StructuralCheckStatus.PASSED,

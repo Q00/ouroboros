@@ -108,7 +108,7 @@ class ExecutionEventEmitter:
         session_id: str,
         node_identity: ExecutionNodeIdentity,
         attestation: DecompositionAttestation,
-    ) -> None:
+    ) -> bool:
         """Persist the gate-anchored decomposition trust verdict (Task 1).
 
         Computed once a decomposition round's siblings have all finished
@@ -117,7 +117,7 @@ class ExecutionEventEmitter:
         (Task 3) and the frugality proof's ``decomposition_trustworthy`` axis
         can read it without recomputing anything.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.decomposition_attested",
                 aggregate_type="execution",
@@ -142,7 +142,7 @@ class ExecutionEventEmitter:
         consecutive_terminal_failures: int,
         backoff_seconds: float,
         reason: str,
-    ) -> None:
+    ) -> bool:
         """Persist that a root AC exhausted the lateral-escalation ladder (Task 2).
 
         This AC has failed at its most expensive configuration, cycled
@@ -156,7 +156,7 @@ class ExecutionEventEmitter:
         .node_id`` every other per-node event for this root AC carries, so
         Kanban/HUD consumers can key off it exactly like any other event.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.parked_for_operator",
                 aggregate_type="execution",
@@ -185,9 +185,9 @@ class ExecutionEventEmitter:
         consecutive_terminal_failures: int,
         parked: bool,
         selected_persona: str | None,
-    ) -> None:
+    ) -> bool:
         """Persist every lateral-escalation state transition before redispatch."""
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.lateral_escalation_step",
                 aggregate_type="execution",
@@ -212,29 +212,21 @@ class ExecutionEventEmitter:
         session_id: str,
         node_id: str,
         root_ac_index: int,
-    ) -> None:
-        """Persist that a previously-parked root AC has succeeded (Task 2/Fix 8).
+    ) -> bool:
+        """Persist that a lateral-escalation state has reached a non-ladder exit.
 
-        ``execution.ac.parked_for_operator`` has no companion "un-parked"
-        event, so a projection that folds the event log (Kanban/HUD/
-        conductor) has no durable signal telling it to clear the parked
-        badge once the AC that triggered it actually finishes successfully —
-        it would otherwise show ``completed`` AND still-``parked`` on the
-        same card forever. This is that companion event, emitted exactly
-        once, at the moment the lateral-escalation ladder's in-memory streak
-        for this root AC is cleared on a breakthrough.
-
-        Only emitted when the AC being resolved was actually parked (the
-        caller checks its own ladder state before calling this) — a plain
-        ordinary success that never engaged the ladder has no parked badge to
-        clear and must not emit a spurious resolution event.
+        A lateral ladder emits ``execution.ac.lateral_escalation_step`` before
+        every redispatch. Any exit from that ladder (success, infra-fatal, or a
+        non-terminal ordinary result handed back to the caller) must clear the
+        durable escalation projection. Without a companion resolution event, a
+        cold replay can reconstruct stale persona/backoff state from the last
+        unresolved step even though the live ladder already exited.
 
         ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
-        .node_id`` the original ``parked_for_operator`` event carried, so a
-        projection can pair the two by node id exactly like any other
-        per-node event.
+        .node_id`` that step/parked events carry, so projections pair them by
+        node id exactly like any other per-node event.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.parked_resolved",
                 aggregate_type="execution",

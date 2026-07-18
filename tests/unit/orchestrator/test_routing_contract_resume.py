@@ -275,6 +275,44 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 42.0,
     }
+    assert resumed._execution_contract["frugality_proof"][
+        "routing_fingerprint"
+    ] == OrchestratorRunner._routing_fingerprint(
+        resumed._execution_contract["model_routing"],
+        retry_policy_contract=resumed._execution_contract["retry_policy"],
+    )
+
+
+def test_legacy_retry_policy_migration_survives_two_consecutive_resumes() -> None:
+    original = _runner()
+    persisted = original._build_execution_contract()
+    del persisted["retry_policy"]
+    persisted["frugality_proof"] = {
+        **persisted["frugality_proof"],
+        "routing_fingerprint": OrchestratorRunner._routing_fingerprint(persisted["model_routing"]),
+    }
+
+    first_resume = _runner()
+    first_resume._lateral_escalation_enabled = True
+    first_resume._parked_retry_backoff_seconds = 42.0
+
+    changed = first_resume._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    migrated = first_resume._execution_contract
+    assert migrated is not None
+
+    second_resume = _runner()
+    second_resume._lateral_escalation_enabled = False
+    second_resume._parked_retry_backoff_seconds = 300.0
+
+    changed_again = second_resume._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: migrated}
+    )
+
+    assert changed_again is False
+    assert second_resume._lateral_escalation_enabled is True
+    assert second_resume._parked_retry_backoff_seconds == 42.0
 
 
 @pytest.mark.parametrize(

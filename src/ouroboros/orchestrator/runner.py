@@ -2627,7 +2627,14 @@ class OrchestratorRunner:
                     persisted_preferences.to_contract_data()
                 )
             if retry_policy_migrated:
-                self._execution_contract["retry_policy"] = self._retry_policy_contract()
+                migrated_retry_policy = self._retry_policy_contract()
+                self._execution_contract["retry_policy"] = migrated_retry_policy
+                migrated_proof = dict(raw_proof)
+                migrated_proof["routing_fingerprint"] = self._routing_fingerprint(
+                    raw_routing,
+                    retry_policy_contract=migrated_retry_policy,
+                )
+                self._execution_contract["frugality_proof"] = migrated_proof
             return True
         return False
 

@@ -2723,7 +2723,13 @@ class ParallelACExecutor:
                 node_id=node_identity.node_id,
                 execution_id=execution_id,
             )
-            return None
+            return DecompositionAttestation(
+                node_id=node_identity.node_id,
+                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+                failed_axis=DecompositionTrustAxis.PARENT_GATE,
+                failed_sibling_id=None,
+                reason="decomposition attestation replay failed; withholding child-tier trust",
+            )
         latest: DecompositionAttestation | None = None
         for event in events:
             if getattr(event, "type", None) != "execution.ac.decomposition_attested":
@@ -6028,7 +6034,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_idx=ac_idx,
                 execution_id=execution_id,
             )
-            events = []
+            raise
 
         latest_state_data: dict[str, Any] | None = None
         latest_state_event_type: str | None = None
@@ -6084,6 +6090,50 @@ Respond with either ATOMIC or the structured JSON object only.
 
         self._lateral_escalation_states[ac_idx] = state
         return state
+
+    @staticmethod
+    def _lateral_state_persistence_failure(
+        *,
+        ac_idx: int,
+        ac_content: str,
+        retry_attempt: int,
+        reason: str,
+    ) -> ACExecutionResult:
+        return ACExecutionResult(
+            ac_index=ac_idx,
+            ac_content=ac_content,
+            success=False,
+            error=reason,
+            retry_attempt=retry_attempt,
+            infra_fatal=True,
+        )
+
+    async def _resolve_lateral_escalation_state(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_id: str,
+        root_ac_index: int,
+        ac_content: str,
+        retry_attempt: int,
+        reason: str,
+    ) -> ACExecutionResult | None:
+        resolved = await self._event_emitter.emit_ac_parked_resolved(
+            execution_id=execution_id,
+            session_id=session_id,
+            node_id=node_id,
+            root_ac_index=root_ac_index,
+        )
+        if not resolved:
+            return self._lateral_state_persistence_failure(
+                ac_idx=root_ac_index,
+                ac_content=ac_content,
+                retry_attempt=retry_attempt,
+                reason=f"lateral escalation resolution persistence failed: {reason}",
+            )
+        self._lateral_escalation_states.pop(root_ac_index, None)
+        return None
 
     async def _maybe_run_lateral_escalation_ladder(
         self,
@@ -6142,8 +6192,22 @@ Respond with either ATOMIC or the structured JSON object only.
         if not terminal:
             return None
 
-        state = await self._load_lateral_escalation_state(ac_idx, execution_id=execution_id)
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+        try:
+            state = await self._load_lateral_escalation_state(ac_idx, execution_id=execution_id)
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.lateral_escalation.state_reconstruction_failed_closed",
+                ac_idx=ac_idx,
+                execution_id=execution_id,
+                error=str(exc),
+            )
+            return self._lateral_state_persistence_failure(
+                ac_idx=ac_idx,
+                ac_content=ac_content,
+                retry_attempt=current_retry_attempt,
+                reason="lateral escalation state reconstruction failed",
+            )
 
         while True:
             failure_class = self._failure_class_for_result(current_result)
@@ -6158,7 +6222,7 @@ Respond with either ATOMIC or the structured JSON object only.
             node_id = ExecutionNodeIdentity.root(
                 execution_context_id=execution_id, ac_index=ac_idx
             ).node_id
-            await self._event_emitter.emit_ac_lateral_escalation_step(
+            step_persisted = await self._event_emitter.emit_ac_lateral_escalation_step(
                 execution_id=execution_id,
                 session_id=session_id,
                 node_id=node_id,
@@ -6168,9 +6232,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 parked=state.parked,
                 selected_persona=step.persona.value if step.persona is not None else None,
             )
+            if not step_persisted:
+                return self._lateral_state_persistence_failure(
+                    ac_idx=ac_idx,
+                    ac_content=ac_content,
+                    retry_attempt=current_retry_attempt,
+                    reason="lateral escalation step persistence failed before redispatch",
+                )
 
             if step.just_parked:
-                await self._event_emitter.emit_ac_parked_for_operator(
+                parked_persisted = await self._event_emitter.emit_ac_parked_for_operator(
                     execution_id=execution_id,
                     session_id=session_id,
                     node_id=node_id,
@@ -6183,6 +6254,13 @@ Respond with either ATOMIC or the structured JSON object only.
                         "at maximum strength"
                     ),
                 )
+                if not parked_persisted:
+                    return self._lateral_state_persistence_failure(
+                        ac_idx=ac_idx,
+                        ac_content=ac_content,
+                        retry_attempt=current_retry_attempt,
+                        reason="parked-for-operator persistence failed before redispatch",
+                    )
 
             if step.apply_long_backoff:
                 await self._sleep(self._parked_retry_backoff_seconds)
@@ -6243,30 +6321,44 @@ Respond with either ATOMIC or the structured JSON object only.
             if not isinstance(candidate, ACExecutionResult):
                 # Infra-fatal mid-ladder: exempt, hand back to the caller's
                 # existing exception handling rather than looping forever.
-                return None
+                return await self._resolve_lateral_escalation_state(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=node_id,
+                    root_ac_index=ac_idx,
+                    ac_content=ac_content,
+                    retry_attempt=current_retry_attempt,
+                    reason="candidate was not an ACExecutionResult",
+                )
             if candidate.success:
-                # Breakthrough: reset the streak and surface the success. When
-                # this AC was actually parked (Fix 8), emit the durable
-                # resolution companion event so a projection folding the
-                # event log (Kanban/HUD/conductor) has a signal to clear the
-                # parked badge — otherwise it would show ``completed`` AND
-                # still-``parked`` forever, since ``parked_for_operator`` has
-                # no other durable "un-parked" signal.
-                if state.parked:
-                    await self._event_emitter.emit_ac_parked_resolved(
-                        execution_id=execution_id,
-                        session_id=session_id,
-                        node_id=ExecutionNodeIdentity.root(
-                            execution_context_id=execution_id, ac_index=ac_idx
-                        ).node_id,
-                        root_ac_index=ac_idx,
-                    )
-                self._lateral_escalation_states.pop(ac_idx, None)
+                # Breakthrough: every ladder entry emitted a durable
+                # lateral_escalation_step, so every exit must emit the companion
+                # resolution event before the in-memory streak is cleared.
+                persistence_failure = await self._resolve_lateral_escalation_state(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=node_id,
+                    root_ac_index=ac_idx,
+                    ac_content=ac_content,
+                    retry_attempt=current_retry_attempt,
+                    reason="successful redispatch",
+                )
+                if persistence_failure is not None:
+                    return persistence_failure
                 return candidate
 
             current_result = candidate
             if not self._is_retryable_failure(candidate):
-                return candidate
+                persistence_failure = await self._resolve_lateral_escalation_state(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=node_id,
+                    root_ac_index=ac_idx,
+                    ac_content=ac_content,
+                    retry_attempt=current_retry_attempt,
+                    reason="non-retryable redispatch result",
+                )
+                return persistence_failure if persistence_failure is not None else candidate
             terminal = await self._root_ac_terminal_state(
                 seed=seed,
                 ac_idx=ac_idx,
@@ -6274,7 +6366,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_attempt=current_retry_attempt,
             )
             if not terminal:
-                return candidate
+                persistence_failure = await self._resolve_lateral_escalation_state(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=node_id,
+                    root_ac_index=ac_idx,
+                    ac_content=ac_content,
+                    retry_attempt=current_retry_attempt,
+                    reason="non-terminal redispatch result",
+                )
+                return persistence_failure if persistence_failure is not None else candidate
 
     async def _run_batch_with_verify_and_retry(
         self,

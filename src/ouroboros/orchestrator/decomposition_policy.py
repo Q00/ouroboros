@@ -384,7 +384,8 @@ class DecompositionDecisionRecord:
         if self.trustworthy and not self._meets_trust_invariant():
             msg = (
                 "trustworthy split requires SPLIT disposition, structural PASSED, "
-                "semantic ESTABLISHED, at least 2 children, and repair_count <= 1"
+                "semantic ESTABLISHED, at least 2 children, repair_count <= 1, "
+                "and child executable verification contracts"
             )
             raise ValueError(msg)
 
@@ -831,6 +832,8 @@ def _children_support_trust(children: Sequence[DecompositionChild]) -> bool:
     coverage_claims: set[str] = set()
     for child in children:
         if not child.coverage_claims or not child.verification_hint:
+            return False
+        if not child.verify_command and not child.expected_artifacts:
             return False
         description = _fingerprint(child.description)
         if not description or description in descriptions:

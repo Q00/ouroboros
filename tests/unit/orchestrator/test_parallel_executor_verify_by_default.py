@@ -731,8 +731,18 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
                 source=DecompositionSource.PREFLIGHT,
                 disposition=DecompositionDisposition.SPLIT,
                 children=(
-                    DecompositionChild("child a", ("scope a",), "verify a"),
-                    DecompositionChild("child b", ("scope b",), "verify b"),
+                    DecompositionChild(
+                        "child a",
+                        ("scope a",),
+                        "verify a",
+                        verify_command="pytest tests/unit/a.py -q",
+                    ),
+                    DecompositionChild(
+                        "child b",
+                        ("scope b",),
+                        "verify b",
+                        expected_artifacts=("b.txt",),
+                    ),
                 ),
                 structural_status=StructuralCheckStatus.PASSED,
                 semantic_status=SemanticAttestationStatus.ESTABLISHED,

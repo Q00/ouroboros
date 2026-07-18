@@ -551,3 +551,61 @@ class TestExecuteDecompositionChildrenWiring:
 
         assert captured_trust_flags
         assert all(flag is False for flag in captured_trust_flags)
+
+    @pytest.mark.asyncio
+    async def test_attestation_replay_failure_withholds_child_tier_trust(self) -> None:
+        """A replay failure is not the same as no prior attestation.
+
+        If the durable trust ledger cannot be reconstructed, the executor must
+        fail closed and withhold trusted child routing for the next split.
+        """
+        from datetime import UTC, datetime
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        store = AsyncMock()
+        store.replay = AsyncMock(side_effect=RuntimeError("event store unavailable"))
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(return_value=True)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        captured_trust_flags: list[bool] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-1",
+            level_contexts=None,
+            retry_attempt=1,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        )
+
+        assert captured_trust_flags
+        assert all(flag is False for flag in captured_trust_flags)
