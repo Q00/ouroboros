@@ -5017,7 +5017,27 @@ Respond with either ATOMIC or the structured JSON object only.
             # _apply_verify_gate returns early when run_verify_commands is disabled,
             # so with the gate off we must retain the transcript-backed evidence
             # rather than drop it.
-            verify_gate_active = self._run_verify_commands
+            #
+            # Fix 1 (round 3): a decomposition child (``is_sub_ac``) is only ever
+            # handed the PARENT's contract (see the "Fix 1 (round 2)" comment on
+            # the ``ac_spec=ac_spec`` forward in ``_execute_decomposition_children``)
+            # -- there is no principled per-child contract in this codebase. Running
+            # the parent's own (possibly non-idempotent) verify_command once per
+            # successful child, IN ADDITION to the single authoritative re-run over
+            # the union of all children in ``_attest_decomposition_round``, is both
+            # a cost bug (N+1 executions of the same command) and a correctness bug:
+            # a child passing the PARENT's whole contract in isolation is not
+            # evidence that child did its own job correctly, so treating that result
+            # as "this sibling's own verify gate" (as ``_attest_decomposition_round``
+            # would, via ``result.verify_gate_outcome``) is a false trust signal.
+            # Children therefore never execute this gate; ``verify_gate_outcome``
+            # stays ``None`` for them, which makes the sibling axis of the
+            # gate-anchored attestation correctly resolve to INDETERMINATE (fail
+            # closed -- see ``decomposition_attestation.py``) instead of borrowing
+            # the parent-wide result as if it were child-local proof. The parent's
+            # own gate is still re-run exactly once, after all children finish, by
+            # ``_attest_decomposition_round``.
+            verify_gate_active = self._run_verify_commands and not is_sub_ac
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()

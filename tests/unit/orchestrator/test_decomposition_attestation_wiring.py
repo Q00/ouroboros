@@ -12,6 +12,7 @@ import pytest
 
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.harness.decomposition_attestation import (
+    DecompositionTrustAxis,
     DecompositionTrustVerdict,
 )
 from ouroboros.orchestrator.decomposition_policy import (
@@ -416,19 +417,28 @@ class TestExecuteDecompositionChildrenWiring:
 
 
 class TestLiveDecompositionAttestationEndToEnd:
-    """Fix 1 (round 2, BLOCKING): reproduction + fix proof for the live-dispatch
-    gap. Every OTHER test in this module hand-constructs ``ACExecutionResult``
-    objects or mocks ``_execute_single_ac`` outright, which is exactly how the
-    round-2 bug hid: those tests can never fail even when a genuinely live
-    decomposed child can never populate its own ``verify_gate_outcome``. This
-    test dispatches every child through the REAL ``_execute_single_ac`` ->
+    """Fix 1 (round 3, BLOCKING): a decomposition child is only ever handed
+    the PARENT's contract verbatim (there is no principled per-child
+    contract in this codebase -- see the "Fix 1 (round 2)"/"Fix 1 (round 3)"
+    comments in ``_execute_decomposition_children``/``_execute_atomic_ac``).
+    Running that parent-wide contract once per successful child, IN ADDITION
+    to the single authoritative re-run over the union of all children in
+    ``_attest_decomposition_round``, was both a cost bug (N+1 non-idempotent
+    command executions) and a correctness bug: a child passing the PARENT's
+    whole contract in isolation is not evidence that child did its own job
+    correctly. As of round 3, children never execute the borrowed contract at
+    all, so the sibling axis of the gate-anchored attestation always resolves
+    to INDETERMINATE (fail closed) for a live decomposition round -- these
+    tests dispatch every child through the REAL ``_execute_single_ac`` ->
     ``_execute_atomic_ac`` code path (a stub *runtime adapter* is the only
-    double -- nothing inside the orchestrator itself is mocked) to prove a
-    live child can now reach a real, non-INDETERMINATE verdict.
+    double) to prove that, and that the PARENT's own gate is still evaluated
+    exactly once, for real, regardless of the (indeterminate) sibling axis.
     """
 
     @pytest.mark.asyncio
-    async def test_live_decomposed_children_reach_trustworthy_verdict(self, tmp_path) -> None:
+    async def test_live_decomposed_children_never_run_borrowed_parent_gate(
+        self, tmp_path
+    ) -> None:
         from datetime import UTC, datetime
 
         from tests.unit.orchestrator.test_parallel_executor import (
@@ -486,27 +496,35 @@ class TestLiveDecompositionAttestationEndToEnd:
             ac_spec=ac_spec,
         )
 
-        # Every sibling was genuinely dispatched through _execute_atomic_ac
-        # (no mocking of _execute_single_ac) and populated its OWN
-        # verify_gate_outcome from the real filesystem oracle -- this is the
-        # exact field that was always None for a live child before the fix.
+        # No sibling ever runs the borrowed parent-wide gate: it is not
+        # evidence of THAT child's own correctness, and running it per child
+        # would duplicate the (possibly non-idempotent) verify_command.
         assert len(result.sub_results) == 2
         for sub_result in result.sub_results:
-            assert sub_result.verify_gate_outcome is not None
-            assert sub_result.verify_gate_outcome.passed is True
+            assert sub_result.verify_gate_outcome is None
 
+        # Fail-closed: with no evaluable per-sibling gate, the round is
+        # INDETERMINATE (never optimistically TRUSTWORTHY) via the sibling axis.
         assert result.decomposition_attestation is not None
-        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.TRUSTWORTHY
-        assert result.decomposition_attestation.trustworthy is True
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert result.decomposition_attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert result.decomposition_attestation.trustworthy is False
+
+        # The PARENT's own gate is still evaluated for real, exactly once,
+        # after all children finished -- and cached on the returned result so
+        # the final acceptance gate does not re-run it a second time.
+        assert result.verify_gate_outcome is not None
+        assert result.verify_gate_outcome.passed is True
 
     @pytest.mark.asyncio
-    async def test_live_decomposed_child_missing_artifact_is_untrustworthy_not_indeterminate(
+    async def test_live_decomposed_child_missing_artifact_still_indeterminate_via_sibling_axis(
         self, tmp_path
     ) -> None:
-        """The negative case: when the real filesystem oracle genuinely fails
-        for a live child (the artifact is missing), the round must resolve to
-        UNTRUSTWORTHY -- backed by a real evaluated gate -- not silently stay
-        INDETERMINATE as it did for every live round before this fix."""
+        """Even when the PARENT's own re-run gate genuinely fails (the
+        artifact is missing), no sibling ever ran that borrowed contract, so
+        the round must resolve INDETERMINATE via the sibling axis -- never
+        misattributing the parent-wide failure to a specific sibling that was
+        never actually checked."""
         from datetime import UTC, datetime
 
         from tests.unit.orchestrator.test_parallel_executor import (
@@ -559,11 +577,15 @@ class TestLiveDecompositionAttestationEndToEnd:
             ac_spec=ac_spec,
         )
 
-        assert result.sub_results[0].verify_gate_outcome is not None
-        assert result.sub_results[0].verify_gate_outcome.passed is False
+        assert result.sub_results[0].verify_gate_outcome is None
         assert result.decomposition_attestation is not None
-        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert result.decomposition_attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
         assert result.decomposition_attestation.trustworthy is False
+
+        # The PARENT's own gate still genuinely ran once and genuinely failed.
+        assert result.verify_gate_outcome is not None
+        assert result.verify_gate_outcome.passed is False
 
 
 class TestDecompositionAttestationReplayOnResume:
