@@ -2031,3 +2031,96 @@ class TestPrePakingSuccessEmitsResolution:
         assert matching, f"no board card produced for node {node_id!r}"
         for card in matching:
             assert "escalation_state" not in card
+
+
+class TestLadderWriteFailureFailsClosed:
+    """Round-5 Finding #4 (BLOCKING): a correctness-bearing write whose only
+    consequence on failure is a log line is fail-OPEN — execution continues
+    exactly as if the write succeeded, and after a restart a clean replay
+    cannot distinguish "never happened" from "failed and was logged". The
+    ladder must not act on (redispatch under) a streak/persona/parked
+    advancement the durable log cannot corroborate: it reverts to the
+    pre-advance state, holds at the parked cadence, and retries the SAME
+    step until the write lands."""
+
+    @pytest.mark.asyncio
+    async def test_progressed_write_failure_defers_redispatch_and_retries_same_step(
+        self,
+    ) -> None:
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_lateral_escalation_progressed = AsyncMock(
+            side_effect=[False, True]
+        )
+
+        dispatch_count = {"n": 0}
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_count["n"] += 1
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        # No dispatch happened while the step was un-persisted: exactly one
+        # redispatch, and only AFTER the write finally landed.
+        assert dispatch_count["n"] == 1
+        progressed_mock = executor._event_emitter.emit_lateral_escalation_progressed
+        assert progressed_mock.await_count == 2
+        # The failed write did NOT advance the ladder: the retried write
+        # describes the IDENTICAL step (no phantom streak increment, no
+        # persona skipped).
+        first_kwargs = progressed_mock.await_args_list[0].kwargs
+        second_kwargs = progressed_mock.await_args_list[1].kwargs
+        assert first_kwargs["personas_tried"] == second_kwargs["personas_tried"] == ()
+        assert (
+            first_kwargs["consecutive_terminal_failures"]
+            == second_kwargs["consecutive_terminal_failures"]
+            == 1
+        )
+        # Held at the operator-visible parked cadence while un-persisted.
+        assert executor._sleep.await_count == 1
+        assert executor._sleep.await_args_list[0].args[0] == (
+            executor._parked_retry_backoff_seconds
+        )
+
+    @pytest.mark.asyncio
+    async def test_parked_write_failure_defers_parking_and_retries_until_durable(
+        self,
+    ) -> None:
+        """The full-parking transition gets the same treatment: the parked
+        redispatch must not run until ``parked_for_operator`` is durably
+        recorded — otherwise a restart loses parked status entirely and
+        re-cycles exhausted personas from scratch."""
+        executor = _make_executor_with_active_ladder()
+        executor._lateral_escalation_states[0] = LateralEscalationState(
+            consecutive_terminal_failures=_THRESHOLD + TOTAL_PERSONA_COUNT - 1,
+            personas_tried=tuple(ThinkingPersona),
+            parked=False,
+        )
+        executor._event_emitter.emit_ac_parked_for_operator = AsyncMock(side_effect=[False, True])
+
+        dispatch_count = {"n": 0}
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_count["n"] += 1
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="last persona failed"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        assert dispatch_count["n"] == 1
+        # The parking transition was re-attempted until it landed.
+        assert executor._event_emitter.emit_ac_parked_for_operator.await_count == 2
+        # Slept the parked cadence twice: once holding the un-persisted
+        # parking step, once as the parked redispatch's own long backoff.
+        assert executor._sleep.await_count == 2
+        for call in executor._sleep.await_args_list:
+            assert call.args[0] == executor._parked_retry_backoff_seconds

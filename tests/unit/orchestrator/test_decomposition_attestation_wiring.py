@@ -1343,3 +1343,102 @@ class TestDecompositionAttestationFailsClosedOnMalformedEventData:
         # every child dispatched this round.
         assert captured_trust_flags
         assert all(flag is False for flag in captured_trust_flags)
+
+
+class TestAttestationWriteFailureFailsClosed:
+    """Round-5 Finding #4 (BLOCKING): a lost ``decomposition_attested`` write
+    replays as silence, and silence reads as "never attested" — which
+    re-admits the child-tier discount (``prior_attestation is None``):
+    fail-OPEN. Once the write's retries are exhausted, the trust verdict the
+    durable log cannot corroborate must not be acted on: the cached AND
+    returned attestation are swapped for the fail-closed UNTRUSTWORTHY
+    sentinel."""
+
+    @staticmethod
+    def _dispatch_kwargs(node_identity: ExecutionNodeIdentity) -> dict[str, object]:
+        from datetime import UTC, datetime
+
+        return {
+            "ac_index": 0,
+            "ac_content": "parent AC",
+            "session_id": "s1",
+            "tools": [],
+            "tool_catalog": None,
+            "system_prompt": "",
+            "seed_goal": "goal",
+            "depth": 0,
+            "execution_id": "exec-1",
+            "level_contexts": None,
+            "retry_attempt": 0,
+            "execution_counters": None,
+            "node_identity": node_identity,
+            "start_time": datetime.now(UTC),
+            "semantic_ac_key": "key",
+            "ac_spec": AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_unpersisted_attestation_swapped_for_untrustworthy_sentinel(self) -> None:
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(return_value=False)
+        executor._sleep = AsyncMock()
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        result = await executor._execute_decomposition_children(
+            decision=decision, **self._dispatch_kwargs(node_identity)
+        )
+
+        # Extra bounded retry rounds on top of _safe_emit_event's internal ones.
+        assert executor._event_emitter.emit_decomposition_attested.await_count == 3
+        # The verdict the round actually COMPUTED was trustworthy — but with
+        # no durable corroboration it must not be acted on: both the returned
+        # result and the in-memory cache carry the fail-closed sentinel.
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.trustworthy is False
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        cached = executor._decomposition_attestations[node_identity.node_id]
+        assert cached.trustworthy is False
+        assert cached.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+
+    @pytest.mark.asyncio
+    async def test_transient_write_failure_recovers_and_keeps_real_verdict(self) -> None:
+        """Control: a write that lands on an extra retry round keeps the
+        genuinely-computed verdict — the fail-closed swap only fires when
+        every retry is exhausted."""
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(side_effect=[False, True])
+        executor._sleep = AsyncMock()
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        result = await executor._execute_decomposition_children(
+            decision=decision, **self._dispatch_kwargs(node_identity)
+        )
+
+        assert executor._event_emitter.emit_decomposition_attested.await_count == 2
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.trustworthy is True
+        assert executor._decomposition_attestations[node_identity.node_id].trustworthy is True

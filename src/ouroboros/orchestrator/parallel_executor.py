@@ -2851,24 +2851,36 @@ class ParallelACExecutor:
             child_artifact_attributions=tuple(child_artifact_attributions),
         )
         self._decomposition_attestations[node_identity.node_id] = attestation
-        attestation_persisted = await self._event_emitter.emit_decomposition_attested(
-            execution_id=execution_id,
-            session_id=session_id,
-            node_identity=node_identity,
-            attestation=attestation,
-            retry_attempt=retry_attempt,
-        )
+        # Round-5 Finding #4 (BLOCKING, superseding round 4's log-only stance):
+        # a FUTURE resume that replays this node id and finds no matching
+        # durable event cannot tell "never attested" from "attested but the
+        # write failed" -- both are silence, and silence reads as "no prior
+        # state" (``prior_attestation is None`` re-admits the child-tier
+        # discount): fail-OPEN. Logging alone changes nothing about how this
+        # run behaves after the failure, so it is not fail-closed. Give the
+        # write bounded EXTRA retry rounds on top of ``_safe_emit_event``'s
+        # own internal retries; if truly exhausted, prevent the semantic
+        # advancement that depends on it: swap the verdict this run caches
+        # AND returns for a fail-closed UNTRUSTWORTHY sentinel (the same
+        # shape ``_load_decomposition_attestation`` synthesizes for an
+        # unreadable log), so a trust verdict the durable log cannot
+        # corroborate never authorizes the cheap child tier — in THIS run via
+        # the in-memory cache, and in the returned result via the
+        # ``next_scheduled`` routing probe.
+        attestation_persisted = False
+        for extra_attempt in range(3):
+            if extra_attempt:
+                await self._sleep(min(2.0 * (2**extra_attempt), 10.0))
+            attestation_persisted = await self._event_emitter.emit_decomposition_attested(
+                execution_id=execution_id,
+                session_id=session_id,
+                node_identity=node_identity,
+                attestation=attestation,
+                retry_attempt=retry_attempt,
+            )
+            if attestation_persisted:
+                break
         if not attestation_persisted:
-            # Fix 5 (round 3, BLOCKING): ``_safe_emit_event`` already retried
-            # and logged the generic "event dropped" warning; this correctness-
-            # bearing write additionally gets its OWN loud, specifically-named
-            # signal, because THIS process's in-memory cache (set just above)
-            # stays correct, but a FUTURE resume that replays this node id and
-            # finds no matching durable event cannot tell "never attested" from
-            # "attested but the write failed" -- it will fail closed on a
-            # genuine read exception (see ``_load_decomposition_attestation``),
-            # but a clean empty replay of a lost write is indistinguishable
-            # from a legitimate first run and defaults to trustworthy.
             log.error(
                 "parallel_executor.decomposition_attestation.write_failed_correctness_risk",
                 node_id=node_identity.node_id,
@@ -2876,6 +2888,18 @@ class ParallelACExecutor:
                 verdict=attestation.verdict.value,
                 trustworthy=attestation.trustworthy,
             )
+            attestation = DecompositionAttestation(
+                node_id=node_identity.node_id,
+                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason=(
+                    "attestation write not durable after retries; failing closed "
+                    "(untrustworthy) rather than acting on a trust verdict the "
+                    "durable log cannot corroborate"
+                ),
+            )
+            self._decomposition_attestations[node_identity.node_id] = attestation
 
         return ACExecutionResult(
             ac_index=ac_index,
@@ -6765,6 +6789,7 @@ Respond with either ATOMIC or the structured JSON object only.
             failure_text = (
                 failure_class or current_result.error or current_result.final_message or ""
             )
+            pre_advance_state = state
             step = advance_lateral_escalation(
                 state, terminal_state_failure=True, failure_text=failure_text
             )
@@ -6790,13 +6815,19 @@ Respond with either ATOMIC or the structured JSON object only.
                 persona=step.persona.value if step.persona is not None else None,
             )
             if not progressed_persisted:
-                # Fix 5 (round 3, BLOCKING): this process's in-memory
-                # ``self._lateral_escalation_states`` (set just above) stays
-                # correct, but a FUTURE resume that cannot find this streak
-                # step durably recorded would silently restart persona
-                # cycling from scratch or lose parked status -- surface it
-                # loudly with correctness-specific framing rather than only
-                # the generic degraded-event-persistence warning.
+                # Round-5 Finding #4 (BLOCKING, superseding round 4's log-only
+                # stance): logging does not make persistence fail-closed. On a
+                # future replay, a write that FAILED and a write that NEVER
+                # HAPPENED are both silence — and silence reads as "no prior
+                # state" (fail-open: personas re-tried from scratch, parked
+                # status lost). ``_safe_emit_event`` already retried with
+                # backoff; once it is exhausted, the semantic advancement that
+                # depends on this write must NOT proceed: revert to the
+                # pre-advance state, hold at the operator-visible parked
+                # cadence, and retry the SAME step (``advance_lateral_escalation``
+                # is deterministic for identical inputs) on the next
+                # iteration. The redispatch below never runs under a state the
+                # durable log cannot corroborate.
                 log.error(
                     "parallel_executor.lateral_escalation.progressed_write_failed_correctness_risk",
                     ac_idx=ac_idx,
@@ -6804,6 +6835,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     personas_tried=[p.value for p in state.personas_tried],
                     parked=state.parked,
                 )
+                state = pre_advance_state
+                self._lateral_escalation_states[ac_idx] = pre_advance_state
+                await self._sleep(self._parked_retry_backoff_seconds)
+                continue
 
             if step.just_parked:
                 parked_node_id = ExecutionNodeIdentity.root(
@@ -6823,19 +6858,28 @@ Respond with either ATOMIC or the structured JSON object only.
                     ),
                 )
                 if not parked_persisted:
-                    # Same correctness risk as above, specifically for the
-                    # full-parking transition: a future resume unable to find
-                    # THIS event durably recorded would lose parked status
-                    # entirely and re-cycle exhausted personas from scratch
-                    # (``_load_lateral_escalation_state`` fails closed --
-                    # assumes still-parked -- only on a genuine replay
-                    # exception, not on a clean-but-incomplete durable log).
+                    # Round-5 Finding #4 (BLOCKING): same fail-closed
+                    # treatment as the ``progressed`` write above, for the
+                    # full-parking transition. A future resume unable to find
+                    # THIS event durably recorded would lose the
+                    # operator-visible parked signal entirely
+                    # (``_load_lateral_escalation_state`` fails closed only
+                    # on a genuine replay exception, not on a
+                    # clean-but-incomplete durable log). Revert and hold: the
+                    # next iteration re-advances to this same parking step
+                    # (re-emitting the ``progressed`` event is harmless — its
+                    # payload is identical and reconstruction takes the
+                    # latest) and re-attempts this write until it lands.
                     log.error(
                         "parallel_executor.lateral_escalation.parked_write_failed_correctness_risk",
                         ac_idx=ac_idx,
                         execution_id=execution_id,
                         node_id=parked_node_id,
                     )
+                    state = pre_advance_state
+                    self._lateral_escalation_states[ac_idx] = pre_advance_state
+                    await self._sleep(self._parked_retry_backoff_seconds)
+                    continue
 
             if step.apply_long_backoff:
                 await self._sleep(self._parked_retry_backoff_seconds)
@@ -6938,21 +6982,32 @@ Respond with either ATOMIC or the structured JSON object only.
                 resolved_node_id = ExecutionNodeIdentity.root(
                     execution_context_id=execution_id, ac_index=ac_idx
                 ).node_id
-                resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
-                    execution_id=execution_id,
-                    session_id=session_id,
-                    node_id=resolved_node_id,
-                    root_ac_index=ac_idx,
-                )
+                # Round-5 Finding #4 (BLOCKING): a durably-missing resolution
+                # leaves the latest replayable event for this node id still
+                # ``parked_for_operator``/``progressed`` — any future
+                # replay-based reconstruction (Kanban/HUD projections, or a
+                # later resume) keeps showing it parked/escalating even
+                # though it already succeeded. Unlike the pre-redispatch
+                # writes above, a genuine SUCCESS cannot be held hostage
+                # forever (reverting a completed AC would surface failure
+                # where escalation actually broke through — the exact
+                # false-negative direction this PR forbids), so this write
+                # gets bounded EXTRA retry rounds on top of
+                # ``_safe_emit_event``'s own internal retries, then a loud
+                # correctness-specific error if truly exhausted.
+                resolved_persisted = False
+                for extra_attempt in range(3):
+                    if extra_attempt:
+                        await self._sleep(min(2.0 * (2**extra_attempt), 10.0))
+                    resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        node_id=resolved_node_id,
+                        root_ac_index=ac_idx,
+                    )
+                    if resolved_persisted:
+                        break
                 if not resolved_persisted:
-                    # Fix 5 (round 3, BLOCKING): a durably-missing
-                    # resolution leaves the latest replayable event for
-                    # this node id still ``parked_for_operator`` (or a
-                    # ``progressed`` event) -- any future replay-based
-                    # reconstruction of this node id (Kanban/HUD
-                    # projections, or a later resume that somehow revisits
-                    # this AC) would keep showing it as parked/escalating
-                    # even though it already succeeded.
                     log.error(
                         "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
                         ac_idx=ac_idx,
