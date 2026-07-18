@@ -876,6 +876,183 @@ class TestLateralEscalationStateFailsClosedOnReplayFailure:
         assert attempts["n"] == 2
 
 
+class TestLateralEscalationStateFailsClosedOnMalformedEventData:
+    """Round-4 Finding #3 (BLOCKING): replay SUCCEEDS and finds a matching
+    escalation event for this node id, but its payload is malformed. The
+    previous parse silently "cleaned up" corruption -- an unrecognized
+    persona value was discarded, an invalid streak count became ``0``, an
+    invalid ``parked`` value became ``False`` -- reconstructing a fresh,
+    non-parked, streak-0 state from a record that may have said PARKED.
+    That is fail-OPEN: the state directly controls whether already-tried
+    personas are repeated and whether parked status survives a restart.
+    "Found the event but couldn't validate its contents" must be treated
+    the SAME way as "replay failed entirely": a synthetic PARKED=True
+    fail-closed sentinel, not cached.
+    """
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    async def _load_with_progressed_payload(
+        memory_event_store: EventStore, payload_overrides: dict[str, object]
+    ) -> tuple[LateralEscalationState, ParallelACExecutor]:
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        data: dict[str, object] = {
+            "execution_id": "exec-1",
+            "session_id": "s1",
+            "node_id": node_id,
+            "root_ac_index": 0,
+            "personas_tried": ["hacker"],
+            "consecutive_terminal_failures": 3,
+            "parked": False,
+            "persona": "hacker",
+        }
+        data.update(payload_overrides)
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data=data,
+            )
+        )
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=memory_event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+        return state, executor
+
+    @pytest.mark.asyncio
+    async def test_unrecognized_persona_value_fails_closed_to_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Before the fix: the unknown persona was silently DISCARDED and the
+        rest of the state admitted -- letting a restart re-try a persona the
+        record says was already tried."""
+        state, executor = await self._load_with_progressed_payload(
+            memory_event_store, {"personas_tried": ["hacker", "not-a-real-persona"]}
+        )
+
+        assert state.parked is True
+        # Fail-closed sentinel is NOT cached -- consistent with the
+        # replay-failure convention.
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_personas_tried_not_a_list_fails_closed_to_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        state, executor = await self._load_with_progressed_payload(
+            memory_event_store, {"personas_tried": "hacker"}
+        )
+
+        assert state.parked is True
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_invalid_streak_fails_closed_to_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Before the fix: an invalid streak silently became 0 -- resetting
+        the persona-cycling threshold progress."""
+        state, executor = await self._load_with_progressed_payload(
+            memory_event_store, {"consecutive_terminal_failures": "three"}
+        )
+
+        assert state.parked is True
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_negative_streak_fails_closed_to_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        state, executor = await self._load_with_progressed_payload(
+            memory_event_store, {"consecutive_terminal_failures": -2}
+        )
+
+        assert state.parked is True
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_invalid_parked_value_fails_closed_to_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Before the fix: a non-bool ``parked`` silently became ``False`` --
+        the exact fail-open direction (a corrupted record of a PARKED AC
+        reconstructing as not-parked)."""
+        state, executor = await self._load_with_progressed_payload(
+            memory_event_store, {"parked": "yes"}
+        )
+
+        assert state.parked is True
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_malformed_parked_for_operator_payload_fails_closed(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """The ``parked_for_operator`` branch must apply the same strict
+        validation to its persona/streak fields (its parked flag is implied
+        by the event type, so the sentinel coincidentally matches
+        ``parked=True`` -- but the personas/streak must not be silently
+        \"cleaned\" either, or the ladder would forget which personas were
+        exhausted)."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker", 42],
+                    "consecutive_terminal_failures": 6,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=memory_event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is True
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_well_formed_payload_still_reconstructs_normally(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Negative control: strict validation must not reject the exact
+        payload the emitter actually writes."""
+        state, executor = await self._load_with_progressed_payload(memory_event_store, {})
+
+        assert state.parked is False
+        assert state.consecutive_terminal_failures == 3
+        assert state.personas_tried == (ThinkingPersona.HACKER,)
+        assert executor._lateral_escalation_states[0] is state
+
+
 class TestParkedRetryBackoffSecondsFiniteGuard:
     """Fix 7 (round 2, BLOCKING) defense-in-depth: this low-level constructor
     is a direct, unvalidated entry point of its own -- independent of the two

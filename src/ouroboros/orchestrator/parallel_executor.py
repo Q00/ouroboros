@@ -6539,33 +6539,60 @@ Respond with either ATOMIC or the structured JSON object only.
 
         state = LateralEscalationState()
         if latest_state_data is not None:
+            # Round-4 Finding #3 (BLOCKING): every field below is ALWAYS
+            # written by its emitter (``emit_lateral_escalation_progressed``
+            # / ``emit_ac_parked_for_operator``), so a missing or wrong-typed
+            # field means the persisted payload is CORRUPT -- not merely
+            # sparse. The previous parse silently "cleaned up" corruption
+            # (unknown persona discarded, invalid streak -> 0, invalid
+            # parked -> False), reconstructing a fresh non-parked state from
+            # a record that may have said PARKED -- fail-OPEN. Treat "found
+            # the event but couldn't validate its contents" exactly like a
+            # total replay failure above: a synthetic PARKED=True sentinel,
+            # not cached, so a later clean read is not poisoned.
+            def _malformed(reason: str) -> LateralEscalationState:
+                log.warning(
+                    "parallel_executor.lateral_escalation.malformed_event_data",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    event_type=latest_state_type,
+                    reason=reason,
+                )
+                return LateralEscalationState(parked=True)
+
             raw_personas = latest_state_data.get("personas_tried")
-            personas: tuple[ThinkingPersona, ...] = ()
-            if isinstance(raw_personas, list):
-                recovered: list[ThinkingPersona] = []
-                for raw_value in raw_personas:
-                    try:
-                        recovered.append(ThinkingPersona(raw_value))
-                    except ValueError:
-                        continue
-                personas = tuple(recovered)
+            if not isinstance(raw_personas, list):
+                return _malformed("personas_tried is not a list")
+            recovered: list[ThinkingPersona] = []
+            for raw_value in raw_personas:
+                try:
+                    recovered.append(ThinkingPersona(raw_value))
+                except ValueError:
+                    return _malformed(f"unrecognized persona value: {raw_value!r}")
+            personas = tuple(recovered)
             raw_streak = latest_state_data.get("consecutive_terminal_failures")
-            streak = (
-                raw_streak
-                if isinstance(raw_streak, int) and not isinstance(raw_streak, bool)
-                else 0
-            )
+            if (
+                not isinstance(raw_streak, int)
+                or isinstance(raw_streak, bool)
+                or raw_streak < 0
+            ):
+                return _malformed(
+                    f"consecutive_terminal_failures is not a non-negative int: {raw_streak!r}"
+                )
+            streak = raw_streak
             # ``parked_for_operator``'s payload predates Fix 5 and has no
             # ``parked`` field of its own -- it is ALWAYS emitted exactly on
             # the parking transition, so winning with that event type means
             # parked=True unconditionally. The newer ``progressed`` event
             # carries the field explicitly (it fires every iteration, parked
-            # or not).
+            # or not) -- and MUST carry it as a real bool, else corrupt.
             if latest_state_type == "execution.ac.parked_for_operator":
                 parked_flag = True
             else:
                 raw_parked = latest_state_data.get("parked")
-                parked_flag = raw_parked is True
+                if not isinstance(raw_parked, bool):
+                    return _malformed(f"parked is not a bool: {raw_parked!r}")
+                parked_flag = raw_parked
             state = LateralEscalationState(
                 consecutive_terminal_failures=streak,
                 personas_tried=personas,
