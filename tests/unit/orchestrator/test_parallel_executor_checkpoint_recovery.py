@@ -421,6 +421,380 @@ class TestCrashRestartRestoresRetryPolicy:
         )
         await recovered_events.close()
 
+
+class TestStaleCheckpointFromFinishedRunNeverResumed:
+    """Round-10 finding #1 (BLOCKING): the checkpoint key is the bare
+    ``seed.metadata.seed_id`` — no run-generation discriminator — so a
+    SECOND, entirely new run of the same Seed found the FIRST run's
+    COMPLETED checkpoint, adopted it, skipped every level, and silently
+    reported success without dispatching a single AC. A checkpoint must be
+    a resume ticket for an INTERRUPTED run only: (a) the runner deletes it
+    once the run records a non-resumable terminal outcome, and (b) the
+    executor's recovery gate refuses any leftover checkpoint whose run
+    already recorded ``completed``/``failed``/``cancelled`` in its durable
+    execution aggregate. ``paused`` — the resumable state — keeps both the
+    checkpoint and the recovery semantics."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_rerun_after_completed_run_dispatches_acs(self, tmp_path: Path) -> None:
+        """The review's exact probe, end to end at the executor boundary.
+
+        Run 1 completes (checkpoint says every level is done) and the
+        runner's durable terminal record lands. Run 2 is a genuinely NEW
+        execution of the same seed — new session_id, new execution_id, no
+        resume intent. It must dispatch the ACs from scratch under its OWN
+        execution_id, never silently succeed off the finished run's
+        checkpoint.
+        """
+        from ouroboros.orchestrator.events import create_execution_terminal_event
+
+        seed = _seed("Fresh re-run after completed run")
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Run 1: completes normally; its final checkpoint marks the
+        # whole plan done.
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = CheckpointStore(base_path=ckpt_path)
+        run1_ckpt.initialize()
+        run1 = _executor(event_store=run1_events, checkpoint_store=run1_ckpt)
+        run1._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+        result1 = await run1.execute_parallel(
+            seed,
+            session_id="session-original",
+            execution_id="exec-original",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        assert result1.all_succeeded
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["completed_levels"] == 1
+
+        # The runner mirrors the terminal outcome into the durable
+        # execution aggregate (this is the staleness discriminator).
+        await run1_events.append(
+            create_execution_terminal_event(
+                execution_id="exec-original",
+                session_id="session-original",
+                status="completed",
+            )
+        )
+        await run1_events.close()
+
+        # --- Run 2: a genuinely fresh execution of the SAME seed.
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
+        result2 = await run2.execute_parallel(
+            seed,
+            session_id="session-rerun",
+            execution_id="exec-rerun",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+
+        # The ACs actually ran — never skipped off the stale checkpoint —
+        # and under the NEW run's own execution_id, not the finished run's.
+        assert captured["batch_executable"] == [0]
+        assert captured["execution_id"] == "exec-rerun"
+        assert result2.all_succeeded
+        assert all(r.final_message != "[Restored from checkpoint]" for r in result2.results)
+        # The stale checkpoint was replaced by run 2's own (fresh) one.
+        replaced = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert replaced.is_ok
+        assert replaced.value.state["execution_id"] == "exec-rerun"
+        await run2_events.close()
+
+    @pytest.mark.asyncio
+    async def test_paused_run_checkpoint_remains_resumable(self, tmp_path: Path) -> None:
+        """``paused`` is the resumable state: the recovery gate must keep
+        honoring its checkpoint (execution_id restored, completed levels
+        skipped) — this is the escalation/parked recovery flow itself."""
+        from ouroboros.orchestrator.events import create_execution_terminal_event
+
+        seed = Seed(
+            goal="Paused run stays resumable",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = CheckpointStore(base_path=ckpt_path)
+        run1_ckpt.initialize()
+        run1 = _executor(event_store=run1_events, checkpoint_store=run1_ckpt)
+
+        async def _pausing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            raise RuntimeError("simulated interruption after level 1")
+
+        run1._run_batch_with_verify_and_retry = AsyncMock(side_effect=_pausing_stage_runner)
+        with pytest.raises(BaseException):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        # The run's terminal record says PAUSED — a resumable outcome.
+        await run1_events.append(
+            create_execution_terminal_event(
+                execution_id="exec-original",
+                session_id="session-original",
+                status="paused",
+                pause_seconds=600,
+            )
+        )
+        await run1_events.close()
+
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _resumed_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_resumed_stage_runner)
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-resumed",
+            execution_id="exec-resumed",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+
+        # Genuine resume semantics preserved: completed level skipped and
+        # the ORIGINAL execution_id restored.
+        assert captured["batch_executable"] == [1]
+        assert captured["execution_id"] == "exec-original"
+        assert result.all_succeeded
+        await run2_events.close()
+
+
+class TestRunnerDeletesCheckpointAtTerminal:
+    """Runner half of round-10 finding #1: once a run records a
+    non-resumable terminal outcome (completed/failed), its checkpoint must
+    not survive to be adopted by a later fresh run. ``paused`` keeps its
+    checkpoint — that is the state the resume flow exists for."""
+
+    def _runner_harness(self, tmp_path: Path) -> tuple[object, CheckpointStore, object]:
+        from ouroboros.orchestrator.runner import OrchestratorRunner
+
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        adapter = MagicMock()
+        adapter.runtime_backend = "opencode"
+        adapter.working_directory = "/tmp/project"
+        adapter.permission_mode = "acceptEdits"
+        event_store = AsyncMock()
+        event_store.append = AsyncMock()
+        event_store.replay = AsyncMock(return_value=[])
+        runner = OrchestratorRunner(adapter, event_store, MagicMock(), checkpoint_store=store)
+        return runner, store, event_store
+
+    def _seed_checkpoint(self, store: CheckpointStore, seed: Seed) -> None:
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        save_result = store.save(
+            CheckpointData.create(
+                seed_id=seed.metadata.seed_id,
+                phase="parallel_execution",
+                state={
+                    "session_id": "session-prior",
+                    "execution_id": "exec-prior",
+                    "completed_levels": 1,
+                    "ac_statuses": {"0": "completed"},
+                    "failed_indices": [],
+                    "completed_count": 1,
+                },
+            )
+        )
+        assert save_result.is_ok
+
+    async def _run_parallel(
+        self,
+        runner: object,
+        seed: Seed,
+        parallel_result: object,
+        *,
+        pause: object = None,
+    ) -> object:
+        from unittest.mock import patch
+
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+        from ouroboros.orchestrator.session import SessionTracker
+
+        tracker = SessionTracker.create("exec-fresh", seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content="Parent work"),),
+            execution_levels=((0,),),
+        )
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_recoverable_failure_pause_from_parallel_result",
+                MagicMock(return_value=pause),
+            ),
+            patch.object(
+                runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
+            ),
+            patch.object(
+                runner._session_repo, "mark_failed", AsyncMock(return_value=Result.ok(None))
+            ),
+            patch.object(
+                runner._session_repo, "mark_paused", AsyncMock(return_value=Result.ok(None))
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ),
+        ):
+            return await runner._execute_parallel(
+                seed=seed,
+                exec_id="exec-fresh",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+    @pytest.mark.asyncio
+    async def test_completed_run_deletes_checkpoint(self, tmp_path: Path) -> None:
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+
+        seed = _seed("Terminal completion clears checkpoint")
+        runner, store, _ = self._runner_harness(tmp_path)
+        self._seed_checkpoint(store, seed)
+
+        result = await self._run_parallel(
+            runner,
+            seed,
+            ParallelExecutionResult(
+                results=(ACExecutionResult(ac_index=0, ac_content="Parent work", success=True),),
+                success_count=1,
+                failure_count=0,
+            ),
+        )
+
+        assert result.is_ok
+        assert store.load(seed.metadata.seed_id).is_err
+
+    @pytest.mark.asyncio
+    async def test_failed_run_deletes_checkpoint(self, tmp_path: Path) -> None:
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+
+        seed = _seed("Terminal failure clears checkpoint")
+        runner, store, _ = self._runner_harness(tmp_path)
+        self._seed_checkpoint(store, seed)
+
+        result = await self._run_parallel(
+            runner,
+            seed,
+            ParallelExecutionResult(
+                results=(
+                    ACExecutionResult(
+                        ac_index=0,
+                        ac_content="Parent work",
+                        success=False,
+                        error="terminal failure",
+                    ),
+                ),
+                success_count=0,
+                failure_count=1,
+            ),
+        )
+
+        assert result.is_ok
+        assert store.load(seed.metadata.seed_id).is_err
+
+    @pytest.mark.asyncio
+    async def test_paused_run_keeps_checkpoint(self, tmp_path: Path) -> None:
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+        from ouroboros.orchestrator.runner import RecoverableFailurePause
+
+        seed = _seed("Paused run keeps checkpoint")
+        runner, store, _ = self._runner_harness(tmp_path)
+        self._seed_checkpoint(store, seed)
+
+        result = await self._run_parallel(
+            runner,
+            seed,
+            ParallelExecutionResult(
+                results=(
+                    ACExecutionResult(
+                        ac_index=0,
+                        ac_content="Parent work",
+                        success=False,
+                        error="recoverable failure",
+                    ),
+                ),
+                success_count=0,
+                failure_count=1,
+            ),
+            pause=RecoverableFailurePause(
+                reason="rate limited",
+                resume_hint="retry later",
+                pause_seconds=600,
+                resume_after=None,
+                pause_kind="rate_limit",
+            ),
+        )
+
+        assert result.is_ok
+        assert store.load(seed.metadata.seed_id).is_ok
+
+
+class TestCrashRestartRestoresRetryPolicyLegacyAndMalformed:
     def test_legacy_checkpoint_without_policy_keeps_current_config(self) -> None:
         executor = ParallelACExecutor(
             adapter=MagicMock(),

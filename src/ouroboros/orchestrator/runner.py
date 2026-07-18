@@ -5277,6 +5277,38 @@ class OrchestratorRunner:
             )
         )
 
+        # Round-10 finding #1 (BLOCKING): an RC3 checkpoint is a resume
+        # ticket for an INTERRUPTED run only. Once this run records a
+        # non-resumable terminal outcome (completed/failed — the same set
+        # ``resume_session`` refuses to resume), its checkpoint must not
+        # survive: the checkpoint key is the bare ``seed.metadata.seed_id``,
+        # so a later, entirely fresh run of the same seed would silently
+        # adopt it and skip every completed level — for a COMPLETED
+        # checkpoint, reporting success without dispatching a single AC.
+        # ``paused`` deliberately keeps its checkpoint: that is the
+        # resumable state the escalation/parked recovery flow depends on.
+        # Ordering matters: the terminal event above is already durable, so
+        # even if this delete fails (or the process dies right here), the
+        # executor's terminal-record staleness gate refuses the leftover
+        # checkpoint on the next run.
+        if terminal_status in ("completed", "failed") and self._checkpoint_store is not None:
+            try:
+                checkpoint_seed_id = parallel_executor._checkpoint_seed_id(seed, tracker.session_id)
+                delete_result = self._checkpoint_store.delete(checkpoint_seed_id)
+                if hasattr(delete_result, "is_ok") and not delete_result.is_ok:
+                    log.error(
+                        "orchestrator.runner.terminal_checkpoint_delete_failed",
+                        seed_id=checkpoint_seed_id,
+                        terminal_status=terminal_status,
+                        error=str(getattr(delete_result, "error", "unknown error")),
+                    )
+            except Exception as e:
+                log.error(
+                    "orchestrator.runner.terminal_checkpoint_delete_failed",
+                    terminal_status=terminal_status,
+                    error=str(e),
+                )
+
         # Deterministic frugality proof over this execution's per-AC triads.
         # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
         await self._evaluate_frugality_proof(exec_id)

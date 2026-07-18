@@ -323,6 +323,45 @@ class CheckpointStore:
             )
         )
 
+    def delete(self, seed_id: str) -> Result[None, PersistenceError]:
+        """Delete every rollback level of a seed's checkpoint.
+
+        Used when the run the checkpoint belongs to reaches a genuinely
+        terminal, non-resumable outcome: an RC3 checkpoint exists solely so
+        an INTERRUPTED run can be resumed, and a checkpoint that outlives
+        its run's terminal completion would be silently adopted by the next
+        fresh execution of the same seed (same ``seed.metadata.seed_id``
+        key), skipping that run's real work. All rollback levels are
+        removed — a stale level-1..3 file must not resurrect the run either.
+
+        This method is idempotent: deleting a nonexistent checkpoint
+        succeeds.
+
+        Args:
+            seed_id: Seed identifier whose checkpoints should be removed.
+
+        Returns:
+            Result.ok(None) on success (including no-op),
+            Result.err(PersistenceError) on failure.
+        """
+        try:
+            checkpoint_path = self._get_checkpoint_path(seed_id)
+            # Same exclusive lock as save(): never race a concurrent rotation.
+            with _file_lock(checkpoint_path, exclusive=True):
+                for level in range(self.MAX_ROLLBACK_DEPTH + 1):
+                    level_path = self._get_checkpoint_path(seed_id, level)
+                    if level_path.exists():
+                        level_path.unlink()
+            return Result.ok(None)
+        except Exception as e:
+            return Result.err(
+                PersistenceError(
+                    f"Failed to delete checkpoint: {e}",
+                    operation="delete",
+                    details={"seed_id": seed_id},
+                )
+            )
+
     def _load_checkpoint_level(
         self, seed_id: str, level: int
     ) -> Result[CheckpointData, PersistenceError]:

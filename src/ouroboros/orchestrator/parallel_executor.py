@@ -1914,6 +1914,117 @@ class ParallelACExecutor:
         )
         self._lateral_escalation_enabled = True
 
+    #: Terminal statuses after which a run can never be resumed — mirrors
+    #: ``resume_session``'s non-resumable SessionStatus set (COMPLETED /
+    #: FAILED / CANCELLED). ``paused`` is deliberately absent: a paused run
+    #: is exactly the state the RC3 checkpoint exists to resume.
+    _NON_RESUMABLE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+    async def _checkpoint_from_terminal_run(self, cp: Any) -> bool:
+        """Return True when the checkpointed run already reached a
+        non-resumable terminal outcome (round-10 finding #1, BLOCKING).
+
+        RC3 checkpoints are keyed by ``seed.metadata.seed_id`` alone — the
+        key carries no run-generation discriminator, so an entirely NEW,
+        intentional re-run of the same Seed would otherwise find the
+        previous run's checkpoint, adopt it, and silently skip every level
+        the previous run completed. Worst case (the review's exact probe):
+        a COMPLETED checkpoint makes the fresh run skip ALL levels and
+        report success without dispatching a single AC.
+
+        The discriminator is the checkpointed run's OWN durable terminal
+        record: the runner mirrors every terminal transition into the
+        execution aggregate as an ``execution.terminal`` event under the
+        run's ``execution_id`` (which the checkpoint carries). A genuine
+        crash leaves NO terminal event — resume is correct. A recorded
+        ``completed`` / ``failed`` / ``cancelled`` means the run ended and
+        its checkpoint is stale; only a LAST status of ``paused`` remains
+        resumable (a paused-then-resumed-then-completed run appends its
+        final status after the pause, so the latest event wins).
+
+        Indeterminate replay (``_replay_with_retry`` → ``None``) keeps the
+        checkpoint resumable. Both directions can violate a mandate here —
+        adopting a stale checkpoint silently skips work, refusing a genuine
+        crash checkpoint re-opens the round-9 #2 regression (retry policy
+        and ladder history dropped, FAILED surfaced with escalation options
+        untried). The tiebreaker: terminal runs now DELETE their checkpoint
+        (runner-side, plus ``_discard_stale_checkpoint`` here), so a
+        checkpoint's continued existence is itself evidence of an
+        interrupted run, and on a degraded event store the very ladder
+        loaders this recovery exists to feed would fail closed on their own
+        replays anyway. The degraded read is logged loudly instead.
+        """
+        saved_execution_id = cp.state.get("execution_id")
+        if not (isinstance(saved_execution_id, str) and saved_execution_id):
+            # Legacy checkpoint without an execution_id: no aggregate to
+            # correlate a terminal record against — keep the pre-fix
+            # resume posture for this one-time migration shape.
+            return False
+        events = await self._replay_with_retry("execution", saved_execution_id)
+        if events is None:
+            log.error(
+                "parallel_executor.recovery.terminal_check_indeterminate",
+                detail=(
+                    "could not replay the checkpointed run's execution "
+                    "aggregate to verify it never reached a terminal state; "
+                    "proceeding with recovery because a surviving checkpoint "
+                    "is itself evidence of interruption (terminal runs "
+                    "delete theirs)"
+                ),
+                execution_id=saved_execution_id,
+            )
+            return False
+        last_status: str | None = None
+        for event in events:
+            if getattr(event, "type", None) != "execution.terminal":
+                continue
+            data = getattr(event, "data", None)
+            status = data.get("status") if isinstance(data, Mapping) else None
+            if isinstance(status, str):
+                last_status = status
+        return last_status in self._NON_RESUMABLE_TERMINAL_STATUSES
+
+    def _discard_stale_checkpoint(self, seed_id: str, *, saved_execution_id: object) -> None:
+        """Drop a checkpoint left behind by an already-terminal run.
+
+        Best-effort: a failed delete only means the (already loud) staleness
+        gate fires again on the next run — never worth failing the current
+        fresh run over.
+        """
+        log.warning(
+            "parallel_executor.recovery.stale_checkpoint_discarded",
+            detail=(
+                "checkpoint belongs to a run that already reached a "
+                "non-resumable terminal state; running fresh instead of "
+                "resuming it"
+            ),
+            seed_id=seed_id,
+            checkpoint_execution_id=saved_execution_id,
+        )
+        self._console.print(
+            "[yellow]Found a checkpoint from an already-finished run of this "
+            "seed — starting fresh (stale checkpoint discarded).[/yellow]"
+        )
+        try:
+            delete = getattr(self._checkpoint_store, "delete", None)
+            delete_result = delete(seed_id) if callable(delete) else None
+            if (
+                delete_result is not None
+                and hasattr(delete_result, "is_ok")
+                and not delete_result.is_ok
+            ):
+                log.error(
+                    "parallel_executor.recovery.stale_checkpoint_delete_failed",
+                    seed_id=seed_id,
+                    error=str(getattr(delete_result, "error", "unknown error")),
+                )
+        except Exception as e:
+            log.error(
+                "parallel_executor.recovery.stale_checkpoint_delete_failed",
+                seed_id=seed_id,
+                error=str(e),
+            )
+
     async def _execute_ac_batch(
         self,
         *,
@@ -2120,7 +2231,21 @@ class ParallelACExecutor:
                 load_result = self._checkpoint_store.load(seed_id)
                 if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
                     cp = load_result.value
-                    if cp.phase == "parallel_execution":
+                    # Round-10 finding #1 (BLOCKING): a checkpoint is only a
+                    # resume ticket for an INTERRUPTED run. If the run it
+                    # belongs to already recorded a non-resumable terminal
+                    # outcome, this is a genuinely NEW execution of the same
+                    # seed — adopt nothing, discard the stale checkpoint,
+                    # and run every level from scratch.
+                    if (
+                        cp.phase == "parallel_execution"
+                        and await self._checkpoint_from_terminal_run(cp)
+                    ):
+                        self._discard_stale_checkpoint(
+                            seed_id,
+                            saved_execution_id=cp.state.get("execution_id"),
+                        )
+                    elif cp.phase == "parallel_execution":
                         # Restore the ORIGINAL run's execution_id. A crash-
                         # restart run is created with a fresh execution_id,
                         # but every durable-state loader keyed off

@@ -166,6 +166,39 @@ class TestCheckpointStore:
         # Message indicates no valid checkpoint was found
         assert "no valid checkpoint" in result.error.message.lower()
 
+    def test_delete_removes_all_rollback_levels(
+        self, checkpoint_store: CheckpointStore, sample_checkpoint: CheckpointData
+    ) -> None:
+        """delete() removes the current checkpoint AND every rotated level."""
+        # Four saves populate level 0 plus rollback levels .1, .2, .3.
+        for step in range(4):
+            checkpoint_store.save(
+                CheckpointData.create(
+                    seed_id=sample_checkpoint.seed_id,
+                    phase="parallel_execution",
+                    state={"step": step},
+                )
+            )
+        level_paths = [
+            checkpoint_store._get_checkpoint_path(sample_checkpoint.seed_id, level)
+            for level in range(CheckpointStore.MAX_ROLLBACK_DEPTH + 1)
+        ]
+        assert all(path.exists() for path in level_paths)
+
+        result = checkpoint_store.delete(sample_checkpoint.seed_id)
+
+        assert result.is_ok
+        assert not any(path.exists() for path in level_paths)
+        # A rotated level must not resurrect the run either.
+        assert checkpoint_store.load(sample_checkpoint.seed_id).is_err
+
+    def test_delete_is_idempotent_for_missing_checkpoint(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Deleting a checkpoint that never existed succeeds (no-op)."""
+        result = checkpoint_store.delete("never-saved-seed")
+        assert result.is_ok
+
     def test_load_validates_integrity(
         self, checkpoint_store: CheckpointStore, sample_checkpoint: CheckpointData
     ) -> None:
