@@ -2540,6 +2540,188 @@ class TestResumeReentersLadderAtRestoredPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_durably_finalized_success_resolves_episode_on_resume(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Round-8 reproduction (adversarial review of Round-7 Finding #4):
+        the in-flight persona dispatch durably SUCCEEDED — its
+        ``outcome_finalized(success=True)`` marker landed — but the process
+        crashed in the window between that success and the
+        episode-resolution write. Resume must treat this as a genuine
+        completed SUCCESS: resolve the episode exactly as a non-crashed
+        success would. The buggy behavior read only the marker's presence
+        (never its ``success`` field), fabricated a "durably finalized
+        failure", consumed a fresh persona, and re-dispatched at frontier
+        strength — silently discarding a durably-recorded success and, here
+        (last available persona), falsely parking an AC that had already
+        succeeded."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        all_personas = [p.value for p in ThinkingPersona]
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": all_personas,
+                    "consecutive_terminal_failures": 4,
+                    "parked": False,
+                    "persona": all_personas[-1],
+                    "retry_attempt": 7,
+                },
+            )
+        )
+        # The dispatch this progression preceded COMPLETED — as a SUCCESS —
+        # before the crash: its authoritative outcome marker landed, but the
+        # episode-resolution write did not.
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 7,
+                    "success": True,
+                    "outcome": "succeeded",
+                    "is_decomposed": False,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock()
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # The recorded success is honored as-is: NO re-dispatch, NO fresh
+        # persona consumed, NO phantom outcome marker for a dispatch that
+        # never ran on resume.
+        executor._execute_ac_batch.assert_not_called()
+        executor._emit_ac_outcome_finalized.assert_not_called()
+        events = await memory_event_store.replay("execution", "exec-1")
+        progressed_after_resume = [
+            event
+            for event in events[2:]  # skip the two pre-seeded crash-era events
+            if event.type == "execution.ac.lateral_escalation_progressed"
+            and event.data.get("node_id") == node_id
+        ]
+        # The persona/streak history is not corrupted with a phantom failure.
+        assert progressed_after_resume == []
+        # No false park: the last available persona had SUCCEEDED, so the AC
+        # must never surface as parked/failed.
+        assert not any(
+            event.type == "execution.ac.parked_for_operator"
+            and event.data.get("node_id") == node_id
+            for event in events
+        )
+        # The episode resolved through the SAME durable transition a
+        # non-crashed success fires, and a later cold start reconstructs a
+        # FRESH state.
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+        later = self._cold_start_executor(memory_event_store)
+        assert (
+            await later._load_lateral_escalation_state(0, execution_id="exec-1")
+            == LateralEscalationState()
+        )
+
+    @pytest.mark.asyncio
+    async def test_durably_finalized_failure_still_advances_past_persona_on_resume(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Companion control for the round-8 fix: a durably finalized
+        FAILURE must keep the existing Round-7 Finding #4 behavior —
+        advance the ladder to the NEXT persona under a NEW attempt number —
+        and must never be misread as a success (zero dispatches / an
+        immediate resolution would be the fix over-rotating)."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.HACKER.value],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": ThinkingPersona.HACKER.value,
+                    "retry_attempt": 7,
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 7,
+                    "success": False,
+                    "outcome": None,
+                    "is_decomposed": False,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Exactly ONE dispatch — the ladder's advance to the NEXT persona.
+        # Not zero: a finalized FAILURE must never take the finalized-success
+        # shortcut and resolve without actually trying the next option.
+        assert len(dispatch_calls) == 1
+        first_prompt = dispatch_calls[0]["retry_prompts"][0]  # type: ignore[index]
+        assert ThinkingPersona.HACKER.value not in first_prompt.lower()
+        events = await memory_event_store.replay("execution", "exec-1")
+        progressed_after_resume = [
+            event
+            for event in events[2:]  # skip the two pre-seeded crash-era events
+            if event.type == "execution.ac.lateral_escalation_progressed"
+            and event.data.get("node_id") == node_id
+        ]
+        assert progressed_after_resume, "ladder never durably progressed after resume"
+        resumed_data = progressed_after_resume[-1].data
+        assert resumed_data["personas_tried"][0] == ThinkingPersona.HACKER.value
+        assert len(resumed_data["personas_tried"]) == 2
+        assert resumed_data["personas_tried"][-1] != ThinkingPersona.HACKER.value
+        assert resumed_data["retry_attempt"] == 8
+        # The resolution came from the advance-dispatch's genuine success —
+        # never from misreading the finalized failure.
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+
+    @pytest.mark.asyncio
     async def test_fresh_ac_without_escalation_history_keeps_ordinary_path(
         self, memory_event_store: EventStore
     ) -> None:

@@ -1160,20 +1160,25 @@ class ParallelACExecutor:
         # double-count its telemetry). ``None`` means the durable record
         # predates the field — the cap fallback then applies.
         self._lateral_escalation_resume_attempts: dict[int, int | None] = {}
-        # Round-7 Finding #4: whether the in-flight attempt recorded by the
-        # latest ``progressed`` event already has a durably-finalized outcome
-        # (``execution.ac.outcome_finalized`` correlated by root_ac_index +
-        # retry_attempt). ``progressed`` is written BEFORE its dispatch runs,
-        # so on its own it cannot distinguish "crash mid-dispatch (re-run the
-        # persona)" from "dispatch completed with a failure, crash before the
-        # NEXT progression (advance PAST the persona)". The finalized marker
-        # — emitted right after every ladder dispatch returns — makes that
-        # distinction exact; without it, resume re-ran an already-tried-and-
-        # failed persona under the same attempt identity, duplicating work
-        # and attempt-scoped telemetry. Reconstructed alongside
-        # ``_lateral_escalation_resume_attempts`` during replay and consumed
-        # (popped) by ``_resume_escalated_ac``.
-        self._lateral_escalation_resume_attempt_completed: dict[int, bool] = {}
+        # Round-7 Finding #4 (extended by round 8): the durably-finalized
+        # outcome of the in-flight attempt recorded by the latest
+        # ``progressed`` event (``execution.ac.outcome_finalized`` correlated
+        # by root_ac_index + retry_attempt). ``progressed`` is written BEFORE
+        # its dispatch runs, so on its own it cannot distinguish "crash
+        # mid-dispatch (re-run the persona)" from "dispatch completed, crash
+        # before the NEXT durable transition". The finalized marker — emitted
+        # right after every ladder dispatch returns — makes that distinction
+        # exact, and its ``success`` field says WHICH completed outcome the
+        # crash interrupted: ``True`` means a real success whose
+        # episode-resolution write never landed (resume must resolve the
+        # episode as SUCCESS, never fabricate a failure or consume another
+        # persona), ``False`` means an already-tried-and-failed persona
+        # (advance PAST it instead of re-running it under the same attempt
+        # identity), and ``None`` means no finalized outcome exists — the
+        # dispatch was genuinely in flight and must be re-run. Reconstructed
+        # alongside ``_lateral_escalation_resume_attempts`` during replay and
+        # consumed (popped) by ``_resume_escalated_ac``.
+        self._lateral_escalation_resume_attempt_finalized: dict[int, bool | None] = {}
         # Round-7 follow-up finding: ``lateral_escalation_progressed
         # (parked=True)`` is persisted BEFORE the separate
         # ``parked_for_operator`` event. If that second write fails and the
@@ -6888,17 +6893,21 @@ Respond with either ATOMIC or the structured JSON object only.
         latest_state_data: dict[str, Any] | None = None
         latest_state_type: str | None = None
         latest_progressed_data: dict[str, Any] | None = None
-        # Round-7 Finding #4: attempt numbers this root AC has a durably
-        # FINALIZED outcome for. ``execution.ac.outcome_finalized`` is
-        # emitted right after every ladder dispatch returns (post
-        # verify-gate), so its presence for the attempt number the latest
-        # ``progressed`` event recorded proves that dispatch COMPLETED —
-        # the crash happened after it, not mid-dispatch. Correlated by
-        # ``root_ac_index`` + ``retry_attempt`` (the event carries no
-        # node_id); an unparseable attempt value is simply not collected,
-        # which degrades to the pre-fix "re-run the in-flight persona"
-        # posture rather than skipping a persona that never really ran.
-        finalized_attempts: set[int] = set()
+        # Round-7 Finding #4 (extended by round 8): attempt numbers this root
+        # AC has a durably FINALIZED outcome for, mapped to that outcome's
+        # ``success`` flag. ``execution.ac.outcome_finalized`` is emitted
+        # right after every ladder dispatch returns (post verify-gate), so
+        # its presence for the attempt number the latest ``progressed`` event
+        # recorded proves that dispatch COMPLETED — the crash happened after
+        # it, not mid-dispatch — and the ``success`` value says whether the
+        # completed outcome was a real SUCCESS (resume must resolve the
+        # episode, never discard it as a failure) or a failure (resume
+        # advances past the persona). Correlated by ``root_ac_index`` +
+        # ``retry_attempt`` (the event carries no node_id); an unparseable
+        # attempt or success value is simply not collected, which degrades to
+        # the pre-fix "re-run the in-flight persona" posture rather than
+        # skipping a persona that never really ran or misreading a success.
+        finalized_attempts: dict[int, bool] = {}
         # Round-7 follow-up finding: whether the CURRENT episode's dedicated
         # ``parked_for_operator`` event actually landed. Reset on the same
         # episode-closing events that reset reconstruction, so a prior
@@ -6910,12 +6919,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 data = getattr(event, "data", None)
                 if isinstance(data, dict) and data.get("root_ac_index") == ac_idx:
                     raw_finalized_attempt = data.get("retry_attempt")
+                    raw_finalized_success = data.get("success")
                     if (
                         isinstance(raw_finalized_attempt, int)
                         and not isinstance(raw_finalized_attempt, bool)
                         and raw_finalized_attempt >= 0
+                        and isinstance(raw_finalized_success, bool)
                     ):
-                        finalized_attempts.add(raw_finalized_attempt)
+                        finalized_attempts[raw_finalized_attempt] = raw_finalized_success
                 continue
             if event_type not in {
                 "execution.ac.parked_for_operator",
@@ -7033,13 +7044,15 @@ Respond with either ATOMIC or the structured JSON object only.
                 return LateralEscalationState(parked=True)
             resume_attempt = raw_attempt
         self._lateral_escalation_resume_attempts[ac_idx] = resume_attempt
-        # Round-7 Finding #4: the in-flight attempt is only "still in flight"
-        # when NO finalized outcome exists for it. A finalized outcome means
-        # the dispatch completed before the crash — resume must advance the
-        # ladder past that persona instead of re-running it under the same
-        # attempt identity.
-        self._lateral_escalation_resume_attempt_completed[ac_idx] = (
-            resume_attempt is not None and resume_attempt in finalized_attempts
+        # Round-7 Finding #4 (extended by round 8): the in-flight attempt is
+        # only "still in flight" when NO finalized outcome exists for it. A
+        # finalized outcome means the dispatch completed before the crash —
+        # and its ``success`` value decides HOW resume handles it: a
+        # finalized SUCCESS must resolve the episode (never be discarded as
+        # a failure), a finalized failure must advance the ladder past that
+        # persona instead of re-running it under the same attempt identity.
+        self._lateral_escalation_resume_attempt_finalized[ac_idx] = (
+            finalized_attempts.get(resume_attempt) if resume_attempt is not None else None
         )
         # Round-7 follow-up finding: durable state says parked but the
         # dedicated operator-notification event never landed (the
@@ -7238,7 +7251,7 @@ Respond with either ATOMIC or the structured JSON object only.
             def _clear_in_memory_state() -> None:
                 self._lateral_escalation_states.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempts.pop(ac_idx, None)
-                self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+                self._lateral_escalation_resume_attempt_finalized.pop(ac_idx, None)
                 self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
             self._schedule_deferred_durable_write(
@@ -7257,7 +7270,7 @@ Respond with either ATOMIC or the structured JSON object only.
             return
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
-        self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+        self._lateral_escalation_resume_attempt_finalized.pop(ac_idx, None)
         self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
     async def _terminate_escalation_episode(
@@ -7314,7 +7327,7 @@ Respond with either ATOMIC or the structured JSON object only.
             def _clear_in_memory_state() -> None:
                 self._lateral_escalation_states.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempts.pop(ac_idx, None)
-                self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+                self._lateral_escalation_resume_attempt_finalized.pop(ac_idx, None)
                 self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
             self._schedule_deferred_durable_write(
@@ -7334,7 +7347,7 @@ Respond with either ATOMIC or the structured JSON object only.
             return
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
-        self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+        self._lateral_escalation_resume_attempt_finalized.pop(ac_idx, None)
         self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
     async def _resume_escalated_ac(
@@ -7372,6 +7385,46 @@ Respond with either ATOMIC or the structured JSON object only.
         top-of-ladder state.
         """
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+        # Round-7 Finding #4 (extended by round 8): ``progressed`` is written
+        # BEFORE its dispatch runs, so the restored "in-flight" attempt may
+        # in fact have COMPLETED before the crash — the durably-finalized
+        # outcome for exactly that attempt number, when present, says so, and
+        # its ``success`` value says WHICH completed outcome the crash
+        # interrupted. Consumed (popped) here so a later resolution/
+        # termination never sees a stale value.
+        in_flight_finalized_success = self._lateral_escalation_resume_attempt_finalized.pop(
+            ac_idx, None
+        )
+        if in_flight_finalized_success is True:
+            # The dispatch durably SUCCEEDED; the crash landed in the window
+            # between that success and the episode-resolution write (which
+            # has bounded retries and a deferred-background fallback — a real
+            # window). Treating this like a finalized failure would silently
+            # discard a durably-recorded success, corrupt the persona/streak
+            # history with a phantom failure, and could even falsely park an
+            # AC whose last persona had actually broken through — the exact
+            # false-negative direction this PR forbids. Converge instead to
+            # the SAME durable outcome a non-crashed success produces: fire
+            # the shared resolution transition and report the AC as
+            # succeeded, without consuming a persona or re-dispatching. The
+            # attempt's own ``outcome_finalized`` marker already landed
+            # before the crash, so no new marker is emitted here.
+            await self._resolve_escalation_success(
+                ac_idx=ac_idx, execution_id=execution_id, session_id=session_id
+            )
+            return ACExecutionResult(
+                ac_index=ac_idx,
+                ac_content=ac_content,
+                success=True,
+                final_message=(
+                    "Execution restarted mid-escalation AFTER the in-flight "
+                    "attempt's dispatch had already completed with a durably "
+                    "finalized SUCCESS; resolving the escalation episode as "
+                    "succeeded instead of discarding the recorded success."
+                ),
+                retry_attempt=ac_retry_attempts[ac_idx],
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            )
         # Round-7 follow-up finding: the durable log says this AC is parked
         # but its dedicated ``parked_for_operator`` event never landed (the
         # write failed and the process died before the in-process
@@ -7421,22 +7474,16 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                     node_id=backfill_node_id,
                 )
-        # Round-7 Finding #4: ``progressed`` is written BEFORE its dispatch
-        # runs, so the restored "in-flight" attempt may in fact have
-        # COMPLETED (with a failure) before the crash — the crash then
-        # happened between that dispatch's finalized outcome and the next
+        # Round-7 Finding #4: the in-flight attempt completed with a durably
+        # finalized FAILURE before the crash — the crash then happened
+        # between that dispatch's finalized outcome and the next
         # ``progressed`` write. Re-running it here would repeat an
         # already-tried-and-failed persona under the SAME attempt identity,
-        # duplicating work and attempt-scoped telemetry. When the durable log
-        # carries a finalized outcome for exactly that attempt number, skip
-        # this pre-ladder redispatch entirely and hand the AC straight to the
-        # ladder, which advances PAST the completed step (personas are never
-        # repeated once recorded) under a NEW attempt number. Consumed
-        # (popped) so a later resolution/termination never sees a stale flag.
-        in_flight_attempt_completed = self._lateral_escalation_resume_attempt_completed.pop(
-            ac_idx, False
-        )
-        if in_flight_attempt_completed:
+        # duplicating work and attempt-scoped telemetry. Skip this pre-ladder
+        # redispatch entirely and hand the AC straight to the ladder, which
+        # advances PAST the completed step (personas are never repeated once
+        # recorded) under a NEW attempt number.
+        if in_flight_finalized_success is False:
             completed_prior = ACExecutionResult(
                 ac_index=ac_idx,
                 ac_content=ac_content,
