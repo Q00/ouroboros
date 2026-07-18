@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rich.cells import cell_len, set_cell_size
 from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
@@ -42,6 +43,27 @@ _DEFAULT_CONTENT_WIDTH = 45
 _MIN_CONTENT_WIDTH = 20
 # Reserved for the status icon, index prefix ("N. "), and elapsed-time suffix.
 _CONTENT_WIDTH_RESERVED_CHARS = 20
+
+
+def _truncate_to_cell_width(content: str, width: int) -> str:
+    """Truncate ``content`` to at most ``width`` terminal display cells.
+
+    ``width`` (from ``Widget.size``) is already a CELL budget, but plain
+    ``len()``/slicing counts Python code points -- CJK characters (2 cells
+    wide), emoji, and combining characters can then overflow or underuse the
+    available width. Uses Rich's cell-width measurement
+    (``rich.cells.cell_len``/``set_cell_size``, the same primitives Rich/
+    Textual use internally to lay out text) instead.
+    """
+    if cell_len(content) <= width:
+        return content
+    ellipsis = "..."
+    budget = max(0, width - cell_len(ellipsis))
+    # ``set_cell_size`` pads with spaces when the cropped remainder is
+    # narrower than ``budget`` (e.g. the cut landed right before a
+    # double-width character) -- strip that padding before appending the
+    # ellipsis so it never renders as a stray gap.
+    return set_cell_size(content, budget).rstrip() + ellipsis
 
 
 @dataclass
@@ -241,9 +263,10 @@ class ACProgressWidget(Widget):
         style = STATUS_STYLES.get(ac.status, "dim")
 
         # Truncate content, sized to the widget's actual available width
-        # instead of a fixed character count.
+        # instead of a fixed character count -- and by terminal DISPLAY
+        # CELLS, not Python code points (see ``_truncate_to_cell_width``).
         width = max_width if max_width is not None else self._content_max_width()
-        content = ac.content[:width] + "..." if len(ac.content) > width else ac.content
+        content = _truncate_to_cell_width(ac.content, width)
 
         # Build label
         label = f" [{style}]{icon}[/{style}]  {ac.index}. {content}"

@@ -2,10 +2,12 @@
 
 from unittest.mock import MagicMock
 
+from rich.cells import cell_len
 from textual import events
 from textual.geometry import Size
 
 from ouroboros.tui.widgets.ac_progress import ACProgressItem, ACProgressWidget
+from ouroboros.tui.widgets.ac_tree import STATUS_ICONS as TREE_STATUS_ICONS
 from ouroboros.tui.widgets.ac_tree import ACTreeWidget
 from ouroboros.tui.widgets.phase_progress import PhaseIndicator, PhaseProgressWidget
 
@@ -412,7 +414,10 @@ class TestACTreeWidget:
         label = widget._format_node_label(node_data)
 
         assert "..." in label
-        assert long_content[:50] in label
+        # Cell-width-aware truncation reserves 3 cells for the "..." within
+        # the 50-cell budget, so the kept content is 47 chars, not 50.
+        assert long_content[:47] in label
+        assert long_content[:50] not in label
 
     def test_format_node_label_is_width_aware_not_a_fixed_constant(self) -> None:
         """Truncation must scale with the available width, not a hard-coded
@@ -430,10 +435,36 @@ class TestACTreeWidget:
         narrow_label = widget._format_node_label(node_data, max_width=15)
         wide_label = widget._format_node_label(node_data, max_width=80)
 
-        assert long_content[:15] in narrow_label
-        assert long_content[:80] in wide_label
+        # Cell-width-aware truncation reserves 3 cells for "..." within each
+        # budget, so the kept content is width - 3 chars.
+        assert long_content[:12] in narrow_label
+        assert long_content[:77] in wide_label
         assert narrow_label != wide_label
         assert len(wide_label) > len(narrow_label)
+
+    def test_format_node_label_truncation_is_cell_width_aware_for_cjk(self) -> None:
+        """CJK characters occupy 2 terminal display cells each. Truncating by
+        Python code-point count (the pre-fix behavior) could keep TWICE the
+        intended cell budget's worth of content and overflow the available
+        terminal width. The truncated label's rendered cell width must never
+        exceed the requested budget."""
+        widget = ACTreeWidget()
+        long_cjk_content = "한글테스트문자열" * 10  # 80 code points, 160 cells
+        node_data = {
+            "status": "pending",
+            "content": long_cjk_content,
+            "is_atomic": False,
+        }
+
+        label = widget._format_node_label(node_data, max_width=20)
+
+        assert "..." in label
+        # Strip the leading status icon + space (not part of the content
+        # truncation budget) before measuring the content's cell width.
+        prefix = f"{TREE_STATUS_ICONS['pending']} "
+        assert label.startswith(prefix)
+        content_part = label[len(prefix) :]
+        assert cell_len(content_part) <= 20
 
     def test_label_max_width_falls_back_when_unmounted(self) -> None:
         """A widget with no real rendered size yet falls back to the default
@@ -477,9 +508,11 @@ class TestACTreeWidget:
         initial_root_label = str(tree.root.label)
         child_node = widget._node_map["ac_child"]
         initial_child_label = str(child_node.label)
-        # Unmounted defaults: root truncates at 30, other nodes at 50.
-        assert long_content[:30] in initial_root_label
-        assert long_content[:50] in initial_child_label
+        # Unmounted defaults: root truncates at 30, other nodes at 50 cells.
+        # Cell-width-aware truncation reserves 3 cells for "..." within each
+        # budget, so the kept content is width - 3 chars.
+        assert long_content[:27] in initial_root_label
+        assert long_content[:47] in initial_child_label
 
         # Simulate resizing to a much narrower terminal.
         widget._label_max_width = lambda **_kwargs: 10  # type: ignore[method-assign]
@@ -489,8 +522,8 @@ class TestACTreeWidget:
         resized_child_label = str(child_node.label)
         assert resized_root_label != initial_root_label
         assert resized_child_label != initial_child_label
-        assert long_content[:10] in resized_root_label
-        assert long_content[:10] in resized_child_label
+        assert long_content[:7] in resized_root_label
+        assert long_content[:7] in resized_child_label
 
     def test_on_resize_before_compose_is_a_no_op(self) -> None:
         """A resize delivered before the tree has ever been built (no
@@ -678,9 +711,28 @@ class TestACProgressWidget:
         narrow = widget._render_ac_item(item, max_width=15)
         wide = widget._render_ac_item(item, max_width=80)
 
-        assert long_content[:15] in str(narrow.render())
-        assert long_content[:80] in str(wide.render())
+        # Cell-width-aware truncation reserves 3 cells for "..." within each
+        # budget, so the kept content is width - 3 chars.
+        assert long_content[:12] in str(narrow.render())
+        assert long_content[:77] in str(wide.render())
         assert str(narrow.render()) != str(wide.render())
+
+    def test_render_ac_item_truncation_is_cell_width_aware_for_cjk(self) -> None:
+        """CJK characters occupy 2 terminal display cells each. Truncating by
+        Python code-point count (the pre-fix behavior) could keep TWICE the
+        intended cell budget's worth of content and overflow the available
+        terminal width. The truncated content's rendered cell width must
+        never exceed the requested budget."""
+        widget = ACProgressWidget()
+        long_cjk_content = "한글테스트문자열" * 10  # 80 code points, 160 cells
+        item = ACProgressItem(index=1, content=long_cjk_content, status="pending")
+
+        rendered = str(widget._render_ac_item(item, max_width=20).render())
+
+        assert "..." in rendered
+        # The content is everything after the "N. " index prefix.
+        content_part = rendered.split(". ", 1)[1]
+        assert cell_len(content_part) <= 20
 
     def test_content_max_width_falls_back_when_unmounted(self) -> None:
         """A widget with no real rendered size yet falls back to the default
