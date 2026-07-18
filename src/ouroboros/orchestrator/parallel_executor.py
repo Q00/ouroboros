@@ -7401,9 +7401,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     node_id=backfill_node_id,
                     root_ac_index=ac_idx,
                     personas_tried=tuple(p.value for p in restored_state.personas_tried),
-                    consecutive_terminal_failures=(
-                        restored_state.consecutive_terminal_failures
-                    ),
+                    consecutive_terminal_failures=(restored_state.consecutive_terminal_failures),
                     backoff_seconds=self._parked_retry_backoff_seconds,
                     reason=backfill_reason,
                 )

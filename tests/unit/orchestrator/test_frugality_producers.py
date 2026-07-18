@@ -32,6 +32,10 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.decomposition_attestation import (
+    DecompositionAttestation,
+    DecompositionTrustVerdict,
+)
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.orchestrator import parallel_executor as pe_module
 from ouroboros.orchestrator.adapter import (
@@ -42,10 +46,6 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
-from ouroboros.harness.decomposition_attestation import (
-    DecompositionAttestation,
-    DecompositionTrustVerdict,
-)
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_ac_runtime_identity,

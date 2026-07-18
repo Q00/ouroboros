@@ -3194,8 +3194,7 @@ class TestInfraFatalExemption:
                 yield AgentMessage(
                     type="result",
                     content=(
-                        "Task execution failed: runtime handle is incompatible "
-                        "with this runtime."
+                        "Task execution failed: runtime handle is incompatible with this runtime."
                     ),
                     data={
                         "subtype": "error",

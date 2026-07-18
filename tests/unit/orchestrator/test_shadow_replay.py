@@ -33,11 +33,11 @@ import pytest
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.harness.decomposition_attestation import (
     DecompositionAttestation,
     DecompositionTrustVerdict,
 )
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
