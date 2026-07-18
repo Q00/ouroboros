@@ -15,8 +15,10 @@ The contract below fixes behaviors and failure conditions only, never wording.
 ## On entry — read, then propose
 
 1. Read everything the user handed over, end to end: the prompt, files, repo
-   signals, prior discussion. Do not propose before reading — a proposal without
-   reading is a guess.
+   signals, prior discussion about this task. Do not propose before reading — a
+   proposal without reading is a guess. Handed over means given for this
+   interview; unrelated session memory or past work is not material, and intent
+   must never be manufactured from it.
 2. Open with a proposal, not a question. State in one line, grounded in what you
    read (point at it), what you take the user to be trying to do — and briefly
    what you would build for that.
@@ -24,8 +26,10 @@ The contract below fixes behaviors and failure conditions only, never wording.
    their requirements from scratch to answer you, the opening failed — redo it.
 4. If two intents are plausible, propose the more likely and note the other.
    Never present a guess as the only reading.
-5. If what was handed over is too thin to propose from, say so and ask what they
-   can share — do not fall back to interrogation.
+5. If nothing (or too little) was handed over, do not guess and do not explain
+   what signals are missing — just ask, in a line or two, what they want to
+   build or can share. Then wait. The proposal comes after there is something
+   to read.
 
 ## During — track intent, dig for what was not said
 
