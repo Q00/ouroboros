@@ -3024,6 +3024,179 @@ class TestInfraFatalExemption:
         )
         assert "401" in failed_event.data["error"]
 
+    @pytest.mark.asyncio
+    async def test_cli_not_found_result_message_marks_infra_fatal(self) -> None:
+        """Fix 4 (round 3, BLOCKING): reproduction of the actual reported gap.
+
+        ``claude_worker_runtime.py`` (via ``worker_runtime.LeaderDrivenWorkerRuntime``)
+        never raises for a missing CLI binary -- it catches ``FileNotFoundError``
+        internally and yields an ordinary final ``AgentMessage`` with
+        ``subtype="error"`` and content ``"claude CLI not found: ..."``. Before
+        this fix, that structured result always produced ``infra_fatal=False``
+        (only a RAISED exception set it), so a missing CLI entered the
+        infinite retry/parking loop instead of surfacing immediately.
+        """
+
+        class _CliMissingRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content="claude CLI not found: [Errno 2] No such file or directory: 'claude'",
+                    data={"subtype": "error"},
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_CliMissingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_cli",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_cli",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_pi_auth_failure_result_message_marks_infra_fatal(self) -> None:
+        """The second reproduction named by the finding: ``pi_runtime.py``
+        reports model/auth failures as an ordinary final error message
+        (``error_type`` stays the adapter's generic tag, not a distinguishing
+        exception class), so the classifier must also recognize well-known
+        auth-failure phrasing in the message CONTENT, not just ``error_type``.
+        """
+
+        class _AuthFailingRuntime:
+            _runtime_handle_backend = "pi"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content="Request failed: 401 Unauthorized - invalid api key provided",
+                    data={"subtype": "error", "error_type": "PiError"},
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_AuthFailingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_pi",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_pi",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_ordinary_verify_failure_result_message_is_not_infra_fatal(self) -> None:
+        """Negative control: an ordinary AC-level failure message (no
+        infra-fatal error_type or phrasing) must NOT be misclassified --
+        false positives here would wrongly skip real retry/escalation
+        opportunities."""
+
+        class _OrdinaryFailingRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                yield AgentMessage(
+                    type="result",
+                    content="Tests failed: 2 assertions did not pass.",
+                    data={"subtype": "error"},
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_OrdinaryFailingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_ordinary",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_ordinary",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is False
+        assert executor._is_retryable_failure(result) is True
+
     def test_is_retryable_failure_excludes_infra_fatal_even_when_shape_matches_ordinary_failure(
         self,
     ) -> None:

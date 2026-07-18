@@ -4862,6 +4862,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     message_count_before_signal = dispatch_state.message_count
                     primary_final_message = dispatch_state.final_message
                     primary_success = dispatch_state.success
+                    # Fix 4 (round 3, BLOCKING): an INFORM-mode signal turn's
+                    # outcome is always discarded in favor of the PRIMARY
+                    # dispatch's own result below -- its infra_fatal verdict
+                    # must be discarded and restored right alongside
+                    # success/final_message, or a merely infra-fatal-looking
+                    # error on this secondary side-channel turn could leak
+                    # into the primary (unrelated) result.
+                    primary_infra_fatal = dispatch_state.infra_fatal
                     await self._event_store.append(
                         create_session_signal_delivery_started_event(
                             queued_signal.signal,
@@ -4913,6 +4921,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         if inform_mode:
                             dispatch_state.success = primary_success
                             dispatch_state.final_message = primary_final_message
+                            dispatch_state.infra_fatal = primary_infra_fatal
                             continue
                         raise
 
@@ -4943,6 +4952,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         if inform_mode:
                             dispatch_state.success = primary_success
                             dispatch_state.final_message = primary_final_message
+                            dispatch_state.infra_fatal = primary_infra_fatal
                             continue
                         dispatch_state.success = False
                         dispatch_state.final_message = (
@@ -4988,6 +4998,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     if inform_mode:
                         dispatch_state.success = primary_success
                         dispatch_state.final_message = primary_final_message
+                        dispatch_state.infra_fatal = primary_infra_fatal
 
                 self._session_signal_hub.unregister(signal_target)
                 signal_target_registered = False
@@ -5240,6 +5251,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 atomic_verifier_verdict=verifier_verdict,
                 verify_gate_outcome=verify_gate_outcome,
                 error=fat_harness_error,
+                # Fix 4 (round 3, BLOCKING): a structured error RESULT (never
+                # raised) can still be a genuinely infra-fatal condition --
+                # e.g. a missing CLI binary or a bad auth credential reported
+                # as an ordinary final error message. ``dispatch_state``'s
+                # classifier (LeafDispatcher.stream) already judged this
+                # dispatch's own final message; thread that verdict through so
+                # ``_is_retryable_failure`` treats it identically to the
+                # raised-exception path below, instead of defaulting to
+                # ``False`` and entering the infinite retry/parking loop.
+                infra_fatal=dispatch_state.infra_fatal,
             )
 
         except Exception as e:

@@ -60,6 +60,66 @@ class LeafDispatchState:
     final_message: str = ""
     success: bool = False
     stalled: bool = False
+    infra_fatal: bool = False
+
+
+# Fix 4 (round 3, BLOCKING): some runtime adapters (e.g.
+# ``claude_worker_runtime.py`` / ``worker_runtime.py``'s "claude CLI not
+# found" and ``pi_runtime.py``'s model/auth failures reported as an assistant
+# message with ``stopReason: "error"``) report genuinely infra-fatal
+# conditions as an ORDINARY final error message in the stream instead of
+# raising. Only a RAISED exception reaching ``_execute_atomic_ac``'s
+# catch-all set ``infra_fatal=True`` before this fix, so a missing CLI or bad
+# auth credential -- reported as a structured error RESULT, never a raised
+# exception -- fell through to ``infra_fatal=False`` and entered the ordinary
+# same-runtime retry / lateral-escalation-ladder loop forever instead of
+# surfacing immediately as an infra-fatal condition. This classifies the
+# error message's KIND (its declared ``error_type`` when an adapter
+# propagates ``type(exc).__name__``, plus well-known infra-fatal phrases in
+# its content) so the same "genuinely fatal, redispatching cannot help"
+# judgment applies whether the failure arrived as a raised exception or a
+# returned result. Deliberately conservative: missing a real infra-fatal
+# message here just keeps the pre-existing (already-tolerated) retry
+# behavior, while a false positive would wrongly skip real retry/escalation
+# opportunities for an ordinary AC failure -- the worse outcome.
+_INFRA_FATAL_ERROR_TYPES = frozenset(
+    {
+        "FileNotFoundError",
+        "PermissionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+    }
+)
+
+_INFRA_FATAL_CONTENT_PATTERNS = (
+    "cli not found",
+    "command not found",
+    "no such file or directory",
+    "unauthorized",
+    "authentication failed",
+    "invalid api key",
+    "api key not valid",
+    "401 unauthorized",
+    "403 forbidden",
+    "model not found",
+    "unknown model",
+    "no such model",
+)
+
+
+def _is_infra_fatal_error_message(message: AgentMessage) -> bool:
+    """Classify a FINAL error message's KIND rather than its raise/return site.
+
+    Only meaningful for ``message.is_final and message.is_error`` — an
+    ordinary tool-call/narrative message is never inspected.
+    """
+    error_type = message.data.get("error_type")
+    if isinstance(error_type, str) and error_type in _INFRA_FATAL_ERROR_TYPES:
+        return True
+    error_detail = message.data.get("error")
+    content = f"{message.content} {error_detail or ''}".lower()
+    return any(pattern in content for pattern in _INFRA_FATAL_CONTENT_PATTERNS)
 
 
 def _correlated_tool_result_name(
@@ -306,6 +366,8 @@ class LeafDispatcher:
                 if message.is_final:
                     state.final_message = message.content
                     state.success = not message.is_error
+                    if message.is_error and _is_infra_fatal_error_message(message):
+                        state.infra_fatal = True
 
         # Check if stall was detected (CancelScope ate the Cancelled)
         state.stalled = stall_scope.cancelled_caught
