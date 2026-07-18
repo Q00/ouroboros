@@ -6189,16 +6189,37 @@ Respond with either ATOMIC or the structured JSON object only.
 
         current_result = result
         current_retry_attempt = ac_retry_attempts[ac_idx]
-        terminal = await self._root_ac_terminal_state(
-            seed=seed, ac_idx=ac_idx, result=current_result, retry_attempt=current_retry_attempt
-        )
-        if not terminal:
-            return None
-
         state = await self._load_lateral_escalation_state(ac_idx, execution_id=execution_id)
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+        # Fix 4 (round 2, BLOCKING): re-verified every iteration below, not
+        # just once here before the loop starts.
+        engaged = False
 
         while True:
+            terminal = await self._root_ac_terminal_state(
+                seed=seed,
+                ac_idx=ac_idx,
+                result=current_result,
+                retry_attempt=current_retry_attempt,
+            )
+            if not terminal:
+                if not engaged:
+                    # Never entered the ladder at all -- today's unchanged
+                    # entry behavior.
+                    return None
+                # A redispatch INSIDE the loop bounced into a non-terminal
+                # outcome (e.g. it got decomposed instead of staying atomic,
+                # so ``is_decomposed`` now makes ``is_terminal_state_failure``
+                # false) -- there is cheaper room left that was not tried, so
+                # the persona ladder must stop advancing rather than keep
+                # cycling personas on a result that no longer reflects a
+                # genuine "stuck at maximum strength" state. Hand back this
+                # CURRENT result (not ``None``, which would make the caller
+                # fall back to the stale pre-ladder result -- the same class
+                # of bug Fix 3 fixes for the infra-fatal case).
+                return current_result
+            engaged = True
+
             failure_class = self._failure_class_for_result(current_result)
             failure_text = (
                 failure_class or current_result.error or current_result.final_message or ""
@@ -6268,25 +6289,39 @@ Respond with either ATOMIC or the structured JSON object only.
                 same_runtime_budget_exhausted=True,
             )
             candidate = retry_results[0]
-            if isinstance(candidate, ACExecutionResult):
-                candidate = await self._apply_verify_gate(
-                    seed=seed,
-                    ac_index=ac_idx,
-                    result=candidate,
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-                await self._emit_ac_outcome_finalized(
-                    result=candidate,
-                    root_ac_index=ac_idx,
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-
             if not isinstance(candidate, ACExecutionResult):
-                # Infra-fatal mid-ladder: exempt, hand back to the caller's
-                # existing exception handling rather than looping forever.
-                return None
+                # A raw, uncaught exception escaped even _execute_ac_batch's
+                # own per-AC exception handling -- genuinely infra-fatal by
+                # construction, exactly like _execute_atomic_ac's own
+                # exception handler (which wraps this same class of failure
+                # as a structured result instead of letting it propagate).
+                # Wrap it the same way so it flows through the SAME
+                # finalization path below and can be propagated OUT as the
+                # actual current result (Fix 3, round 2, BLOCKING) instead of
+                # silently vanishing into a bare exception object no caller
+                # downstream of this ladder knows how to handle.
+                candidate = ACExecutionResult(
+                    ac_index=ac_idx,
+                    ac_content=ac_content,
+                    success=False,
+                    error=str(candidate),
+                    retry_attempt=current_retry_attempt,
+                    infra_fatal=True,
+                )
+            candidate = await self._apply_verify_gate(
+                seed=seed,
+                ac_index=ac_idx,
+                result=candidate,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            await self._emit_ac_outcome_finalized(
+                result=candidate,
+                root_ac_index=ac_idx,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+
             if candidate.success:
                 # Breakthrough: reset the streak and surface the success. When
                 # this AC was actually parked (Fix 8), emit the durable
@@ -6309,7 +6344,18 @@ Respond with either ATOMIC or the structured JSON object only.
 
             current_result = candidate
             if not self._is_retryable_failure(candidate):
-                return None
+                # Fix 3 (round 2, BLOCKING): propagate this CURRENT terminal
+                # result (infra-fatal, blocked, or otherwise non-retryable)
+                # out to the caller instead of ``None``. Returning ``None``
+                # here previously made the caller interpret "the ladder
+                # produced no new result" and fall back to finalizing the
+                # STALE quality-failure result captured before the ladder
+                # started — silently discarding whatever genuinely happened
+                # on this redispatch and reporting a wrong reason for the
+                # AC's final state. The caller now distinguishes a returned
+                # FAILED result from a returned SUCCESS result and emits
+                # recovery-exhausted for the former using THIS fresh result.
+                return candidate
 
     async def _run_batch_with_verify_and_retry(
         self,
@@ -6613,6 +6659,24 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             if escalated is not None:
                 results[position] = escalated
+                # Fix 3 (round 2, BLOCKING): the ladder can now return a
+                # FAILED result too (infra-fatal or otherwise non-retryable,
+                # discovered mid-ladder), not just a breakthrough SUCCESS.
+                # Emit recovery-exhausted for that case using THIS fresh
+                # result -- never the stale pre-ladder `result` captured
+                # above -- so the durable record reflects what actually
+                # happened on the ladder's last redispatch.
+                if not escalated.success:
+                    await self._emit_recovery_exhausted(
+                        seed=seed,
+                        result=escalated,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        retry_termination_reason=(
+                            "infra_fatal" if escalated.infra_fatal else "not_retryable"
+                        ),
+                    )
                 continue
             await self._emit_recovery_exhausted(
                 seed=seed,

@@ -664,3 +664,239 @@ class TestParkedRetryBackoffSecondsFiniteGuard:
             parked_retry_backoff_seconds=900.0,
         )
         assert executor._parked_retry_backoff_seconds == 900.0
+
+
+class TestInfraFatalMidLadderPropagates:
+    """Fix 3 (round 2, BLOCKING): an infra-fatal (or otherwise non-retryable)
+    result discovered on a REDISPATCH INSIDE the ladder loop must propagate
+    out as the ladder's own return value, not vanish into a ``None`` that
+    would make the caller fall back to a stale pre-ladder result."""
+
+    @pytest.mark.asyncio
+    async def test_infra_fatal_result_mid_ladder_is_returned_not_none(self) -> None:
+        executor = _make_executor_with_active_ladder()
+
+        call_count = {"n": 0}
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return [_failed_result(error="attempt 1 failed")]
+            # The SECOND redispatch (inside the ladder loop) crashes at the
+            # infra level -- exactly the scenario that used to vanish into
+            # ``None`` and make the caller finalize a stale earlier result.
+            return [
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Implement the widget",
+                    success=False,
+                    error="adapter crashed mid-dispatch",
+                    infra_fatal=True,
+                )
+            ]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is False
+        assert outcome.infra_fatal is True
+        assert outcome.error == "adapter crashed mid-dispatch"
+
+    @pytest.mark.asyncio
+    async def test_raw_exception_mid_ladder_is_wrapped_and_returned_not_none(self) -> None:
+        """A raw, uncaught exception escaping ``_execute_ac_batch``'s own
+        per-AC handling mid-ladder must ALSO propagate out (wrapped as an
+        infra-fatal ``ACExecutionResult``, mirroring how the atomic leaf's
+        own exception handler wraps this same class of failure), not vanish
+        into ``None``."""
+        executor = _make_executor_with_active_ladder()
+
+        call_count = {"n": 0}
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[object]:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return [_failed_result(error="attempt 1 failed")]
+            return [RuntimeError("adapter crashed raw")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is False
+        assert outcome.infra_fatal is True
+        assert "adapter crashed raw" in (outcome.error or "")
+
+
+class TestLadderFailurePropagatesToRecoveryExhausted:
+    """Fix 3 (round 2, BLOCKING): the CALLER (``_run_batch_with_verify_and_retry``)
+    must emit recovery-exhausted using the ladder's OWN fresh failed result
+    when the ladder returns one, never the stale pre-ladder result captured
+    before the ladder ran."""
+
+    @pytest.mark.asyncio
+    async def test_caller_uses_fresh_escalated_failure_not_stale_result(self) -> None:
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor_with_active_ladder()
+        executor._ac_retry_attempts = 1
+
+        stale_result = _failed_result(error="stale pre-ladder failure")
+        fresh_infra_fatal = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="adapter crashed mid-ladder",
+            infra_fatal=True,
+        )
+
+        executor._execute_ac_batch = AsyncMock(return_value=[stale_result])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._maybe_run_lateral_escalation_ladder = AsyncMock(return_value=fresh_infra_fatal)
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert results[0] is fresh_infra_fatal
+        executor._emit_recovery_exhausted.assert_awaited_once()
+        _, kwargs = executor._emit_recovery_exhausted.await_args
+        assert kwargs["result"] is fresh_infra_fatal
+        assert kwargs["result"] is not stale_result
+        assert kwargs["retry_termination_reason"] == "infra_fatal"
+
+    @pytest.mark.asyncio
+    async def test_caller_skips_recovery_exhausted_for_a_breakthrough_success(self) -> None:
+        """Unchanged behavior: a genuine ladder SUCCESS must never trigger a
+        spurious recovery-exhausted emission."""
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor_with_active_ladder()
+        executor._ac_retry_attempts = 1
+
+        stale_result = _failed_result(error="stale pre-ladder failure")
+        breakthrough = _success_result()
+
+        executor._execute_ac_batch = AsyncMock(return_value=[stale_result])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._maybe_run_lateral_escalation_ladder = AsyncMock(return_value=breakthrough)
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert results[0] is breakthrough
+        executor._emit_recovery_exhausted.assert_not_awaited()
+
+
+class TestTerminalEligibilityRecheckedEachIteration:
+    """Fix 4 (round 2, BLOCKING): terminal-state eligibility must be
+    rechecked after EVERY redispatch inside the ladder loop, not just once
+    at entry. A redispatch that bounces into decomposition (non-atomic) is
+    no longer a "stuck at maximum strength" failure -- there is cheaper room
+    left (namely, not decomposing) that was not tried."""
+
+    @pytest.mark.asyncio
+    async def test_bounce_into_decomposition_mid_ladder_stops_the_ladder(self) -> None:
+        executor = _make_executor_with_active_ladder()
+
+        call_count = {"n": 0}
+
+        def _decomposed_result() -> ACExecutionResult:
+            return ACExecutionResult(
+                ac_index=0,
+                ac_content="Implement the widget",
+                success=False,
+                error="bounced into decomposition",
+                is_decomposed=True,
+            )
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return [_failed_result(error="attempt 1 failed")]
+            # Second redispatch bounces into decomposition -- no longer
+            # atomic, so no longer "at maximum strength".
+            return [_decomposed_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        # The ladder must stop -- NOT keep cycling personas on a non-terminal
+        # result -- and hand back the CURRENT (decomposed) result rather than
+        # None (which would make the caller fall back to stale data).
+        assert outcome is not None
+        assert outcome.is_decomposed is True
+        assert outcome.error == "bounced into decomposition"
+        # Only 2 redispatches happened: the ladder did not loop a 3rd time
+        # trying to advance the persona cycle on the non-terminal bounce.
+        assert call_count["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_still_terminal_every_iteration_keeps_cycling_as_before(self) -> None:
+        """Regression guard: when every redispatch STAYS terminal (atomic,
+        frontier tier, max effort), the now-per-iteration recheck must not
+        change existing persona-cycling/success behavior."""
+        executor = _make_executor_with_active_ladder()
+
+        call_count = {"n": 0}
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] >= 5:
+                return [_success_result()]
+            return [_failed_result(error=f"attempt {call_count['n']} failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(
+            executor, result=_failed_result(error="attempt 0 failed"), ac_retry_attempts={0: 2}
+        )
+
+        assert outcome is not None
+        assert outcome.success is True
+        assert call_count["n"] == 5
