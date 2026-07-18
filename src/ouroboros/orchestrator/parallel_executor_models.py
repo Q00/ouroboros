@@ -283,6 +283,18 @@ class ParallelExecutionResult:
             original pre-failure context.
         total_messages: Total messages processed across all ACs.
         total_duration_seconds: Total execution time.
+        unconfirmed_durable_writes: Round-8 finding #3: descriptions of
+            correctness-bearing durable writes (ladder resolution/termination,
+            parked backfill, decomposition attestation, ...) whose deferred
+            background retries either exhausted their attempt budget or were
+            still pending when the bounded run-completion drain gave up and
+            cancelled them. Each entry means the durable log MAY be missing a
+            record whose absence reads as different state on a later replay
+            or cold resume — the true durable state of the named AC/episode
+            is UNCERTAIN. Empty on a fully-confirmed run. Surfaced through
+            the operator-facing completion summary and the run's execution
+            summary so the uncertainty is visible from the run's own final
+            output, never only from a log line.
     """
 
     results: tuple[ACExecutionResult, ...]
@@ -296,6 +308,7 @@ class ParallelExecutionResult:
     reconciled_level_contexts: tuple[LevelContext, ...] = field(default_factory=tuple)
     total_messages: int = 0
     total_duration_seconds: float = 0.0
+    unconfirmed_durable_writes: tuple[str, ...] = ()
 
     @property
     def all_succeeded(self) -> bool:

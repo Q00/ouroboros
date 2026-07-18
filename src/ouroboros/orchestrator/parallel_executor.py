@@ -986,6 +986,24 @@ def render_parallel_completion_message(
             status = "COMPLETED" if result.success else "FAILED"
             suffix = f" ({len(result.sub_results)} subtasks)" if result.is_decomposed else ""
         lines.append(f"- Task {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
+    if parallel_result.unconfirmed_durable_writes:
+        # Round-8 finding #3: the bounded run-completion drain had to give up
+        # with correctness-bearing durable writes still unconfirmed. The run
+        # itself is NOT failed for this (escalation-mandate direction), but
+        # the uncertainty must be visible in the run's own final output —
+        # never only in a log line: a later crash before the record ever
+        # lands is indistinguishable from the transition never happening.
+        lines.append("")
+        lines.append(
+            f"WARNING: {len(parallel_result.unconfirmed_durable_writes)} "
+            "correctness-bearing durable write(s) could not be confirmed "
+            "persisted before the run completed. The true durable state of "
+            "the affected AC(s)/episode(s) is UNCERTAIN — a later resume may "
+            "reconstruct stale state. Verify the event log before relying on "
+            "this run's recorded outcomes:"
+        )
+        for description in parallel_result.unconfirmed_durable_writes:
+            lines.append(f"- unconfirmed: {description}")
     return "\n".join(lines)
 
 
@@ -1149,6 +1167,16 @@ class ParallelACExecutor:
         # were exhausted. Held here so the tasks are not garbage-collected
         # mid-flight and tests can await them deterministically.
         self._deferred_durable_write_tasks: set[asyncio.Task[None]] = set()
+        # Round-8 finding #3: descriptions of correctness-bearing durable
+        # writes that were NEVER confirmed persisted — their deferred
+        # background retries either exhausted the attempt budget ("gave up")
+        # or were cancelled by the bounded run-completion drain / shutdown
+        # while still pending. A log line alone is not an operator surface:
+        # this list is copied into ``ParallelExecutionResult
+        # .unconfirmed_durable_writes`` at aggregation so the run's OWN
+        # final output says "the true durable state of X is uncertain"
+        # instead of reporting an ordinary, fully-durable completion.
+        self._unconfirmed_durable_write_descriptions: list[str] = []
         # Round-6 Finding #1: the ACTUAL in-flight dispatch-attempt number
         # durably recorded by the latest ``lateral_escalation_progressed``
         # event for each root AC, reconstructed alongside
@@ -2708,6 +2736,21 @@ class ParallelACExecutor:
             duration_seconds=total_duration,
         )
 
+        # Round-8 finding #3: the drain above ran to completion, so every
+        # deferred correctness-bearing write has either landed, exhausted
+        # its budget, or been cancelled — the list below is final for this
+        # run. A non-empty list means the durable log MAY be missing records
+        # whose absence reads as different state on replay/cold-resume; the
+        # run must SAY so in its own result rather than reporting an
+        # ordinary fully-durable completion.
+        unconfirmed_durable_writes = tuple(self._unconfirmed_durable_write_descriptions)
+        if unconfirmed_durable_writes:
+            log.error(
+                "parallel_executor.deferred_durable_writes.unconfirmed_at_completion",
+                count=len(unconfirmed_durable_writes),
+                writes=list(unconfirmed_durable_writes),
+            )
+
         return ParallelExecutionResult(
             results=tuple(sorted_results),
             success_count=success_count,
@@ -2720,6 +2763,7 @@ class ParallelACExecutor:
             reconciled_level_contexts=tuple(level_contexts),
             total_messages=total_messages,
             total_duration_seconds=total_duration,
+            unconfirmed_durable_writes=unconfirmed_durable_writes,
         )
 
     def _coerce_decomposition_decision(
@@ -7140,7 +7184,20 @@ Respond with either ATOMIC or the structured JSON object only.
         can now corroborate) once the write actually lands. The final
         give-up is loud and leaves any fail-closed in-memory substitute in
         place.
+
+        Round-8 finding #3: a loud LOG is not an operator surface. Every
+        terminal non-persisted outcome (attempt budget exhausted, or
+        cancellation by the bounded drain/shutdown while still pending) also
+        records a description in
+        ``self._unconfirmed_durable_write_descriptions``, which aggregation
+        copies into the run result's ``unconfirmed_durable_writes`` so the
+        uncertainty is visible from the run's own final output.
         """
+        description = log_key
+        if log_context:
+            description += (
+                " (" + ", ".join(f"{key}={value}" for key, value in sorted(log_context.items())) + ")"
+            )
 
         async def _retry_loop() -> None:
             attempts_remaining = _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS
@@ -7175,6 +7232,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             on_persisted()
                         log.info(f"{log_key}.deferred_write_recovered", **log_context)
                         return
+                self._unconfirmed_durable_write_descriptions.append(description)
                 log.error(f"{log_key}.deferred_write_gave_up", **log_context)
             except asyncio.CancelledError:
                 # Cancellation (the bounded drain at run completion timing
@@ -7182,6 +7240,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 # bypasses both the "recovered" and "gave up" logs above,
                 # and the durable log may still be missing this
                 # correctness-bearing record.
+                self._unconfirmed_durable_write_descriptions.append(description)
                 log.warning(
                     f"{log_key}.deferred_write_cancelled",
                     attempts_remaining=attempts_remaining,

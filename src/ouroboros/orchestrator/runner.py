@@ -5087,8 +5087,44 @@ class OrchestratorRunner:
             "max_parallel_workers": self._max_parallel_workers,
             "effective_parallel_workers": effective_workers,
             "verification_report": verification_report,
+            # Round-8 finding #3: correctness-bearing durable writes the
+            # bounded run-completion drain could not confirm persisted. A
+            # non-empty list means the durable state of the named
+            # AC(s)/episode(s) is UNCERTAIN — surfaced in the persisted
+            # summary (session_completed/mark_completed) so the uncertainty
+            # is queryable from the run's own outcome, not only from logs.
+            "unconfirmed_durable_writes_count": len(parallel_result.unconfirmed_durable_writes),
+            "unconfirmed_durable_writes": list(parallel_result.unconfirmed_durable_writes),
             **self._task_summary(),
         }
+
+        # Round-8 finding #3: make the unconfirmed-durable-write uncertainty
+        # impossible to miss at the operator console, on EVERY completion
+        # branch (success, pause, failure) — the run is deliberately not
+        # failed for it (escalation-mandate direction: a slow write must not
+        # surface "failed"), but a clean-looking completion banner alone
+        # would silently misreport an uncertain durable state as ordinary.
+        if parallel_result.unconfirmed_durable_writes:
+            self._console.print(
+                Panel(
+                    Text(
+                        "Completed with UNCONFIRMED durable state: "
+                        f"{len(parallel_result.unconfirmed_durable_writes)} "
+                        "correctness-bearing write(s) never confirmed persisted "
+                        "within the completion drain window:\n"
+                        + "\n".join(
+                            f"- {description}"
+                            for description in parallel_result.unconfirmed_durable_writes
+                        )
+                        + "\nThe true durable state of the affected AC(s)/episode(s) "
+                        "is uncertain; verify the event log before relying on this "
+                        "run's recorded outcomes.",
+                        style="red",
+                    ),
+                    title="[red]Durable State Unconfirmed[/red]",
+                    border_style="red",
+                )
+            )
 
         # Emit completion event
         if success:

@@ -3830,3 +3830,175 @@ class TestDeferredWritesDrainAtRunCompletion:
         assert landed.is_set()
         await asyncio.sleep(0)
         assert not executor._deferred_durable_write_tasks
+
+
+class TestUnconfirmedDurableWritesSurfaceInRunResult:
+    """Round-8 finding #3 (BLOCKING): the bounded run-completion drain
+    cancelling still-pending correctness-bearing writes after its timeout
+    used to leave only a LOG line behind — the run then returned a clean,
+    ordinary completion as if everything were fully durable, even though a
+    subsequent crash before the record ever lands is indistinguishable from
+    the transition never happening. Every terminal non-persisted outcome
+    (attempt budget exhausted, or cancelled while still pending) must be
+    recorded and propagated into the run's OWN final output
+    (``ParallelExecutionResult.unconfirmed_durable_writes`` and the
+    operator-facing completion summary), never only into logs."""
+
+    @pytest.mark.asyncio
+    async def test_drain_cancelled_write_is_recorded_as_unconfirmed(self) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        started = asyncio.Event()
+
+        async def hanging_write() -> bool:
+            started.set()
+            await asyncio.Event().wait()  # pragma: no cover - cancelled mid-wait
+            return True
+
+        with patch(
+            "ouroboros.orchestrator.parallel_executor._DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS",
+            0.05,
+        ):
+            executor._schedule_deferred_durable_write(
+                write=hanging_write,
+                on_persisted=None,
+                log_key="parallel_executor.lateral_escalation.resolved",
+                ac_idx=3,
+                execution_id="exec-1",
+            )
+            await executor._drain_deferred_durable_writes()
+
+        assert started.is_set()
+        assert len(executor._unconfirmed_durable_write_descriptions) == 1
+        description = executor._unconfirmed_durable_write_descriptions[0]
+        # The description identifies WHICH correctness-bearing write for
+        # WHICH AC never confirmed, so the operator can check that exact
+        # episode instead of grepping logs.
+        assert "parallel_executor.lateral_escalation.resolved" in description
+        assert "ac_idx=3" in description
+        assert "execution_id=exec-1" in description
+
+    @pytest.mark.asyncio
+    async def test_exhausted_write_budget_is_recorded_as_unconfirmed(self) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        write = AsyncMock(return_value=False)  # store refuses every attempt
+
+        executor._schedule_deferred_durable_write(
+            write=write,
+            on_persisted=None,
+            log_key="parallel_executor.lateral_escalation.interrupted",
+            ac_idx=1,
+            execution_id="exec-1",
+        )
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        assert len(executor._unconfirmed_durable_write_descriptions) == 1
+        assert (
+            "parallel_executor.lateral_escalation.interrupted"
+            in executor._unconfirmed_durable_write_descriptions[0]
+        )
+
+    @pytest.mark.asyncio
+    async def test_persisted_write_is_never_recorded_as_unconfirmed(self) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        write = AsyncMock(return_value=True)
+
+        executor._schedule_deferred_durable_write(
+            write=write, on_persisted=None, log_key="test.deferred"
+        )
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        assert executor._unconfirmed_durable_write_descriptions == []
+
+    @pytest.mark.asyncio
+    async def test_run_result_carries_unconfirmed_writes_from_completed_drain(self) -> None:
+        """End-to-end shape: a run whose completion drain had to cancel a
+        pending correctness write must return a ``ParallelExecutionResult``
+        whose ``unconfirmed_durable_writes`` names it — the run's own
+        output, not a log line, is the operator surface. Runs through the
+        REAL ``execute_parallel`` path (impl, aggregation, drain)."""
+        import asyncio
+
+        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+
+        executor = _make_executor_with_active_ladder()
+
+        async def hanging_write() -> bool:
+            await asyncio.Event().wait()  # pragma: no cover - cancelled mid-wait
+            return True
+
+        seed = _make_seed()
+        plan = DependencyGraph(
+            nodes=(ACNode(index=0, content="Implement the widget", depends_on=()),),
+            execution_levels=((0,),),
+        ).to_execution_plan()
+        # A correctness-bearing write is in flight when the run body finishes
+        # (the shape deferred writes always take: scheduled near the END of a
+        # run) and the store never confirms it before the bounded drain.
+        executor._schedule_deferred_durable_write(
+            write=hanging_write,
+            on_persisted=None,
+            log_key="parallel_executor.lateral_escalation.resolved",
+            ac_idx=0,
+            execution_id="exec",
+        )
+
+        with patch(
+            "ouroboros.orchestrator.parallel_executor._DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS",
+            0.05,
+        ):
+            result = await executor.execute_parallel(
+                seed,
+                execution_plan=plan,
+                session_id="sess",
+                execution_id="exec",
+                tools=["Read"],
+                system_prompt="system",
+                externally_satisfied_acs={0: {"reason": "done manually"}},
+            )
+
+        assert isinstance(result, ParallelExecutionResult)
+        assert len(result.unconfirmed_durable_writes) == 1
+        assert "lateral_escalation.resolved" in result.unconfirmed_durable_writes[0]
+        assert "ac_idx=0" in result.unconfirmed_durable_writes[0]
+
+    def test_completion_message_surfaces_unconfirmed_writes(self) -> None:
+        from ouroboros.orchestrator.parallel_executor import (
+            ParallelExecutionResult,
+            render_parallel_completion_message,
+        )
+
+        message = render_parallel_completion_message(
+            ParallelExecutionResult(
+                results=(),
+                success_count=1,
+                failure_count=0,
+                unconfirmed_durable_writes=(
+                    "parallel_executor.lateral_escalation.resolved (ac_idx=0, execution_id=exec)",
+                ),
+            ),
+            total_acceptance_criteria=1,
+        )
+
+        assert "UNCERTAIN" in message
+        assert "unconfirmed: parallel_executor.lateral_escalation.resolved" in message
+
+    def test_completion_message_stays_clean_without_unconfirmed_writes(self) -> None:
+        from ouroboros.orchestrator.parallel_executor import (
+            ParallelExecutionResult,
+            render_parallel_completion_message,
+        )
+
+        message = render_parallel_completion_message(
+            ParallelExecutionResult(results=(), success_count=1, failure_count=0),
+            total_acceptance_criteria=1,
+        )
+
+        assert "UNCERTAIN" not in message
+        assert "unconfirmed" not in message
