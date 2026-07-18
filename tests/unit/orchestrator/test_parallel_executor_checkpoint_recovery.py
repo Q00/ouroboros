@@ -14,7 +14,12 @@ Covers the two production gaps found by adversarial review on PR #1648:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1394,3 +1399,245 @@ class TestRunnerAdoptsRecoveredExecutionId:
         )
         assert result.value.execution_id == "exec-fresh"
         assert "exec-fresh" not in runner._active_sessions
+
+
+class TestActiveCheckpointNeverSilentlyAdopted:
+    """Round-12 finding #3 (BLOCKING): the round-10 terminal-staleness gate
+    distinguishes a crashed run's checkpoint from a FINISHED run's, but not
+    from a checkpoint whose writer is STILL ALIVE — another process
+    actively running (or legitimately paused/parked) the same seed right
+    now. A second, near-concurrent launch of the same seed could adopt the
+    live run's execution_id and both processes would race the same
+    execution aggregate. Checkpoint saves now embed an ownership marker
+    (pid + host + written_at heartbeat, the ``core.worktree`` task-lock
+    convention), and recovery refuses — loudly, before any AC work — to
+    adopt a non-terminal checkpoint whose owner appears alive."""
+
+    @pytest.mark.asyncio
+    async def test_second_launch_refuses_live_owner_then_resumes_after_death(
+        self, tmp_path: Path
+    ) -> None:
+        """The core risk scenario, with a REAL live process as the first
+        claimant: launch 2 must fail closed (no dispatch, no adoption, the
+        live owner's checkpoint untouched) while the owner lives, and the
+        SAME launch must resume the crashed run normally once it is dead."""
+        from ouroboros.orchestrator.parallel_executor import CheckpointOwnershipError
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed = Seed(
+            goal="Concurrent launch ownership",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Run 1: completes level 1 (checkpoint saved with an ownership
+        # marker), then is interrupted mid-level-2.
+        original_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await original_events.initialize()
+        original_ckpt = CheckpointStore(base_path=ckpt_path)
+        original_ckpt.initialize()
+        original = _executor(event_store=original_events, checkpoint_store=original_ckpt)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            raise RuntimeError("simulated interruption mid-level-2")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        await original_events.close()
+
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        owner = saved.value.state["owner"]
+        assert owner["pid"] == os.getpid()
+        assert owner["host"] == socket.gethostname()
+
+        # --- Stand-in for "the first process is still alive": a genuinely
+        # running OS process owns the checkpoint. (The test process itself
+        # cannot play both claimants — its own pid is the legitimate
+        # same-process relaunch shape — so the checkpoint carries the exact
+        # bytes a run inside the live sleeper would have written.)
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        try:
+            store = CheckpointStore(base_path=ckpt_path)
+            live_state = dict(saved.value.state)
+            live_state["owner"] = {**owner, "pid": sleeper.pid}
+            assert store.save(
+                CheckpointData.create(
+                    seed_id=saved.value.seed_id,
+                    phase=saved.value.phase,
+                    state=live_state,
+                )
+            ).is_ok
+
+            # --- Launch 2, near-concurrent, same seed + checkpoint store.
+            run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+            await run2_events.initialize()
+            run2 = _executor(
+                event_store=run2_events,
+                checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            )
+            run2._run_batch_with_verify_and_retry = AsyncMock()
+            with pytest.raises(CheckpointOwnershipError, match="still active or paused"):
+                await run2.execute_parallel(
+                    seed,
+                    session_id="session-double-launch",
+                    execution_id="exec-double-launch",
+                    tools=[],
+                    system_prompt="system",
+                    execution_plan=plan,
+                )
+            # Fail-closed on every axis: nothing dispatched, nothing
+            # adopted, and the LIVE owner's checkpoint is byte-for-byte
+            # untouched (no overwrite under launch 2's identity).
+            run2._run_batch_with_verify_and_retry.assert_not_awaited()
+            preserved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+            assert preserved.is_ok
+            assert preserved.value.state["execution_id"] == "exec-original"
+            assert preserved.value.state["owner"]["pid"] == sleeper.pid
+            await run2_events.close()
+        finally:
+            sleeper.kill()
+            sleeper.wait()
+
+        # --- The owner is now DEAD: the same launch shape is a genuine
+        # crash-restart and must resume the interrupted run (level 1
+        # skipped, original execution_id restored) — the gate self-heals
+        # with no operator override needed.
+        run3_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run3_events.initialize()
+        run3 = _executor(
+            event_store=run3_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _resumed_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
+
+        run3._run_batch_with_verify_and_retry = AsyncMock(side_effect=_resumed_stage_runner)
+        result = await run3.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+        assert result.all_succeeded
+        assert captured["batch_executable"] == [1]
+        assert captured["execution_id"] == "exec-original"
+        await run3_events.close()
+
+    def _conflict(self, owner: object) -> str | None:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            cross_harness_redispatch=False,
+        )
+        cp = SimpleNamespace(
+            phase="parallel_execution",
+            state={"execution_id": "exec-original", "owner": owner},
+        )
+        return executor._checkpoint_owner_conflict(cp)
+
+    def test_own_pid_is_never_a_conflict(self) -> None:
+        """The same-process relaunch shape (every in-process recovery test
+        above) must keep adopting: a process cannot race itself."""
+        assert (
+            self._conflict(
+                {
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "written_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            is None
+        )
+
+    def test_dead_same_host_pid_is_never_a_conflict(self) -> None:
+        """A genuinely exited owner (real subprocess, reaped) is the crash
+        shape: resume must proceed even with a fresh heartbeat."""
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        assert (
+            self._conflict(
+                {
+                    "pid": proc.pid,
+                    "host": socket.gethostname(),
+                    "written_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            is None
+        )
+
+    def test_cross_host_fresh_heartbeat_is_a_conflict(self) -> None:
+        """An unprobeable (different-host) owner with a heartbeat inside
+        the freshness window is treated as possibly live."""
+        conflict = self._conflict(
+            {
+                "pid": 12345,
+                "host": "some-other-host.example",
+                "written_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        assert conflict is not None
+        assert "cannot be probed" in conflict
+
+    def test_cross_host_stale_heartbeat_is_not_a_conflict(self) -> None:
+        assert (
+            self._conflict(
+                {
+                    "pid": 12345,
+                    "host": "some-other-host.example",
+                    "written_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+                }
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "owner",
+        [
+            None,
+            "not-a-mapping",
+            {},
+            {"pid": "12345", "host": "some-other-host.example"},
+            {"pid": 12345, "host": "some-other-host.example", "written_at": "not-a-timestamp"},
+            {"pid": 12345, "host": "some-other-host.example"},
+        ],
+    )
+    def test_legacy_or_unreadable_owner_keeps_adopt_posture(self, owner: object) -> None:
+        """A checkpoint written before this fix (no owner) or with an
+        unreadable marker must stay resumable — the one-time-migration
+        convention; an unreadable marker must never permanently wall off
+        durable ladder history (mirrors ``core.worktree._is_lock_stale``
+        treating unreadable timestamps as claimable)."""
+        assert self._conflict(owner) is None

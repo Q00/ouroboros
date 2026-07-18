@@ -31,17 +31,19 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 import math
 import os
 from pathlib import Path
 import re
+import socket
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import anyio
 from rich.console import Console
 
+from ouroboros.core.errors import OuroborosError
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -1012,6 +1014,55 @@ def render_parallel_completion_message(
 # =============================================================================
 # Parallel Executor
 # =============================================================================
+
+
+class CheckpointOwnershipError(OuroborosError):
+    """A non-terminal RC3 checkpoint appears to belong to a LIVE run.
+
+    Round-12 finding #3 (BLOCKING): checkpoints are keyed by the stable
+    ``seed_id`` alone and adopted automatically on launch. The round-10
+    staleness gate distinguishes crashed runs from FINISHED ones, but it
+    cannot tell a crashed run's checkpoint from one written by another
+    process that is STILL actively running (or legitimately paused/parked)
+    this same seed right now. Adopting such a checkpoint would put two live
+    processes on the SAME execution aggregate — racing on durable state,
+    double-dispatching ACs. This error fails the second launch immediately
+    and loudly instead: a genuinely infra-fatal launch conflict, not an AC
+    failure, so the escalation mandate (never surface FAILED with
+    escalation options untried) is not implicated — no AC work has started
+    and retrying cannot help while the owning process is alive.
+    """
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort same-host liveness probe (mirrors ``core.worktree``).
+
+    PID reuse can make a dead owner look alive — this is a heuristic that
+    errs toward refusing a conflicting launch, never toward corrupting a
+    possibly-live run's state. Cross-host owners cannot be probed at all
+    and fall back to the heartbeat-freshness window.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we lack permission to signal it — still alive.
+        return True
+    return True
+
+
+#: How recently a cross-host owner's checkpoint must have been written to be
+#: treated as possibly live. Checkpoints are written per completed level, so
+#: this is a coarse heartbeat: a live cross-host run mid-level for longer than
+#: this window is NOT detected (accepted limitation — a shared checkpoint
+#: store across hosts is not this single-operator CLI's primary shape), while
+#: a genuine cross-host crash-restart inside the window merely has to wait it
+#: out (the refusal error says so). Same-host owners use the precise PID
+#: probe instead and never consult this window.
+_CHECKPOINT_OWNER_FRESHNESS = timedelta(minutes=15)
 
 
 class ParallelACExecutor:
@@ -2217,6 +2268,85 @@ class ParallelACExecutor:
                 last_status = status
         return last_status in self._NON_RESUMABLE_TERMINAL_STATUSES
 
+    def _checkpoint_owner_conflict(self, cp: Any) -> str | None:
+        """Return a conflict description when the checkpoint's writer may
+        still be ALIVE, else ``None`` (round-12 finding #3, BLOCKING).
+
+        The round-10 terminal-staleness gate answers "did the checkpointed
+        run already FINISH?" — it cannot answer "is another process still
+        RUNNING (or legitimately paused/parked, awaiting its own resume)
+        this seed right now?". Both leave a non-terminal checkpoint, but
+        adopting a live run's checkpoint puts two processes on the same
+        execution aggregate: racing durable state, double-dispatching ACs.
+
+        The discriminator is the ownership marker every checkpoint save now
+        embeds (``owner``: pid + host + written_at), mirroring the
+        pid/host/heartbeat convention ``core.worktree``'s task lock already
+        established in this codebase:
+
+        - Same host, owner pid alive (and not this process) -> CONFLICT.
+          This is the precise probe for the primary single-operator shape
+          (double-launch / relaunch-while-alive on one machine). PID reuse
+          can false-positive here — accepted: it errs toward refusing a
+          launch (self-heals when the reusing process exits), never toward
+          corrupting a live run.
+        - Same host, owner pid dead -> genuine crash, adopt.
+        - Different host (or unprobeable pid): fall back to heartbeat
+          freshness — a checkpoint written within
+          ``_CHECKPOINT_OWNER_FRESHNESS`` is treated as possibly live.
+          Coarse by design (checkpoints are per-level, so a long mid-level
+          live run outlives the window undetected), and a genuine
+          cross-host crash-restart inside the window only has to wait it
+          out.
+        - No/legacy/malformed owner record -> ``None`` (adopt posture).
+          A checkpoint written before this fix must stay resumable (the
+          one-time-migration convention every other restored field
+          follows), and an unreadable marker must not permanently wall off
+          durable ladder history — the checkpoint's continued existence
+          plus the terminal-staleness gate remain the (weaker) evidence of
+          interruption, exactly the pre-fix posture. This mirrors
+          ``core.worktree._is_lock_stale`` treating unreadable timestamps
+          as stale/claimable.
+        """
+        owner = cp.state.get("owner")
+        if not isinstance(owner, Mapping):
+            return None
+        host = owner.get("host")
+        pid = owner.get("pid")
+        if (
+            isinstance(host, str)
+            and host == socket.gethostname()
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+        ):
+            if pid == os.getpid():
+                # This very process wrote the checkpoint (in-process
+                # relaunch); it cannot race itself across processes.
+                return None
+            if _pid_alive(pid):
+                return (
+                    f"process {pid} on this host ({host!r}) wrote this "
+                    "checkpoint and is still running"
+                )
+            return None
+        written_at = owner.get("written_at")
+        if isinstance(written_at, str):
+            try:
+                written = datetime.fromisoformat(written_at)
+            except ValueError:
+                return None
+            if written.tzinfo is None:
+                written = written.replace(tzinfo=UTC)
+            age = datetime.now(UTC) - written
+            if age < _CHECKPOINT_OWNER_FRESHNESS:
+                return (
+                    f"a process on host {host!r} wrote this checkpoint "
+                    f"{int(age.total_seconds())}s ago (within the "
+                    f"{int(_CHECKPOINT_OWNER_FRESHNESS.total_seconds())}s "
+                    "liveness window) and cannot be probed from this host"
+                )
+        return None
+
     def _discard_stale_checkpoint(self, seed_id: str, *, saved_execution_id: object) -> None:
         """Drop a checkpoint left behind by an already-terminal run.
 
@@ -2479,6 +2609,41 @@ class ParallelACExecutor:
                             saved_execution_id=cp.state.get("execution_id"),
                         )
                     elif cp.phase == "parallel_execution":
+                        # Round-12 finding #3 (BLOCKING): before adopting a
+                        # NON-terminal checkpoint, make sure its writer is
+                        # not still alive. Two live claimants on one seed
+                        # (operator double-launch, a monitor relaunching
+                        # over a live process, or a run that is legitimately
+                        # paused/parked awaiting ITS OWN resume) must never
+                        # silently converge on the same execution aggregate.
+                        # Refusing is loud and immediate — an infra-fatal
+                        # launch conflict raised before any AC work starts,
+                        # so no AC ever surfaces FAILED over it.
+                        owner_conflict = self._checkpoint_owner_conflict(cp)
+                        if owner_conflict is not None:
+                            log.error(
+                                "parallel_executor.recovery.active_checkpoint_conflict",
+                                seed_id=seed_id,
+                                checkpoint_execution_id=cp.state.get("execution_id"),
+                                conflict=owner_conflict,
+                            )
+                            self._console.print(
+                                "[red]Refusing to start: an existing run of "
+                                "this seed appears to still be active or "
+                                f"paused ({owner_conflict}).[/red]"
+                            )
+                            raise CheckpointOwnershipError(
+                                "An RC3 checkpoint for seed "
+                                f"'{seed_id}' appears to belong to a run that "
+                                f"is still active or paused: {owner_conflict}. "
+                                "Refusing to adopt it — two live processes "
+                                "must not share one execution's durable "
+                                "state. If that run has finished or been "
+                                "stopped, simply relaunch (a dead owner is "
+                                "adopted automatically); otherwise wait for "
+                                "it or cancel it first, or start a different "
+                                "seed/session to run fresh."
+                            )
                         # Restore the ORIGINAL run's execution_id. A crash-
                         # restart run is created with a fresh execution_id,
                         # but every durable-state loader keyed off
@@ -2595,6 +2760,13 @@ class ParallelACExecutor:
                             f"(checkpoint recovered, "
                             f"{len(level_contexts)} level context(s) restored)[/cyan]"
                         )
+            except CheckpointOwnershipError:
+                # Round-12 finding #3: the ownership refusal must FAIL the
+                # launch, never degrade into "recovery failed, run fresh" —
+                # a fresh run of the same seed would still race the live
+                # owner on the shared checkpoint key, the workspace, and
+                # the dispatched ACs themselves.
+                raise
             except Exception as e:
                 log.warning(
                     "parallel_executor.recovery.failed",
@@ -3177,6 +3349,21 @@ class ParallelACExecutor:
                                         self._cross_harness_redispatch_enabled
                                     ),
                                     "shadow_replay_enabled": self._shadow_replay_enabled,
+                                },
+                                # Round-12 finding #3 (BLOCKING): ownership
+                                # marker for the liveness gate
+                                # (``_checkpoint_owner_conflict``) — which
+                                # process wrote this checkpoint and when, in
+                                # the pid/host/heartbeat convention
+                                # ``core.worktree``'s task lock established.
+                                # ``written_at`` refreshes on every level
+                                # save, giving cross-host readers a coarse
+                                # heartbeat; same-host readers probe the pid
+                                # directly.
+                                "owner": {
+                                    "pid": os.getpid(),
+                                    "host": socket.gethostname(),
+                                    "written_at": datetime.now(UTC).isoformat(),
                                 },
                             },
                         )
