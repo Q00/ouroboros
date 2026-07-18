@@ -115,7 +115,6 @@ from ouroboros.orchestrator.decomposition_policy import (
 )
 from ouroboros.orchestrator.effort_routing import (
     assess_investment,
-    decide_effort,
     resolve_execute_effort,
 )
 from ouroboros.orchestrator.events import create_ac_stall_detected_event
@@ -4330,6 +4329,29 @@ Respond with either ATOMIC or the structured JSON object only.
             review,
         )
 
+    def _suggested_model_tier_hint(self) -> str | None:
+        """The profile-suggested starting model tier, or ``None`` for "no opinion".
+
+        A profile's ``suggested_model_tier`` seeds the starting tier ONLY when
+        it is something other than the shipped default MEDIUM ("no
+        opinion"); MEDIUM leaves precedence with the router's own base/child
+        logic and any explicit ``model_tier`` arg. Dormant by default (no
+        profile, or a MEDIUM hint, or no router configured -> no model
+        override).
+
+        This is the single source of truth for that hint so every caller that
+        needs to reconstruct a live model-routing decision (the real atomic
+        dispatch AND the terminal-strength check that must match it,
+        ``_root_ac_terminal_state``) computes it identically instead of each
+        maintaining its own copy that can silently drift apart.
+        """
+        if (
+            self._execution_profile is not None
+            and self._execution_profile.suggested_model_tier is not SuggestedModelTier.MEDIUM
+        ):
+            return tier_from_profile_hint(self._execution_profile.suggested_model_tier.value)
+        return None
+
     async def _execute_atomic_ac(
         self,
         ac_index: int,
@@ -4506,18 +4528,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # Sibling of the effort routing above: decide WHICH model tier runs this
         # unit. A decomposed child drops one tier only with explicit trust; current
         # live decomposition supplies none. Retry escalation is applied afterward.
-        # A profile's suggested_model_tier seeds the starting tier ONLY when it is
-        # something other than the shipped default MEDIUM ("no opinion"); MEDIUM
-        # leaves precedence with the router's own base/child logic and any explicit
-        # model_tier arg. Dormant by default (router None → no model override).
-        suggested_tier: str | None = None
-        if (
-            self._execution_profile is not None
-            and self._execution_profile.suggested_model_tier is not SuggestedModelTier.MEDIUM
-        ):
-            suggested_tier = tier_from_profile_hint(
-                self._execution_profile.suggested_model_tier.value
-            )
+        suggested_tier = self._suggested_model_tier_hint()
         model_decision, execute_model_kwargs = resolve_execute_model(
             self._adapter,
             router=self._model_router,
@@ -5813,32 +5824,50 @@ Respond with either ATOMIC or the structured JSON object only.
     async def _root_ac_terminal_state(
         self,
         *,
+        seed: Seed,
         ac_idx: int,
         result: ACExecutionResult,
         retry_attempt: int,
     ) -> bool:
         """Whether ``result`` is a failure at this root AC's maximum strength.
 
-        Recomputes the model tier / reasoning effort the last dispatch
-        actually ran at from the SAME pure decision points every retry
-        already routes through (``decide_model`` / ``decide_effort``) rather
-        than persisting a redundant copy on ``ACExecutionResult``.
+        Recomputes the model tier / reasoning effort the NEXT dispatch of
+        this root AC would actually run at by calling the EXACT SAME
+        resolution entry points a live dispatch uses —
+        :func:`~ouroboros.orchestrator.model_routing.resolve_execute_model`
+        and
+        :func:`~ouroboros.orchestrator.effort_routing.resolve_execute_effort`
+        — with the SAME inputs a live dispatch would pass them, never a
+        parallel/incomplete reconstruction. Calling the lower-level
+        ``decide_model``/``decide_effort`` directly (as an earlier revision
+        did) skips everything those wrappers own on top: the runtime's
+        actual enforceable-effort vocabulary, the cross-harness
+        backend-mismatch guard (a router built for a different backend than
+        the currently-swapped-in adapter is treated as absent), and the
+        profile's suggested-tier hint — and it silently dropped the AC's own
+        investment assessment entirely, which is how a low/low measured
+        assessment's real "high effort" dispatch could get reported as a
+        terminal "xhigh" here: one notch of the investment-authorized
+        cheapening the real dispatch applies, then never subtracted back out.
         """
-        del ac_idx
-        capabilities = getattr(self._adapter, "capabilities", None)
-        model_support = getattr(capabilities, "model_override_support", ParamSupport.IGNORED)
-        effort_support = getattr(capabilities, "reasoning_effort_support", ParamSupport.IGNORED)
-        model_decision = decide_model(
-            model_support,
+        ac_criterion = seed.acceptance_criteria[ac_idx]
+        investment_spec = (
+            ac_criterion.investment if isinstance(ac_criterion, AcceptanceCriterionSpec) else None
+        )
+        investment_assessment = assess_investment(investment_spec)
+        model_decision, _model_kwargs = resolve_execute_model(
+            self._adapter,
             router=self._model_router,
             is_decomposed_child=False,
             retry_attempt=retry_attempt,
+            suggested_tier=self._suggested_model_tier_hint(),
         )
-        effort_decision = decide_effort(
-            effort_support,
+        effort_decision, _effort_kwargs = resolve_execute_effort(
+            self._adapter,
             base_effort=self._reasoning_effort,
             is_decomposed_child=False,
             retry_attempt=retry_attempt,
+            investment_assessment=investment_assessment,
         )
         return is_terminal_state_failure(
             success=result.success,
@@ -5899,7 +5928,7 @@ Respond with either ATOMIC or the structured JSON object only.
         current_result = result
         current_retry_attempt = ac_retry_attempts[ac_idx]
         terminal = await self._root_ac_terminal_state(
-            ac_idx=ac_idx, result=current_result, retry_attempt=current_retry_attempt
+            seed=seed, ac_idx=ac_idx, result=current_result, retry_attempt=current_retry_attempt
         )
         if not terminal:
             return None

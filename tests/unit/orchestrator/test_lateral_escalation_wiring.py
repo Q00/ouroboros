@@ -12,10 +12,12 @@ import pytest
 
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
+    InvestmentSpec,
     OntologySchema,
     Seed,
     SeedMetadata,
 )
+from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
 from ouroboros.orchestrator.lateral_escalation import (
     TOTAL_PERSONA_COUNT,
     LateralEscalationState,
@@ -61,6 +63,12 @@ def _make_executor_with_active_ladder() -> ParallelACExecutor:
         base_tier="frontier",
         escalation_retry_threshold=999,  # never escalates further past frontier
     )
+    # resolve_execute_model() treats a router built for a different backend
+    # than the currently-configured adapter as absent (the cross-harness
+    # redispatch guard) — the adapter must report the SAME backend the
+    # router above declares for the model axis to actually be "configured"
+    # from a live dispatch's point of view, exactly as it must at runtime.
+    executor._adapter.runtime_backend = "claude"
     return executor
 
 
@@ -307,3 +315,115 @@ class TestLadderProgression:
         # Never re-emitted the parked event again (already parked; ``just_parked``
         # only fires once on the original transition).
         executor._event_emitter.emit_ac_parked_for_operator.assert_not_awaited()
+
+
+class TestRootAcTerminalStateMatchesLiveDispatch:
+    """Fix 3 (BLOCKING, PR #1648 review): ``_root_ac_terminal_state`` must
+    reproduce the EXACT model/effort resolution a live dispatch would use for
+    the NEXT attempt of this same root AC — same entry points
+    (``resolve_execute_model``/``resolve_execute_effort``), same inputs
+    (investment authority, profile-suggested tier, backend-matched router) —
+    never a parallel/incomplete reconstruction that can silently diverge from
+    what actually gets dispatched.
+    """
+
+    @pytest.mark.asyncio
+    async def test_investment_authorized_cheapening_is_reflected_not_overshot(self) -> None:
+        """A measured low/low high-confidence investment assessment
+        authorizes ONE notch of real-dispatch cheapening; from
+        ``EFFORT_RAISE_RETRY_THRESHOLD`` onward the retry-raise then adds one
+        notch back, netting "high" — not "xhigh". Before the fix, the helper
+        ignored the investment assessment entirely and reported "xhigh": at
+        the effort ceiling, wrongly satisfying ``at_max_effort`` and
+        reporting this AC terminal a retry early. The model axis alone is
+        already at the frontier ceiling (see ``_make_executor_with_active_ladder``),
+        so with the fix this case must NOT be terminal (effort axis has real
+        headroom the live dispatch would still use), and the bug this
+        regression guards against would have reported it terminal."""
+        executor = _make_executor_with_active_ladder()
+        executor._reasoning_effort = "high"
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(
+                AcceptanceCriterionSpec(
+                    description="Implement the widget",
+                    investment=InvestmentSpec(
+                        difficulty="low",
+                        stakes="low",
+                        provenance="measured",
+                        confidence="high",
+                    ),
+                ),
+            ),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        # Ground truth: what the REAL dispatch would resolve for this exact
+        # retry attempt, given the exact same investment assessment.
+        investment_assessment = assess_investment(seed.acceptance_criteria[0].investment)
+        real_effort_decision, _ = resolve_execute_effort(
+            executor._adapter,
+            base_effort="high",
+            is_decomposed_child=False,
+            retry_attempt=3,
+            investment_assessment=investment_assessment,
+        )
+        assert real_effort_decision.level == "high"  # cheapen-then-raise nets back to "high"
+
+        terminal = await executor._root_ac_terminal_state(
+            seed=seed,
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=3,
+        )
+
+        # The effort axis still has real headroom under the fix (matches the
+        # live dispatch's own "high", short of the "xhigh" ceiling), so this
+        # is correctly NOT yet a terminal-state failure.
+        assert terminal is False
+
+    @pytest.mark.asyncio
+    async def test_no_investment_authority_reaches_true_ceiling_and_is_terminal(self) -> None:
+        """Without investment authority to cheapen, the retry-raise alone
+        carries a "high" base to the "xhigh" ceiling — genuinely terminal,
+        same as before the fix. Regression guard proving the fix did not
+        just flip every case to non-terminal."""
+        executor = _make_executor_with_active_ladder()
+        executor._reasoning_effort = "high"
+        seed = _make_seed()  # no investment on the AC spec
+
+        terminal = await executor._root_ac_terminal_state(
+            seed=seed,
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=3,
+        )
+
+        assert terminal is True
+
+    @pytest.mark.asyncio
+    async def test_model_router_backend_mismatch_treated_as_dormant_like_live_dispatch(
+        self,
+    ) -> None:
+        """``resolve_execute_model`` treats a router built for a DIFFERENT
+        backend than the currently-configured adapter as absent (the
+        cross-harness redispatch guard). The terminal check must observe the
+        identical treatment — calling the lower-level ``decide_model``
+        directly (the pre-fix shape) would ignore this guard and use the
+        router anyway."""
+        executor = _make_executor_with_active_ladder()
+        executor._adapter.runtime_backend = "codex"  # no longer matches the router's "claude"
+        seed = _make_seed()
+
+        # With the model axis forced dormant by the mismatch and no effort
+        # axis configured either, there is no ladder to have exhausted.
+        terminal = await executor._root_ac_terminal_state(
+            seed=seed,
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=3,
+        )
+
+        assert terminal is False
