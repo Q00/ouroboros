@@ -53,7 +53,10 @@ def _truncate_to_cell_width(content: str, width: int) -> str:
     """
     if cell_len(content) <= width:
         return content
-    ellipsis = "..."
+    # Round-8 (non-blocking): in panes narrower than the 3-cell "..." the
+    # fixed ellipsis would itself exceed the available width — size it to
+    # the width that actually exists (".."/"."/"" for 2/1/0 cells).
+    ellipsis = "..." if width >= 3 else "." * max(0, width)
     budget = max(0, width - cell_len(ellipsis))
     # ``set_cell_size`` pads with spaces when the cropped remainder is
     # narrower than ``budget`` (e.g. the cut landed right before a

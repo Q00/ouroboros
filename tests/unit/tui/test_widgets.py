@@ -787,6 +787,23 @@ class TestACProgressWidget:
         # Ample pane: reserved chars subtracted as before.
         assert _width_for(100) == 80
 
+    def test_truncation_ellipsis_never_exceeds_widths_below_three_cells(self) -> None:
+        """Round-8 (non-blocking): for widths below the 3-cell "..." the
+        ellipsis itself must be sized to the available width — a fixed
+        "..." would overflow an extremely narrow pane. Verified for BOTH
+        twin helpers (``ac_progress`` and ``ac_tree``)."""
+        from ouroboros.tui.widgets.ac_progress import (
+            _truncate_to_cell_width as progress_truncate,
+        )
+        from ouroboros.tui.widgets.ac_tree import _truncate_to_cell_width as tree_truncate
+
+        for truncate in (progress_truncate, tree_truncate):
+            for width in (0, 1, 2, 3):
+                truncated = truncate("some long content", width)
+                assert cell_len(truncated) <= width
+            # Sanity: usable widths keep the ordinary 3-cell ellipsis.
+            assert truncate("some long content", 10).endswith("...")
+
     def test_render_ac_item_truncation_is_cell_width_aware_for_cjk(self) -> None:
         """CJK characters occupy 2 terminal display cells each. Truncating by
         Python code-point count (the pre-fix behavior) could keep TWICE the
