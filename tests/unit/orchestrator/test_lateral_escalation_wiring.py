@@ -2333,6 +2333,118 @@ class TestResumeReentersLadderAtRestoredPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_parked_without_operator_event_backfills_it_on_resume(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Round-7 follow-up finding: ``progressed(parked=True)`` is persisted
+        BEFORE the separate ``parked_for_operator`` event. If that second
+        write fails and the process dies, replay restores ``parked=True`` —
+        but the ladder only emits ``parked_for_operator`` on the
+        ``just_parked`` transition EDGE, which never re-fires for an
+        already-parked reconstruction, permanently skipping the dedicated
+        operator notification. Resume must detect the gap (durably parked,
+        no matching operator event this episode) and backfill it."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [p.value for p in ThinkingPersona],
+                    "consecutive_terminal_failures": 9,
+                    "parked": True,
+                    "persona": None,
+                    "retry_attempt": 12,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        events = await memory_event_store.replay("execution", "exec-1")
+        parked_events = [
+            event
+            for event in events
+            if event.type == "execution.ac.parked_for_operator"
+            and event.data.get("node_id") == node_id
+        ]
+        assert len(parked_events) == 1, "the missing operator event must be backfilled"
+        assert parked_events[0].data["consecutive_terminal_failures"] == 9
+        assert parked_events[0].data["personas_tried"] == [p.value for p in ThinkingPersona]
+        # And the run's success still resolved the episode after the backfill.
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_parked_with_operator_event_already_landed_is_not_duplicated(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Control for the backfill: when the episode's ``parked_for_operator``
+        DID land durably, resume must not emit a second one."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [p.value for p in ThinkingPersona],
+                    "consecutive_terminal_failures": 9,
+                    "parked": True,
+                    "persona": None,
+                    "retry_attempt": 12,
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [p.value for p in ThinkingPersona],
+                    "consecutive_terminal_failures": 9,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        events = await memory_event_store.replay("execution", "exec-1")
+        parked_events = [
+            event
+            for event in events
+            if event.type == "execution.ac.parked_for_operator"
+            and event.data.get("node_id") == node_id
+        ]
+        assert len(parked_events) == 1, "no duplicate operator event may be emitted"
+
+    @pytest.mark.asyncio
     async def test_completed_persona_dispatch_is_not_rerun_on_resume(
         self, memory_event_store: EventStore
     ) -> None:

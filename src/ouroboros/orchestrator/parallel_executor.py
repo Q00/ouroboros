@@ -1174,6 +1174,19 @@ class ParallelACExecutor:
         # ``_lateral_escalation_resume_attempts`` during replay and consumed
         # (popped) by ``_resume_escalated_ac``.
         self._lateral_escalation_resume_attempt_completed: dict[int, bool] = {}
+        # Round-7 follow-up finding: ``lateral_escalation_progressed
+        # (parked=True)`` is persisted BEFORE the separate
+        # ``parked_for_operator`` event. If that second write fails and the
+        # process dies, replay correctly restores ``parked=True`` — but the
+        # ladder only emits ``parked_for_operator`` on the ``just_parked``
+        # transition EDGE, which never re-fires for an already-parked
+        # reconstruction, permanently skipping the dedicated operator
+        # notification the durable-event contract advertises. The loader
+        # records here whether the current episode's durable log says parked
+        # with NO ``parked_for_operator`` event actually landed;
+        # ``_resume_escalated_ac`` consumes (pops) it and backfills the event
+        # idempotently.
+        self._lateral_escalation_parked_event_missing: dict[int, bool] = {}
         # Fix 7 (round 2, BLOCKING) defense-in-depth: the two contract
         # boundaries that populate this value (EconomicsConfig's Pydantic
         # field validator, and the resume-time
@@ -6886,6 +6899,11 @@ Respond with either ATOMIC or the structured JSON object only.
         # which degrades to the pre-fix "re-run the in-flight persona"
         # posture rather than skipping a persona that never really ran.
         finalized_attempts: set[int] = set()
+        # Round-7 follow-up finding: whether the CURRENT episode's dedicated
+        # ``parked_for_operator`` event actually landed. Reset on the same
+        # episode-closing events that reset reconstruction, so a prior
+        # episode's operator event can never satisfy a later episode's gap.
+        parked_operator_event_seen = False
         for event in events:
             event_type = getattr(event, "type", None)
             if event_type == "execution.ac.outcome_finalized":
@@ -6921,7 +6939,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 latest_state_data = None
                 latest_state_type = None
                 latest_progressed_data = None
+                parked_operator_event_seen = False
             else:
+                if event_type == "execution.ac.parked_for_operator":
+                    parked_operator_event_seen = True
                 latest_state_data = data
                 latest_state_type = event_type
                 # Round-6 Finding #1: the in-flight attempt number lives only
@@ -7019,6 +7040,17 @@ Respond with either ATOMIC or the structured JSON object only.
         # attempt identity.
         self._lateral_escalation_resume_attempt_completed[ac_idx] = (
             resume_attempt is not None and resume_attempt in finalized_attempts
+        )
+        # Round-7 follow-up finding: durable state says parked but the
+        # dedicated operator-notification event never landed (the
+        # ``progressed(parked=True)`` write succeeded, the
+        # ``parked_for_operator`` write did not, and the process died before
+        # the in-process revert-and-retry could re-attempt it). The
+        # ``just_parked`` transition edge never re-fires for an
+        # already-parked reconstruction, so the resumed path must backfill
+        # the event explicitly.
+        self._lateral_escalation_parked_event_missing[ac_idx] = (
+            state.parked and not parked_operator_event_seen
         )
 
         self._lateral_escalation_states[ac_idx] = state
@@ -7207,6 +7239,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 self._lateral_escalation_states.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempts.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+                self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
             self._schedule_deferred_durable_write(
                 write=lambda: self._event_emitter.emit_ac_parked_resolved(
@@ -7225,6 +7258,7 @@ Respond with either ATOMIC or the structured JSON object only.
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
         self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+        self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
     async def _terminate_escalation_episode(
         self, *, ac_idx: int, execution_id: str, session_id: str, reason: str
@@ -7281,6 +7315,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 self._lateral_escalation_states.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempts.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+                self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
             self._schedule_deferred_durable_write(
                 write=lambda: self._event_emitter.emit_lateral_escalation_interrupted(
@@ -7300,6 +7335,7 @@ Respond with either ATOMIC or the structured JSON object only.
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
         self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
+        self._lateral_escalation_parked_event_missing.pop(ac_idx, None)
 
     async def _resume_escalated_ac(
         self,
@@ -7336,6 +7372,57 @@ Respond with either ATOMIC or the structured JSON object only.
         top-of-ladder state.
         """
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+        # Round-7 follow-up finding: the durable log says this AC is parked
+        # but its dedicated ``parked_for_operator`` event never landed (the
+        # write failed and the process died before the in-process
+        # revert-and-retry could re-attempt it; the ``just_parked`` edge
+        # never re-fires for an already-parked reconstruction). Backfill it
+        # here, before anything else — the AC genuinely IS parked per the
+        # durable ``progressed(parked=True)`` record, so this only makes the
+        # log say what the reconstruction already concluded. Same durability
+        # convention as the other correctness-bearing writes: bounded
+        # in-process attempt first, then the shared deferred-write retry
+        # mechanism if the store is still refusing.
+        if restored_state.parked and self._lateral_escalation_parked_event_missing.pop(
+            ac_idx, False
+        ):
+            backfill_node_id = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id, ac_index=ac_idx
+            ).node_id
+            backfill_reason = (
+                "all lateral-thinking personas exhausted; AC still failing "
+                "at maximum strength (operator event backfilled on resume)"
+            )
+
+            async def _emit_parked_backfill() -> bool:
+                return await self._event_emitter.emit_ac_parked_for_operator(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=backfill_node_id,
+                    root_ac_index=ac_idx,
+                    personas_tried=tuple(p.value for p in restored_state.personas_tried),
+                    consecutive_terminal_failures=(
+                        restored_state.consecutive_terminal_failures
+                    ),
+                    backoff_seconds=self._parked_retry_backoff_seconds,
+                    reason=backfill_reason,
+                )
+
+            if not await _emit_parked_backfill():
+                log.error(
+                    "parallel_executor.lateral_escalation.parked_backfill_write_failed",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    node_id=backfill_node_id,
+                )
+                self._schedule_deferred_durable_write(
+                    write=_emit_parked_backfill,
+                    on_persisted=None,
+                    log_key="parallel_executor.lateral_escalation.parked_backfill",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    node_id=backfill_node_id,
+                )
         # Round-7 Finding #4: ``progressed`` is written BEFORE its dispatch
         # runs, so the restored "in-flight" attempt may in fact have
         # COMPLETED (with a failure) before the crash — the crash then
