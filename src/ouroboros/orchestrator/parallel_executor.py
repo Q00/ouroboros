@@ -1689,6 +1689,28 @@ class ParallelACExecutor:
                 ordered_indices.append(ac_index)
         return tuple(ordered_indices)
 
+    @staticmethod
+    def _checkpoint_seed_id(seed: Seed, session_id: str) -> str:
+        """Return the stable identifier used to key RC3 checkpoints.
+
+        ``Seed`` has no ``id`` attribute — its durable identifier lives at
+        ``seed.metadata.seed_id`` (generated once at seed creation and
+        preserved through serialization). The previous
+        ``getattr(seed, "id", session_id)`` therefore ALWAYS fell through to
+        the ``session_id`` fallback, and since a crash-restart run is created
+        with a fresh session, the recovery load could never find the
+        checkpoint the crashed run saved under the old session's id. Keying
+        by ``seed.metadata.seed_id`` makes save and load agree across
+        restarts of the same seed. ``session_id`` remains only as a graceful
+        fallback for duck-typed seeds without metadata (mirrors the
+        ``getattr(getattr(seed, "metadata", None), "seed_id", None)``
+        convention already used in ``mcp.server.adapter``).
+        """
+        seed_id = getattr(getattr(seed, "metadata", None), "seed_id", None)
+        if isinstance(seed_id, str) and seed_id:
+            return seed_id
+        return session_id
+
     async def _execute_ac_batch(
         self,
         *,
@@ -1844,7 +1866,7 @@ class ParallelACExecutor:
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
             try:
-                seed_id = getattr(seed, "id", session_id)
+                seed_id = self._checkpoint_seed_id(seed, session_id)
                 load_result = self._checkpoint_store.load(seed_id)
                 if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
                     cp = load_result.value
@@ -2417,7 +2439,7 @@ class ParallelACExecutor:
                     try:
                         from ouroboros.persistence.checkpoint import CheckpointData
 
-                        seed_id = getattr(seed, "id", session_id)
+                        seed_id = self._checkpoint_seed_id(seed, session_id)
                         checkpoint = CheckpointData.create(
                             seed_id=seed_id,
                             phase="parallel_execution",
