@@ -2726,36 +2726,18 @@ class ParallelACExecutor:
                     investment_spec=investment_spec,
                     decomposition_trustworthy=child_decomposition_trustworthy,
                     semantic_ac_key=semantic_ac_key,
-                    # Fix 1 (round 2): forward the PARENT's own success
-                    # contract to every child dispatch. Without this,
-                    # ``ac_spec`` was always None for a live decomposed
-                    # child, so ``_execute_atomic_ac`` could never run that
-                    # child's own verify gate, and
-                    # ``result.verify_gate_outcome`` stayed None forever --
-                    # making ``_attest_decomposition_round``'s sibling axis
-                    # permanently INDETERMINATE for every real decomposition
-                    # round (only hand-built unit-test results could ever
-                    # populate it). There is no separate per-child verify
-                    # contract anywhere in this codebase (the decomposer
-                    # only proposes free-text ``verification_hint``, not a
-                    # runnable command), so each child inherits the
-                    # parent's contract verbatim, scoped to "does the AC's
-                    # contract already hold after this child's own slice" --
-                    # the same gate-anchored oracle every other AC
-                    # success/failure decision reuses. This is
-                    # intentionally conservative: a multi-child split only
-                    # earns TRUSTWORTHY when the contract holds again after
-                    # EVERY child, not just the last one, matching this
-                    # whole module's fail-closed bias (see
-                    # ``decomposition_attestation.py``). A child's own
-                    # dispatch success can be gated by this recheck
-                    # (mirroring top-level atomic ACs), but that never
-                    # leaves the overall decomposed AC's final acceptance
-                    # incorrect: the outer ``_apply_verify_gate`` call
-                    # independently re-derives success/failure from the
-                    # SAME contract re-run after all children finish, so a
-                    # spurious mid-round gate failure on an earlier child is
-                    # corrected by that final, authoritative check.
+                    # Forward the PARENT's spec for prompt context and
+                    # semantic-key derivation. Children NEVER execute this
+                    # borrowed contract as their own verify gate (Fix 1,
+                    # round 3 -- see the ``verify_gate_active`` comment in
+                    # ``_execute_atomic_ac``): running the parent's whole
+                    # (possibly non-idempotent) contract once per child was
+                    # both a cost bug and a false trust signal. A child's
+                    # own evidence comes from the per-child artifact-slice
+                    # oracle above (its assigned slice of the parent's
+                    # seed-authored expected_artifacts), and the parent's
+                    # own gate is still re-run exactly once, after all
+                    # children finish, by ``_attest_decomposition_round``.
                     ac_spec=ac_spec,
                 )
             except BaseException as exc:
@@ -3424,15 +3406,14 @@ class ParallelACExecutor:
             ac_spec: The root AC's structured spec, when it carries a success
                 contract, so the atomic leaf prompt can surface it. The batch
                 layer passes it for top-level ACs; decomposition recursion
-                (``_execute_decomposition_children``) now forwards the SAME
-                root spec to every child dispatch too (Fix 1, round 2), so a
-                live decomposed child can run its own verify gate and populate
-                ``result.verify_gate_outcome`` -- the gate-anchored decomposition
-                attestation (``_attest_decomposition_round``) reads that field
-                off every sibling and is otherwise permanently unable to reach
-                a non-INDETERMINATE verdict. There is no separate per-child
-                verify contract in this codebase, so a child's "own" gate is
-                the parent's contract re-checked after that child's slice.
+                (``_execute_decomposition_children``) forwards the SAME root
+                spec to every child dispatch for prompt context, but a child
+                never executes that borrowed contract as its own verify gate
+                (Fix 1, round 3). A decomposed child's OWN evidence instead
+                comes from the per-child artifact-slice oracle in
+                ``_execute_decomposition_children``: its assigned slice of
+                the parent's seed-authored ``expected_artifacts``, checked
+                deterministically with a pre-dispatch existence snapshot.
             investment_spec: The top-level AC's investment authority. Recursive
                 children inherit it because they jointly discharge the parent AC.
                 This is tracked separately from ``ac_spec`` because it governs a
@@ -5293,24 +5274,27 @@ Respond with either ATOMIC or the structured JSON object only.
             # rather than drop it.
             #
             # Fix 1 (round 3): a decomposition child (``is_sub_ac``) is only ever
-            # handed the PARENT's contract (see the "Fix 1 (round 2)" comment on
-            # the ``ac_spec=ac_spec`` forward in ``_execute_decomposition_children``)
-            # -- there is no principled per-child contract in this codebase. Running
-            # the parent's own (possibly non-idempotent) verify_command once per
-            # successful child, IN ADDITION to the single authoritative re-run over
-            # the union of all children in ``_attest_decomposition_round``, is both
-            # a cost bug (N+1 executions of the same command) and a correctness bug:
-            # a child passing the PARENT's whole contract in isolation is not
-            # evidence that child did its own job correctly, so treating that result
-            # as "this sibling's own verify gate" (as ``_attest_decomposition_round``
+            # handed the PARENT's contract (see the ``ac_spec=ac_spec`` forward in
+            # ``_execute_decomposition_children``). Running the parent's own
+            # (possibly non-idempotent) verify_command once per successful child,
+            # IN ADDITION to the single authoritative re-run over the union of all
+            # children in ``_attest_decomposition_round``, is both a cost bug (N+1
+            # executions of the same command) and a correctness bug: a child
+            # passing the PARENT's whole contract in isolation is not evidence
+            # that child did its own job correctly, so treating that result as
+            # "this sibling's own verify gate" (as ``_attest_decomposition_round``
             # would, via ``result.verify_gate_outcome``) is a false trust signal.
             # Children therefore never execute this gate; ``verify_gate_outcome``
-            # stays ``None`` for them, which makes the sibling axis of the
-            # gate-anchored attestation correctly resolve to INDETERMINATE (fail
-            # closed -- see ``decomposition_attestation.py``) instead of borrowing
-            # the parent-wide result as if it were child-local proof. The parent's
-            # own gate is still re-run exactly once, after all children finish, by
-            # ``_attest_decomposition_round``.
+            # stays ``None`` for them. A child's OWN evidence instead comes from
+            # the per-child artifact-slice oracle in
+            # ``_execute_decomposition_children`` (its assigned slice of the
+            # parent's seed-authored expected_artifacts, checked with a
+            # pre-dispatch existence snapshot); with no slice assigned, the
+            # sibling axis of the gate-anchored attestation resolves to
+            # INDETERMINATE (fail closed -- see ``decomposition_attestation.py``)
+            # instead of borrowing the parent-wide result as if it were
+            # child-local proof. The parent's own gate is still re-run exactly
+            # once, after all children finish, by ``_attest_decomposition_round``.
             verify_gate_active = self._run_verify_commands and not is_sub_ac
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:

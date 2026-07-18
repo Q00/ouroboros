@@ -16,10 +16,25 @@ than inventing a parallel evidence-manifest/coverage-claim judge (the
 file-overlap-based attestation approach an earlier design review considered
 and rejected as a strawman), this module reuses that SAME oracle twice:
 
-* once per sibling — did each child pass its own verify gate?
+* once per sibling — did each child pass its own child-local contract?
 * once for the parent — re-run *after* every child has finished, does the
   parent's own verify gate now pass over the union of all children's combined
   effect on the shared workspace?
+
+The sibling axis is populated by the per-child artifact-slice contract: when
+the parent AC's seed declares ``expected_artifacts``, the decomposer must
+partition those paths across its proposed children (structurally validated —
+a child can never claim a path outside the parent's seed-authored set, so the
+decomposer cannot invent its own oracle), and the orchestrator checks each
+child's assigned slice with the same deterministic artifact-existence check
+the parent's gate uses, snapshotting existence before that child dispatches
+so pre-existing files never earn credit. No LLM self-grading is involved.
+``TRUSTWORTHY`` is therefore genuinely reachable when (a) the parent declares
+``expected_artifacts`` and the partition's per-child evidence plus the
+parent's re-run gate all pass, or (b) some future per-child contract type
+populates the sibling axis. When the parent declares no
+``expected_artifacts``, the round stays ``INDETERMINATE`` by design — an
+honest "not enough information", not a bug.
 
 If a sibling clobbered another's work, or the split left a gap the parent's
 own contract cares about, the parent's re-run gate fails and the round is

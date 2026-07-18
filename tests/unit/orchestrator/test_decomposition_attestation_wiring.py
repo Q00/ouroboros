@@ -418,21 +418,22 @@ class TestExecuteDecompositionChildrenWiring:
 
 class TestLiveDecompositionAttestationEndToEnd:
     """Fix 1 (round 3, BLOCKING): a decomposition child is only ever handed
-    the PARENT's contract verbatim (there is no principled per-child
-    contract in this codebase -- see the "Fix 1 (round 2)"/"Fix 1 (round 3)"
-    comments in ``_execute_decomposition_children``/``_execute_atomic_ac``).
-    Running that parent-wide contract once per successful child, IN ADDITION
-    to the single authoritative re-run over the union of all children in
-    ``_attest_decomposition_round``, was both a cost bug (N+1 non-idempotent
-    command executions) and a correctness bug: a child passing the PARENT's
-    whole contract in isolation is not evidence that child did its own job
-    correctly. As of round 3, children never execute the borrowed contract at
-    all, so the sibling axis of the gate-anchored attestation always resolves
-    to INDETERMINATE (fail closed) for a live decomposition round -- these
+    the PARENT's contract verbatim (see the ``ac_spec=ac_spec`` forward in
+    ``_execute_decomposition_children`` and the ``verify_gate_active``
+    comment in ``_execute_atomic_ac``). Running that parent-wide contract
+    once per successful child, IN ADDITION to the single authoritative
+    re-run over the union of all children in ``_attest_decomposition_round``,
+    was both a cost bug (N+1 non-idempotent command executions) and a
+    correctness bug: a child passing the PARENT's whole contract in
+    isolation is not evidence that child did its own job correctly. As of
+    round 3, children never execute the borrowed contract at all; a child's
+    OWN evidence comes only from the per-child artifact-slice oracle (see
+    ``TestPerChildArtifactSliceOracle``). The rounds in THIS class carry no
+    child artifact slices, so their sibling axis stays un-evaluable -- these
     tests dispatch every child through the REAL ``_execute_single_ac`` ->
     ``_execute_atomic_ac`` code path (a stub *runtime adapter* is the only
     double) to prove that, and that the PARENT's own gate is still evaluated
-    exactly once, for real, regardless of the (indeterminate) sibling axis.
+    exactly once, for real, regardless of the sibling axis.
     """
 
     @pytest.mark.asyncio

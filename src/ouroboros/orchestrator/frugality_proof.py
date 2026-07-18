@@ -26,12 +26,22 @@ A triad row joins three measured axes by ``ac_id``:
   ``execution.ac.decomposition_attested`` below whenever that event exists.
 * **attestation override** — ``execution.ac.decomposition_attested`` (Fix 3,
   round 3): the REAL, post-round, gate-anchored trust verdict for the same
-  decomposition round the child's baseline was measured in. When present for
-  a row's attempt, it is authoritative over the shadow-replay proposal-time
-  value -- an untrustworthy post-round attestation invalidates that attempt's
-  row even if the earlier shadow-replay snapshot said trustworthy. Correlated
-  by ``(run, parent_node_id, retry_attempt)`` since this event carries no
+  decomposition round the child's baseline was measured in. It is
+  authoritative over the shadow-replay proposal-time value -- a row carrying
+  ``parent_node_id`` only stays trustworthy when a real TRUSTWORTHY
+  attestation exists for every one of its attempts; an untrustworthy,
+  MISSING, duplicated, or unjoinable (ambiguous ``parent_node_id``)
+  attestation excludes the row, so degraded telemetry can never be more
+  trusted than present telemetry. Correlated by
+  ``(run, parent_node_id, retry_attempt)`` since this event carries no
   ``ac_id`` (it is scoped to the decomposition ROUND, not one child).
+  TRUSTWORTHY verdicts are genuinely producible: when a parent AC's seed
+  declares ``expected_artifacts`` and the decomposer partitions them across
+  children, each child is graded against its own deterministic artifact
+  slice (see ``decomposition_attestation.py``), so attested rounds can and
+  do accumulate countable proof samples. Parents without
+  ``expected_artifacts`` attest INDETERMINATE by design and simply never
+  count -- an honest "not enough information", not a bug.
 * **acceptance** — ``execution.ac.outcome_finalized``. Proof rows remain provisional
   until the seed-level verify/retry layer authoritatively accepts their root AC.
 
