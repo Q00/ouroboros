@@ -15,11 +15,11 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
-from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
 from ouroboros.harness.decomposition_attestation import (
     DecompositionAttestation,
     DecompositionTrustVerdict,
 )
+from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
