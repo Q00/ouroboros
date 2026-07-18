@@ -3010,6 +3010,22 @@ class ParallelACExecutor:
                     )
                 )
             else:
+                # PRECEDENCE RISK (latent, guard-rail for future code): in
+                # this branch the artifact-slice oracle produced NO evaluable
+                # evidence -- which includes its deliberate DENIALS, e.g.
+                # "assigned artifacts pre-existed dispatch" -- so a non-None
+                # ``gate`` here would stand alone as this sibling's verify
+                # signal, and ``gate.passed=True`` would bypass that denial
+                # entirely. Today this is unreachable on the live path
+                # (nothing populates a decomposition child's
+                # ``verify_gate_outcome``; children never run the borrowed
+                # parent gate), so the fallback is safe. If a future change
+                # starts populating per-child gate outcomes, it MUST NOT let
+                # a passing gate override an artifact-oracle denial: an
+                # unevaluable-by-denial artifact record means "this child's
+                # slice is not attributable", and no independent gate pass
+                # may resurrect it into sibling-axis credit.
+                #
                 # Surface the artifact oracle's UNEVALUABLE record's reason
                 # (e.g. "assigned artifacts pre-existed dispatch: ...") so an
                 # INDETERMINATE round stays diagnosable, instead of the
