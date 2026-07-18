@@ -2705,6 +2705,238 @@ class TestNonSuccessLadderExitsResolveDurableState:
         assert state == LateralEscalationState()
 
 
+class TestResumedLadderNonEngageableExitsCloseEpisode:
+    """Adversarial-review Bug #2 (live reproduction): a THIRD terminal exit
+    Round-6 Finding #2 missed. When ``_resume_escalated_ac``'s redispatch of
+    a resumed AC comes back non-retryable/infra-fatal (or decomposed),
+    execution flows into ``_maybe_run_lateral_escalation_ladder``, which
+    returned ``None`` at an early exit BEFORE ``engaged`` was ever set — so
+    neither in-loop ``_terminate_escalation_episode`` call site was reached.
+    The durable record for the node stayed a dangling ``progressed`` and a
+    LATER cold resume reconstructed the stale in-progress ladder and
+    auto-redispatched an AC whose actual last outcome was infra-fatal —
+    directly violating the "infra-fatal fails immediately" mandate."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    def _cold_start_executor(event_store: EventStore) -> ParallelACExecutor:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        executor._ac_retry_attempts = 2
+        executor._model_router = ModelRouter(
+            tier_models={"frontier": "gpt-frontier"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="frontier",
+            escalation_retry_threshold=999,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._sleep = AsyncMock()
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        return executor
+
+    async def _run_batch(
+        self, executor: ParallelACExecutor, *, ac_retry_attempts: dict[int, int]
+    ) -> list[ACExecutionResult | BaseException]:
+        return await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts=ac_retry_attempts,
+            execution_counters=None,
+        )
+
+    @staticmethod
+    async def _seed_progressed_history(store: EventStore, node_id: str) -> None:
+        """Durably record a mid-ladder episode, exactly as a crashed prior
+        process would have left it: latest record is ``progressed``."""
+        await store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.HACKER.value],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": ThinkingPersona.HACKER.value,
+                },
+            )
+        )
+
+    async def _escalation_events(self, store: EventStore, node_id: str) -> list[BaseEvent]:
+        events = await store.replay("execution", "exec-1")
+        return [
+            event
+            for event in events
+            if event.type
+            in {
+                "execution.ac.lateral_escalation_progressed",
+                "execution.ac.parked_for_operator",
+                "execution.ac.parked_resolved",
+                "execution.ac.lateral_escalation_interrupted",
+            }
+            and event.data.get("node_id") == node_id
+        ]
+
+    @pytest.mark.asyncio
+    async def test_resumed_infra_fatal_redispatch_closes_episode_durably(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """The review's exact reproduction: resumed AC with existing ladder
+        history whose resumed redispatch comes back infra-fatal. The durable
+        record must end in a terminal state, and a SUBSEQUENT cold resume
+        must NOT auto-redispatch it through the ladder again."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await self._seed_progressed_history(memory_event_store, node_id)
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Implement the widget",
+                    success=False,
+                    error="adapter crashed on the resumed redispatch",
+                    infra_fatal=True,
+                )
+            ]
+        )
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is False
+        assert results[0].infra_fatal is True
+        # ONE dispatch: the resumed attempt — infra-fatal never re-enters
+        # the ladder's redispatch loop.
+        assert executor._execute_ac_batch.await_count == 1
+
+        # The durable record now shows a TERMINAL state, not the review's
+        # stale ['execution.ac.lateral_escalation_progressed'].
+        escalation_events = await self._escalation_events(memory_event_store, node_id)
+        assert escalation_events[-1].type == "execution.ac.lateral_escalation_interrupted"
+        assert escalation_events[-1].data["reason"] == "not_retryable"
+
+        # A SUBSEQUENT cold resume reconstructs fresh state...
+        cold = self._cold_start_executor(memory_event_store)
+        assert (
+            await cold._load_lateral_escalation_state(0, execution_id="exec-1")
+            == LateralEscalationState()
+        )
+        # ...and dispatches through the ORDINARY fresh path — never the
+        # resumed-ladder auto-redispatch (no parked-cadence sleep, no
+        # post-budget/forced-frontier ladder dispatch).
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            return [_success_result()]
+
+        cold._execute_ac_batch = AsyncMock(side_effect=succeeds)
+        cold_results = await self._run_batch(cold, ac_retry_attempts={0: 0})
+        assert isinstance(cold_results[0], ACExecutionResult)
+        assert len(dispatch_calls) == 1
+        assert dispatch_calls[0]["same_runtime_budget_exhausted"] is False
+        assert dispatch_calls[0].get("force_frontier_routing", False) is False
+        cold._sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resumed_decomposed_redispatch_closes_episode_durably(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """The review-noted decomposed variant of the same hole: a resumed
+        redispatch that came back decomposed exits at the first not-terminal
+        check before ``engaged`` is set."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await self._seed_progressed_history(memory_event_store, node_id)
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Implement the widget",
+                    success=False,
+                    error="decomposition children failed",
+                    is_decomposed=True,
+                )
+            ]
+        )
+
+        results = await self._run_batch(executor, ac_retry_attempts={0: 0})
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].is_decomposed is True
+
+        escalation_events = await self._escalation_events(memory_event_store, node_id)
+        assert escalation_events[-1].type == "execution.ac.lateral_escalation_interrupted"
+        assert escalation_events[-1].data["reason"] == "redispatch_decomposed"
+
+        cold = self._cold_start_executor(memory_event_store)
+        assert (
+            await cold._load_lateral_escalation_state(0, execution_id="exec-1")
+            == LateralEscalationState()
+        )
+
+    @pytest.mark.asyncio
+    async def test_fresh_ac_non_retryable_exit_emits_no_spurious_termination(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Control: a genuinely fresh AC (no escalation history) hitting the
+        same early infra-fatal exit has nothing to terminate — no spurious
+        ``interrupted`` event may appear."""
+        executor = self._cold_start_executor(memory_event_store)
+        infra_fatal = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="adapter crashed",
+            infra_fatal=True,
+        )
+
+        outcome = await executor._maybe_run_lateral_escalation_ladder(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=infra_fatal,
+            ac_retry_attempts={0: 2},
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            execution_counters=None,
+        )
+
+        assert outcome is None
+        events = await memory_event_store.replay("execution", "exec-1")
+        assert not any(
+            event.type == "execution.ac.lateral_escalation_interrupted" for event in events
+        )
+
+
 class TestResolvedWriteExhaustionRetriesInBackground:
     """Round-6 Finding #3 (BLOCKING): when the ``parked_resolved`` write's
     bounded foreground retries were ALL exhausted, the executor logged,

@@ -6896,6 +6896,21 @@ Respond with either ATOMIC or the structured JSON object only.
         self._lateral_escalation_states[ac_idx] = state
         return state
 
+    @staticmethod
+    def _escalation_state_has_history(state: LateralEscalationState) -> bool:
+        """Whether a (restored) ladder state records an OPEN escalation episode.
+
+        The same three-field test ``_run_batch_with_verify_and_retry`` uses
+        to route a batch AC through the resumed-ladder path: any parked
+        flag, nonzero terminal-failure streak, or recorded persona means a
+        durable ``progressed``/``parked_for_operator`` record exists for
+        this AC whose episode has not yet been closed by a terminal event.
+        A fresh, never-escalated AC (or one whose episode was already
+        resolved/interrupted — reconstruction resets those to fresh) has
+        none of the three.
+        """
+        return bool(state.parked or state.consecutive_terminal_failures > 0 or state.personas_tried)
+
     def _schedule_deferred_durable_write(
         self,
         *,
@@ -7350,6 +7365,34 @@ Respond with either ATOMIC or the structured JSON object only.
         if not self._lateral_escalation_enabled:
             return None
         if not self._is_retryable_failure(result):
+            # Round-6 review follow-up (Finding #2's THIRD exit): on the
+            # RESUMED path, ``_resume_escalated_ac``'s redispatch can come
+            # back non-retryable/infra-fatal and flow here BEFORE the loop
+            # below ever sets ``engaged`` — so NEITHER in-loop terminal exit
+            # (both added for Finding #2) is reached and the durable episode
+            # stays a dangling ``progressed`` record. A later cold resume
+            # would then reconstruct the stale in-progress ladder and
+            # AUTO-REDISPATCH an AC whose actual last outcome was
+            # infra-fatal — the exact failure mode the "infra-fatal fails
+            # immediately" mandate forbids. If durable escalation history
+            # exists for this AC, close the episode before stepping aside; a
+            # genuinely fresh AC (no history) has nothing to terminate and
+            # must not get a spurious termination event. The loader's
+            # fail-closed sentinel (synthetic parked=True on an unreadable
+            # log) also routes here: when history CANNOT be read, closing a
+            # possibly-nonexistent episode is the safe direction — an
+            # ``interrupted`` record with no prior history replays exactly
+            # like no episode at all, while a dangling real episode would
+            # auto-redispatch after infra-fatal.
+            if self._escalation_state_has_history(
+                await self._load_lateral_escalation_state(ac_idx, execution_id=execution_id)
+            ):
+                await self._terminate_escalation_episode(
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    reason="not_retryable",
+                )
             return None
 
         current_result = result
@@ -7393,6 +7436,29 @@ Respond with either ATOMIC or the structured JSON object only.
                     # Never entered the ladder at all: success, or no
                     # escalation axis is actively configured (both dormant) --
                     # today's unchanged entry behavior for those cases.
+                    # Round-6 review follow-up (Finding #2's RESUMED
+                    # decomposed variant): a resumed AC with durable ladder
+                    # history whose ``_resume_escalated_ac`` redispatch came
+                    # back DECOMPOSED lands here on the very first check
+                    # (``is_decomposed`` makes the failure non-terminal
+                    # before ``engaged`` is ever set), so the in-loop
+                    # decomposed exit below is never reached and the episode
+                    # would stay a dangling ``progressed`` record — a later
+                    # cold resume would auto-redispatch through the ladder
+                    # again. Durably close the episode for a non-success
+                    # result whenever escalation history exists; a fresh AC
+                    # (no history) keeps today's silent pass-through.
+                    if not current_result.success and self._escalation_state_has_history(state):
+                        await self._terminate_escalation_episode(
+                            ac_idx=ac_idx,
+                            execution_id=execution_id,
+                            session_id=session_id,
+                            reason=(
+                                "redispatch_decomposed"
+                                if current_result.is_decomposed
+                                else "ladder_not_engageable"
+                            ),
+                        )
                     return None
                 # A redispatch INSIDE the loop bounced into a non-terminal
                 # outcome (with forced-ceiling semantics this now means: it
@@ -7693,11 +7759,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 restored = await self._load_lateral_escalation_state(
                     ac_idx, execution_id=execution_id
                 )
-                if (
-                    restored.parked
-                    or restored.consecutive_terminal_failures > 0
-                    or restored.personas_tried
-                ):
+                if self._escalation_state_has_history(restored):
                     resumed_ladder_states[ac_idx] = restored
                     # Re-enter at the post-budget phase — the durable record
                     # proves this AC already spent its ordinary budget before
