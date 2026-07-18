@@ -3857,6 +3857,7 @@ class ParallelACExecutor:
         parent_text: str,
         min_sub_acs: int,
         max_sub_acs: int,
+        parent_expected_artifacts: tuple[str, ...] = (),
     ) -> tuple[DecompositionProposal | None, tuple[str, ...]]:
         """Parse a bounded generic proposal without claiming semantic trust."""
         if len(response_text) > 10_000:
@@ -3872,6 +3873,7 @@ class ParallelACExecutor:
             parent_text=parent_text,
             min_children=min_sub_acs,
             max_children=max_sub_acs,
+            parent_expected_artifacts=parent_expected_artifacts,
         )
         if errors:
             return None, errors
@@ -3880,6 +3882,7 @@ class ParallelACExecutor:
             parent_text=parent_text,
             min_children=min_sub_acs,
             max_children=max_sub_acs,
+            parent_expected_artifacts=parent_expected_artifacts,
         )
         return proposal, (() if proposal is not None else ("invalid_structured_proposal",))
 
@@ -3958,17 +3961,34 @@ class ParallelACExecutor:
         reasons: tuple[str, ...],
         min_sub_acs: int,
         max_sub_acs: int,
+        parent_expected_artifacts: tuple[str, ...] = (),
     ) -> str:
         """Build the single verifier-guided repair request for a generic proposal."""
+        artifact_clause = ""
+        child_example = '{"description":"...","coverage_claims":["..."],"verification_hint":"..."}'
+        if parent_expected_artifacts:
+            artifact_list = "\n".join(f"- {path}" for path in parent_expected_artifacts)
+            artifact_clause = (
+                "\nThe parent criterion declares these expected artifact paths:\n"
+                f"{artifact_list}\n"
+                "EVERY path above must be assigned to EXACTLY ONE child via that child's "
+                '"expected_artifacts" field. Do not invent paths outside this list and do '
+                "not assign the same path to more than one child.\n"
+            )
+            child_example = (
+                '{"description":"...","coverage_claims":["..."],'
+                '"verification_hint":"...",'
+                '"expected_artifacts":["one/path/from/the/list/above"]}'
+            )
         return (
             "Repair the rejected decomposition proposal exactly once. Return ONLY the "
             "structured JSON object described below; do not return ATOMIC or a string array.\n\n"
             f"Rejection reasons: {json.dumps(reasons)}\n\n"
-            f"Parent criterion:\n{parent_text}\n\n"
+            f"Parent criterion:\n{parent_text}\n"
+            f"{artifact_clause}\n"
             f"Bounded attempt trace:\n{trace_summary or 'none'}\n\n"
             f"Return {min_sub_acs}-{max_sub_acs} children in this shape:\n"
-            '{"children":[{"description":"...","coverage_claims":["..."],'
-            '"verification_hint":"..."}],"covers_parent":true,"rationale":"..."}'
+            f'{{"children":[{child_example}],"covers_parent":true,"rationale":"..."}}'
         )
 
     async def _verify_generic_decomposition(
@@ -3980,6 +4000,7 @@ class ParallelACExecutor:
         system_prompt: str,
         min_sub_acs: int,
         max_sub_acs: int,
+        parent_expected_artifacts: tuple[str, ...] = (),
     ) -> tuple[DecompositionProposal | None, tuple[str, ...]]:
         """Apply structural validation followed by independent semantic attestation."""
         proposal, reasons = self._parse_structured_decomposition(
@@ -3987,6 +4008,7 @@ class ParallelACExecutor:
             parent_text=parent_text,
             min_sub_acs=min_sub_acs,
             max_sub_acs=max_sub_acs,
+            parent_expected_artifacts=parent_expected_artifacts,
         )
         if proposal is None:
             return None, reasons
@@ -4019,7 +4041,13 @@ class ParallelACExecutor:
         evidence_refs: tuple[str, ...] = (),
     ) -> DecompositionDecisionRecord:
         """Decompose an AC and return a versioned, fail-closed decision."""
-        del tools, system_prompt, retry_attempt, ac_spec
+        del tools, system_prompt, retry_attempt
+        # The PARENT's own seed-authored expected_artifacts (fixed before the
+        # decomposer ever runs) is the only material a proposal may partition
+        # into per-child artifact slices -- see validate_decomposition_proposal.
+        parent_expected_artifacts: tuple[str, ...] = (
+            tuple(ac_spec.expected_artifacts) if ac_spec is not None else ()
+        )
         ac_label = (
             f"AC #{node_identity.display_path}"
             if node_identity is not None
@@ -4061,6 +4089,25 @@ class ParallelACExecutor:
             )
 
         bounded_trace = redact_and_truncate_text(trace_summary, max_chars=1_000)
+        # Mirroring profile_lines: this block is only present when the parent
+        # actually declares expected_artifacts, so a decomposer for a
+        # contract-less parent is never tempted to invent the field.
+        artifact_partition_lines = ""
+        child_example_keys = (
+            '"description":"...","coverage_claims":["distinct parent scope"],\n'
+            '"verification_hint":"how this child is independently checked"'
+        )
+        if parent_expected_artifacts:
+            artifact_list = "\n".join(f"- {path}" for path in parent_expected_artifacts)
+            artifact_partition_lines = (
+                "This criterion declares the following expected artifact paths:\n"
+                f"{artifact_list}\n"
+                "If you decompose, EVERY path above must be assigned to EXACTLY ONE child "
+                'via that child\'s "expected_artifacts" JSON field. Do not invent paths '
+                "outside this list and do not assign the same path to more than one "
+                "child.\n"
+            )
+            child_example_keys += ',\n"expected_artifacts":["one/path/from/the/list/above"]'
         decompose_prompt = f"""Analyze this acceptance criterion and determine if it should be decomposed.
 
 ## Goal Context
@@ -4073,7 +4120,7 @@ class ParallelACExecutor:
 Default to ATOMIC. Each sub-AC becomes a separate agent session with its own full
 context, so split only when the parent bundles multiple independently valuable
 outcomes that can be verified separately.
-{profile_lines}
+{profile_lines}{artifact_partition_lines}
 Decompose into {min_sub_acs}-{max_sub_acs} sub-ACs only when each child is simpler,
 independently executable, and owns distinct parent scope. Multiple steps or files
 alone are not evidence that a split is warranted.
@@ -4081,8 +4128,7 @@ alone are not evidence that a split is warranted.
 If the AC is one focused outcome, respond with: ATOMIC
 
 If decomposing, respond with ONLY this structured JSON object:
-{{"children":[{{"description":"...","coverage_claims":["distinct parent scope"],
-"verification_hint":"how this child is independently checked"}}],
+{{"children":[{{{child_example_keys}}}],
 "covers_parent":true,"rationale":"why the children cover the parent without overlap"}}
 
 Respond with either ATOMIC or the structured JSON object only.
@@ -4127,6 +4173,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     system_prompt=decomposition_system_prompt,
                     min_sub_acs=min_sub_acs,
                     max_sub_acs=max_sub_acs,
+                    parent_expected_artifacts=parent_expected_artifacts,
                 )
                 if proposal is not None:
                     return DecompositionDecisionRecord(
@@ -4148,6 +4195,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     reasons=proposal_reasons,
                     min_sub_acs=min_sub_acs,
                     max_sub_acs=max_sub_acs,
+                    parent_expected_artifacts=parent_expected_artifacts,
                 )
                 repaired_text = await self._dispatch_decomposition_prompt(
                     prompt=repair_prompt,
@@ -4160,6 +4208,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     system_prompt=decomposition_system_prompt,
                     min_sub_acs=min_sub_acs,
                     max_sub_acs=max_sub_acs,
+                    parent_expected_artifacts=parent_expected_artifacts,
                 )
                 if repaired_proposal is not None:
                     return DecompositionDecisionRecord(

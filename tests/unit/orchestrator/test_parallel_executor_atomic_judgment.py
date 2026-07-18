@@ -309,3 +309,120 @@ async def test_try_decompose_ac_parses_verdict_array_before_atomic_substring(
     assert result.source is DecompositionSource.PREFLIGHT
     assert [child.description for child in result.children] == expected_children
     assert result.reasons == expected_reasons
+
+
+@pytest.mark.asyncio
+async def test_try_decompose_ac_prompts_for_artifact_partition_when_parent_declares() -> None:
+    """When the parent AC's seed-authored contract declares expected_artifacts,
+    the decomposer prompt must list them and require an exact one-child-each
+    assignment via the child "expected_artifacts" JSON field."""
+    from ouroboros.core.seed import AcceptanceCriterionSpec
+
+    runtime = _CapturingDecompositionRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+
+    await executor._try_decompose_ac(
+        ac_content="Build the parser and its docs.",
+        ac_index=0,
+        seed_goal="goal",
+        tools=["Read"],
+        system_prompt="system",
+        ac_spec=AcceptanceCriterionSpec(
+            description="Build the parser and its docs.",
+            expected_artifacts=("src/parser.py", "docs/parser.md"),
+        ),
+    )
+
+    assert runtime.prompt is not None
+    assert "- src/parser.py" in runtime.prompt
+    assert "- docs/parser.md" in runtime.prompt
+    assert "EXACTLY ONE child" in runtime.prompt
+    assert '"expected_artifacts"' in runtime.prompt
+
+
+@pytest.mark.asyncio
+async def test_try_decompose_ac_never_mentions_artifacts_without_parent_contract() -> None:
+    """Invariant 4 (prompt leg): a parent with no expected_artifacts must get
+    the exact pre-feature prompt shape -- no artifact instructions, and no
+    "expected_artifacts" example key to tempt the decomposer into inventing
+    the field."""
+    from ouroboros.core.seed import AcceptanceCriterionSpec
+
+    runtime = _CapturingDecompositionRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+
+    await executor._try_decompose_ac(
+        ac_content="Build the parser.",
+        ac_index=0,
+        seed_goal="goal",
+        tools=["Read"],
+        system_prompt="system",
+        ac_spec=AcceptanceCriterionSpec(description="Build the parser."),
+    )
+
+    assert runtime.prompt is not None
+    assert "expected_artifacts" not in runtime.prompt
+
+
+@pytest.mark.asyncio
+async def test_parse_structured_decomposition_threads_parent_artifacts() -> None:
+    """The structural parse leg must reject a proposal whose children do not
+    exactly partition the parent's declared artifact set, and accept one that
+    does (carrying the slices onto the parsed children)."""
+    import json as _json
+
+    valid = _json.dumps(
+        {
+            "children": [
+                {
+                    "description": "Implement the parser module",
+                    "coverage_claims": ["parser scope"],
+                    "verification_hint": "parser file exists",
+                    "expected_artifacts": ["src/parser.py"],
+                },
+                {
+                    "description": "Write the parser documentation",
+                    "coverage_claims": ["docs scope"],
+                    "verification_hint": "docs file exists",
+                    "expected_artifacts": ["docs/parser.md"],
+                },
+            ],
+            "covers_parent": True,
+            "rationale": "Parser code and docs are independently verifiable.",
+        }
+    )
+    proposal, reasons = ParallelACExecutor._parse_structured_decomposition(
+        valid,
+        parent_text="Build the parser and its docs.",
+        min_sub_acs=2,
+        max_sub_acs=5,
+        parent_expected_artifacts=("src/parser.py", "docs/parser.md"),
+    )
+    assert reasons == ()
+    assert proposal is not None
+    assert proposal.children[0].expected_artifacts == ("src/parser.py",)
+    assert proposal.children[1].expected_artifacts == ("docs/parser.md",)
+
+    # Same payload but the docs artifact is never assigned: rejected.
+    incomplete = valid.replace(
+        '"expected_artifacts": ["docs/parser.md"]', '"expected_artifacts": []'
+    )
+    proposal, reasons = ParallelACExecutor._parse_structured_decomposition(
+        incomplete,
+        parent_text="Build the parser and its docs.",
+        min_sub_acs=2,
+        max_sub_acs=5,
+        parent_expected_artifacts=("src/parser.py", "docs/parser.md"),
+    )
+    assert proposal is None
+    assert any("not fully assigned" in reason for reason in reasons)
