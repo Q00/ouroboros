@@ -68,6 +68,8 @@ from ouroboros.events.session_signal import (
 from ouroboros.harness.claim_term_guard import strict_deterministic_claim_term_guard
 from ouroboros.harness.decomposition_attestation import (
     DecompositionAttestation,
+    DecompositionTrustAxis,
+    DecompositionTrustVerdict,
     ParentVerifyOutcome,
     SiblingVerifyOutcome,
     attest_decomposition,
@@ -752,6 +754,57 @@ def _revalidate_cached_verify_gate_outcome(
         reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
         output_tail=outcome.output_tail,
         missing_artifacts=missing_artifacts,
+    )
+
+
+def _decomposition_attestation_from_event_data(
+    data: Mapping[str, Any],
+) -> DecompositionAttestation | None:
+    """Reconstruct a :class:`DecompositionAttestation` from durable event data.
+
+    Inverse of :meth:`DecompositionAttestation.to_event_data`, used to replay
+    a persisted ``execution.ac.decomposition_attested`` event back into the
+    same shape ``_attest_decomposition_round`` originally produced (Fix 2,
+    round 2). Fails closed: any payload that does not round-trip cleanly
+    (unknown enum value, wrong type, missing required field) returns
+    ``None`` -- treated the same as "no attestation recorded for this node
+    id", never optimistically defaulted to a trustworthy verdict.
+    """
+    node_id = data.get("node_id")
+    verdict_raw = data.get("verdict")
+    if not isinstance(node_id, str) or not node_id.strip():
+        return None
+    if not isinstance(verdict_raw, str):
+        return None
+    try:
+        verdict = DecompositionTrustVerdict(verdict_raw)
+    except ValueError:
+        return None
+
+    failed_axis_raw = data.get("failed_axis")
+    failed_axis: DecompositionTrustAxis | None = None
+    if failed_axis_raw is not None:
+        if not isinstance(failed_axis_raw, str):
+            return None
+        try:
+            failed_axis = DecompositionTrustAxis(failed_axis_raw)
+        except ValueError:
+            return None
+
+    failed_sibling_id = data.get("failed_sibling_id")
+    if failed_sibling_id is not None and not isinstance(failed_sibling_id, str):
+        return None
+
+    reason = data.get("reason")
+    if not isinstance(reason, str):
+        reason = ""
+
+    return DecompositionAttestation(
+        node_id=node_id,
+        verdict=verdict,
+        failed_axis=failed_axis,
+        failed_sibling_id=failed_sibling_id,
+        reason=reason,
     )
 
 
@@ -2509,7 +2562,13 @@ class ParallelACExecutor:
         # AC's future retries: once a decomposition round is proven untrustworthy
         # by re-running the parent's own verify gate, a fresh (unverified) SPLIT
         # proposal on the next retry must not re-admit the cheap child tier.
-        prior_attestation = self._decomposition_attestations.get(node_identity.node_id)
+        # Fix 2 (round 2, BLOCKING): read through the durable-event-backed
+        # loader, not the raw in-memory dict, so a fresh executor after a
+        # resume/restart reconstructs a prior UNTRUSTWORTHY verdict instead
+        # of silently forgetting it and re-admitting the discount.
+        prior_attestation = await self._load_decomposition_attestation(
+            node_identity.node_id, execution_id=execution_id, session_id=session_id
+        )
         child_decomposition_trustworthy = decision.trustworthy and (
             prior_attestation is None or prior_attestation.trustworthy
         )
@@ -5927,6 +5986,65 @@ Respond with either ATOMIC or the structured JSON object only.
             model_tier=model_decision.tier,
             effort_level=effort_decision.level,
         )
+
+    async def _load_decomposition_attestation(
+        self, node_id: str, *, execution_id: str, session_id: str
+    ) -> DecompositionAttestation | None:
+        """Load the LATEST gate-anchored attestation for this node id, durable
+        across restarts (Fix 2, round 2, BLOCKING).
+
+        ``self._decomposition_attestations`` is an in-memory cache. A process
+        restart/resume recreates the executor with it EMPTY, so a fresh
+        executor forgets a prior round's UNTRUSTWORTHY verdict for this root
+        AC and silently re-authorizes the cheap child-tier discount it
+        should still be withholding -- exactly the poisoning this cache
+        exists to enforce, just no longer surviving a restart.
+
+        Mirrors the existing convention this codebase already uses for the
+        same shape of problem (see ``_load_lateral_escalation_state``): a
+        cache hit returns immediately; a miss replays this execution's own
+        durable events and rebuilds the verdict from the LATEST
+        ``execution.ac.decomposition_attested`` event for this node id.
+        ``node_id`` is stable across same-root retries (it does not encode
+        retry_attempt), so the newest matching event in the durable log is
+        authoritative -- identical "last write wins" semantics to the
+        in-memory dict it replaces. No matching event means no attestation
+        has ever been recorded for this node id (``None``, exactly like
+        today's in-memory default); that is NOT cached, since a decomposition
+        round for this node id may not have run yet in THIS process and a
+        later call after it finishes must not keep returning a stale
+        ``None``.
+        """
+        if node_id in self._decomposition_attestations:
+            return self._decomposition_attestations[node_id]
+
+        aggregate_id = execution_id or session_id
+        try:
+            events = await self._event_store.replay("execution", aggregate_id)
+        except Exception:
+            log.warning(
+                "parallel_executor.decomposition_attestation.state_reconstruction_failed",
+                node_id=node_id,
+                execution_id=execution_id,
+            )
+            events = []
+
+        latest_data: dict[str, Any] | None = None
+        for event in events:
+            if getattr(event, "type", None) != "execution.ac.decomposition_attested":
+                continue
+            data = getattr(event, "data", None)
+            if not isinstance(data, dict) or data.get("node_id") != node_id:
+                continue
+            latest_data = data
+
+        if latest_data is None:
+            return None
+
+        attestation = _decomposition_attestation_from_event_data(latest_data)
+        if attestation is not None:
+            self._decomposition_attestations[node_id] = attestation
+        return attestation
 
     async def _load_lateral_escalation_state(
         self, ac_idx: int, *, execution_id: str

@@ -564,3 +564,143 @@ class TestLiveDecompositionAttestationEndToEnd:
         assert result.decomposition_attestation is not None
         assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
         assert result.decomposition_attestation.trustworthy is False
+
+
+class TestDecompositionAttestationReplayOnResume:
+    """Fix 2 (round 2, BLOCKING): a fresh executor (empty in-memory cache,
+    as happens after a resume/restart) must reconstruct a PRIOR round's
+    UNTRUSTWORTHY verdict from the durable ``execution.ac.decomposition_attested``
+    event log rather than silently forgetting it and re-authorizing the
+    cheap child-tier discount."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_executor_replays_prior_untrustworthy_verdict_from_event_store(
+        self,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.harness.decomposition_attestation import (
+            DecompositionAttestation,
+            DecompositionTrustAxis,
+        )
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _make_replaying_event_store,
+        )
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-resume", ac_index=0)
+
+        # Simulate a PRIOR process having already recorded an UNTRUSTWORTHY
+        # verdict for this exact root AC and persisted it as a durable event
+        # -- exactly what ``ExecutionEventEmitter.emit_decomposition_attested``
+        # writes.
+        prior_attestation = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="prior process: parent gate failed after decomposition",
+        )
+        event_store, appended_events = _make_replaying_event_store()
+        appended_events.append(
+            BaseEvent(
+                type="execution.ac.decomposition_attested",
+                aggregate_type="execution",
+                aggregate_id="exec-resume",
+                data={
+                    **node_identity.to_event_metadata(),
+                    **prior_attestation.to_event_data(),
+                    "execution_id": "exec-resume",
+                    "session_id": "s1",
+                },
+            )
+        )
+
+        # A brand-new executor -- as a resumed process would construct --
+        # with NOTHING in its in-memory ``_decomposition_attestations`` cache.
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        assert executor._decomposition_attestations == {}
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+        executor._emit_workflow_progress = AsyncMock()
+        executor._emit_level_started = AsyncMock()
+        executor._emit_level_completed = AsyncMock()
+        executor._emit_subtask_event = AsyncMock()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+
+        decision = _trustworthy_split_decision(node_identity.node_id)
+
+        captured_trust_flags: list[bool] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-resume",
+            level_contexts=None,
+            retry_attempt=1,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        )
+
+        # The fresh decision itself looks fine (trustworthy=True in isolation)...
+        assert decision.trustworthy is True
+        # ...but the REPLAYED prior verdict must still withhold trust for
+        # every child, proving it was reconstructed from the durable event
+        # log rather than the (empty) in-memory cache. (The cache now holds
+        # THIS round's own freshly-computed verdict, since the round that
+        # just ran overwrites it -- exactly like the pre-existing in-memory
+        # behavior; what this test proves is the trust-withholding DECISION
+        # made *before* that round ran, which is captured in
+        # ``captured_trust_flags``.)
+        assert captured_trust_flags
+        assert all(flag is False for flag in captured_trust_flags)
+
+    @pytest.mark.asyncio
+    async def test_fresh_executor_with_no_prior_event_defaults_to_none(self) -> None:
+        """No matching durable event for this node id -> no prior attestation
+        (identical to today's in-memory ``None`` default), not an error and
+        not an optimistic trustworthy default."""
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _make_replaying_event_store,
+        )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._load_decomposition_attestation(
+            "node-never-seen", execution_id="exec-none", session_id="s1"
+        )
+
+        assert result is None
+        assert "node-never-seen" not in executor._decomposition_attestations
