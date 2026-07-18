@@ -248,6 +248,10 @@ class TestCrashRestartRestoresExecutionId:
         assert captured["batch_executable"] == [1]
         assert captured["execution_id"] == "exec-original"
         assert result.all_succeeded
+        # Round-10 finding #3: the restored id is propagated back through
+        # the result so the CALLER can rejoin its own terminal-status and
+        # frugality bookkeeping to the same aggregate.
+        assert result.execution_id == "exec-original"
 
         # The durable-state loader, keyed off the restored execution_id,
         # finds the REAL prior ladder events — not an empty replay.
@@ -515,6 +519,7 @@ class TestStaleCheckpointFromFinishedRunNeverResumed:
         assert captured["batch_executable"] == [0]
         assert captured["execution_id"] == "exec-rerun"
         assert result2.all_succeeded
+        assert result2.execution_id == "exec-rerun"
         assert all(r.final_message != "[Restored from checkpoint]" for r in result2.results)
         # The stale checkpoint was replaced by run 2's own (fresh) one.
         replaced = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
@@ -606,11 +611,29 @@ class TestStaleCheckpointFromFinishedRunNeverResumed:
         )
 
         # Genuine resume semantics preserved: completed level skipped and
-        # the ORIGINAL execution_id restored.
+        # the ORIGINAL execution_id restored — and reported back to the
+        # caller for its own terminal/frugality bookkeeping (finding #3).
         assert captured["batch_executable"] == [1]
         assert captured["execution_id"] == "exec-original"
         assert result.all_succeeded
+        assert result.execution_id == "exec-original"
         await run2_events.close()
+
+
+def _make_runner(tmp_path: Path) -> tuple[object, CheckpointStore, object]:
+    from ouroboros.orchestrator.runner import OrchestratorRunner
+
+    store = CheckpointStore(base_path=tmp_path / "checkpoints")
+    store.initialize()
+    adapter = MagicMock()
+    adapter.runtime_backend = "opencode"
+    adapter.working_directory = "/tmp/project"
+    adapter.permission_mode = "acceptEdits"
+    event_store = AsyncMock()
+    event_store.append = AsyncMock()
+    event_store.replay = AsyncMock(return_value=[])
+    runner = OrchestratorRunner(adapter, event_store, MagicMock(), checkpoint_store=store)
+    return runner, store, event_store
 
 
 class TestRunnerDeletesCheckpointAtTerminal:
@@ -620,19 +643,7 @@ class TestRunnerDeletesCheckpointAtTerminal:
     checkpoint — that is the state the resume flow exists for."""
 
     def _runner_harness(self, tmp_path: Path) -> tuple[object, CheckpointStore, object]:
-        from ouroboros.orchestrator.runner import OrchestratorRunner
-
-        store = CheckpointStore(base_path=tmp_path / "checkpoints")
-        store.initialize()
-        adapter = MagicMock()
-        adapter.runtime_backend = "opencode"
-        adapter.working_directory = "/tmp/project"
-        adapter.permission_mode = "acceptEdits"
-        event_store = AsyncMock()
-        event_store.append = AsyncMock()
-        event_store.replay = AsyncMock(return_value=[])
-        runner = OrchestratorRunner(adapter, event_store, MagicMock(), checkpoint_store=store)
-        return runner, store, event_store
+        return _make_runner(tmp_path)
 
     def _seed_checkpoint(self, store: CheckpointStore, seed: Seed) -> None:
         from ouroboros.persistence.checkpoint import CheckpointData
@@ -823,3 +834,155 @@ class TestCrashRestartRestoresRetryPolicyLegacyAndMalformed:
         assert executor._lateral_escalation_enabled is True
         assert executor._parked_retry_backoff_seconds == before_backoff
         assert executor._ac_retry_attempts == before_attempts
+
+
+class TestRunnerAdoptsRecoveredExecutionId:
+    """Round-10 finding #3 (BLOCKING): RC3 recovery restores the ORIGINAL
+    run's execution_id inside the executor, so every AC event of the
+    continuation lands under that aggregate — but the runner kept its OWN
+    freshly-minted id and used it for post-execution bookkeeping. One
+    logical run was split across two execution aggregates: AC events under
+    the old id; terminal status, frugality proof, and the returned
+    OrchestratorResult under the new one. The executor now returns the id
+    it actually emitted under (``ParallelExecutionResult.execution_id``)
+    and the runner must adopt it for ALL execution-scoped bookkeeping."""
+
+    async def _run(
+        self,
+        runner: object,
+        seed: Seed,
+        parallel_result: object,
+    ) -> tuple[object, object, AsyncMock, AsyncMock]:
+        from unittest.mock import patch
+
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+        from ouroboros.orchestrator.session import SessionTracker
+
+        tracker = SessionTracker.create("exec-fresh", seed.metadata.seed_id)
+        # The session registry is keyed under the FRESH id at registration
+        # time (execute_precreated_session does this before execution).
+        runner._active_sessions["exec-fresh"] = tracker.session_id
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content="Parent work"),),
+            execution_levels=((0,),),
+        )
+        proof = AsyncMock()
+        retrospective = AsyncMock(return_value=True)
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner, "_evaluate_frugality_proof", proof),
+            patch.object(runner, "_report_frugality_retrospective", retrospective),
+            patch.object(
+                runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id="exec-fresh",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+        return result, tracker, proof, retrospective
+
+    @staticmethod
+    def _terminal_events(event_store: AsyncMock) -> list[object]:
+        return [
+            call.args[0]
+            for call in event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.terminal"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_terminal_and_frugality_follow_restored_execution_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Simulated crash-recovery: the executor reports the checkpoint-
+        restored id ("exec-original") while the runner minted "exec-fresh".
+        Terminal-status recording, frugality-proof evaluation, and the
+        returned OrchestratorResult must ALL follow the restored id — no
+        split-aggregate mismatch between AC-level and session-level
+        bookkeeping."""
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+
+        seed = _seed("Recovered execution id adoption")
+        runner, _store, event_store = _make_runner(tmp_path)
+
+        result, tracker, proof, retrospective = await self._run(
+            runner,
+            seed,
+            ParallelExecutionResult(
+                results=(ACExecutionResult(ac_index=0, ac_content="Parent work", success=True),),
+                success_count=1,
+                failure_count=0,
+                execution_id="exec-original",
+            ),
+        )
+
+        assert result.is_ok
+        # (b) Terminal status lands on the ORIGINAL aggregate the AC events
+        # (a) were emitted under.
+        terminal_events = self._terminal_events(event_store)
+        assert len(terminal_events) == 1
+        assert terminal_events[0].aggregate_id == "exec-original"
+        assert terminal_events[0].data["status"] == "completed"
+        # (b) Frugality proof + retrospective are evaluated over the SAME
+        # restored aggregate, never the stale fresh id.
+        proof.assert_awaited_once_with("exec-original")
+        retrospective.assert_awaited_once_with(
+            execution_id="exec-original",
+            session_id=tracker.session_id,
+            terminal_status="completed",
+        )
+        # Downstream consumers get the id the events actually live under.
+        assert result.value.execution_id == "exec-original"
+        # In-memory session tracking was registered under the FRESH id and
+        # must be cleaned up under that SAME key — no leaked entry.
+        assert "exec-fresh" not in runner._active_sessions
+        assert "exec-original" not in runner._active_sessions
+
+    @pytest.mark.asyncio
+    async def test_without_recovery_fresh_execution_id_is_kept(self, tmp_path: Path) -> None:
+        """No recovery happened: the executor echoes the caller's own id
+        back and every piece of bookkeeping stays on it (guard against the
+        adoption logic changing non-recovery behavior)."""
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+
+        seed = _seed("No recovery keeps fresh id")
+        runner, _store, event_store = _make_runner(tmp_path)
+
+        result, tracker, proof, retrospective = await self._run(
+            runner,
+            seed,
+            ParallelExecutionResult(
+                results=(ACExecutionResult(ac_index=0, ac_content="Parent work", success=True),),
+                success_count=1,
+                failure_count=0,
+                execution_id="exec-fresh",
+            ),
+        )
+
+        assert result.is_ok
+        terminal_events = self._terminal_events(event_store)
+        assert len(terminal_events) == 1
+        assert terminal_events[0].aggregate_id == "exec-fresh"
+        proof.assert_awaited_once_with("exec-fresh")
+        retrospective.assert_awaited_once_with(
+            execution_id="exec-fresh",
+            session_id=tracker.session_id,
+            terminal_status="completed",
+        )
+        assert result.value.execution_id == "exec-fresh"
+        assert "exec-fresh" not in runner._active_sessions

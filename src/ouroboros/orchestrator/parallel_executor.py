@@ -2995,6 +2995,12 @@ class ParallelACExecutor:
             total_messages=total_messages,
             total_duration_seconds=total_duration,
             unconfirmed_durable_writes=unconfirmed_durable_writes,
+            # Round-10 finding #3 (BLOCKING): ``execution_id`` here is the
+            # possibly checkpoint-RESTORED id every AC event above was
+            # emitted under. Returning it lets the caller rejoin its own
+            # terminal-status / frugality bookkeeping to the SAME aggregate
+            # instead of the fresh id it originally passed in.
+            execution_id=execution_id,
         )
 
     def _coerce_decomposition_decision(

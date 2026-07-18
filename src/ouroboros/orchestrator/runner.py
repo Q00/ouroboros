@@ -5106,6 +5106,36 @@ class OrchestratorRunner:
         # Calculate duration
         duration = (datetime.now(UTC) - start_time).total_seconds()
 
+        # Round-10 finding #3 (BLOCKING): RC3 checkpoint recovery restores
+        # the ORIGINAL (checkpointed) run's execution_id inside the
+        # executor, so every AC-level event of this continuation landed
+        # under that restored aggregate — but this caller still holds the
+        # fresh id it minted. Recording terminal status and evaluating the
+        # frugality proof under the fresh id would split one logical run
+        # across two execution aggregates (AC events under the old id,
+        # session-level terminal/frugality bookkeeping under the new one),
+        # making frugality queries and terminal tracking silently read the
+        # WRONG aggregate. Adopt the executor's authoritative id for all
+        # execution-scoped bookkeeping below. ``_unregister_session`` and
+        # cancellation cleanup deliberately keep the ORIGINAL exec_id: the
+        # in-memory active-session registry was keyed under it at
+        # registration time and must be popped under the same key.
+        recovered_exec_id = getattr(parallel_result, "execution_id", None)
+        if (
+            isinstance(recovered_exec_id, str)
+            and recovered_exec_id
+            and recovered_exec_id != exec_id
+        ):
+            log.info(
+                "orchestrator.runner.recovered_execution_id_adopted",
+                original_execution_id=exec_id,
+                recovered_execution_id=recovered_exec_id,
+                session_id=tracker.session_id,
+            )
+            effective_exec_id = recovered_exec_id
+        else:
+            effective_exec_id = exec_id
+
         # Determine overall success
         success = parallel_result.all_succeeded
         recoverable_failure_pause = None
@@ -5248,7 +5278,12 @@ class OrchestratorRunner:
         )
         await self._event_store.append(
             create_execution_terminal_event(
-                execution_id=exec_id,
+                # Round-10 finding #3: the terminal record must land on the
+                # SAME execution aggregate the AC events were emitted under
+                # (the checkpoint-restored id after a recovery), or a
+                # recovered run's terminal transition is invisible to every
+                # consumer of the original aggregate.
+                execution_id=effective_exec_id,
                 session_id=tracker.session_id,
                 status=terminal_status,
                 summary=execution_summary if success else None,
@@ -5311,17 +5346,20 @@ class OrchestratorRunner:
 
         # Deterministic frugality proof over this execution's per-AC triads.
         # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-        await self._evaluate_frugality_proof(exec_id)
+        # Round-10 finding #3: keyed by the checkpoint-restored id — the
+        # proof correlates rows by execution_id, and the AC triads of a
+        # recovered run live in the ORIGINAL aggregate.
+        await self._evaluate_frugality_proof(effective_exec_id)
         if terminal_status in {"completed", "failed", "cancelled"}:
             await self._report_frugality_retrospective(
-                execution_id=exec_id,
+                execution_id=effective_exec_id,
                 session_id=tracker.session_id,
                 terminal_status=terminal_status,
             )
 
         log.info(
             "orchestrator.runner.parallel_completed",
-            execution_id=exec_id,
+            execution_id=effective_exec_id,
             session_id=tracker.session_id,
             success=success,
             success_count=parallel_result.success_count,
@@ -5333,7 +5371,8 @@ class OrchestratorRunner:
             duration_seconds=duration,
         )
 
-        # Clean up session tracking
+        # Clean up session tracking — keyed by the ORIGINAL exec_id the
+        # session was registered under (see the adoption note above).
         self._unregister_session(exec_id, tracker.session_id)
         await clear_cancellation(tracker.session_id)
         if self._task_workspace is not None:
@@ -5343,7 +5382,10 @@ class OrchestratorRunner:
             OrchestratorResult(
                 success=success,
                 session_id=tracker.session_id,
-                execution_id=exec_id,
+                # Round-10 finding #3: report the id the run's events
+                # actually live under, so downstream consumers (evaluate,
+                # projections, MCP job results) query the REAL aggregate.
+                execution_id=effective_exec_id,
                 summary=execution_summary,
                 messages_processed=parallel_result.total_messages,
                 final_message=final_message,

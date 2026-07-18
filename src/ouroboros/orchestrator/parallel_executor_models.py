@@ -295,6 +295,20 @@ class ParallelExecutionResult:
             the operator-facing completion summary and the run's execution
             summary so the uncertainty is visible from the run's own final
             output, never only from a log line.
+        execution_id: Round-10 finding #3 (BLOCKING): the execution_id this
+            run's AC events were actually emitted under. Normally the id the
+            caller passed in — but RC3 checkpoint recovery restores the
+            ORIGINAL (checkpointed) run's execution_id so the ladder /
+            attestation loaders and all AC events rejoin the original
+            durable aggregate. That restoration used to mutate only the
+            executor's local variable: the CALLER kept its own fresh id and
+            recorded the run's terminal status and frugality-proof
+            evaluation under it, splitting one logical continuation across
+            two execution aggregates (AC events under the old id,
+            session-level terminal/frugality bookkeeping under the new one).
+            Callers MUST key all post-execution, execution-scoped
+            bookkeeping off THIS value. ``None`` only for legacy
+            constructions that predate the field.
     """
 
     results: tuple[ACExecutionResult, ...]
@@ -309,6 +323,7 @@ class ParallelExecutionResult:
     total_messages: int = 0
     total_duration_seconds: float = 0.0
     unconfirmed_durable_writes: tuple[str, ...] = ()
+    execution_id: str | None = None
 
     @property
     def all_succeeded(self) -> bool:
