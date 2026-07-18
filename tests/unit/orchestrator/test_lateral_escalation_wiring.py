@@ -1080,6 +1080,164 @@ class TestLadderFailurePropagatesToRecoveryExhausted:
         executor._emit_recovery_exhausted.assert_not_awaited()
 
 
+class TestZeroRetryBudgetStillEngagesLadder:
+    """Fix 6 (round 3, BLOCKING): ``ac_retry_attempts=0`` is a valid,
+    documented configuration (no same-runtime retries before escalation).
+    Before this fix, ``_run_batch_with_verify_and_retry``'s
+    ``if self._ac_retry_attempts <= 0:`` early return emitted
+    recovery-exhausted directly and returned, completely bypassing
+    ``_maybe_run_lateral_escalation_ladder`` -- only reachable through the
+    ``while pending:`` loop, which a zero-budget config never enters. Even
+    with ``lateral_escalation_enabled=True``, a zero ordinary retry budget
+    meant the AC surfaced as exhausted/failed immediately: exactly the
+    "give up" behavior this whole feature exists to prevent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_exhausted_ac_is_handed_to_the_ladder(self) -> None:
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor_with_active_ladder()
+        executor._ac_retry_attempts = 0
+
+        initial_failure = _failed_result(error="stuck at maximum strength")
+        breakthrough = _success_result()
+
+        executor._execute_ac_batch = AsyncMock(return_value=[initial_failure])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._maybe_run_lateral_escalation_ladder = AsyncMock(return_value=breakthrough)
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        # The ladder MUST have been consulted even though the ordinary retry
+        # budget is zero -- the actual reported bug.
+        executor._maybe_run_lateral_escalation_ladder.assert_awaited_once()
+        # A breakthrough success from the ladder must win over the initial
+        # exhausted failure, and must never trigger recovery-exhausted.
+        assert results[0] is breakthrough
+        executor._emit_recovery_exhausted.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_ladder_failure_still_emits_recovery_exhausted_with_fresh_result(
+        self,
+    ) -> None:
+        """When the ladder itself terminates in failure (infra-fatal or
+        otherwise non-retryable) for a zero-budget AC, recovery-exhausted
+        must still fire using the ladder's OWN fresh result, not the stale
+        pre-ladder one -- the same guarantee Fix 3 (round 2) already gives
+        the nonzero-budget path."""
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor_with_active_ladder()
+        executor._ac_retry_attempts = 0
+
+        stale_result = _failed_result(error="stale pre-ladder failure")
+        fresh_infra_fatal = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="adapter crashed mid-ladder",
+            infra_fatal=True,
+        )
+
+        executor._execute_ac_batch = AsyncMock(return_value=[stale_result])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._maybe_run_lateral_escalation_ladder = AsyncMock(return_value=fresh_infra_fatal)
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert results[0] is fresh_infra_fatal
+        executor._emit_recovery_exhausted.assert_awaited_once()
+        _, kwargs = executor._emit_recovery_exhausted.await_args
+        assert kwargs["result"] is fresh_infra_fatal
+        assert kwargs["result"] is not stale_result
+        assert kwargs["retry_termination_reason"] == "infra_fatal"
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_ladder_disabled_preserves_original_behavior(self) -> None:
+        """Sanity control: with the ladder OFF (today's default), a zero
+        retry budget must behave exactly as before -- immediate
+        recovery-exhausted, no ladder consultation side effects beyond the
+        already-guarded no-op ``_maybe_run_lateral_escalation_ladder`` call."""
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor()  # lateral escalation NOT enabled
+        executor._ac_retry_attempts = 0
+
+        initial_failure = _failed_result(error="stuck at maximum strength")
+
+        executor._execute_ac_batch = AsyncMock(return_value=[initial_failure])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        seed = Seed(
+            goal="Implement the stubborn widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Ladder", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert results[0] is initial_failure
+        executor._emit_recovery_exhausted.assert_awaited_once()
+        _, kwargs = executor._emit_recovery_exhausted.await_args
+        assert kwargs["result"] is initial_failure
+        assert kwargs["retry_termination_reason"] == "budget_exhausted"
+
+
 class TestTerminalEligibilityRecheckedEachIteration:
     """Fix 4 (round 2, BLOCKING): terminal-state eligibility must be
     rechecked after EVERY redispatch inside the ladder loop, not just once

@@ -6646,15 +6646,33 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
 
         if self._ac_retry_attempts <= 0:
+            # Fix 6 (round 3, BLOCKING): ``ac_retry_attempts=0`` is a valid,
+            # documented configuration (no same-runtime retries before
+            # escalation) -- it must behave like "immediately exhausted, now
+            # try the lateral-escalation ladder," not "exhausted, stop." This
+            # early return used to emit recovery-exhausted directly and
+            # return, completely bypassing ``_maybe_run_lateral_escalation_ladder``
+            # (only reachable, before this fix, through the ``while pending:``
+            # loop below -- which a zero same-runtime-retry-budget config
+            # never enters). Route through the SAME escalate-then-finalize
+            # helper the bottom of this function uses, so the ladder is tried
+            # here too even with ``lateral_escalation_enabled=True`` and a
+            # zero ordinary retry budget.
             for position, ac_idx in enumerate(batch_executable):
                 result = results[position]
                 if isinstance(result, ACExecutionResult):
-                    await self._emit_recovery_exhausted(
+                    results[position] = await self._finalize_batch_ac_with_escalation(
                         seed=seed,
+                        ac_idx=ac_idx,
                         result=result,
-                        root_ac_index=ac_idx,
+                        ac_retry_attempts=ac_retry_attempts,
                         session_id=session_id,
                         execution_id=execution_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        level_contexts=level_contexts,
+                        execution_counters=execution_counters,
                         retry_termination_reason=(
                             "budget_exhausted"
                             if self._is_retryable_failure(result)
@@ -6899,7 +6917,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # being marked exhausted/FAILED here. Genuinely infra-fatal
             # failures and ACs still short of maximum strength fall through
             # to the unchanged recovery-exhausted path below.
-            escalated = await self._maybe_run_lateral_escalation_ladder(
+            results[position] = await self._finalize_batch_ac_with_escalation(
                 seed=seed,
                 ac_idx=ac_idx,
                 result=result,
@@ -6911,40 +6929,84 @@ Respond with either ATOMIC or the structured JSON object only.
                 system_prompt=system_prompt,
                 level_contexts=level_contexts,
                 execution_counters=execution_counters,
-            )
-            if escalated is not None:
-                results[position] = escalated
-                # Fix 3 (round 2, BLOCKING): the ladder can now return a
-                # FAILED result too (infra-fatal or otherwise non-retryable,
-                # discovered mid-ladder), not just a breakthrough SUCCESS.
-                # Emit recovery-exhausted for that case using THIS fresh
-                # result -- never the stale pre-ladder `result` captured
-                # above -- so the durable record reflects what actually
-                # happened on the ladder's last redispatch.
-                if not escalated.success:
-                    await self._emit_recovery_exhausted(
-                        seed=seed,
-                        result=escalated,
-                        root_ac_index=ac_idx,
-                        session_id=session_id,
-                        execution_id=execution_id,
-                        retry_termination_reason=(
-                            "infra_fatal" if escalated.infra_fatal else "not_retryable"
-                        ),
-                    )
-                continue
-            await self._emit_recovery_exhausted(
-                seed=seed,
-                result=result,
-                root_ac_index=ac_idx,
-                session_id=session_id,
-                execution_id=execution_id,
                 retry_termination_reason=retry_termination_reasons.get(
                     ac_idx,
                     "budget_exhausted" if self._is_retryable_failure(result) else "not_retryable",
                 ),
             )
         return results
+
+    async def _finalize_batch_ac_with_escalation(
+        self,
+        *,
+        seed: Seed,
+        ac_idx: int,
+        result: ACExecutionResult,
+        ac_retry_attempts: dict[int, int],
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        execution_counters: dict[str, int] | None,
+        retry_termination_reason: str,
+    ) -> ACExecutionResult:
+        """Hand one exhausted batch AC to the lateral-escalation ladder before
+        accepting it as recovery-exhausted (Fix 6, round 3 / Task 2).
+
+        Shared by both call sites that reach "this AC's ordinary retry budget
+        is spent" -- the ``ac_retry_attempts <= 0`` early return above AND the
+        bottom of the ``while pending:`` loop -- so an AC stuck at maximum
+        strength always gets a chance at the lateral-persona ladder before
+        surfacing as exhausted/failed, regardless of which path got it here.
+        A result the ladder does not engage with (success, not retryable, or
+        the ladder disabled) passes through ``_maybe_run_lateral_escalation_ladder``
+        unchanged (returns ``None``), so this always falls back to the
+        original recovery-exhausted behavior for those cases.
+        """
+        escalated = await self._maybe_run_lateral_escalation_ladder(
+            seed=seed,
+            ac_idx=ac_idx,
+            result=result,
+            ac_retry_attempts=ac_retry_attempts,
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            level_contexts=level_contexts,
+            execution_counters=execution_counters,
+        )
+        if escalated is not None:
+            # Fix 3 (round 2, BLOCKING): the ladder can now return a FAILED
+            # result too (infra-fatal or otherwise non-retryable, discovered
+            # mid-ladder), not just a breakthrough SUCCESS. Emit
+            # recovery-exhausted for that case using THIS fresh result --
+            # never the stale pre-ladder ``result`` argument -- so the
+            # durable record reflects what actually happened on the ladder's
+            # last redispatch.
+            if not escalated.success:
+                await self._emit_recovery_exhausted(
+                    seed=seed,
+                    result=escalated,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    retry_termination_reason=(
+                        "infra_fatal" if escalated.infra_fatal else "not_retryable"
+                    ),
+                )
+            return escalated
+        await self._emit_recovery_exhausted(
+            seed=seed,
+            result=result,
+            root_ac_index=ac_idx,
+            session_id=session_id,
+            execution_id=execution_id,
+            retry_termination_reason=retry_termination_reason,
+        )
+        return result
 
     async def _maybe_redispatch_alt_harness_for_batch_ac(
         self,
