@@ -3631,6 +3631,170 @@ class TestResolvedWriteExhaustionRetriesInBackground:
         assert not executor._deferred_durable_write_tasks
 
 
+class TestOutcomeFinalizedWriteFailureFailsClosed:
+    """Round-9 Finding #3 (BLOCKING): ``_emit_ac_outcome_finalized`` discarded
+    ``_safe_emit_event``'s return value. That was harmless while the marker
+    was only an input to the frugality proof, but rounds 7-8 made it the
+    resume-correlation logic's AUTHORITATIVE proof that an in-flight persona
+    dispatch already completed — a silently dropped write plus a crash means
+    a restart re-runs a persona attempt that already ran (re-applying side
+    effects). The write must get the same deferred-background-retry treatment
+    as the other correctness-bearing writes in this file, and a permanently
+    failed write must surface via ``unconfirmed_durable_writes``."""
+
+    @staticmethod
+    def _bare_executor(event_store: object) -> ParallelACExecutor:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,  # type: ignore[arg-type]
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._sleep = AsyncMock()
+        return executor
+
+    @pytest.mark.asyncio
+    async def test_failed_marker_write_schedules_deferred_background_retry(self) -> None:
+        import asyncio
+
+        executor = self._bare_executor(AsyncMock())
+        # The immediate foreground emit fails; the FIRST background retry lands.
+        executor._safe_emit_event = AsyncMock(side_effect=[False, True])
+
+        await executor._emit_ac_outcome_finalized(
+            result=_failed_result(),
+            root_ac_index=0,
+            session_id="s1",
+            execution_id="exec-1",
+        )
+
+        # Not silently dropped: a deferred background retry was scheduled.
+        assert executor._deferred_durable_write_tasks
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        assert executor._safe_emit_event.await_count == 2
+        retried_event = executor._safe_emit_event.await_args_list[1].args[0]
+        assert retried_event.type == "execution.ac.outcome_finalized"
+        # The write eventually landed, so nothing surfaces as unconfirmed.
+        assert not executor._unconfirmed_durable_write_descriptions
+
+    @pytest.mark.asyncio
+    async def test_exhausted_marker_write_surfaces_as_unconfirmed(self) -> None:
+        import asyncio
+
+        executor = self._bare_executor(AsyncMock())
+        executor._safe_emit_event = AsyncMock(return_value=False)
+
+        await executor._emit_ac_outcome_finalized(
+            result=_failed_result(),
+            root_ac_index=0,
+            session_id="s1",
+            execution_id="exec-1",
+        )
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        from ouroboros.orchestrator.parallel_executor import (
+            _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS,
+        )
+
+        # Immediate foreground attempt + the full deferred budget.
+        assert executor._safe_emit_event.await_count == 1 + _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS
+        # Round-8 finding #3 convention: the permanently-unconfirmed write is
+        # visible from the run's own final output, like every other exhausted
+        # correctness-bearing write.
+        assert any(
+            "parallel_executor.ac.outcome_finalized" in description
+            for description in executor._unconfirmed_durable_write_descriptions
+        )
+
+    @pytest.mark.asyncio
+    async def test_persisted_marker_write_schedules_no_background_task(self) -> None:
+        """Negative control: the ordinary successful write is unchanged."""
+        executor = self._bare_executor(AsyncMock())
+        executor._safe_emit_event = AsyncMock(return_value=True)
+
+        await executor._emit_ac_outcome_finalized(
+            result=_failed_result(),
+            root_ac_index=0,
+            session_id="s1",
+            execution_id="exec-1",
+        )
+
+        assert not executor._deferred_durable_write_tasks
+        assert not executor._unconfirmed_durable_write_descriptions
+
+    @pytest.mark.asyncio
+    async def test_deferred_marker_landing_restores_resume_correlation(self) -> None:
+        """End-to-end against a real store: the immediate emit fails once
+        (transient store blip), the deferred retry lands the marker, and a
+        subsequent cold-start reconstruction correlates the in-flight
+        attempt as durably FINALIZED — not "still mid-dispatch, must
+        re-run"."""
+        import asyncio
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+            # The ladder durably recorded the hacker persona's attempt 7 as
+            # in-flight before its dispatch ran.
+            await store.append(
+                BaseEvent(
+                    type="execution.ac.lateral_escalation_progressed",
+                    aggregate_type="execution",
+                    aggregate_id="exec-1",
+                    data={
+                        "execution_id": "exec-1",
+                        "session_id": "s1",
+                        "node_id": node_id,
+                        "root_ac_index": 0,
+                        "personas_tried": [ThinkingPersona.HACKER.value],
+                        "consecutive_terminal_failures": 3,
+                        "parked": False,
+                        "persona": ThinkingPersona.HACKER.value,
+                        "retry_attempt": 7,
+                    },
+                )
+            )
+            executor = self._bare_executor(store)
+            real_safe_emit = executor._safe_emit_event
+            attempt_counter = {"calls": 0}
+
+            async def flaky_emit(event: BaseEvent, max_retries: int = 3) -> bool:
+                attempt_counter["calls"] += 1
+                if attempt_counter["calls"] == 1:
+                    return False  # the transient immediate-write failure
+                return await real_safe_emit(event, max_retries)
+
+            executor._safe_emit_event = flaky_emit  # type: ignore[method-assign]
+
+            await executor._emit_ac_outcome_finalized(
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Implement the widget",
+                    success=False,
+                    error="verify_command failed",
+                    retry_attempt=7,
+                    is_decomposed=False,
+                ),
+                root_ac_index=0,
+                session_id="s1",
+                execution_id="exec-1",
+            )
+            assert executor._deferred_durable_write_tasks
+            await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+            # Cold start after the deferred write landed: reconstruction sees
+            # attempt 7 as durably finalized (failed, not decomposed), so
+            # resume advances past the persona instead of re-running it.
+            resumed = self._bare_executor(store)
+            await resumed._load_lateral_escalation_state(0, execution_id="exec-1")
+            assert resumed._lateral_escalation_resume_attempts[0] == 7
+            assert resumed._lateral_escalation_resume_attempt_finalized[0] == (False, False)
+        finally:
+            await store.close()
+
+
 class TestDeferredWriteFirstAttemptIsImmediate:
     """Adversarial-review Bug #1: the deferred retry loop slept the FULL
     parked cadence (default 300s) BEFORE its first attempt, while the

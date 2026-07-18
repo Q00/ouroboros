@@ -6453,28 +6453,65 @@ Respond with either ATOMIC or the structured JSON object only.
         Leaf-level deliver and shadow events are provisional because they are
         emitted before the seed-level success contract runs.  The deterministic
         frugality proof requires this marker and admits only roots whose latest
-        retry was finally accepted.  Event persistence remains observe-only: if
-        the marker is dropped, the proof fails closed by excluding the rows.
+        retry was finally accepted.
+
+        Round-9 finding #3 (BLOCKING): this write used to be observe-only
+        ("if the marker is dropped, the proof fails closed by excluding the
+        rows") — true while the frugality proof was its only consumer,
+        because a dropped write just meant one fewer counted sample. Rounds
+        7-8 made it correctness-bearing for a second consumer: the ladder's
+        resume-correlation logic (``finalized_attempts`` in the escalation
+        state loader, consumed via
+        ``_lateral_escalation_resume_attempt_finalized``) reads this marker
+        as authoritative proof that an in-flight persona dispatch already
+        completed. If this write silently fails and the process dies before
+        any later event lands, a restart finds no record that the attempt
+        completed, concludes "still mid-dispatch", and RE-RUNS a persona
+        attempt that already ran — duplicating work and re-applying side
+        effects. So this write now follows the same durable fail-closed
+        convention as the other correctness-bearing writes in this file
+        (attestation, ``parked_resolved``, ``lateral_escalation_interrupted``,
+        parked backfill): a failed foreground emit (which already carries
+        ``_safe_emit_event``'s own bounded retries) schedules a deferred
+        background retry via ``_schedule_deferred_durable_write``, whose
+        terminal give-up surfaces in the run's ``unconfirmed_durable_writes``.
         """
         from ouroboros.events.base import BaseEvent
 
-        await self._safe_emit_event(
-            BaseEvent(
-                type="execution.ac.outcome_finalized",
-                aggregate_type="execution",
-                aggregate_id=execution_id or session_id,
-                data={
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "root_ac_index": root_ac_index,
-                    "ac_index": root_ac_index,
-                    "retry_attempt": result.retry_attempt,
-                    "success": result.success,
-                    "outcome": result.outcome.value if result.outcome is not None else None,
-                    "is_decomposed": result.is_decomposed,
-                },
+        async def _emit_marker() -> bool:
+            return await self._safe_emit_event(
+                BaseEvent(
+                    type="execution.ac.outcome_finalized",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id,
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "root_ac_index": root_ac_index,
+                        "ac_index": root_ac_index,
+                        "retry_attempt": result.retry_attempt,
+                        "success": result.success,
+                        "outcome": result.outcome.value if result.outcome is not None else None,
+                        "is_decomposed": result.is_decomposed,
+                    },
+                )
             )
-        )
+
+        if not await _emit_marker():
+            log.error(
+                "parallel_executor.ac.outcome_finalized_write_failed_correctness_risk",
+                root_ac_index=root_ac_index,
+                execution_id=execution_id,
+                retry_attempt=result.retry_attempt,
+            )
+            self._schedule_deferred_durable_write(
+                write=_emit_marker,
+                on_persisted=None,
+                log_key="parallel_executor.ac.outcome_finalized",
+                root_ac_index=root_ac_index,
+                execution_id=execution_id,
+                retry_attempt=result.retry_attempt,
+            )
 
     async def _emit_recovery_exhausted(
         self,
