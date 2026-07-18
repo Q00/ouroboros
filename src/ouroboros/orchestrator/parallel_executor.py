@@ -6673,6 +6673,193 @@ Respond with either ATOMIC or the structured JSON object only.
         self._lateral_escalation_states[ac_idx] = state
         return state
 
+    async def _resolve_escalation_success(
+        self, *, ac_idx: int, execution_id: str, session_id: str
+    ) -> None:
+        """Durably close this root AC's escalation episode after a success.
+
+        Shared by the ladder's own breakthrough exit and the resumed-ladder
+        re-entry path (Round-5 Finding #1): whichever path an AC with durable
+        escalation history succeeds on, the ``parked_resolved`` companion
+        event must fire so replay-based projections and later resumes
+        converge to "resolved" instead of a stale parked/escalating record.
+
+        Round-5 Finding #4 (BLOCKING): a durably-missing resolution leaves
+        the latest replayable event for this node id still
+        ``parked_for_operator``/``progressed``. Unlike the ladder's
+        pre-redispatch writes, a genuine SUCCESS cannot be held hostage
+        forever (reverting a completed AC would surface failure where
+        escalation actually broke through — the exact false-negative
+        direction this PR forbids), so this write gets bounded EXTRA retry
+        rounds on top of ``_safe_emit_event``'s own internal retries, then a
+        loud correctness-specific error if truly exhausted.
+        """
+        resolved_node_id = ExecutionNodeIdentity.root(
+            execution_context_id=execution_id, ac_index=ac_idx
+        ).node_id
+        resolved_persisted = False
+        for extra_attempt in range(3):
+            if extra_attempt:
+                await self._sleep(min(2.0 * (2**extra_attempt), 10.0))
+            resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
+                execution_id=execution_id,
+                session_id=session_id,
+                node_id=resolved_node_id,
+                root_ac_index=ac_idx,
+            )
+            if resolved_persisted:
+                break
+        if not resolved_persisted:
+            log.error(
+                "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
+                ac_idx=ac_idx,
+                execution_id=execution_id,
+                node_id=resolved_node_id,
+            )
+        self._lateral_escalation_states.pop(ac_idx, None)
+
+    async def _resume_escalated_ac(
+        self,
+        *,
+        seed: Seed,
+        ac_idx: int,
+        restored_state: LateralEscalationState,
+        ac_retry_attempts: dict[int, int],
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        execution_counters: dict[str, int] | None,
+    ) -> ACExecutionResult:
+        """Re-enter a mid-ladder/parked AC at its restored phase after a resume.
+
+        Round-5 Finding #1 (BLOCKING): checkpoints only save after a level
+        completes, so a crash mid-ladder restarts the whole level — and the
+        ordinary batch path used to run this AC through a FRESH un-backed-off
+        same-runtime retry budget before any escalation state was loaded
+        (loading only happened inside the ladder, which is only reached after
+        that budget is spent). Worse, a fresh attempt that happened to
+        succeed bypassed the ``parked_resolved`` transition entirely, leaving
+        durable/projected state stuck on parked/escalating for a completed
+        AC. This helper is the correct re-entry: the resumed attempt runs at
+        the ladder's post-budget phase (persona-framed prompt for an
+        in-flight persona, parked cadence honored via a pre-dispatch long
+        backoff, frontier/max-effort routing per the ladder's own contract),
+        a SUCCESS fires the same resolution event the non-crash path fires,
+        and a failure hands straight back to the ladder — which resumes at
+        the restored streak/persona/parked phase, never a fresh
+        top-of-ladder state.
+        """
+        ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+        synthetic_prior = ACExecutionResult(
+            ac_index=ac_idx,
+            ac_content=ac_content,
+            success=False,
+            error=(
+                "Execution restarted while this AC was mid-escalation; resuming "
+                "the lateral-escalation ladder at its durably recorded phase."
+            ),
+            retry_attempt=ac_retry_attempts[ac_idx],
+        )
+        if restored_state.parked:
+            # Honor the parked cadence that governs retry pacing: the parked
+            # loop always sleeps the long backoff BEFORE a redispatch.
+            await self._sleep(self._parked_retry_backoff_seconds)
+            retry_prompt = self._build_ac_retry_prompt(
+                result=synthetic_prior, ac_content=ac_content, is_final_attempt=True
+            )
+        elif restored_state.personas_tried:
+            # The ``progressed`` event is emitted BEFORE its redispatch, so
+            # the last recorded persona is the one whose attempt the crash
+            # interrupted — re-run THAT persona's attempt, don't skip it.
+            in_flight_persona = restored_state.personas_tried[-1]
+            retry_prompt = build_persona_retry_prompt(
+                persona=in_flight_persona,
+                ac_content=ac_content,
+                current_approach=(
+                    self._build_ac_retry_prompt(
+                        result=synthetic_prior, ac_content=ac_content, is_final_attempt=False
+                    )
+                    or "The previous attempts failed as described above."
+                ),
+                failed_attempts=(),
+            )
+        else:
+            retry_prompt = self._build_ac_retry_prompt(
+                result=synthetic_prior, ac_content=ac_content, is_final_attempt=False
+            )
+
+        retry_results = await self._execute_ac_batch(
+            seed=seed,
+            batch_indices=[ac_idx],
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            level_contexts=level_contexts,
+            ac_retry_attempts=ac_retry_attempts,
+            execution_counters=execution_counters,
+            retry_prompts={ac_idx: retry_prompt},
+            same_runtime_budget_exhausted=True,
+            # The ladder's own redispatch contract (Round-5 Finding #2): a
+            # resumed mid-ladder attempt runs at maximum strength.
+            force_frontier_routing=True,
+        )
+        candidate = retry_results[0]
+        if not isinstance(candidate, ACExecutionResult):
+            # Mirrors the ladder's own handling of a raw escaped exception:
+            # genuinely infra-fatal by construction.
+            candidate = ACExecutionResult(
+                ac_index=ac_idx,
+                ac_content=ac_content,
+                success=False,
+                error=str(candidate),
+                retry_attempt=ac_retry_attempts[ac_idx],
+                infra_fatal=True,
+            )
+        candidate = await self._apply_verify_gate(
+            seed=seed,
+            ac_index=ac_idx,
+            result=candidate,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await self._emit_ac_outcome_finalized(
+            result=candidate,
+            root_ac_index=ac_idx,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        if candidate.success:
+            # The resumed attempt succeeded without re-entering the ladder
+            # loop: fire the SAME resolution transition the non-crash path
+            # fires, so durable/projected state converges to resolved.
+            await self._resolve_escalation_success(
+                ac_idx=ac_idx, execution_id=execution_id, session_id=session_id
+            )
+            return candidate
+        # Still failing: hand straight to the ladder, which resumes at the
+        # restored (cached) streak/persona/parked phase.
+        return await self._finalize_batch_ac_with_escalation(
+            seed=seed,
+            ac_idx=ac_idx,
+            result=candidate,
+            ac_retry_attempts=ac_retry_attempts,
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            level_contexts=level_contexts,
+            execution_counters=execution_counters,
+            retry_termination_reason=(
+                "budget_exhausted" if self._is_retryable_failure(candidate) else "not_retryable"
+            ),
+        )
+
     async def _maybe_run_lateral_escalation_ladder(
         self,
         *,
@@ -6979,42 +7166,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 # HUD reducers clear all escalation badges on it, and the
                 # state loader resets reconstruction to fresh), so it is the
                 # correct signal for both exits.
-                resolved_node_id = ExecutionNodeIdentity.root(
-                    execution_context_id=execution_id, ac_index=ac_idx
-                ).node_id
-                # Round-5 Finding #4 (BLOCKING): a durably-missing resolution
-                # leaves the latest replayable event for this node id still
-                # ``parked_for_operator``/``progressed`` — any future
-                # replay-based reconstruction (Kanban/HUD projections, or a
-                # later resume) keeps showing it parked/escalating even
-                # though it already succeeded. Unlike the pre-redispatch
-                # writes above, a genuine SUCCESS cannot be held hostage
-                # forever (reverting a completed AC would surface failure
-                # where escalation actually broke through — the exact
-                # false-negative direction this PR forbids), so this write
-                # gets bounded EXTRA retry rounds on top of
-                # ``_safe_emit_event``'s own internal retries, then a loud
-                # correctness-specific error if truly exhausted.
-                resolved_persisted = False
-                for extra_attempt in range(3):
-                    if extra_attempt:
-                        await self._sleep(min(2.0 * (2**extra_attempt), 10.0))
-                    resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
-                        execution_id=execution_id,
-                        session_id=session_id,
-                        node_id=resolved_node_id,
-                        root_ac_index=ac_idx,
-                    )
-                    if resolved_persisted:
-                        break
-                if not resolved_persisted:
-                    log.error(
-                        "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
-                        ac_idx=ac_idx,
-                        execution_id=execution_id,
-                        node_id=resolved_node_id,
-                    )
-                self._lateral_escalation_states.pop(ac_idx, None)
+                await self._resolve_escalation_success(
+                    ac_idx=ac_idx, execution_id=execution_id, session_id=session_id
+                )
                 return candidate
 
             current_result = candidate
@@ -7051,26 +7205,91 @@ Respond with either ATOMIC or the structured JSON object only.
         Contract-less ACs with the verify gate off/absent and zero configured
         retries reduce to a single ``_execute_ac_batch`` call plus the identity
         gate, so today's behavior is preserved.
+
+        Round-5 Finding #1 (BLOCKING): BEFORE the ordinary dispatch/retry
+        path runs, each AC's durable lateral-escalation state is restored
+        (lazily, from the event store — the same replay-on-miss convention
+        every other durable state here uses). An AC with a recorded
+        mid-ladder or parked phase never re-enters the fresh un-backed-off
+        retry budget: it is routed through ``_resume_escalated_ac``, which
+        re-enters the ladder at the restored phase/cadence and fires the
+        resolution transition on success. In a non-crash run this is a
+        no-op: the in-memory cache serves fresh default states.
         """
-        results = await self._execute_ac_batch(
-            seed=seed,
-            batch_indices=batch_executable,
-            session_id=session_id,
-            execution_id=execution_id,
-            tools=tools,
-            tool_catalog=tool_catalog,
-            system_prompt=system_prompt,
-            level_contexts=level_contexts,
-            ac_retry_attempts=ac_retry_attempts,
-            execution_counters=execution_counters,
-            # The initial attempt is the AC's final same-runtime attempt only
-            # when no same-runtime retries are configured; otherwise defer
-            # cross-harness redispatch until the V3 loop below is spent.
-            same_runtime_budget_exhausted=self._ac_retry_attempts <= 0,
-        )
+        # Restore ladder/parked phase BEFORE any ordinary dispatch. Note the
+        # loader fails closed (synthetic parked=True, uncached) on a replay
+        # failure — such an AC is deliberately routed through the resumed
+        # path too, trading an unnecessary parked-cadence attempt (an
+        # acceptable false positive) for never granting a fresh retry budget
+        # to an AC whose durable phase we cannot read.
+        resumed_ladder_states: dict[int, LateralEscalationState] = {}
+        if self._lateral_escalation_enabled:
+            for ac_idx in batch_executable:
+                restored = await self._load_lateral_escalation_state(
+                    ac_idx, execution_id=execution_id
+                )
+                if (
+                    restored.parked
+                    or restored.consecutive_terminal_failures > 0
+                    or restored.personas_tried
+                ):
+                    resumed_ladder_states[ac_idx] = restored
+                    # Re-enter at the post-budget phase — the durable record
+                    # proves this AC already spent its ordinary budget before
+                    # the ladder engaged. Never reset to a fresh budget.
+                    ac_retry_attempts[ac_idx] = max(
+                        ac_retry_attempts[ac_idx], self._ac_retry_attempts
+                    )
+
+        position_by_idx = {ac_idx: position for position, ac_idx in enumerate(batch_executable)}
+        fresh_executable = [
+            ac_idx for ac_idx in batch_executable if ac_idx not in resumed_ladder_states
+        ]
+        results: list[ACExecutionResult | BaseException] = [None] * len(batch_executable)  # type: ignore[list-item]
+        if fresh_executable:
+            fresh_results = await self._execute_ac_batch(
+                seed=seed,
+                batch_indices=fresh_executable,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+                # The initial attempt is the AC's final same-runtime attempt only
+                # when no same-runtime retries are configured; otherwise defer
+                # cross-harness redispatch until the V3 loop below is spent.
+                same_runtime_budget_exhausted=self._ac_retry_attempts <= 0,
+            )
+            for fresh_position, ac_idx in enumerate(fresh_executable):
+                results[position_by_idx[ac_idx]] = fresh_results[fresh_position]
+        for ac_idx, restored in resumed_ladder_states.items():
+            # Sequential, like the ladder finalization at the bottom of this
+            # function: a resumed ladder AC may block on the parked cadence.
+            # Its returned result is FINAL (verify-gated, outcome-finalized,
+            # ladder-processed) — it must not re-enter the fresh-path
+            # gate/retry/finalize machinery below.
+            results[position_by_idx[ac_idx]] = await self._resume_escalated_ac(
+                seed=seed,
+                ac_idx=ac_idx,
+                restored_state=restored,
+                ac_retry_attempts=ac_retry_attempts,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                execution_counters=execution_counters,
+            )
+
         retry_termination_reasons: dict[int, str] = {}
         # V1 gate on freshly-successful ACs.
         for position, ac_idx in enumerate(batch_executable):
+            if ac_idx in resumed_ladder_states:
+                continue
             result = results[position]
             if isinstance(result, ACExecutionResult):
                 gated = await self._apply_verify_gate(
@@ -7102,6 +7321,8 @@ Respond with either ATOMIC or the structured JSON object only.
             # here too even with ``lateral_escalation_enabled=True`` and a
             # zero ordinary retry budget.
             for position, ac_idx in enumerate(batch_executable):
+                if ac_idx in resumed_ladder_states:
+                    continue
                 result = results[position]
                 if isinstance(result, ACExecutionResult):
                     results[position] = await self._finalize_batch_ac_with_escalation(
@@ -7126,11 +7347,10 @@ Respond with either ATOMIC or the structured JSON object only.
 
         # V3 retry loop: re-dispatch non-stall failures up to the configured
         # attempts. Kill criterion: stop early when the failure class repeats.
-        position_by_idx = {ac_idx: position for position, ac_idx in enumerate(batch_executable)}
         pending = {
             ac_idx
             for position, ac_idx in enumerate(batch_executable)
-            if self._is_retryable_failure(results[position])
+            if ac_idx not in resumed_ladder_states and self._is_retryable_failure(results[position])
         }
         last_failure_class = {
             ac_idx: self._failure_class_for_result(results[position_by_idx[ac_idx]])
@@ -7351,6 +7571,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     pending.discard(ac_idx)
 
         for position, ac_idx in enumerate(batch_executable):
+            if ac_idx in resumed_ladder_states:
+                # Round-5 Finding #1: already final — verify-gated, outcome-
+                # finalized, and ladder-processed inside _resume_escalated_ac.
+                continue
             result = results[position]
             if not isinstance(result, ACExecutionResult):
                 continue

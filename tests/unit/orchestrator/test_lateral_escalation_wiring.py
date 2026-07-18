@@ -2124,3 +2124,243 @@ class TestLadderWriteFailureFailsClosed:
         assert executor._sleep.await_count == 2
         for call in executor._sleep.await_args_list:
             assert call.args[0] == executor._parked_retry_backoff_seconds
+
+
+class TestResumeReentersLadderAtRestoredPhase:
+    """Round-5 Finding #1 (BLOCKING): checkpoints only save after a level
+    completes, so a crash mid-ladder restarts that level with every AC's
+    retry counter reset to zero — and the ordinary un-backed-off retry path
+    used to run BEFORE any escalation state was loaded (loading only
+    happened inside the ladder itself). A resumed AC that was mid-ladder or
+    parked must re-enter at its durably recorded phase/cadence, and a
+    success on that resumed path must still fire the resolution transition
+    the non-crash path fires."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    def _cold_start_executor(event_store: EventStore) -> ParallelACExecutor:
+        """A fresh executor, as recreated after a crash/restart, with a real
+        emitter over the run's durable store and a nonzero fresh retry
+        budget configured."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        executor._ac_retry_attempts = 2
+        executor._model_router = ModelRouter(
+            tier_models={"frontier": "gpt-frontier"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="frontier",
+            escalation_retry_threshold=999,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._sleep = AsyncMock()
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        return executor
+
+    async def _run_batch(
+        self, executor: ParallelACExecutor, *, ac_retry_attempts: dict[int, int]
+    ) -> list[ACExecutionResult | BaseException]:
+        return await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts=ac_retry_attempts,
+            execution_counters=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_parked_ac_resumes_at_parked_cadence_and_resolves_on_success(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """The exact reported crash-mid-parked-cycle scenario: on resume the
+        AC must NOT restart the fresh un-backed-off retry budget, must honor
+        the parked cadence before its dispatch, and a success must leave the
+        durable log resolved — not stuck on parked."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [p.value for p in ThinkingPersona],
+                    "consecutive_terminal_failures": 9,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+
+        ac_retry_attempts = {0: 0}  # the post-crash reset the finding describes
+        results = await self._run_batch(executor, ac_retry_attempts=ac_retry_attempts)
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # ONE dispatch — the fresh 2-attempt retry budget was never granted.
+        assert len(dispatch_calls) == 1
+        # Re-entered as a ladder-owned attempt: post-budget, max strength,
+        # with a re-entry retry prompt.
+        assert dispatch_calls[0]["same_runtime_budget_exhausted"] is True
+        assert dispatch_calls[0]["force_frontier_routing"] is True
+        retry_prompts = dispatch_calls[0]["retry_prompts"]
+        assert isinstance(retry_prompts, dict) and retry_prompts[0]
+        assert ac_retry_attempts[0] == executor._ac_retry_attempts
+        # The parked cadence governed pacing: slept the long backoff BEFORE
+        # the resumed dispatch.
+        executor._sleep.assert_awaited_once_with(executor._parked_retry_backoff_seconds)
+        # Durable state converged: the latest replayable escalation event is
+        # the resolution, and a later cold start reconstructs FRESH state.
+        events = await memory_event_store.replay("execution", "exec-1")
+        escalation_events = [
+            event
+            for event in events
+            if event.type
+            in {
+                "execution.ac.lateral_escalation_progressed",
+                "execution.ac.parked_for_operator",
+                "execution.ac.parked_resolved",
+            }
+            and event.data.get("node_id") == node_id
+        ]
+        assert escalation_events[-1].type == "execution.ac.parked_resolved"
+        later = self._cold_start_executor(memory_event_store)
+        assert (
+            await later._load_lateral_escalation_state(0, execution_id="exec-1")
+            == LateralEscalationState()
+        )
+
+    @pytest.mark.asyncio
+    async def test_mid_persona_crash_resumes_in_flight_persona_then_continues_cycle(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """A crash during a persona redispatch (the ``progressed`` event is
+        emitted BEFORE the redispatch) must resume by re-running THAT
+        persona's attempt — not a fresh top-of-ladder identical retry — and
+        a subsequent failure must continue the cycle from the restored
+        personas, never repeating or restarting."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.HACKER.value],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": ThinkingPersona.HACKER.value,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def fails_then_succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            if len(dispatch_calls) >= 2:
+                return [_success_result()]
+            return [_failed_result(error="resumed persona attempt failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fails_then_succeeds)
+
+        ac_retry_attempts = {0: 0}
+        results = await self._run_batch(executor, ac_retry_attempts=ac_retry_attempts)
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Two dispatches total: the resumed in-flight-persona attempt, then
+        # ONE ladder redispatch — never the fresh 2-attempt ordinary budget.
+        assert len(dispatch_calls) == 2
+        # The resumed attempt re-ran the interrupted persona's framing.
+        first_prompt = dispatch_calls[0]["retry_prompts"][0]  # type: ignore[index]
+        assert ThinkingPersona.HACKER.value in first_prompt.lower()
+        # The ladder continued from the restored phase: the next durable
+        # ``progressed`` record extends the persona history (hacker + a new
+        # persona) instead of restarting from scratch or repeating hacker.
+        events = await memory_event_store.replay("execution", "exec-1")
+        progressed_after_resume = [
+            event
+            for event in events[1:]  # skip the pre-seeded crash-era event
+            if event.type == "execution.ac.lateral_escalation_progressed"
+            and event.data.get("node_id") == node_id
+        ]
+        assert progressed_after_resume, "ladder never durably progressed after resume"
+        resumed_personas = progressed_after_resume[-1].data["personas_tried"]
+        assert resumed_personas[0] == ThinkingPersona.HACKER.value
+        assert len(resumed_personas) == 2
+        assert len(set(resumed_personas)) == 2
+        # And the eventual success still resolved the episode durably.
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_fresh_ac_without_escalation_history_keeps_ordinary_path(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Control: an AC with NO durable escalation history must get the
+        unchanged ordinary path — fresh budget, no forced routing, no
+        spurious resolution event."""
+        executor = self._cold_start_executor(memory_event_store)
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def fails_then_succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            if len(dispatch_calls) >= 2:
+                return [_success_result()]
+            return [_failed_result(error="first attempt failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fails_then_succeeds)
+
+        ac_retry_attempts = {0: 0}
+        results = await self._run_batch(executor, ac_retry_attempts=ac_retry_attempts)
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Ordinary path: initial dispatch + one budget-funded retry.
+        assert len(dispatch_calls) == 2
+        assert dispatch_calls[0]["same_runtime_budget_exhausted"] is False
+        assert dispatch_calls[0].get("force_frontier_routing", False) is False
+        assert ac_retry_attempts[0] == 1
+        # No escalation episode existed, so no resolution event may appear.
+        events = await memory_event_store.replay("execution", "exec-1")
+        assert not any(event.type == "execution.ac.parked_resolved" for event in events)
