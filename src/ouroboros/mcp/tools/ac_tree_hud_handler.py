@@ -46,6 +46,18 @@ _TREE_CHANGE_EVENT_TYPES = frozenset(
         "execution.subtask.updated",
         "execution.node.created",
         "execution.node.updated",
+        # Task 1/2/Fix 8 per-node badges (decomposition trust, lateral-
+        # escalation parking, and its resolution). These do not touch a
+        # node's status/children, but they DO change the rendered tree (the
+        # ``[untrusted:...]``/``[parked]`` badges and the Trust/Escalation
+        # summary line) — omitting them here made cursor-based incremental
+        # polling silently skip past these events: with no OTHER tree-change
+        # event in the same poll window, ``_has_tree_change_event`` returned
+        # False and the handler short-circuited to "unchanged" before ever
+        # reaching the merge step that folds them in.
+        "execution.ac.decomposition_attested",
+        "execution.ac.parked_for_operator",
+        "execution.ac.parked_resolved",
     }
 )
 

@@ -115,3 +115,85 @@ async def test_handle_returns_full_render_when_progress_event_arrives_after_curs
     assert (
         "└─ ◐ AC 2: Second criterion  [Edit src/ouroboros/mcp/tools/ac_tree_hud_handler.py]"
     ) in tool_result.text_content
+
+
+async def test_parked_for_operator_event_alone_triggers_rerender_after_cursor(
+    memory_event_store: EventStore,
+) -> None:
+    """Fix 7 (BLOCKING, PR #1648 review): a NON-ZERO-cursor poll whose only
+    new event since the cursor is ``execution.ac.parked_for_operator`` (no
+    OTHER tree-change event in the same window) must still trigger a full
+    rerender — not the "unchanged" short-circuit. Before the fix, this event
+    type was missing from ``_TREE_CHANGE_EVENT_TYPES``, so a client polling
+    incrementally would silently never see the [parked] badge appear at all,
+    defeating the entire point of wiring it into the HUD."""
+    await memory_event_store.append(
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="sess_parked_cursor",
+            data={
+                "execution_id": "exec_parked_cursor",
+                "seed_id": "seed_parked_cursor",
+                "start_time": "2026-04-05T12:00:00+00:00",
+            },
+        )
+    )
+    await memory_event_store.append(
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_parked_cursor",
+            data={
+                "execution_id": "exec_parked_cursor",
+                "completed_count": 0,
+                "total_count": 1,
+                "acceptance_criteria": [
+                    {
+                        "node_id": "ac_1",
+                        "index": 1,
+                        "content": "Stubborn criterion",
+                        "status": "executing",
+                    },
+                ],
+            },
+        )
+    )
+
+    handler = ACTreeHUDHandler(event_store=memory_event_store)
+    initial_result = await handler.handle(
+        {"session_id": "sess_parked_cursor", "cursor": 0, "view": "tree"}
+    )
+    assert initial_result.is_ok
+    initial_cursor = initial_result.value.meta["cursor"]
+    assert "[parked]" not in initial_result.value.text_content
+
+    # The ONLY new event since the cursor is the parked badge — no
+    # workflow.progress.updated, no execution.node.* event alongside it.
+    await memory_event_store.append(
+        BaseEvent(
+            type="execution.ac.parked_for_operator",
+            aggregate_type="execution",
+            aggregate_id="exec_parked_cursor",
+            data={
+                "execution_id": "exec_parked_cursor",
+                "session_id": "sess_parked_cursor",
+                "node_id": "ac_1",
+                "root_ac_index": 0,
+                "personas_tried": ["hacker"],
+                "consecutive_terminal_failures": 3,
+                "backoff_seconds": 300.0,
+                "reason": "all lateral-thinking personas exhausted",
+            },
+        )
+    )
+
+    changed_result = await handler.handle(
+        {"session_id": "sess_parked_cursor", "cursor": initial_cursor, "view": "tree"}
+    )
+
+    assert changed_result.is_ok
+    tool_result = changed_result.value
+    assert tool_result.meta["changed"] is True
+    assert not tool_result.text_content.startswith("unchanged cursor=")
+    assert "[parked]" in tool_result.text_content
