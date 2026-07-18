@@ -154,6 +154,53 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    terms and references are used only for contrast questions. Do not infer these
    arguments from vocabulary density or fetch referenced URLs/files.
 
+   **Inline materials contract (zero-turn invariant)**:
+   On the first user-facing interview surface, append one short, optional
+   invitation in the conversation language alongside the question or question
+   batch: "If you have notes, documents, or a prior discussion, paste them with
+   your answer — they reduce the number of questions." If a future or host-local
+   understanding draft precedes the first question, put the same invitation at
+   the end of that draft instead. The invitation is part of the existing turn:
+   never send it through a separate `ask_user` call, never wait for a response to
+   it, and never create a materials-only question, gate, wizard, or MCP round.
+
+   Ignoring the invitation is a strict no-op. Forward the user's answer exactly
+   as the routing/refine rules below otherwise require and continue with the
+   same next question. Do not add an empty-material marker, placeholder answer,
+   ledger entry, tool call, model call, or confirmation. This keeps the ignored
+   transcript identical to the vanilla interview apart from the one inline
+   invitation on the already-existing first assistant turn.
+
+   When the user pastes material with an answer, or gives an explicit local file
+   path as material, consume it during the normal handling of that answer. Read
+   an explicit local path with `inspect_code`; do not ask a follow-up merely to
+   request or confirm material. Preserve the user's answer verbatim, then append
+   a concise material digest to the same MCP `answer` payload so the persisted
+   transcript and next question can use it. Use these two ledger categories:
+
+   - `confirmed fact` — something stated directly in the supplied material. If
+     it is not independently verified, phrase it as "The supplied material
+     states ..." rather than promoting the claim to objective truth, and cite
+     the pasted note or file path as its source.
+   - `inferred assumption` — a falsifiable interpretation derived from the
+     material. Mark it as unconfirmed and never let it enter the Seed unless the
+     user later confirms or corrects it.
+
+   Render the material-derived ledger at the start of the **next existing
+   assistant turn**, immediately before its normal question or question batch,
+   under a short "Understanding draft" heading. Use the conversation-language
+   equivalents of `confirmed fact` and `inferred assumption`. This is not a
+   standalone response and does not replace, delay, or add a question. If the
+   current runtime has no general understanding-draft implementation (including
+   when #1654 is absent), render this compact material-only draft directly; do
+   not make it conditional on that sibling feature. Never invent an assumption
+   just to populate the second category.
+
+   If the user sends material without answering the pending question, ingest
+   and render the draft, then keep that same pending question on the next
+   assistant turn. Do not treat the material as an answer to an unrelated
+   decision and do not ask a separate "do you have materials?" question.
+
 2. **For each question from MCP, apply the routing paths below:**
 
    **Parent-session question handoff**:
@@ -686,18 +733,23 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 
 1. Read `src/ouroboros/agents/socratic-interviewer.md` and adopt that role
 2. **Pre-scan the codebase**: Use the active runtime's `inspect_code` capability to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, inspect key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
-3. Ask clarifying questions based on the user's topic and codebase context
-4. **Present each question using the active runtime's `ask_user` capability** with contextually relevant suggested answers (same format as Path A step 2)
-5. Use the active runtime's `inspect_code` and `web_research` capabilities to explore further context if needed
-6. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
+3. Apply the same **Inline materials contract (zero-turn invariant)** from Path A
+   to the first fallback question and every submitted material. Keep the
+   material ledger in conversation context and render its understanding draft
+   immediately before the next normal fallback question; there is no MCP relay
+   in this path.
+4. Ask clarifying questions based on the user's topic and codebase context
+5. **Present each question using the active runtime's `ask_user` capability** with contextually relevant suggested answers (same format as Path A step 2)
+6. Use the active runtime's `inspect_code` and `web_research` capabilities to explore further context if needed
+7. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
    - Track multiple independent ambiguity threads
    - Revisit unresolved threads every few rounds
    - Do not let one detailed subtopic crowd out the rest of the original request
-7. **Apply the Refine gate** (Path A Step 4) to free-text user answers before
+8. **Apply the Refine gate** (Path A Step 4) to free-text user answers before
    absorbing them into your running understanding. The structure preservation
    matters less here than in Path A (no MCP relay), but the "did I miss any
    reasoning, constraints, or scope?" check still surfaces gaps.
-8. Prefer closure only after applying the Seed-ready Acceptance Guard above.
+9. Prefer closure only after applying the Seed-ready Acceptance Guard above.
    Then **apply the Restate gate** (Path A Step 9): collapse the agreed answers
    into a one-sentence goal and confirm with the user before suggesting `ooo seed`.
    In fallback mode there is no MCP state to refresh, so if the user picks
@@ -706,9 +758,9 @@ If the MCP tool is NOT available, fall back to agent-based interview:
    one-sentence goal, rerun the Seed-ready Acceptance Guard locally, and ask the
    Restate gate again with the corrected goal line. Do not try to "send it back
    to MCP" in Path B; the conversation context is the source of truth.
-9. Continue until the user says "done"
-10. Interview results live in conversation context (not persisted)
-11. After completion, suggest the next step in `📍 Next:` format:
+10. Continue until the user says "done"
+11. Interview results live in conversation context (not persisted)
+12. After completion, suggest the next step in `📍 Next:` format:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior
