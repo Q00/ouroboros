@@ -174,10 +174,14 @@ class ACTreeWidget(Widget):
 
         Kept separate from :meth:`_format_node_label` because the root label
         (passed straight to ``Tree(...)``) never carries a status icon
-        prefix, unlike every other node's label.
+        prefix, unlike every other node's label. Truncates by terminal
+        DISPLAY CELLS via the same ``_truncate_to_cell_width`` helper every
+        ordinary node label already uses -- code-point slicing miscounts
+        CJK/emoji widths (round-4 follow-up: the root label was missed when
+        that fix was applied to the ordinary labels).
         """
         root_width = self._label_max_width(default=_DEFAULT_ROOT_LABEL_WIDTH)
-        return root_content[:root_width] + "..." if len(root_content) > root_width else root_content
+        return _truncate_to_cell_width(root_content, root_width)
 
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""

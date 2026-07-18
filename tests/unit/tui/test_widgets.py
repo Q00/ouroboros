@@ -157,7 +157,13 @@ class TestACTreeWidget:
 
     def test_compose_root_label_truncates_with_ellipsis(self) -> None:
         """The root Tree label truncation must append '...' when it actually
-        truncates (previously a silent hard cut with no visual indicator)."""
+        truncates (previously a silent hard cut with no visual indicator).
+
+        Round-4 follow-up: the root label now truncates by display CELLS via
+        the same ``_truncate_to_cell_width`` helper ordinary labels use, so
+        the "..." is reserved WITHIN the 30-cell budget (27 kept + 3
+        ellipsis), not appended past it.
+        """
         long_content = "R" * 100
         tree_data = {
             "root_id": "ac_root",
@@ -178,7 +184,26 @@ class TestACTreeWidget:
         tree = next(w for w in widgets if hasattr(w, "root"))
 
         assert str(tree.root.label).endswith("...")
-        assert long_content[:30] in str(tree.root.label)
+        assert long_content[:27] in str(tree.root.label)
+        assert long_content[:30] not in str(tree.root.label)
+
+    def test_root_label_truncation_is_cell_width_aware_for_cjk(self) -> None:
+        """Round-4 follow-up: the root label was still truncated by Python
+        code points while ordinary labels had already been fixed to truncate
+        by terminal display cells. A CJK root label (2 cells per character)
+        sliced by code points overflows its cell budget -- the root must use
+        the SAME ``_truncate_to_cell_width`` helper as every other label."""
+        from rich.cells import cell_len
+
+        widget = ACTreeWidget()
+        cjk_content = "가" * 100  # Hangul syllables: 2 display cells each
+
+        label = widget._format_root_label(cjk_content)
+
+        assert label.endswith("...")
+        # The whole rendered label must fit the 30-cell default root budget.
+        # Code-point slicing would have kept 30 chars = 60 cells + "...".
+        assert cell_len(label) <= 30
 
     def test_update_tree(self) -> None:
         """Test updating tree data."""
