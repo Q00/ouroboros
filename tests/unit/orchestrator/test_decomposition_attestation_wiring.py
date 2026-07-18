@@ -1253,9 +1253,7 @@ class TestDecompositionAttestationFailsClosedOnMalformedEventData:
 
     @pytest.mark.asyncio
     async def test_malformed_found_event_fails_closed_to_untrustworthy(self) -> None:
-        node_identity = ExecutionNodeIdentity.root(
-            execution_context_id="exec-corrupt", ac_index=0
-        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-corrupt", ac_index=0)
         event_store = self._store_with_malformed_attested_event(
             node_identity.node_id, "exec-corrupt"
         )
@@ -1287,9 +1285,7 @@ class TestDecompositionAttestationFailsClosedOnMalformedEventData:
         id's next retry -- exactly like a REAL prior UNTRUSTWORTHY verdict."""
         from datetime import UTC, datetime
 
-        node_identity = ExecutionNodeIdentity.root(
-            execution_context_id="exec-corrupt2", ac_index=0
-        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-corrupt2", ac_index=0)
         event_store = self._store_with_malformed_attested_event(
             node_identity.node_id, "exec-corrupt2"
         )
