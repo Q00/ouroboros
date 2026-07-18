@@ -1887,6 +1887,53 @@ class ParallelACExecutor:
         reconciled_level_contexts: list[LevelContext] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> ParallelExecutionResult:
+        """Execute ACs per the staged plan, always draining deferred writes.
+
+        Thin boundary over :meth:`_execute_parallel_impl` (Round-7 Findings
+        #2/#3 follow-up): deferred correctness-bearing durable writes (ladder
+        resolution/interruption, decomposition attestation) previously got
+        their bounded final drain only on the NORMAL completion path — an
+        exception propagating out of the run body (a TaskGroup failure, a
+        cancellation, an operator interrupt) skipped the drain entirely, so
+        the pending background writes died silently at the ``asyncio.run``
+        teardown boundary and cold resume reconstructed stale ladder /
+        unattested-round state. The ``finally`` here gives those writes the
+        same bounded final shot on EVERY exit path out of the run, normal or
+        exceptional.
+        """
+        try:
+            return await self._execute_parallel_impl(
+                seed,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                system_prompt=system_prompt,
+                tool_catalog=tool_catalog,
+                dependency_graph=dependency_graph,
+                execution_plan=execution_plan,
+                reconciled_level_contexts=reconciled_level_contexts,
+                externally_satisfied_acs=externally_satisfied_acs,
+            )
+        finally:
+            # Bounded (never the full parked-cadence budget), and safe to run
+            # twice: the happy path drains before aggregating results, leaving
+            # nothing pending for this second call.
+            await self._drain_deferred_durable_writes()
+
+    async def _execute_parallel_impl(
+        self,
+        seed: Seed,
+        *,
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        system_prompt: str,
+        tool_catalog: tuple[MCPToolDefinition, ...] | None = None,
+        dependency_graph: DependencyGraph | None = None,
+        execution_plan: StagedExecutionPlan | None = None,
+        reconciled_level_contexts: list[LevelContext] | None = None,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+    ) -> ParallelExecutionResult:
         """Execute ACs according to a staged execution plan.
 
         Args:
@@ -2588,7 +2635,9 @@ class ParallelACExecutor:
         # the ``asyncio.run`` boundary, whose teardown cancels all pending
         # tasks. Anything still pending after the timeout is cancelled
         # explicitly so its own cancellation handler logs loudly instead of
-        # dying silently at loop teardown.
+        # dying silently at loop teardown. Exceptional exits from this run
+        # body are covered too: ``execute_parallel``'s ``finally`` repeats
+        # this drain on every exit path (Round-7 Findings #2/#3 follow-up).
         await self._drain_deferred_durable_writes()
 
         # Aggregate results - sort by AC index for consistent ordering

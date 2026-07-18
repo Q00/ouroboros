@@ -3179,3 +3179,47 @@ class TestDeferredWritesDrainAtRunCompletion:
         executor = _make_executor_with_active_ladder()
         await executor._drain_deferred_durable_writes()
         assert not executor._deferred_durable_write_tasks
+
+    @pytest.mark.asyncio
+    async def test_exceptional_exit_from_execute_parallel_still_drains(self) -> None:
+        """Round-7 Findings #2/#3 follow-up: the bounded drain previously ran
+        only on the NORMAL completion path of ``execute_parallel`` — an
+        exception propagating out of the run body skipped it, so pending
+        deferred correctness-bearing writes (ladder resolution/interruption,
+        decomposition attestation) died silently at the ``asyncio.run``
+        teardown boundary and cold resume reconstructed stale state. The
+        public boundary's ``finally`` must give them the same bounded final
+        shot on an exceptional exit."""
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        landed = asyncio.Event()
+
+        async def slow_write() -> bool:
+            await asyncio.sleep(0.05)
+            landed.set()
+            return True
+
+        async def crashing_impl(*args: object, **kwargs: object):
+            # A deferred write is in flight when the run body blows up —
+            # exactly the shape of a TaskGroup failure right after an
+            # exhausted foreground write was handed to the background loop.
+            executor._schedule_deferred_durable_write(
+                write=slow_write, on_persisted=None, log_key="test.deferred"
+            )
+            raise RuntimeError("run body failed mid-flight")
+
+        with patch.object(executor, "_execute_parallel_impl", crashing_impl):
+            with pytest.raises(RuntimeError, match="run body failed mid-flight"):
+                await executor.execute_parallel(
+                    _make_seed(),
+                    session_id="sess",
+                    execution_id="exec",
+                    tools=["Read"],
+                    system_prompt="system",
+                )
+
+        # The exception still propagated, but the write landed first.
+        assert landed.is_set()
+        await asyncio.sleep(0)
+        assert not executor._deferred_durable_write_tasks
