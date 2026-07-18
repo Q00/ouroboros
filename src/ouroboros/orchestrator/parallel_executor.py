@@ -8001,6 +8001,94 @@ Respond with either ATOMIC or the structured JSON object only.
                 execution_counters=execution_counters,
                 retry_termination_reason="budget_exhausted",
             )
+        # Round-11 finding #4 (BLOCKING): reaching this point means the
+        # durable log carries a pre-dispatch ``progressed`` record for this
+        # AC's in-flight attempt and NO ``outcome_finalized`` marker for it.
+        # That state is genuinely AMBIGUOUS: either the crash landed
+        # mid-dispatch (re-running is correct and exactly what rounds 5-8
+        # built), or the dispatch COMPLETED and its finalize write — plus
+        # the deferred background retry round-9 #3 added — was lost with the
+        # dying process. No durable discriminator between the two can exist:
+        # the same event-store outage that lost the finalize marker would
+        # have lost any discriminator written alongside it, and the deferred
+        # -write tracker's in-process state died with the process. Blindly
+        # refusing to continue would abandon the AC while escalation remains
+        # (forbidden); blindly redispatching SILENTLY risks duplicating an
+        # already-applied attempt's side effects (also forbidden). The
+        # resolution reuses the EXISTING park-for-operator machinery: the
+        # redispatch still happens (never give up), but only after (a) a
+        # durable, operator-visible ``parked_for_operator`` signal with an
+        # ambiguity-specific reason — the same event Kanban/HUD/conductor
+        # already surface, so no new wiring — and (b) the parked cadence
+        # held BEFORE the dispatch, giving the operator a real window to
+        # inspect/cancel. Loud, delayed, and interruptible instead of silent
+        # and immediate. For an already-PARKED state the operator signal
+        # already exists this episode (``parked_for_operator`` landed, or
+        # the backfill above just emitted it) and the parked branch below
+        # already sleeps the cadence, so only the reason detail is logged —
+        # never a duplicate operator event (the established no-duplication
+        # invariant for this episode's operator notification). Side effect
+        # accepted deliberately: if ANOTHER crash lands during the delayed
+        # redispatch below, replaying this event reconstructs parked=True —
+        # the codebase's established fail-closed posture for uncertain
+        # escalation state (the same sentinel the loader synthesizes for an
+        # unreadable/malformed log): long-backoff retries at maximum
+        # strength, never a surfaced FAILED, never a repeated persona.
+        ambiguous_resume_attempt = self._lateral_escalation_resume_attempts.get(ac_idx)
+        ambiguity_reason = (
+            "crash-restart found this AC's in-flight escalation attempt"
+            + (
+                f" (attempt {ambiguous_resume_attempt})"
+                if ambiguous_resume_attempt is not None
+                else ""
+            )
+            + " with no durably finalized outcome: the dispatch may have "
+            "completed with its finalize write lost, so the upcoming "
+            "redispatch could duplicate already-applied side effects; "
+            "verify the workspace or cancel within the parked backoff "
+            "window if that work already landed"
+        )
+        log.warning(
+            "parallel_executor.lateral_escalation.ambiguous_completion_resume",
+            ac_idx=ac_idx,
+            execution_id=execution_id,
+            resume_attempt=ambiguous_resume_attempt,
+            parked=restored_state.parked,
+            backoff_seconds=self._parked_retry_backoff_seconds,
+        )
+        self._console.print(f"  [yellow]AC {ac_idx + 1}: {ambiguity_reason}[/yellow]")
+        if not restored_state.parked:
+            ambiguity_node_id = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id, ac_index=ac_idx
+            ).node_id
+
+            async def _emit_ambiguity_signal() -> bool:
+                return await self._event_emitter.emit_ac_parked_for_operator(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=ambiguity_node_id,
+                    root_ac_index=ac_idx,
+                    personas_tried=tuple(p.value for p in restored_state.personas_tried),
+                    consecutive_terminal_failures=(restored_state.consecutive_terminal_failures),
+                    backoff_seconds=self._parked_retry_backoff_seconds,
+                    reason=ambiguity_reason,
+                )
+
+            if not await _emit_ambiguity_signal():
+                log.error(
+                    "parallel_executor.lateral_escalation.ambiguity_signal_write_failed",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    node_id=ambiguity_node_id,
+                )
+                self._schedule_deferred_durable_write(
+                    write=_emit_ambiguity_signal,
+                    on_persisted=None,
+                    log_key="parallel_executor.lateral_escalation.ambiguity_signal",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    node_id=ambiguity_node_id,
+                )
         synthetic_prior = ACExecutionResult(
             ac_index=ac_idx,
             ac_content=ac_content,
@@ -8038,6 +8126,13 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_prompt = self._build_ac_retry_prompt(
                 result=synthetic_prior, ac_content=ac_content, is_final_attempt=False
             )
+        if not restored_state.parked:
+            # Round-11 finding #4: the non-parked branches used to redispatch
+            # IMMEDIATELY. Hold the same parked cadence here too — this is
+            # the operator-attention window the durable ambiguity signal
+            # above just opened, so the possibly-duplicating redispatch is
+            # delayed and interruptible instead of instant.
+            await self._sleep(self._parked_retry_backoff_seconds)
 
         retry_results = await self._execute_ac_batch(
             seed=seed,

@@ -3059,6 +3059,181 @@ class TestResumeReentersLadderAtRestoredPhase:
         assert not any(event.type == "execution.ac.parked_resolved" for event in events)
 
 
+class TestAmbiguousCompletionResumeIsLoudAndDelayed:
+    """Round-11 finding #4 (BLOCKING): ``progressed`` is written BEFORE its
+    dispatch and ``outcome_finalized`` after it — with round-9 #3's deferred
+    background retry as the finalize write's last resort. If the process
+    dies before that deferred write lands, resume replay finds the
+    ``progressed`` record with NO finalized outcome: genuinely ambiguous
+    between "crash mid-dispatch" (re-run is correct) and "completed with the
+    finalize write lost" (re-run duplicates already-applied side effects).
+    No durable discriminator can exist — the same store outage that lost the
+    marker would lose any discriminator too. Resume must neither silently
+    auto-redispatch nor abandon the AC: it emits a durable, operator-visible
+    ``parked_for_operator`` signal with an ambiguity-specific reason (the
+    same event Kanban/HUD/conductor already surface) and holds the parked
+    cadence BEFORE the redispatch, so the possibly-duplicating dispatch is
+    loud, delayed, and operator-interruptible."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    def _seed_in_flight_progressed(node_id: str) -> BaseEvent:
+        """The crash-era durable record: pre-dispatch ``progressed`` for the
+        hacker persona's attempt 7 — and deliberately NO
+        ``outcome_finalized`` marker (the crash-before-deferred-write-lands
+        window)."""
+        return BaseEvent(
+            type="execution.ac.lateral_escalation_progressed",
+            aggregate_type="execution",
+            aggregate_id="exec-1",
+            data={
+                "execution_id": "exec-1",
+                "session_id": "s1",
+                "node_id": node_id,
+                "root_ac_index": 0,
+                "personas_tried": [ThinkingPersona.HACKER.value],
+                "consecutive_terminal_failures": 3,
+                "parked": False,
+                "persona": ThinkingPersona.HACKER.value,
+                "retry_attempt": 7,
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_resume_emits_durable_signal_and_holds_cadence(
+        self, memory_event_store: EventStore
+    ) -> None:
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(self._seed_in_flight_progressed(node_id))
+        executor = TestResumeReentersLadderAtRestoredPhase._cold_start_executor(memory_event_store)
+
+        order: list[str] = []
+        parked_events_at_dispatch: list[BaseEvent] = []
+
+        async def _record_sleep(seconds: float) -> None:
+            order.append(f"sleep:{seconds}")
+
+        executor._sleep = AsyncMock(side_effect=_record_sleep)
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            order.append("dispatch")
+            # Snapshot the durable log AT dispatch time: the operator signal
+            # must already have landed BEFORE the redispatch runs.
+            events_now = await memory_event_store.replay("execution", "exec-1")
+            parked_events_at_dispatch.extend(
+                event
+                for event in events_now
+                if event.type == "execution.ac.parked_for_operator"
+                and event.data.get("node_id") == node_id
+            )
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        # Not abandoned: the redispatch still ran, exactly once, and won.
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        assert order.count("dispatch") == 1
+        # Not silent: the durable, operator-visible ambiguity signal landed
+        # BEFORE the redispatch, on the same node id every other operator
+        # surface keys off, with a reason naming the ambiguous attempt.
+        assert len(parked_events_at_dispatch) == 1
+        ambiguity_event = parked_events_at_dispatch[0]
+        assert ambiguity_event.data["root_ac_index"] == 0
+        reason = ambiguity_event.data["reason"]
+        assert "attempt 7" in reason
+        assert "no durably finalized outcome" in reason
+        assert ambiguity_event.data["backoff_seconds"] == (executor._parked_retry_backoff_seconds)
+        # Not immediate: the parked cadence was held BEFORE the redispatch —
+        # the operator's window to inspect/cancel.
+        assert order == [f"sleep:{executor._parked_retry_backoff_seconds}", "dispatch"]
+        # The episode still converges: success resolved it durably, and a
+        # later cold start reconstructs FRESH state (the ambiguity signal
+        # never leaves the AC stuck parked).
+        events = await memory_event_store.replay("execution", "exec-1")
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+        later = TestResumeReentersLadderAtRestoredPhase._cold_start_executor(memory_event_store)
+        assert (
+            await later._load_lateral_escalation_state(0, execution_id="exec-1")
+            == LateralEscalationState()
+        )
+
+    @pytest.mark.asyncio
+    async def test_finalized_outcome_present_emits_no_ambiguity_signal(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Control: when the in-flight attempt's ``outcome_finalized`` marker
+        DID land, there is no ambiguity — resume takes the established
+        finalized-outcome branches and must emit NO operator signal."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(self._seed_in_flight_progressed(node_id))
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 7,
+                    "success": False,
+                    "outcome": None,
+                    "is_decomposed": False,
+                },
+            )
+        )
+        executor = TestResumeReentersLadderAtRestoredPhase._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        events = await memory_event_store.replay("execution", "exec-1")
+        assert not any(
+            event.type == "execution.ac.parked_for_operator"
+            and event.data.get("node_id") == node_id
+            for event in events
+        )
+
+
 class TestResumeRestoresPersistedRetryAttempt:
     """Round-6 Finding #1 (BLOCKING): ``lateral_escalation_progressed`` did
     not persist the in-flight dispatch-attempt counter, and the resume path
