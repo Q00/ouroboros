@@ -241,9 +241,13 @@ class TestLadderProgression:
         assert len(seen_prompts) == len(set(seen_prompts))
         # Escalation state is cleared on breakthrough.
         assert 0 not in executor._lateral_escalation_states
-        # Fix 8: this AC was never parked, so there is no badge to clear —
-        # emitting a resolution event here would be a spurious no-op event.
-        executor._event_emitter.emit_ac_parked_resolved.assert_not_awaited()
+        # Round-5 Finding #3 (BLOCKING, superseding round 2's Fix 8 stance):
+        # even though this AC never parked, every loop iteration durably
+        # emitted a ``progressed`` event before its redispatch — so a success
+        # mid-persona-cycle MUST still emit the resolution companion event,
+        # or the latest replayable record stays ``progressed`` and
+        # projections show a completed AC as "escalating" forever.
+        executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_all_personas_exhausted_emits_parked_event(self) -> None:
@@ -1909,3 +1913,121 @@ class TestLadderRedispatchForcesFrontierRouting:
         )
         assert result.success is True
         assert runtime.captured == [{"reasoning_effort": "high", "model": "claude-standard"}]
+
+
+class TestPrePakingSuccessEmitsResolution:
+    """Round-5 Finding #3 (BLOCKING): a persona can succeed partway through
+    the cycle, BEFORE the AC ever parks. The durable resolution event used
+    to be gated on ``state.parked`` — so in that case the node's LATEST
+    replayable event stayed ``lateral_escalation_progressed`` ("trying
+    persona X") and every replay-based projection reported a COMPLETED AC as
+    still actively escalating, forever. Resolution must fire on EVERY
+    successful ladder exit."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_persona_success_before_parking_resolves_durable_state(
+        self, memory_event_store: EventStore
+    ) -> None:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=memory_event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        executor._model_router = ModelRouter(
+            tier_models={"frontier": "gpt-frontier"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="frontier",
+            escalation_retry_threshold=999,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._sleep = AsyncMock()
+        # The REAL emitter + REAL durable store: this test verifies the
+        # durable event log itself, not a mocked emitter call.
+
+        call_count = {"n": 0}
+
+        async def fails_once_then_succeeds_under_first_persona(
+            **kwargs: object,
+        ) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            # Redispatch 1: the identical below-threshold retry fails.
+            # Redispatch 2: the FIRST persona attempt succeeds — well before
+            # parking (4 personas remain untried).
+            if call_count["n"] >= 2:
+                return [_success_result()]
+            return [_failed_result(error=f"attempt {call_count['n']} failed")]
+
+        executor._execute_ac_batch = AsyncMock(
+            side_effect=fails_once_then_succeeds_under_first_persona
+        )
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        assert call_count["n"] == 2  # succeeded mid-cycle, never parked
+
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        events = await memory_event_store.replay("execution", "exec-1")
+        escalation_events = [
+            event
+            for event in events
+            if event.type
+            in {
+                "execution.ac.lateral_escalation_progressed",
+                "execution.ac.parked_for_operator",
+                "execution.ac.parked_resolved",
+            }
+            and event.data.get("node_id") == node_id
+        ]
+        # The ladder durably recorded its in-flight progress...
+        assert any(
+            event.type == "execution.ac.lateral_escalation_progressed"
+            for event in escalation_events
+        )
+        # ...and the LATEST durable event is the resolution — not a stale
+        # ``progressed`` record claiming the AC is still escalating.
+        assert escalation_events[-1].type == "execution.ac.parked_resolved"
+
+        # A cold-start reconstruction (fresh executor, same durable store —
+        # i.e. any later resume) must see a FRESH state, not a stale
+        # mid-ladder streak.
+        cold = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=memory_event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        cold._lateral_escalation_enabled = True
+        state = await cold._load_lateral_escalation_state(0, execution_id="exec-1")
+        assert state == LateralEscalationState()
+
+        # And the replay-based board projection (dashboard/HUD/conductor all
+        # fold the same reducer) shows NO escalation badge for the node —
+        # the exact "status=completed, escalation_state=escalating" stuck
+        # pairing the finding reproduced.
+        from ouroboros.dashboard.board import reduce_board
+
+        board = reduce_board(
+            [{"event_type": event.type, "payload": event.data} for event in events],
+            execution_id="exec-1",
+        )
+        all_cards = [card for column in board["columns"].values() for card in column]
+        matching = [card for card in all_cards if card.get("id") == node_id]
+        assert matching, f"no board card produced for node {node_id!r}"
+        for card in matching:
+            assert "escalation_state" not in card

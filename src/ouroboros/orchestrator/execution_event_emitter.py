@@ -215,10 +215,18 @@ class ExecutionEventEmitter:
         once, at the moment the lateral-escalation ladder's in-memory streak
         for this root AC is cleared on a breakthrough.
 
-        Only emitted when the AC being resolved was actually parked (the
-        caller checks its own ladder state before calling this) — a plain
-        ordinary success that never engaged the ladder has no parked badge to
-        clear and must not emit a spurious resolution event.
+        Round-5 Finding #3 (BLOCKING): emitted on EVERY successful ladder
+        exit — parked or still mid-persona-cycling. Each ladder iteration
+        durably records a ``lateral_escalation_progressed`` event before its
+        redispatch, so a persona that succeeds BEFORE parking would otherwise
+        leave that ``progressed`` event as the node's latest replayable
+        record, and replay-based projections would show a completed AC as
+        still "escalating" forever. Consumers already treat this event as
+        "this node's escalation episode is over" (reducers clear all
+        escalation badges; the state loader resets reconstruction to fresh),
+        so it closes both exits. A plain ordinary success that never engaged
+        the ladder still must not emit it — there is no escalation episode to
+        resolve.
 
         ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
         .node_id`` the original ``parked_for_operator`` event carried, so a

@@ -6917,37 +6917,48 @@ Respond with either ATOMIC or the structured JSON object only.
             )
 
             if candidate.success:
-                # Breakthrough: reset the streak and surface the success. When
-                # this AC was actually parked (Fix 8), emit the durable
-                # resolution companion event so a projection folding the
-                # event log (Kanban/HUD/conductor) has a signal to clear the
-                # parked badge — otherwise it would show ``completed`` AND
-                # still-``parked`` forever, since ``parked_for_operator`` has
-                # no other durable "un-parked" signal.
-                if state.parked:
-                    resolved_node_id = ExecutionNodeIdentity.root(
-                        execution_context_id=execution_id, ac_index=ac_idx
-                    ).node_id
-                    resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
+                # Breakthrough: reset the streak and surface the success.
+                # Round-5 Finding #3 (BLOCKING): emit the durable resolution
+                # companion event on EVERY successful ladder exit — parked or
+                # not. Every loop iteration above has already durably emitted
+                # a ``lateral_escalation_progressed`` event BEFORE its
+                # redispatch, so a persona that succeeds partway through the
+                # cycle (before parking) otherwise leaves that ``progressed``
+                # event as the LATEST replayable record for this node id:
+                # replay-based projections (Kanban/HUD/conductor) would show
+                # a COMPLETED AC as still actively "escalating" forever, and
+                # ``_load_lateral_escalation_state`` would reconstruct a
+                # stale mid-ladder streak on a later resume. The previous
+                # ``if state.parked:`` gate only covered the fully-parked
+                # case; ``parked_resolved`` already means "this node's
+                # escalation episode is over" to every consumer (the board/
+                # HUD reducers clear all escalation badges on it, and the
+                # state loader resets reconstruction to fresh), so it is the
+                # correct signal for both exits.
+                resolved_node_id = ExecutionNodeIdentity.root(
+                    execution_context_id=execution_id, ac_index=ac_idx
+                ).node_id
+                resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_id=resolved_node_id,
+                    root_ac_index=ac_idx,
+                )
+                if not resolved_persisted:
+                    # Fix 5 (round 3, BLOCKING): a durably-missing
+                    # resolution leaves the latest replayable event for
+                    # this node id still ``parked_for_operator`` (or a
+                    # ``progressed`` event) -- any future replay-based
+                    # reconstruction of this node id (Kanban/HUD
+                    # projections, or a later resume that somehow revisits
+                    # this AC) would keep showing it as parked/escalating
+                    # even though it already succeeded.
+                    log.error(
+                        "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
+                        ac_idx=ac_idx,
                         execution_id=execution_id,
-                        session_id=session_id,
                         node_id=resolved_node_id,
-                        root_ac_index=ac_idx,
                     )
-                    if not resolved_persisted:
-                        # Fix 5 (round 3, BLOCKING): a durably-missing
-                        # resolution leaves the latest replayable event for
-                        # this node id still ``parked_for_operator`` -- any
-                        # future replay-based reconstruction of this node id
-                        # (Kanban/HUD projections, or a later resume that
-                        # somehow revisits this AC) would keep showing it as
-                        # parked even though it already succeeded.
-                        log.error(
-                            "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
-                            ac_idx=ac_idx,
-                            execution_id=execution_id,
-                            node_id=resolved_node_id,
-                        )
                 self._lateral_escalation_states.pop(ac_idx, None)
                 return candidate
 
