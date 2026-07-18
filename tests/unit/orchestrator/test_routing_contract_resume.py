@@ -310,6 +310,22 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         # ``asyncio.sleep(inf)`` and hangs that AC's slot forever.
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("inf")},
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("nan")},
+        # Fix 9 (round 3, BLOCKING): 0 (and any value below EconomicsConfig's
+        # own ``ge=1.0`` floor) must be rejected HERE, at resume validation --
+        # not silently accepted and then clamped to 1.0 by the executor
+        # constructor's defense-in-depth floor, which would let the
+        # persisted/fingerprinted policy (0) diverge from the policy actually
+        # executed (1.0).
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 0.0,
+            "ac_retry_attempts": 2,
+        },
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 0.5,
+            "ac_retry_attempts": 2,
+        },
         # Fix 7 (round 3, BLOCKING): a round-2-era contract (or any tampered
         # payload) missing/malformed on the NEW ac_retry_attempts field must
         # fail closed here too, exactly like the other two fields already do.

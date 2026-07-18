@@ -1973,8 +1973,19 @@ class OrchestratorRunner:
             # parked-retry loop and hangs that AC's slot forever with no
             # operator-visible signal. Fail closed here too, not just at
             # config-construction time.
+            #
+            # Fix 9 (round 3, BLOCKING): the floor must be ``>= 1.0``, matching
+            # ``EconomicsConfig.parked_retry_backoff_seconds``'s own
+            # ``Field(default=300.0, ge=1.0)`` exactly -- not ``>= 0``. A
+            # persisted ``0`` used to sail through this check and then get
+            # silently clamped to ``1.0`` by ``ParallelACExecutor.__init__``'s
+            # ``max(1.0, ...)`` defense-in-depth floor, so the value this
+            # resume-validation gate accepted (and fingerprinted/durably
+            # recorded) differed from the value actually executed -- a
+            # durable-contract integrity bug. Reject/fail-closed on load
+            # instead of silently accepting-then-clamping.
             and math.isfinite(backoff)
-            and backoff >= 0
+            and backoff >= 1.0
             # Fix 7 (round 3, BLOCKING): mirror ExecutionConfig.ac_retry_attempts's
             # own ``ge=0`` contract here too, not just at config-construction time.
             and isinstance(retry_attempts, int)
