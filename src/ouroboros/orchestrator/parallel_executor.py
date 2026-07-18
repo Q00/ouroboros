@@ -3041,9 +3041,13 @@ class ParallelACExecutor:
             async def _retry_attestation_write() -> bool:
                 # A newer round for this node id has since replaced the
                 # sentinel (its own attestation was computed and written):
-                # backfilling the OLDER round's event now would append it
-                # AFTER the newer one and win the loader's last-write-wins
-                # replay. Stop retrying — the newer record is authoritative.
+                # stop retrying — the newer record is authoritative. This
+                # check-then-write is inherently racy (the write below runs
+                # through ``_safe_emit_event``'s multi-second retry window,
+                # during which a newer round's write can land first), so it
+                # is only an optimization: the loader's replay selects by
+                # HIGHEST persisted ``retry_attempt``, not log order, and
+                # stays correct even if this older backfill lands last.
                 if self._decomposition_attestations.get(node_identity.node_id) is not sentinel:
                     return True
                 persisted = await self._event_emitter.emit_decomposition_attested(
@@ -6608,9 +6612,12 @@ Respond with either ATOMIC or the structured JSON object only.
         durable events and rebuilds the verdict from the LATEST
         ``execution.ac.decomposition_attested`` event for this node id.
         ``node_id`` is stable across same-root retries (it does not encode
-        retry_attempt), so the newest matching event in the durable log is
-        authoritative -- identical "last write wins" semantics to the
-        in-memory dict it replaces. No matching event means no attestation
+        retry_attempt), so the matching event with the HIGHEST persisted
+        ``retry_attempt`` is authoritative — log order only breaks ties.
+        Selecting by raw log position instead ("last write wins") was
+        vulnerable to a deferred backfill of an OLDER round landing after a
+        NEWER round's foreground write (see the selection loop below).
+        No matching event means no attestation
         has ever been recorded for this node id (``None``, exactly like
         today's in-memory default); that is NOT cached, since a decomposition
         round for this node id may not have run yet in THIS process and a
@@ -6654,13 +6661,41 @@ Respond with either ATOMIC or the structured JSON object only.
             )
 
         latest_data: dict[str, Any] | None = None
+        latest_retry_attempt = -1
         for event in events:
             if getattr(event, "type", None) != "execution.ac.decomposition_attested":
                 continue
             data = getattr(event, "data", None)
             if not isinstance(data, dict) or data.get("node_id") != node_id:
                 continue
-            latest_data = data
+            # Adversarial-review Bug #4 (TOCTOU on the deferred backfill):
+            # raw last-write-wins BY LOG ORDER is not safe here. Round N's
+            # attestation write can fail, get a deferred background backfill
+            # scheduled, and then land AFTER round N+1's own foreground
+            # write for the SAME node id (the backfill's pre-write
+            # supersession check passes before N+1 attests, but its actual
+            # write runs through ``_safe_emit_event``'s multi-second retry
+            # window) — leaving the OLDER verdict last in the log and
+            # durably resurrecting a stale trust verdict on replay. Select
+            # by the HIGHEST ``retry_attempt`` instead: the field is the
+            # root AC's monotonically-increasing retry index, persisted on
+            # every one of these events since it was introduced, so the
+            # read side stays correct under ANY out-of-log-order landing.
+            # Events predating the field (or carrying a corrupt value) rank
+            # as -1: among themselves the ``>=`` keeps plain log order (the
+            # pre-fix behavior, exactly), and any event that DOES carry the
+            # field outranks them.
+            raw_attempt = data.get("retry_attempt")
+            attempt = (
+                raw_attempt
+                if isinstance(raw_attempt, int)
+                and not isinstance(raw_attempt, bool)
+                and raw_attempt >= 0
+                else -1
+            )
+            if attempt >= latest_retry_attempt:
+                latest_retry_attempt = attempt
+                latest_data = data
 
         if latest_data is None:
             # ONLY the genuine "no matching event exists at all" case may

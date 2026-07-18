@@ -1110,6 +1110,191 @@ class TestDecompositionAttestationReplayOnResume:
         assert "node-never-seen" not in executor._decomposition_attestations
 
 
+class TestAttestationReplaySelectsHighestRetryAttempt:
+    """Adversarial-review Bug #4 (TOCTOU race on the deferred backfill):
+    round N's failed attestation write gets a deferred background backfill;
+    round N+1 (same node id — stable across retries) computes a different
+    verdict and its foreground write lands FIRST; the backfill's pre-write
+    supersession check passed before N+1 attested, but its actual write ran
+    through ``_safe_emit_event``'s multi-second retry window and landed
+    SECOND. With raw last-write-wins BY LOG ORDER, replay then resurrected
+    round N's stale verdict — potentially re-authorizing a discount the
+    newer, correct verdict had foreclosed. The loader must select by the
+    HIGHEST persisted ``retry_attempt`` among matching events, tie-breaking
+    (and legacy events without the field) on log order."""
+
+    @staticmethod
+    def _executor_with_store():
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _make_replaying_event_store,
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        return executor, appended_events
+
+    @staticmethod
+    def _attested_event(node_identity, attestation, *, retry_attempt=None):
+        from ouroboros.events.base import BaseEvent
+
+        data = {
+            **node_identity.to_event_metadata(),
+            **attestation.to_event_data(),
+            "execution_id": "exec-race",
+            "session_id": "s1",
+        }
+        if retry_attempt is not None:
+            data["retry_attempt"] = retry_attempt
+        return BaseEvent(
+            type="execution.ac.decomposition_attested",
+            aggregate_type="execution",
+            aggregate_id="exec-race",
+            data=data,
+        )
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_stale_backfill_does_not_resurrect_older_verdict(
+        self,
+    ) -> None:
+        """The exact race outcome, constructed directly: the OLDER (lower
+        retry_attempt) event lands in the log AFTER the NEWER (higher
+        retry_attempt) one. Replay must still return the newer attestation —
+        never re-authorize the trust the newer round foreclosed."""
+        from ouroboros.harness.decomposition_attestation import DecompositionAttestation
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-race", ac_index=0)
+        newer = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="round N+1: parent gate failed after decomposition",
+        )
+        stale = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+            failed_axis=None,
+            failed_sibling_id=None,
+            reason="round N: all axes passed (stale, superseded by round N+1)",
+        )
+        executor, appended_events = self._executor_with_store()
+        # Round N+1's foreground write landed FIRST...
+        appended_events.append(self._attested_event(node_identity, newer, retry_attempt=2))
+        # ...then round N's deferred backfill finally landed, OUT of order.
+        appended_events.append(self._attested_event(node_identity, stale, retry_attempt=1))
+
+        loaded = await executor._load_decomposition_attestation(
+            node_identity.node_id, execution_id="exec-race", session_id="s1"
+        )
+
+        assert loaded is not None
+        assert loaded.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert loaded.reason == "round N+1: parent gate failed after decomposition"
+
+    @pytest.mark.asyncio
+    async def test_in_order_log_still_returns_latest_round(self) -> None:
+        """Control: the ordinary no-race log (attempts in log order) keeps
+        returning the latest round exactly as before."""
+        from ouroboros.harness.decomposition_attestation import DecompositionAttestation
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-race", ac_index=0)
+        older = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="round N failed",
+        )
+        newer = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+            failed_axis=None,
+            failed_sibling_id=None,
+            reason="round N+1 passed",
+        )
+        executor, appended_events = self._executor_with_store()
+        appended_events.append(self._attested_event(node_identity, older, retry_attempt=1))
+        appended_events.append(self._attested_event(node_identity, newer, retry_attempt=2))
+
+        loaded = await executor._load_decomposition_attestation(
+            node_identity.node_id, execution_id="exec-race", session_id="s1"
+        )
+
+        assert loaded is not None
+        assert loaded.verdict is DecompositionTrustVerdict.TRUSTWORTHY
+        assert loaded.reason == "round N+1 passed"
+
+    @pytest.mark.asyncio
+    async def test_legacy_events_without_retry_attempt_keep_log_order(self) -> None:
+        """Durable records written before ``retry_attempt`` was persisted
+        rank equally, so among themselves plain log order still wins — the
+        exact pre-fix posture, never worse."""
+        from ouroboros.harness.decomposition_attestation import DecompositionAttestation
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-race", ac_index=0)
+        first = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+            failed_axis=None,
+            failed_sibling_id=None,
+            reason="legacy first",
+        )
+        second = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="legacy second",
+        )
+        executor, appended_events = self._executor_with_store()
+        appended_events.append(self._attested_event(node_identity, first))
+        appended_events.append(self._attested_event(node_identity, second))
+
+        loaded = await executor._load_decomposition_attestation(
+            node_identity.node_id, execution_id="exec-race", session_id="s1"
+        )
+
+        assert loaded is not None
+        assert loaded.reason == "legacy second"
+
+    @pytest.mark.asyncio
+    async def test_versioned_event_outranks_legacy_event_landing_after_it(self) -> None:
+        """An event that DOES carry ``retry_attempt`` outranks a legacy
+        (field-less) record regardless of where each sits in the log."""
+        from ouroboros.harness.decomposition_attestation import DecompositionAttestation
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-race", ac_index=0)
+        versioned = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="versioned record",
+        )
+        legacy = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+            failed_axis=None,
+            failed_sibling_id=None,
+            reason="legacy record",
+        )
+        executor, appended_events = self._executor_with_store()
+        appended_events.append(self._attested_event(node_identity, versioned, retry_attempt=0))
+        appended_events.append(self._attested_event(node_identity, legacy))
+
+        loaded = await executor._load_decomposition_attestation(
+            node_identity.node_id, execution_id="exec-race", session_id="s1"
+        )
+
+        assert loaded is not None
+        assert loaded.reason == "versioned record"
+
+
 class TestDecompositionAttestationFailsClosedOnReplayFailure:
     """Fix 5 (round 3, BLOCKING): a genuine READ failure (every
     ``_replay_with_retry`` attempt raises) must NOT be silently treated the
