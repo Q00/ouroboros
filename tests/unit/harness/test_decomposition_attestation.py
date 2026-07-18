@@ -177,3 +177,109 @@ class TestConstructionInvariants:
     def test_parent_rejects_passed_without_verify_command(self) -> None:
         with pytest.raises(ValueError, match="has_verify_command"):
             ParentVerifyOutcome(has_verify_command=False, passed=False)
+
+
+class TestEvaluatedFailureBeatsIndeterminacy:
+    """Evaluate-all-then-prioritize-failure ordering: an axis that actually
+    ran and FAILED must win the verdict as UNTRUSTWORTHY, never be masked by
+    an earlier axis's mere absence of evidence."""
+
+    def test_parent_failure_wins_over_indeterminate_sibling(self) -> None:
+        """The exact masking bug this reorder fixes: a sibling with no
+        evaluable gate used to short-circuit the scan BEFORE the parent's
+        real, evaluated failure was ever considered."""
+        attestation = attest_decomposition(
+            node_id="root:6",
+            siblings=(_sibling("0", has_verify_command=False, passed=None), _sibling("1")),
+            parent=_parent(passed=False, reason="expected_artifacts missing: out.json"),
+        )
+
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.failed_axis is DecompositionTrustAxis.PARENT_GATE
+        assert attestation.failed_sibling_id is None
+
+    def test_later_sibling_failure_wins_over_earlier_indeterminate_sibling(self) -> None:
+        attestation = attest_decomposition(
+            node_id="root:7",
+            siblings=(
+                _sibling("0", has_verify_command=False, passed=None),
+                _sibling("1", passed=False, reason="real failure"),
+            ),
+            parent=_parent(has_verify_command=False, passed=None),
+        )
+
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "1"
+
+    def test_sibling_failure_attributed_before_parent_failure(self) -> None:
+        attestation = attest_decomposition(
+            node_id="root:8",
+            siblings=(_sibling("0", passed=False, reason="sibling failed"),),
+            parent=_parent(passed=False, reason="parent failed too"),
+        )
+
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "0"
+
+    def test_empty_siblings_with_failing_parent_is_untrustworthy(self) -> None:
+        """Even with no sibling evidence at all, a parent gate that ran and
+        failed is real negative evidence -- tightened from the previous
+        INDETERMINATE early return."""
+        attestation = attest_decomposition(
+            node_id="root:9",
+            siblings=(),
+            parent=_parent(passed=False, reason="parent failed"),
+        )
+
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.failed_axis is DecompositionTrustAxis.PARENT_GATE
+
+
+class TestReorderNeverMintsNewTrustworthy:
+    """Safety invariant 5: relative to the previous first-indeterminate-
+    returns-early scan, the reorder may only tighten INDETERMINATE to
+    UNTRUSTWORTHY when real failing evidence exists. TRUSTWORTHY still
+    requires every axis evaluated AND passed, so no axis-evaluation
+    permutation containing an indeterminate or failing axis may yield
+    TRUSTWORTHY."""
+
+    _SIBLING_STATES: tuple[tuple[bool, bool | None], ...] = (
+        (True, True),  # evaluated, passed
+        (True, False),  # evaluated, failed
+        (False, None),  # unevaluable
+    )
+
+    @pytest.mark.parametrize("first", _SIBLING_STATES, ids=["pass", "fail", "none"])
+    @pytest.mark.parametrize("second", _SIBLING_STATES, ids=["pass", "fail", "none"])
+    @pytest.mark.parametrize("parent_state", _SIBLING_STATES, ids=["pass", "fail", "none"])
+    def test_trustworthy_requires_all_axes_evaluated_and_passed(
+        self,
+        first: tuple[bool, bool | None],
+        second: tuple[bool, bool | None],
+        parent_state: tuple[bool, bool | None],
+    ) -> None:
+        attestation = attest_decomposition(
+            node_id="root:perm",
+            siblings=(
+                _sibling("0", has_verify_command=first[0], passed=first[1]),
+                _sibling("1", has_verify_command=second[0], passed=second[1]),
+            ),
+            parent=_parent(has_verify_command=parent_state[0], passed=parent_state[1]),
+        )
+
+        all_passed = all(state == (True, True) for state in (first, second, parent_state))
+        any_failed = any(state == (True, False) for state in (first, second, parent_state))
+
+        if all_passed:
+            # The ONLY permutation that is trustworthy -- identical to the
+            # condition under the pre-reorder logic.
+            assert attestation.verdict is DecompositionTrustVerdict.TRUSTWORTHY
+        elif any_failed:
+            # Real evaluated failure always wins (this is where the reorder
+            # may TIGHTEN a previously-INDETERMINATE verdict).
+            assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        else:
+            assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        # Never trustworthy unless everything was evaluated and passed.
+        assert attestation.trustworthy is (all_passed is True)

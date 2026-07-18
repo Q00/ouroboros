@@ -32,6 +32,16 @@ therefore the case this module leans hardest on getting right) resolves to
 round graded trustworthy) are the one failure mode this module must never
 produce, so ambiguity always resolves closed, never open.
 
+:func:`attest_decomposition` evaluates ALL axes first and only then
+prioritizes (evaluate-all-then-prioritize-failure ordering): any axis that
+actually ran and FAILED wins the verdict as ``UNTRUSTWORTHY`` — real,
+evaluated negative evidence is never masked by another axis's mere absence of
+evidence — then any unevaluable axis resolves ``INDETERMINATE``, and only a
+board of fully evaluated passes yields ``TRUSTWORTHY``. Relative to a
+first-indeterminate-returns-early scan this can only tighten a verdict
+(``INDETERMINATE`` → ``UNTRUSTWORTHY``); it can never mint a new
+``TRUSTWORTHY``.
+
 This module is pure: no LLM calls, no subprocess execution, no filesystem
 access, and no import from ``ouroboros.orchestrator`` (mirroring
 ``ouroboros.harness.traceguard_validator``). Callers construct
@@ -164,26 +174,78 @@ def attest_decomposition(
     A round is ``TRUSTWORTHY`` iff every sibling passed its own verify gate
     AND the parent's own verify gate, re-run over the current workspace state
     after all children finished, also passes. Any sibling or the parent
-    without an evaluable verify gate collapses the whole round to
-    ``INDETERMINATE`` (not trustworthy) rather than being skipped or
-    optimistically assumed to pass — an unproven axis must never be read as a
-    passing one.
+    without an evaluable verify gate leaves the round ``INDETERMINATE`` (not
+    trustworthy) rather than being skipped or optimistically assumed to pass
+    — an unproven axis must never be read as a passing one.
 
-    Siblings are checked in order so the FIRST failing/indeterminate sibling
-    is the one attributed in the verdict (deterministic, stable output for a
-    given input order).
+    ALL axes are evaluated first, then prioritized (evaluate-all-then-
+    prioritize-failure ordering):
+
+    1. any axis that was actually EVALUATED and FAILED wins →
+       ``UNTRUSTWORTHY`` (real, evaluated negative evidence must never be
+       masked by some other axis's mere absence of evidence — the first
+       failing sibling is attributed; the parent is attributed only when no
+       sibling failed);
+    2. otherwise any unevaluable axis → ``INDETERMINATE`` (attributing the
+       first indeterminate sibling, else the parent);
+    3. otherwise (every axis evaluated and passed) → ``TRUSTWORTHY``.
+
+    This ordering can only ever tighten a verdict relative to the previous
+    first-indeterminate-sibling-returns-early behavior: an input that used to
+    resolve ``INDETERMINATE`` may now resolve ``UNTRUSTWORTHY`` when real
+    failing evidence exists elsewhere, but ``TRUSTWORTHY`` still requires the
+    exact same "everything evaluated and passed" condition — no new
+    ``TRUSTWORTHY`` verdicts are ever produced.
+
+    Siblings are scanned in order so the FIRST failing (or, failing that,
+    FIRST indeterminate) sibling is the one attributed in the verdict
+    (deterministic, stable output for a given input order).
 
     Args:
         node_id: The decomposition round's node id.
         siblings: Every sibling's own verify-gate outcome. An empty tuple
-            (a decomposition round with no recorded children) is itself
-            indeterminate — there is nothing to attest.
+            (a decomposition round with no recorded children) makes the
+            sibling axis unevaluable — there is nothing to attest on it.
         parent: The parent's own verify-gate outcome, re-run after all
             siblings finished.
 
     Returns:
         A frozen :class:`DecompositionAttestation`.
     """
+    failing_sibling: SiblingVerifyOutcome | None = None
+    indeterminate_sibling: SiblingVerifyOutcome | None = None
+    for sibling in siblings:
+        if not sibling.has_verify_command or sibling.passed is None:
+            if indeterminate_sibling is None:
+                indeterminate_sibling = sibling
+        elif sibling.passed is False and failing_sibling is None:
+            failing_sibling = sibling
+
+    parent_unevaluable = not parent.has_verify_command or parent.passed is None
+    parent_failed = not parent_unevaluable and parent.passed is False
+
+    # 1) Real, evaluated failures win over any other axis's indeterminacy.
+    if failing_sibling is not None:
+        return DecompositionAttestation(
+            node_id=node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.SIBLING_GATE,
+            failed_sibling_id=failing_sibling.sibling_id,
+            reason=(
+                f"sibling {failing_sibling.sibling_id!r} failed its own verify gate: "
+                f"{failing_sibling.reason}"
+            ),
+        )
+    if parent_failed:
+        return DecompositionAttestation(
+            node_id=node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason=f"parent verify gate failed after decomposition: {parent.reason}",
+        )
+
+    # 2) No evaluated failure anywhere: any unevaluable axis is indeterminate.
     if not siblings:
         return DecompositionAttestation(
             node_id=node_id,
@@ -192,31 +254,18 @@ def attest_decomposition(
             failed_sibling_id=None,
             reason="no sibling verify-gate evidence recorded for this round",
         )
-
-    for sibling in siblings:
-        if not sibling.has_verify_command or sibling.passed is None:
-            return DecompositionAttestation(
-                node_id=node_id,
-                verdict=DecompositionTrustVerdict.INDETERMINATE,
-                failed_axis=DecompositionTrustAxis.SIBLING_GATE,
-                failed_sibling_id=sibling.sibling_id,
-                reason=(
-                    f"sibling {sibling.sibling_id!r} has no evaluable verify gate; "
-                    "cannot attest this round"
-                ),
-            )
-        if sibling.passed is False:
-            return DecompositionAttestation(
-                node_id=node_id,
-                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
-                failed_axis=DecompositionTrustAxis.SIBLING_GATE,
-                failed_sibling_id=sibling.sibling_id,
-                reason=(
-                    f"sibling {sibling.sibling_id!r} failed its own verify gate: {sibling.reason}"
-                ),
-            )
-
-    if not parent.has_verify_command or parent.passed is None:
+    if indeterminate_sibling is not None:
+        return DecompositionAttestation(
+            node_id=node_id,
+            verdict=DecompositionTrustVerdict.INDETERMINATE,
+            failed_axis=DecompositionTrustAxis.SIBLING_GATE,
+            failed_sibling_id=indeterminate_sibling.sibling_id,
+            reason=(
+                f"sibling {indeterminate_sibling.sibling_id!r} has no evaluable verify gate; "
+                "cannot attest this round"
+            ),
+        )
+    if parent_unevaluable:
         return DecompositionAttestation(
             node_id=node_id,
             verdict=DecompositionTrustVerdict.INDETERMINATE,
@@ -227,15 +276,8 @@ def attest_decomposition(
                 "sufficiency after decomposition"
             ),
         )
-    if parent.passed is False:
-        return DecompositionAttestation(
-            node_id=node_id,
-            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
-            failed_axis=DecompositionTrustAxis.PARENT_GATE,
-            failed_sibling_id=None,
-            reason=f"parent verify gate failed after decomposition: {parent.reason}",
-        )
 
+    # 3) Every axis evaluated and passed.
     return DecompositionAttestation(
         node_id=node_id,
         verdict=DecompositionTrustVerdict.TRUSTWORTHY,

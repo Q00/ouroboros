@@ -515,14 +515,16 @@ class TestLiveDecompositionAttestationEndToEnd:
         assert result.verify_gate_outcome.passed is True
 
     @pytest.mark.asyncio
-    async def test_live_decomposed_child_missing_artifact_still_indeterminate_via_sibling_axis(
+    async def test_live_missing_parent_artifact_is_untrustworthy_via_parent_axis(
         self, tmp_path
     ) -> None:
-        """Even when the PARENT's own re-run gate genuinely fails (the
-        artifact is missing), no sibling ever ran that borrowed contract, so
-        the round must resolve INDETERMINATE via the sibling axis -- never
-        misattributing the parent-wide failure to a specific sibling that was
-        never actually checked."""
+        """No sibling ever ran the borrowed parent-wide contract (their axis
+        stays unevaluable), but the PARENT's own re-run gate genuinely ran
+        and FAILED -- real, evaluated negative evidence. Under the
+        evaluate-all-then-prioritize-failure ordering that failure wins the
+        verdict as UNTRUSTWORTHY on the PARENT axis (with no sibling blamed,
+        since none was actually checked) instead of being masked into
+        INDETERMINATE by the siblings' absence of evidence."""
         from datetime import UTC, datetime
 
         from tests.unit.orchestrator.test_parallel_executor import (
@@ -577,8 +579,9 @@ class TestLiveDecompositionAttestationEndToEnd:
 
         assert result.sub_results[0].verify_gate_outcome is None
         assert result.decomposition_attestation is not None
-        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
-        assert result.decomposition_attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert result.decomposition_attestation.failed_axis is DecompositionTrustAxis.PARENT_GATE
+        assert result.decomposition_attestation.failed_sibling_id is None
         assert result.decomposition_attestation.trustworthy is False
 
         # The PARENT's own gate still genuinely ran once and genuinely failed.
