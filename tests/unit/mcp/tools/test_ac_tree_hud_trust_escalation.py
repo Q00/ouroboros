@@ -120,6 +120,88 @@ class TestRenderMarkdownDirectly:
         assert "[untrusted" not in markdown
 
 
+class TestParkedResolvedFolding:
+    """Fix 8 (BLOCKING, PR #1648 review): a parked AC that later succeeds
+    must have its parked badge cleared in the HUD too, not just show
+    ``completed`` while ``[parked]`` still lingers on the node label."""
+
+    @pytest.mark.asyncio
+    async def test_parked_then_resolved_clears_the_hud_badge(
+        self, memory_event_store: EventStore
+    ) -> None:
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_resolved_e2e",
+                data={
+                    "execution_id": "exec_resolved_e2e",
+                    "seed_id": "seed_resolved_e2e",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_resolved_e2e",
+                data={
+                    "execution_id": "exec_resolved_e2e",
+                    "completed_count": 0,
+                    "total_count": 1,
+                    "acceptance_criteria": [
+                        {
+                            "node_id": "ac_1",
+                            "index": 1,
+                            "content": "Stubborn criterion",
+                            "status": "executing",
+                        },
+                    ],
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec_resolved_e2e",
+                data={
+                    "execution_id": "exec_resolved_e2e",
+                    "session_id": "sess_resolved_e2e",
+                    "node_id": "ac_1",
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker"],
+                    "consecutive_terminal_failures": 3,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_resolved",
+                aggregate_type="execution",
+                aggregate_id="exec_resolved_e2e",
+                data={
+                    "execution_id": "exec_resolved_e2e",
+                    "session_id": "sess_resolved_e2e",
+                    "node_id": "ac_1",
+                    "root_ac_index": 0,
+                },
+            )
+        )
+
+        handler = ACTreeHUDHandler(event_store=memory_event_store)
+
+        tree_result = await handler.handle(
+            {"session_id": "sess_resolved_e2e", "cursor": 0, "view": "tree"}
+        )
+        assert tree_result.is_ok
+        assert "[parked]" not in tree_result.value.text_content
+        assert "Trust/Escalation" not in tree_result.value.text_content
+
+
 class TestHandlerEndToEnd:
     @pytest.mark.asyncio
     async def test_parked_event_surfaces_in_all_three_views(

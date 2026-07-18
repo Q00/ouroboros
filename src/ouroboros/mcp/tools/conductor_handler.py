@@ -340,13 +340,14 @@ class RecordConductorDecisionHandler:
         """Bounded Task 1/2 summary for the AC(s) this decision followed.
 
         Queries the SAME durable events Kanban/HUD already read
-        (``execution.ac.decomposition_attested`` / ``execution.ac.parked_for_operator``),
-        scoped to ``execution_id`` (the execution the selected successor
-        follows) — the concrete link between this conductor decision and the
-        AC(s) it is "relevant for". Fails closed to ``None`` on any query
-        error so an audit-surface hiccup never fails the decision recording
-        itself (the caller's ``try`` around this whole method already treats
-        any raised exception as a hard failure of the MCP call).
+        (``execution.ac.decomposition_attested`` / ``execution.ac.parked_for_operator``
+        / ``execution.ac.parked_resolved``), scoped to ``execution_id`` (the
+        execution the selected successor follows) — the concrete link
+        between this conductor decision and the AC(s) it is "relevant for".
+        Fails closed to ``None`` on any query error so an audit-surface
+        hiccup never fails the decision recording itself (the caller's
+        ``try`` around this whole method already treats any raised exception
+        as a hard failure of the MCP call).
         """
         try:
             attested = await self.event_store.query_events(
@@ -359,6 +360,16 @@ class RecordConductorDecisionHandler:
                 event_type="execution.ac.parked_for_operator",
                 limit=200,
             )
+            # Fix 8: a parked AC that later succeeded emits this durable
+            # resolution companion — without subtracting it out, this
+            # summary (and the conductor decision receipt it feeds) would
+            # keep citing an AC as "parked for operator" forever, even after
+            # it actually completed.
+            resolved = await self.event_store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.ac.parked_resolved",
+                limit=200,
+            )
         except Exception:  # noqa: BLE001 - optional audit enrichment, never fatal.
             return None
 
@@ -367,11 +378,16 @@ class RecordConductorDecisionHandler:
             for item in attested
             if isinstance(item.data, dict) and item.data.get("trustworthy") is False
         }
+        resolved_nodes = {
+            item.data.get("node_id")
+            for item in resolved
+            if isinstance(item.data, dict) and item.data.get("node_id")
+        }
         parked_nodes = {
             item.data.get("node_id")
             for item in parked
             if isinstance(item.data, dict) and item.data.get("node_id")
-        }
+        } - resolved_nodes
         parts: list[str] = []
         if untrustworthy_nodes:
             plural = "s" if len(untrustworthy_nodes) != 1 else ""

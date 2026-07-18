@@ -6026,7 +6026,22 @@ Respond with either ATOMIC or the structured JSON object only.
                 # existing exception handling rather than looping forever.
                 return None
             if candidate.success:
-                # Breakthrough: reset the streak and surface the success.
+                # Breakthrough: reset the streak and surface the success. When
+                # this AC was actually parked (Fix 8), emit the durable
+                # resolution companion event so a projection folding the
+                # event log (Kanban/HUD/conductor) has a signal to clear the
+                # parked badge — otherwise it would show ``completed`` AND
+                # still-``parked`` forever, since ``parked_for_operator`` has
+                # no other durable "un-parked" signal.
+                if state.parked:
+                    await self._event_emitter.emit_ac_parked_resolved(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        node_id=ExecutionNodeIdentity.root(
+                            execution_context_id=execution_id, ac_index=ac_idx
+                        ).node_id,
+                        root_ac_index=ac_idx,
+                    )
                 self._lateral_escalation_states.pop(ac_idx, None)
                 return candidate
 

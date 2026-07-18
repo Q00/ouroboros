@@ -70,6 +70,7 @@ _TRUST_ESCALATION_EVENTS = frozenset(
     {
         "execution.ac.decomposition_attested",
         "execution.ac.parked_for_operator",
+        "execution.ac.parked_resolved",
     }
 )
 
@@ -443,6 +444,18 @@ def reduce_board(
                 personas_tried = payload.get("personas_tried")
                 if isinstance(personas_tried, list):
                     card["escalation_personas_tried"] = len(personas_tried)
+
+        elif event_type == "execution.ac.parked_resolved":
+            # Fix 8: the parked AC above eventually succeeded. Clear the
+            # badge so the card does not show ``completed`` AND still-
+            # ``parked`` at once — without this, folding the event log alone
+            # (no other durable "un-parked" signal exists) leaves the parked
+            # badge stuck forever.
+            node_id = payload.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                card = _card(cards, node_id)
+                card.pop("escalation_state", None)
+                card.pop("escalation_personas_tried", None)
 
         elif event_type == "execution.frugality_proof.evaluated":
             # Run-end frugality proof (run-level, not per-node): a compact summary

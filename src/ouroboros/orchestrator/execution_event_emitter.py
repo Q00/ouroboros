@@ -174,6 +174,49 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_ac_parked_resolved(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_id: str,
+        root_ac_index: int,
+    ) -> None:
+        """Persist that a previously-parked root AC has succeeded (Task 2/Fix 8).
+
+        ``execution.ac.parked_for_operator`` has no companion "un-parked"
+        event, so a projection that folds the event log (Kanban/HUD/
+        conductor) has no durable signal telling it to clear the parked
+        badge once the AC that triggered it actually finishes successfully —
+        it would otherwise show ``completed`` AND still-``parked`` on the
+        same card forever. This is that companion event, emitted exactly
+        once, at the moment the lateral-escalation ladder's in-memory streak
+        for this root AC is cleared on a breakthrough.
+
+        Only emitted when the AC being resolved was actually parked (the
+        caller checks its own ladder state before calling this) — a plain
+        ordinary success that never engaged the ladder has no parked badge to
+        clear and must not emit a spurious resolution event.
+
+        ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
+        .node_id`` the original ``parked_for_operator`` event carried, so a
+        projection can pair the two by node id exactly like any other
+        per-node event.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.parked_resolved",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "node_id": node_id,
+                    "root_ac_index": root_ac_index,
+                },
+            )
+        )
+
     async def emit_bounce_classified(
         self,
         *,

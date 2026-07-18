@@ -123,3 +123,65 @@ class TestParkedForOperatorFolding:
         )
 
         assert all(len(column) == 0 for column in board["columns"].values())
+
+
+class TestParkedResolvedFolding:
+    """Fix 8 (BLOCKING, PR #1648 review): a parked AC that later succeeds must
+    have its parked badge cleared, not left showing ``completed`` AND still-
+    ``parked`` forever."""
+
+    def test_parked_resolved_clears_the_badge(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.node.created",
+                    {"node_id": "ac_3", "label": "Stubborn AC", "status": "executing"},
+                ),
+                (
+                    "execution.ac.parked_for_operator",
+                    {
+                        "node_id": "ac_3",
+                        "root_ac_index": 2,
+                        "personas_tried": ["hacker", "researcher"],
+                        "consecutive_terminal_failures": 5,
+                        "backoff_seconds": 300.0,
+                        "reason": "all lateral-thinking personas exhausted",
+                    },
+                ),
+                (
+                    "execution.ac.parked_resolved",
+                    {"node_id": "ac_3", "root_ac_index": 2},
+                ),
+                (
+                    "execution.ac.completed",
+                    {"node_id": "ac_3", "success": True},
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_3")
+        assert "escalation_state" not in card
+        assert "escalation_personas_tried" not in card
+        assert card["status"] == "completed"
+
+    def test_missing_node_id_is_ignored(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.node.created",
+                    {"node_id": "ac_4", "label": "AC", "status": "executing"},
+                ),
+                (
+                    "execution.ac.parked_for_operator",
+                    {"node_id": "ac_4", "root_ac_index": 3},
+                ),
+                ("execution.ac.parked_resolved", {"root_ac_index": 3}),
+            ),
+            execution_id="exec_1",
+        )
+
+        # No node_id on the resolution event: the badge stays (fail-safe —
+        # never silently clear a badge without a resolvable target).
+        card = _card_by_id(board, "ac_4")
+        assert card["escalation_state"] == "parked"

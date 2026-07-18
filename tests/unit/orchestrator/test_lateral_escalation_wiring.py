@@ -44,6 +44,7 @@ def _make_executor() -> ParallelACExecutor:
     executor._emit_subtask_event = AsyncMock()
     executor._emit_ac_outcome_finalized = AsyncMock()
     executor._event_emitter.emit_ac_parked_for_operator = AsyncMock()
+    executor._event_emitter.emit_ac_parked_resolved = AsyncMock()
     executor._sleep = AsyncMock()
     return executor
 
@@ -236,6 +237,9 @@ class TestLadderProgression:
         assert len(seen_prompts) == len(set(seen_prompts))
         # Escalation state is cleared on breakthrough.
         assert 0 not in executor._lateral_escalation_states
+        # Fix 8: this AC was never parked, so there is no badge to clear —
+        # emitting a resolution event here would be a spurious no-op event.
+        executor._event_emitter.emit_ac_parked_resolved.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_all_personas_exhausted_emits_parked_event(self) -> None:
@@ -275,6 +279,12 @@ class TestLadderProgression:
         assert executor._sleep.await_count == 2
         for call in executor._sleep.await_args_list:
             assert call.args[0] == executor._parked_retry_backoff_seconds
+        # Fix 8: this AC WAS parked before the breakthrough, so the durable
+        # resolution companion event must fire exactly once so Kanban/HUD/
+        # conductor can clear the parked badge.
+        executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
+        _, resolved_kwargs = executor._event_emitter.emit_ac_parked_resolved.await_args
+        assert resolved_kwargs["root_ac_index"] == 0
 
     @pytest.mark.asyncio
     async def test_parked_state_keeps_retrying_with_long_backoff_and_does_not_hard_stop(
@@ -315,6 +325,9 @@ class TestLadderProgression:
         # Never re-emitted the parked event again (already parked; ``just_parked``
         # only fires once on the original transition).
         executor._event_emitter.emit_ac_parked_for_operator.assert_not_awaited()
+        # Fix 8: the eventual breakthrough still resolves the (pre-seeded)
+        # parked state exactly once.
+        executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
 
 
 class TestRootAcTerminalStateMatchesLiveDispatch:

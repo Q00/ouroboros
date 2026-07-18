@@ -133,6 +133,44 @@ async def test_trust_and_escalation_state_surfaced_when_present(store: EventStor
 
 
 @pytest.mark.asyncio
+async def test_resolved_parked_ac_is_excluded_from_the_summary(store: EventStore) -> None:
+    """Fix 8 (BLOCKING, PR #1648 review): an AC parked then later resolved
+    (succeeded) must NOT keep being cited as "parked for operator" in this
+    audit summary — without subtracting the resolution, the receipt would
+    misreport a completed AC as still needing operator attention forever."""
+    await store.append(
+        BaseEvent(
+            type="execution.ac.parked_for_operator",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            data={
+                "node_id": "ac_2",
+                "root_ac_index": 1,
+                "personas_tried": ["hacker"],
+                "consecutive_terminal_failures": 3,
+                "backoff_seconds": 300.0,
+                "reason": "all lateral-thinking personas exhausted",
+            },
+        )
+    )
+    await store.append(
+        BaseEvent(
+            type="execution.ac.parked_resolved",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            data={"node_id": "ac_2", "root_ac_index": 1},
+        )
+    )
+
+    handler = RecordConductorDecisionHandler(store)
+    result = await handler.handle(_selected())
+
+    assert result.is_ok
+    assert "parked for operator" not in result.value.text_content
+    assert "trust_escalation_summary" not in result.value.meta
+
+
+@pytest.mark.asyncio
 async def test_no_trust_escalation_line_when_nothing_reported(store: EventStore) -> None:
     handler = RecordConductorDecisionHandler(store)
 

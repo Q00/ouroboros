@@ -827,7 +827,11 @@ def _merge_subtask_events_into_snapshot(
 
 
 _TRUST_ESCALATION_EVENT_TYPES = frozenset(
-    {"execution.ac.decomposition_attested", "execution.ac.parked_for_operator"}
+    {
+        "execution.ac.decomposition_attested",
+        "execution.ac.parked_for_operator",
+        "execution.ac.parked_resolved",
+    }
 )
 
 
@@ -839,9 +843,10 @@ def _merge_trust_escalation_events_into_snapshot(
 
     Unlike :func:`_merge_subtask_events_into_snapshot`, this never creates a
     new node — ``execution.ac.decomposition_attested`` /
-    ``execution.ac.parked_for_operator`` are per-node badges layered on a node
-    the tree already knows about, resolved by ``node_id`` (falling back to the
-    legacy ``ac_N`` id via ``root_ac_index`` for older/simpler tree payloads).
+    ``execution.ac.parked_for_operator`` / ``execution.ac.parked_resolved``
+    are per-node badges layered on a node the tree already knows about,
+    resolved by ``node_id`` (falling back to the legacy ``ac_N`` id via
+    ``root_ac_index`` for older/simpler tree payloads).
     """
     raw_nodes = snapshot.get("nodes")
     root_id = _coerce_non_empty_string(snapshot.get("root_id")) or _ROOT_ID
@@ -875,8 +880,10 @@ def _merge_trust_escalation_events_into_snapshot(
             if verdict:
                 nodes[target_id]["trust_verdict"] = verdict
                 nodes[target_id]["trustworthy"] = bool(data.get("trustworthy"))
-        else:  # execution.ac.parked_for_operator
+        elif event_type == "execution.ac.parked_for_operator":
             nodes[target_id]["escalation_state"] = "parked"
+        else:  # execution.ac.parked_resolved (Fix 8): clear the parked badge.
+            nodes[target_id].pop("escalation_state", None)
 
     return {"root_id": root_id, "nodes": nodes}
 
