@@ -654,6 +654,15 @@ class InterviewEngine:
     # single call when no breakdown or no valid candidate is available.
     question_candidate_panel: bool = False
 
+    @staticmethod
+    def _has_draftable_context(state: InterviewState, initial_context: str) -> bool:
+        """Return whether the first turn has enough material for a useful draft."""
+        if state.codebase_context.strip() or state.codebase_paths:
+            return True
+        stripped = initial_context.strip()
+        non_empty_lines = [line for line in stripped.splitlines() if line.strip()]
+        return len(non_empty_lines) > 1 or len(stripped) >= 160
+
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
         self.model_is_explicit = self.model is not None
@@ -833,7 +842,10 @@ class InterviewEngine:
         # selection. Falls through to the single call when disabled, when no
         # per-dimension breakdown is stored, or when no valid candidate is
         # produced — so existing behavior is always reachable.
-        if self.question_candidate_panel:
+        draft_first_turn = self._next_conversation_round_number(
+            state
+        ) == 1 and self._has_draftable_context(state, effective_initial_context)
+        if self.question_candidate_panel and not draft_first_turn:
             candidate = await self._select_question_from_candidates(
                 state,
                 system_prompt=system_prompt,
@@ -1155,8 +1167,31 @@ class InterviewEngine:
         )
         prompt_initial_context = self._initial_context_for_system_prompt(context_for_prompt)
 
-        # For first round, add explicit instruction to start directly with a question
-        if effective_round_number == 1:
+        draft_first_turn = effective_round_number == 1 and self._has_draftable_context(
+            state,
+            context_for_prompt,
+        )
+
+        if draft_first_turn:
+            dynamic_header = (
+                "You are an expert requirements engineer conducting a Socratic interview.\n\n"
+                "CRITICAL: Before asking your FIRST question, show a short `Draft understanding` "
+                "based only on the available context. Cover the goal, deliverable, constraints, "
+                "and assumptions. Start every draft line with exactly `[CONFIRMED FACT]` when "
+                "the context states it directly, or `[INFERRED ASSUMPTION]` when you inferred it. "
+                "Never present an inference as a fact. After the draft, ask the user to correct "
+                "wrong or incomplete lines, making the most important unresolved point the first "
+                "question. Tell the user to include `[CONFIRM ASSUMPTIONS]` only if all inferred "
+                "assumptions are accurate. This draft-first instruction overrides any later "
+                "question-only or no-preamble instruction for this response.\n\n"
+                f"This is {round_info}. Your job is to expose and reduce ambiguity.\n\n"
+                f"Initial context: {prompt_initial_context}\n"
+            )
+            codebase_context = state.codebase_context.strip()
+            if codebase_context and codebase_context not in context_for_prompt:
+                dynamic_header += f"\nAvailable codebase context:\n{codebase_context[:900]}\n"
+        # Thin first turns deliberately preserve the prior transcript behavior.
+        elif effective_round_number == 1:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "

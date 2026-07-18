@@ -49,6 +49,44 @@ _CONSTRAINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+DRAFT_ASSUMPTION_PREFIX = "[INFERRED ASSUMPTION]"
+DRAFT_ASSUMPTION_CONFIRMATION = "[CONFIRM ASSUMPTIONS]"
+
+
+def draft_assumptions(question: str) -> tuple[str, ...]:
+    """Return model-inferred assumption lines from a draft-first turn."""
+    assumptions: list[str] = []
+    for line in question.splitlines():
+        stripped = line.strip().lstrip("-* ").strip()
+        if not stripped.startswith(DRAFT_ASSUMPTION_PREFIX):
+            continue
+        text = stripped.removeprefix(DRAFT_ASSUMPTION_PREFIX).strip()
+        if text:
+            assumptions.append(text)
+    return tuple(assumptions)
+
+
+def confirms_draft_assumptions(answer: str | None) -> bool:
+    """Require an explicit user act before draft assumptions gain authority."""
+    return bool(answer and DRAFT_ASSUMPTION_CONFIRMATION.casefold() in answer.casefold())
+
+
+def seed_safe_user_answer(answer: str) -> str:
+    """Remove the draft control marker while preserving user-authored content."""
+    return re.sub(
+        re.escape(DRAFT_ASSUMPTION_CONFIRMATION),
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def seed_safe_interviewer_turn(question: str, answer: str | None) -> str:
+    """Remove unconfirmed model inferences from legacy Seed extraction input."""
+    if confirms_draft_assumptions(answer):
+        return question
+    return "\n".join(line for line in question.splitlines() if not draft_assumptions(line))
+
 
 @dataclass(frozen=True, slots=True)
 class AppliedRequirementDistillation:
@@ -126,6 +164,53 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
         answer = (round_data.user_response or "").strip()
         if not answer or round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
             continue
+
+        inferred_assumptions = draft_assumptions(round_data.question)
+        assumptions_confirmed = confirms_draft_assumptions(answer)
+        for index, assumption in enumerate(inferred_assumptions):
+            inference_evidence_id = (
+                f"round-{round_data.round_number}:draft-assumption-{index}:model"
+            )
+            candidate_evidence_ids = [inference_evidence_id]
+            evidence.append(
+                RequirementEvidence(
+                    evidence_id=inference_evidence_id,
+                    kind=RequirementEvidenceKind.MODEL_INFERENCE,
+                    text=assumption,
+                )
+            )
+            if assumptions_confirmed:
+                confirmation_evidence_id = (
+                    f"round-{round_data.round_number}:draft-assumption-{index}:user"
+                )
+                evidence.append(
+                    RequirementEvidence(
+                        evidence_id=confirmation_evidence_id,
+                        kind=RequirementEvidenceKind.USER_STATEMENT,
+                        text=answer,
+                    )
+                )
+                candidate_evidence_ids.append(confirmation_evidence_id)
+            candidates.append(
+                RequirementCandidate(
+                    candidate_id=(f"round-{round_data.round_number}:draft-assumption-{index}"),
+                    section=RequirementSection.CONTEXT,
+                    text=assumption,
+                    content_source=CandidateContentSource.MODEL_INFERRED,
+                    resolution=(
+                        CandidateResolution.CONFIRMED
+                        if assumptions_confirmed
+                        else CandidateResolution.NEEDS_CONFIRMATION
+                    ),
+                    confirmation_authority=(
+                        ConfirmationAuthority.USER
+                        if assumptions_confirmed
+                        else ConfirmationAuthority.NONE
+                    ),
+                    evidence_ids=tuple(candidate_evidence_ids),
+                )
+            )
+
         reference_cue = reference_by_question.get(round_data.question)
         if reference_cue is not None:
             if reference_cue.reference_id in resolved_reference_ids:
@@ -140,23 +225,26 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             resolved_reference_ids.add(reference_cue.reference_id)
             continue
 
+        requirement_answer = seed_safe_user_answer(answer)
+        if not requirement_answer:
+            continue
         evidence_id = f"round-{round_data.round_number}:user"
         evidence.append(
             RequirementEvidence(
                 evidence_id=evidence_id,
                 kind=RequirementEvidenceKind.USER_STATEMENT,
-                text=answer,
+                text=requirement_answer,
             )
         )
-        explicitly_required = bool(_EXPLICIT_REQUIREMENT_RE.search(answer))
+        explicitly_required = bool(_EXPLICIT_REQUIREMENT_RE.search(requirement_answer))
         if not explicitly_required:
             continue
 
         referenced = tuple(
             cue.reference_id
             for cue in state.reference_cues
-            if cue.reference_id.casefold() in answer.casefold()
-            or cue.label.casefold() in answer.casefold()
+            if cue.reference_id.casefold() in requirement_answer.casefold()
+            or cue.label.casefold() in requirement_answer.casefold()
         )
         candidate_evidence_ids = [evidence_id]
         for reference_id in referenced:
@@ -165,7 +253,7 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
                 RequirementEvidence(
                     evidence_id=reference_evidence_id,
                     kind=RequirementEvidenceKind.REFERENCE_CUE,
-                    text=answer,
+                    text=requirement_answer,
                     reference_id=reference_id,
                 )
             )
@@ -179,7 +267,7 @@ def build_requirement_distillation(state: InterviewState) -> RequirementDistilla
             RequirementCandidate(
                 candidate_id=f"round-{round_data.round_number}:requirement",
                 section=section,
-                text=answer,
+                text=requirement_answer,
                 content_source=(
                     CandidateContentSource.REFERENCE_DERIVED
                     if referenced

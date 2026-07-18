@@ -252,6 +252,80 @@ def test_non_reference_interview_preserves_legacy_extraction() -> None:
     assert applied.requirements == requirements
 
 
+def test_unconfirmed_draft_assumption_is_omitted_from_seed_input(tmp_path) -> None:
+    """A correction does not grant the interviewer's inferred line authority."""
+    state = InterviewState(
+        interview_id="draft-corrected",
+        initial_context="Build an offline-capable desktop app",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=(
+                    "Draft understanding:\n"
+                    "- [CONFIRMED FACT] Goal: offline-capable desktop app\n"
+                    "- [INFERRED ASSUMPTION] Constraint: cloud storage is required\n"
+                    "Cloud or local-only storage?"
+                ),
+                user_response="Use local-only storage; no cloud dependency.",
+            )
+        ],
+    )
+
+    distillation = build_requirement_distillation(state)
+    applied = apply_requirement_distillation({}, distillation)
+    candidate = next(
+        item
+        for item in distillation.candidates
+        if item.candidate_id == "round-1:draft-assumption-0"
+    )
+    generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=tmp_path)
+    seed_context = generator._build_interview_context(state)
+
+    assert candidate.content_source is CandidateContentSource.MODEL_INFERRED
+    assert candidate.resolution is CandidateResolution.NEEDS_CONFIRMATION
+    assert candidate.confirmation_authority is ConfirmationAuthority.NONE
+    assert candidate in applied.promotion.omitted
+    assert "cloud storage is required" not in seed_context
+    assert "Use local-only storage; no cloud dependency." in seed_context
+
+
+def test_explicit_draft_assumption_confirmation_allows_promotion(tmp_path) -> None:
+    """The explicit review marker grants user authority to inferred lines."""
+    state = InterviewState(
+        interview_id="draft-confirmed",
+        initial_context="Build an offline-capable desktop app",
+        rounds=[
+            InterviewRound(
+                round_number=1,
+                question=(
+                    "Draft understanding:\n"
+                    "- [INFERRED ASSUMPTION] Constraint: cloud storage is required\n"
+                    "What should change?"
+                ),
+                user_response="[CONFIRM ASSUMPTIONS] The draft is accurate.",
+            )
+        ],
+    )
+
+    distillation = build_requirement_distillation(state)
+    applied = apply_requirement_distillation({}, distillation)
+    candidate = next(
+        item
+        for item in distillation.candidates
+        if item.candidate_id == "round-1:draft-assumption-0"
+    )
+    generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=tmp_path)
+
+    assert candidate.content_source is CandidateContentSource.MODEL_INFERRED
+    assert candidate.resolution is CandidateResolution.CONFIRMED
+    assert candidate.confirmation_authority is ConfirmationAuthority.USER
+    assert candidate in applied.promotion.promoted
+    seed_context = generator._build_interview_context(state)
+    assert "cloud storage is required" in seed_context
+    assert "[CONFIRM ASSUMPTIONS]" not in seed_context
+    assert all(item.candidate_id != "round-1:requirement" for item in distillation.candidates)
+
+
 def test_reference_cue_merge_changes_fingerprint_and_revision() -> None:
     state = InterviewState(interview_id="test", initial_context="Build a tool")
     before = build_requirement_distillation(state)

@@ -1065,6 +1065,43 @@ class TestInterviewEngineSystemPrompt:
         # Now just shows "Round N" without max limit
         assert "Round 1" in prompt
 
+    def test_rich_context_starts_with_labeled_draft_before_question(self) -> None:
+        """A substantive first turn asks for a correction-first labeled draft."""
+        engine = InterviewEngine(llm_adapter=MagicMock())
+        state = InterviewState(
+            interview_id="draft-first",
+            initial_context=(
+                "Goal: add offline synchronization to the existing desktop app.\n"
+                "Deliverable: a reusable sync service and migration notes.\n"
+                "Constraint: preserve the current local database format."
+            ),
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "Before asking your FIRST question" in prompt
+        assert "Draft understanding" in prompt
+        assert "[CONFIRMED FACT]" in prompt
+        assert "[INFERRED ASSUMPTION]" in prompt
+        assert "[CONFIRM ASSUMPTIONS]" in prompt
+        assert prompt.index("Before asking your FIRST question") < prompt.index(
+            "question-only or no-preamble"
+        )
+        assert "Start your FIRST response with a DIRECT QUESTION" not in prompt
+
+    def test_thin_context_preserves_direct_question_first_turn(self) -> None:
+        """A one-line idea with no repository context keeps the old behavior."""
+        engine = InterviewEngine(llm_adapter=MagicMock())
+        state = InterviewState(
+            interview_id="thin-first-turn",
+            initial_context="Build a task manager",
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "CRITICAL: Start your FIRST response with a DIRECT QUESTION" in prompt
+        assert "Draft understanding" not in prompt
+
     def test_system_prompt_treats_summary_recovery_as_first_real_round(self) -> None:
         """Summary sentinel rounds should not remove first-question prompt guards."""
         mock_adapter = MagicMock()

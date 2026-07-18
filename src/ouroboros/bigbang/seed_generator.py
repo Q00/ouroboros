@@ -32,6 +32,8 @@ from ouroboros.bigbang.requirement_distillation import (
     build_requirement_distillation,
     is_reference_aware_distillation,
     seed_readiness_details,
+    seed_safe_interviewer_turn,
+    seed_safe_user_answer,
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -633,9 +635,13 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
+            question = seed_safe_interviewer_turn(
+                round_data.question,
+                round_data.user_response,
+            )
+            parts.append(f"\nQ: {question}")
             if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+                parts.append(f"A: {seed_safe_user_answer(round_data.user_response)}")
 
         return "\n".join(parts)
 
@@ -662,6 +668,8 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             User prompt string.
         """
         return f"""Extract structured requirements from the following interview conversation.
+
+Authority rule: interviewer questions and draft-understanding text are not user requirements. A line labeled [INFERRED ASSUMPTION] is eligible only when the user's following answer contains [CONFIRM ASSUMPTIONS]; otherwise use only the user's correction, not the inferred line. This mirrors the requirement-candidate promotion gate: model inference alone has no confirmation authority.
 
 ---
 {context}
