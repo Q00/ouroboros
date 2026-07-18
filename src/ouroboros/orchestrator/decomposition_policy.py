@@ -511,8 +511,15 @@ def validate_decomposition_proposal(
       must actually cover the parent's whole artifact contract).
 
     When ``parent_expected_artifacts`` is empty, children's
-    ``expected_artifacts`` are neither required nor validated here -- the
-    field is a no-op and behavior matches the pre-feature code exactly.
+    ``expected_artifacts`` are neither required nor partition-validated here.
+    Note this is NOT byte-identical to the pre-feature behavior, though: a
+    proposal whose children carry a malformed ``expected_artifacts`` field
+    (duplicates, non-strings, blank/oversized entries, or too many of them)
+    is still rejected at construction time by the
+    :class:`DecompositionChild` ``__post_init__`` bounds (via ``from_dict``),
+    forcing the whole proposal to bounce (atomic/escalation) where the old
+    code silently ignored the unrecognized field and accepted the split. The
+    delta is strictly MORE fail-closed, never less.
     """
 
     errors: list[str] = []
