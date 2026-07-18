@@ -5876,6 +5876,98 @@ Respond with either ATOMIC or the structured JSON object only.
             effort_level=effort_decision.level,
         )
 
+    async def _load_lateral_escalation_state(
+        self, ac_idx: int, *, execution_id: str
+    ) -> LateralEscalationState:
+        """Load this root AC's persona-escalation streak, durable across restarts.
+
+        ``self._lateral_escalation_states`` is an in-memory cache. A process
+        restart/resume recreates the executor with it EMPTY, which silently
+        dropped a parked AC's escalation history (restarting the persona
+        cycle from scratch on the very next terminal failure) and its
+        long-backoff parked cadence — despite the design intending durable
+        parking.
+
+        Mirrors the existing convention this codebase already uses for the
+        SAME shape of problem — an in-memory cache reconstructed from the
+        event store on a miss (see
+        ``ACRuntimeHandleManager._load_persisted_ac_runtime_handle``): a
+        cache hit returns immediately; a miss replays this execution's own
+        durable events and rebuilds the state from the latest UNRESOLVED
+        ``execution.ac.parked_for_operator`` event for this AC's node id
+        (Fix 8's ``execution.ac.parked_resolved`` marks one resolved, so a
+        parked-then-succeeded AC correctly reconstructs as fresh, not
+        still-parked). No matching event means a fresh, never-parked state —
+        identical to today's in-memory default.
+
+        The rebuilt (or freshly-defaulted) state is cached back onto
+        ``self._lateral_escalation_states`` so later calls in the SAME
+        process do not repeat the replay.
+        """
+        cached = self._lateral_escalation_states.get(ac_idx)
+        if cached is not None:
+            return cached
+
+        from ouroboros.resilience.lateral import ThinkingPersona
+
+        node_id = ExecutionNodeIdentity.root(
+            execution_context_id=execution_id, ac_index=ac_idx
+        ).node_id
+        try:
+            events = await self._event_store.replay("execution", execution_id)
+        except Exception:
+            log.warning(
+                "parallel_executor.lateral_escalation.state_reconstruction_failed",
+                ac_idx=ac_idx,
+                execution_id=execution_id,
+            )
+            events = []
+
+        latest_parked_data: dict[str, Any] | None = None
+        resolved = False
+        for event in events:
+            event_type = getattr(event, "type", None)
+            if event_type not in {
+                "execution.ac.parked_for_operator",
+                "execution.ac.parked_resolved",
+            }:
+                continue
+            data = getattr(event, "data", None)
+            if not isinstance(data, dict) or data.get("node_id") != node_id:
+                continue
+            if event_type == "execution.ac.parked_for_operator":
+                latest_parked_data = data
+                resolved = False
+            else:
+                resolved = True
+
+        state = LateralEscalationState()
+        if latest_parked_data is not None and not resolved:
+            raw_personas = latest_parked_data.get("personas_tried")
+            personas: tuple[ThinkingPersona, ...] = ()
+            if isinstance(raw_personas, list):
+                recovered: list[ThinkingPersona] = []
+                for raw_value in raw_personas:
+                    try:
+                        recovered.append(ThinkingPersona(raw_value))
+                    except ValueError:
+                        continue
+                personas = tuple(recovered)
+            raw_streak = latest_parked_data.get("consecutive_terminal_failures")
+            streak = (
+                raw_streak
+                if isinstance(raw_streak, int) and not isinstance(raw_streak, bool)
+                else 0
+            )
+            state = LateralEscalationState(
+                consecutive_terminal_failures=streak,
+                personas_tried=personas,
+                parked=True,
+            )
+
+        self._lateral_escalation_states[ac_idx] = state
+        return state
+
     async def _maybe_run_lateral_escalation_ladder(
         self,
         *,
@@ -5933,7 +6025,7 @@ Respond with either ATOMIC or the structured JSON object only.
         if not terminal:
             return None
 
-        state = self._lateral_escalation_states.get(ac_idx, LateralEscalationState())
+        state = await self._load_lateral_escalation_state(ac_idx, execution_id=execution_id)
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
 
         while True:

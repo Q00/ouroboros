@@ -6,6 +6,7 @@ always mocked — this suite never actually sleeps or dispatches a real agent.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,13 +18,16 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
+from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.lateral_escalation import (
     TOTAL_PERSONA_COUNT,
     LateralEscalationState,
 )
 from ouroboros.orchestrator.model_routing import ModelRouter
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
+from ouroboros.persistence.event_store import EventStore
 from ouroboros.resilience.lateral import ThinkingPersona
 
 _THRESHOLD = 2  # mirrors lateral_escalation._LATERAL_ESCALATION_THRESHOLD
@@ -440,3 +444,183 @@ class TestRootAcTerminalStateMatchesLiveDispatch:
         )
 
         assert terminal is False
+
+
+class TestLateralEscalationStateDurability:
+    """Fix 6 (BLOCKING, PR #1648 review): a process restart/resume recreates
+    the executor with ``self._lateral_escalation_states`` EMPTY. A parked
+    AC's escalation streak/personas-tried/parked cadence must be
+    reconstructed from its own durable event history on first access, not
+    silently dropped (restarting the persona cycle from scratch and losing
+    the long-backoff parked cadence)."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    def _cold_start_executor(event_store: EventStore) -> ParallelACExecutor:
+        """A FRESH executor instance — as if just recreated after a restart —
+        wired to a durable event store that may already carry this run's
+        history."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        return executor
+
+    @pytest.mark.asyncio
+    async def test_reconstructs_parked_state_from_durable_event_on_cold_start(
+        self, memory_event_store: EventStore
+    ) -> None:
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker", "researcher"],
+                    "consecutive_terminal_failures": 6,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        assert executor._lateral_escalation_states == {}  # cold start: nothing cached yet
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is True
+        assert state.consecutive_terminal_failures == 6
+        assert state.personas_tried == (ThinkingPersona.HACKER, ThinkingPersona.RESEARCHER)
+        # Cached for subsequent same-process calls (no repeat replay).
+        assert executor._lateral_escalation_states[0] is state
+
+    @pytest.mark.asyncio
+    async def test_resolved_park_reconstructs_as_fresh_not_still_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """A parked-then-succeeded AC (Fix 8's resolution event present)
+        must NOT reconstruct as still-parked after a restart."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker"],
+                    "consecutive_terminal_failures": 5,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_resolved",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state == LateralEscalationState()
+
+    @pytest.mark.asyncio
+    async def test_no_durable_event_reconstructs_fresh_state(
+        self, memory_event_store: EventStore
+    ) -> None:
+        executor = self._cold_start_executor(memory_event_store)
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state == LateralEscalationState()
+
+    @pytest.mark.asyncio
+    async def test_in_memory_cache_hit_skips_replay(self, memory_event_store: EventStore) -> None:
+        executor = self._cold_start_executor(memory_event_store)
+        seeded = LateralEscalationState(consecutive_terminal_failures=2, parked=False)
+        executor._lateral_escalation_states[0] = seeded
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state is seeded
+
+    @pytest.mark.asyncio
+    async def test_reconstructed_parked_state_applies_long_backoff_immediately(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """End-to-end through the actual ladder entry point: a 'cold start'
+        AC that was durably parked before a restart must resume the
+        long-backoff parked cadence on its VERY FIRST post-restart dispatch —
+        not restart persona cycling from scratch, and not lose the long
+        backoff."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [p.value for p in ThinkingPersona],
+                    "consecutive_terminal_failures": 20,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        executor = _make_executor_with_active_ladder()
+        # Swap in the durable store carrying this AC's parked history, as if
+        # this executor were recreated after a restart against the same run.
+        executor._event_store = memory_event_store
+
+        call_count = {"n": 0}
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="still broken"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        assert call_count["n"] == 1
+        # The long-backoff parked cadence applied on the FIRST post-restart
+        # dispatch — proving the reconstructed state was actually consulted,
+        # not a fresh LateralEscalationState() that would instead do "one
+        # more identical retry" without sleeping at all.
+        executor._sleep.assert_awaited_once_with(executor._parked_retry_backoff_seconds)
