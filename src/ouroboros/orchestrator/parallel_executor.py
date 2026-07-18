@@ -7848,7 +7848,21 @@ Respond with either ATOMIC or the structured JSON object only.
             return None
 
         current_result = result
-        current_retry_attempt = ac_retry_attempts[ac_idx]
+        # Round-9 finding #1 (BLOCKING): the batch counter alone can LAG the
+        # attempt number the AC's current result actually ran under —
+        # internal stall retries bump ``atomic_retry_attempt`` inside
+        # ``_execute_single_ac`` without the batch counter ever seeing it,
+        # and an alternate-harness redispatch runs at
+        # ``atomic_retry_attempt + 1``. Seeding the ladder from the lagging
+        # counter would make its first redispatch (``current_retry_attempt
+        # + 1`` below) REUSE an attempt number those mechanisms already
+        # consumed: colliding attempt-scoped runtime handles/telemetry, and
+        # — worse — letting that earlier attempt's ``outcome_finalized``
+        # marker falsely correlate on a later resume as proof that the
+        # ladder's persona dispatch under the reused number already
+        # completed, skipping a persona that never ran. Start from the
+        # highest attempt number ANY mechanism has used for this AC.
+        current_retry_attempt = max(ac_retry_attempts[ac_idx], result.retry_attempt)
         state = await self._load_lateral_escalation_state(ac_idx, execution_id=execution_id)
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
         # Fix 4 (round 2, BLOCKING): re-verified every iteration below, not

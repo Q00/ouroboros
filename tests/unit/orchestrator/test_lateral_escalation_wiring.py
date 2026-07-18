@@ -338,6 +338,92 @@ class TestLadderProgression:
         executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
 
 
+class TestLadderNeverReusesAttemptNumbers:
+    """Round-9 Finding #1 (BLOCKING): the ladder seeded its attempt counter
+    from the BATCH's retry counter alone, ignoring ``result.retry_attempt``.
+    Internal stall retries bump the atomic attempt number without the batch
+    counter seeing it, and an alternate-harness redispatch runs at
+    ``atomic_retry_attempt + 1`` — so the result entering the ladder can
+    carry a HIGHER attempt number than the batch counter. Seeding from the
+    lagging counter made the ladder's first dispatch REUSE an already-used
+    attempt number: colliding attempt-scoped handles/telemetry, and letting
+    the earlier attempt's ``outcome_finalized`` marker falsely correlate on
+    resume as proof the persona dispatch under the reused number already
+    completed."""
+
+    @pytest.mark.asyncio
+    async def test_result_attempt_ahead_of_batch_counter_gets_a_fresh_number(self) -> None:
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_lateral_escalation_progressed = AsyncMock(return_value=True)
+        dispatch_attempts: list[int] = []
+
+        async def succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            attempts = kwargs["ac_retry_attempts"]
+            assert isinstance(attempts, dict)
+            dispatch_attempts.append(attempts[0])
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        # The batch counter says 2, but the AC's current result already ran
+        # under attempt 5 (e.g. a prior alternate-harness redispatch at
+        # ``atomic_retry_attempt + 1``).
+        stale_counter_result = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="alt-harness attempt also failed",
+            retry_attempt=5,
+            is_decomposed=False,
+        )
+        ac_retry_attempts = {0: 2}
+        outcome = await _ladder(
+            executor, result=stale_counter_result, ac_retry_attempts=ac_retry_attempts
+        )
+
+        assert outcome is not None
+        assert outcome.success is True
+        # The ladder's first dispatch used a genuinely NEW attempt number
+        # (6 = max(2, 5) + 1) — never 3, which attempt 5's mechanisms may
+        # already have consumed handles/telemetry/markers under.
+        assert dispatch_attempts == [6]
+        assert ac_retry_attempts[0] == 6
+        progressed_kwargs = (
+            executor._event_emitter.emit_lateral_escalation_progressed.await_args.kwargs
+        )
+        assert progressed_kwargs["retry_attempt"] == 6
+
+    @pytest.mark.asyncio
+    async def test_batch_counter_ahead_of_result_attempt_is_unchanged(self) -> None:
+        """Negative control: when the batch counter already leads (the
+        ordinary path), seeding is unchanged."""
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_lateral_escalation_progressed = AsyncMock(return_value=True)
+        dispatch_attempts: list[int] = []
+
+        async def succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            attempts = kwargs["ac_retry_attempts"]
+            assert isinstance(attempts, dict)
+            dispatch_attempts.append(attempts[0])
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        ac_retry_attempts = {0: 2}
+        outcome = await _ladder(
+            executor,
+            result=_failed_result(error="ordinary budget-exhausted failure"),
+            ac_retry_attempts=ac_retry_attempts,
+        )
+
+        assert outcome is not None
+        assert outcome.success is True
+        assert dispatch_attempts == [3]
+        assert ac_retry_attempts[0] == 3
+
+
 class TestRootAcTerminalStateMatchesLiveDispatch:
     """Fix 3 (BLOCKING, PR #1648 review): ``_root_ac_terminal_state`` must
     reproduce the EXACT model/effort resolution a live dispatch would use for
