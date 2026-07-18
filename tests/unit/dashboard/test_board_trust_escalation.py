@@ -185,3 +185,98 @@ class TestParkedResolvedFolding:
         # never silently clear a badge without a resolvable target).
         card = _card_by_id(board, "ac_4")
         assert card["escalation_state"] == "parked"
+
+
+class TestLateralEscalationProgressedFolding:
+    """Round-4 follow-up: ``execution.ac.lateral_escalation_progressed`` is
+    emitted on EVERY ladder iteration, so the board shows active
+    persona-escalation progress (which persona is currently being tried)
+    while it happens — not only once the AC is fully parked."""
+
+    def test_progressed_event_sets_escalating_state_and_current_persona(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.node.created",
+                    {"node_id": "ac_5", "label": "Stubborn AC", "status": "executing"},
+                ),
+                (
+                    "execution.ac.lateral_escalation_progressed",
+                    {
+                        "node_id": "ac_5",
+                        "root_ac_index": 4,
+                        "personas_tried": ["hacker"],
+                        "consecutive_terminal_failures": 3,
+                        "parked": False,
+                        "persona": "hacker",
+                    },
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_5")
+        assert card["escalation_state"] == "escalating"
+        assert card["escalation_persona"] == "hacker"
+        assert card["escalation_personas_tried"] == 1
+        # A badge, not a lifecycle signal — status is untouched.
+        assert card["status"] == "executing"
+
+    def test_progressed_event_with_parked_true_sets_parked_state(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.ac.lateral_escalation_progressed",
+                    {
+                        "node_id": "ac_6",
+                        "root_ac_index": 5,
+                        "personas_tried": ["hacker", "contrarian"],
+                        "consecutive_terminal_failures": 6,
+                        "parked": True,
+                        "persona": None,
+                    },
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_6")
+        assert card["escalation_state"] == "parked"
+        assert card["escalation_personas_tried"] == 2
+
+    def test_parked_resolved_clears_progressed_badges_too(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.ac.lateral_escalation_progressed",
+                    {
+                        "node_id": "ac_7",
+                        "root_ac_index": 6,
+                        "personas_tried": ["hacker"],
+                        "consecutive_terminal_failures": 3,
+                        "parked": False,
+                        "persona": "hacker",
+                    },
+                ),
+                ("execution.ac.parked_resolved", {"node_id": "ac_7", "root_ac_index": 6}),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_7")
+        assert "escalation_state" not in card
+        assert "escalation_persona" not in card
+        assert "escalation_personas_tried" not in card
+
+    def test_missing_node_id_is_ignored(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.ac.lateral_escalation_progressed",
+                    {"root_ac_index": 0, "parked": False, "persona": "hacker"},
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        assert all(len(column) == 0 for column in board["columns"].values())

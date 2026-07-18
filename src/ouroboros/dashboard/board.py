@@ -69,6 +69,7 @@ _TELEMETRY_EVENTS = frozenset(
 _TRUST_ESCALATION_EVENTS = frozenset(
     {
         "execution.ac.decomposition_attested",
+        "execution.ac.lateral_escalation_progressed",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
     }
@@ -434,6 +435,25 @@ def reduce_board(
                     card["trust_verdict"] = verdict
                     card["trustworthy"] = bool(payload.get("trustworthy"))
 
+        elif event_type == "execution.ac.lateral_escalation_progressed":
+            # Task 2 (round-4 follow-up): emitted on EVERY ladder iteration,
+            # so an operator sees active persona-escalation progress (which
+            # persona is currently being tried) while it happens — not only
+            # once the AC is fully parked. Latest event wins, matching the
+            # chronological-fold semantics of every other badge here.
+            node_id = payload.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                card = _card(cards, node_id)
+                card["escalation_state"] = (
+                    "parked" if payload.get("parked") is True else "escalating"
+                )
+                personas_tried = payload.get("personas_tried")
+                if isinstance(personas_tried, list):
+                    card["escalation_personas_tried"] = len(personas_tried)
+                persona = payload.get("persona")
+                if isinstance(persona, str) and persona:
+                    card["escalation_persona"] = persona
+
         elif event_type == "execution.ac.parked_for_operator":
             # Task 2: this root AC exhausted the lateral-escalation ladder and
             # is retrying forever at a long backoff instead of failing.
@@ -456,6 +476,7 @@ def reduce_board(
                 card = _card(cards, node_id)
                 card.pop("escalation_state", None)
                 card.pop("escalation_personas_tried", None)
+                card.pop("escalation_persona", None)
 
         elif event_type == "execution.frugality_proof.evaluated":
             # Run-end frugality proof (run-level, not per-node): a compact summary

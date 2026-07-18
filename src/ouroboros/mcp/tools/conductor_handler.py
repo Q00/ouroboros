@@ -341,7 +341,8 @@ class RecordConductorDecisionHandler:
 
         Queries the SAME durable events Kanban/HUD already read
         (``execution.ac.decomposition_attested`` / ``execution.ac.parked_for_operator``
-        / ``execution.ac.parked_resolved``), scoped to ``execution_id`` (the
+        / ``execution.ac.parked_resolved`` /
+        ``execution.ac.lateral_escalation_progressed``), scoped to ``execution_id`` (the
         execution the selected successor follows) — the concrete link
         between this conductor decision and the AC(s) it is "relevant for".
         Fails closed to ``None`` on any query error so an audit-surface
@@ -370,6 +371,15 @@ class RecordConductorDecisionHandler:
                 event_type="execution.ac.parked_resolved",
                 limit=200,
             )
+            # Round-4 follow-up: emitted on EVERY ladder iteration, so this
+            # summary can also cite ACs whose persona escalation is actively
+            # in flight (not yet fully parked) — the same visibility gap the
+            # Kanban/HUD projections closed for this event.
+            progressed = await self.event_store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.ac.lateral_escalation_progressed",
+                limit=200,
+            )
         except Exception:  # noqa: BLE001 - optional audit enrichment, never fatal.
             return None
 
@@ -386,7 +396,9 @@ class RecordConductorDecisionHandler:
         # sort by timestamp ascending to replay in true chronological order
         # so a later event always overwrites an earlier one's state for that
         # node id.
-        combined = sorted((*attested, *parked, *resolved), key=lambda item: item.timestamp)
+        combined = sorted(
+            (*attested, *parked, *resolved, *progressed), key=lambda item: item.timestamp
+        )
         node_states: dict[str, dict[str, Any]] = {}
         for item in combined:
             if not isinstance(item.data, dict):
@@ -397,16 +409,27 @@ class RecordConductorDecisionHandler:
             state = node_states.setdefault(node_id, {})
             if item.type == "execution.ac.decomposition_attested":
                 state["trustworthy"] = item.data.get("trustworthy") is True
+            elif item.type == "execution.ac.lateral_escalation_progressed":
+                is_parked = item.data.get("parked") is True
+                state["parked"] = is_parked
+                state["escalating"] = not is_parked
             elif item.type == "execution.ac.parked_for_operator":
                 state["parked"] = True
+                state["escalating"] = False
             elif item.type == "execution.ac.parked_resolved":
                 state["parked"] = False
+                state["escalating"] = False
 
         untrustworthy_nodes = {
             node_id for node_id, state in node_states.items() if state.get("trustworthy") is False
         }
         parked_nodes = {
             node_id for node_id, state in node_states.items() if state.get("parked") is True
+        }
+        escalating_nodes = {
+            node_id
+            for node_id, state in node_states.items()
+            if state.get("escalating") is True and node_id not in parked_nodes
         }
         parts: list[str] = []
         if untrustworthy_nodes:
@@ -415,6 +438,9 @@ class RecordConductorDecisionHandler:
         if parked_nodes:
             plural = "s" if len(parked_nodes) != 1 else ""
             parts.append(f"{len(parked_nodes)} AC{plural} parked for operator")
+        if escalating_nodes:
+            plural = "s" if len(escalating_nodes) != 1 else ""
+            parts.append(f"{len(escalating_nodes)} AC{plural} in persona escalation")
         if not parts:
             return None
 

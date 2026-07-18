@@ -106,6 +106,38 @@ class TestRenderMarkdownDirectly:
         assert "[parked]" in markdown
         assert "Trust/Escalation: 1 parked for operator" in markdown
 
+    def test_tree_view_badges_escalating_node_with_current_persona(self) -> None:
+        """Round-4 follow-up: an AC actively cycling personas (not yet
+        parked) shows WHICH persona is currently being tried."""
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_escalating",
+            execution_id="exec_escalating",
+            session_status="running",
+            progress_data={
+                **_progress_data(),
+                "ac_tree": {
+                    "root_id": "root",
+                    "nodes": {
+                        "root": {"id": "root", "content": "root", "children_ids": ["ac_1"]},
+                        "ac_1": {
+                            "id": "ac_1",
+                            "content": "Stubborn criterion",
+                            "status": "executing",
+                            "index": 1,
+                            "depth": 1,
+                            "children_ids": [],
+                            "escalation_state": "escalating",
+                            "escalation_persona": "hacker",
+                        },
+                    },
+                },
+            },
+            view="tree",
+        )
+
+        assert "[persona:hacker]" in markdown
+        assert "Trust/Escalation: 1 in persona escalation" in markdown
+
     def test_no_badge_when_absent(self) -> None:
         markdown = render_ac_tree_hud_markdown(
             session_id="sess_clean",
@@ -199,6 +231,153 @@ class TestParkedResolvedFolding:
         )
         assert tree_result.is_ok
         assert "[parked]" not in tree_result.value.text_content
+        assert "Trust/Escalation" not in tree_result.value.text_content
+
+
+class TestLateralEscalationProgressedFolding:
+    """Round-4 follow-up: ``execution.ac.lateral_escalation_progressed`` must
+    fold into the HUD tree so an operator sees in-flight persona-escalation
+    progress BEFORE the AC is fully parked — previously the event was absent
+    from both ``_TREE_CHANGE_EVENT_TYPES`` (cursor polling skipped it) and
+    the merge reducer (no badge even when other events forced a render)."""
+
+    @pytest.mark.asyncio
+    async def test_progressed_event_surfaces_current_persona_in_tree_view(
+        self, memory_event_store: EventStore
+    ) -> None:
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_escalating_e2e",
+                data={
+                    "execution_id": "exec_escalating_e2e",
+                    "seed_id": "seed_escalating_e2e",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_escalating_e2e",
+                data={
+                    "execution_id": "exec_escalating_e2e",
+                    "completed_count": 0,
+                    "total_count": 1,
+                    "acceptance_criteria": [
+                        {
+                            "node_id": "ac_1",
+                            "index": 1,
+                            "content": "Stubborn criterion",
+                            "status": "executing",
+                        },
+                    ],
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec_escalating_e2e",
+                data={
+                    "execution_id": "exec_escalating_e2e",
+                    "session_id": "sess_escalating_e2e",
+                    "node_id": "ac_1",
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker"],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": "hacker",
+                },
+            )
+        )
+
+        handler = ACTreeHUDHandler(event_store=memory_event_store)
+
+        tree_result = await handler.handle(
+            {"session_id": "sess_escalating_e2e", "cursor": 0, "view": "tree"}
+        )
+        assert tree_result.is_ok
+        assert "persona:hacker" in tree_result.value.text_content
+        assert "1 in persona escalation" in tree_result.value.text_content
+
+    @pytest.mark.asyncio
+    async def test_parked_resolved_clears_progressed_badge_too(
+        self, memory_event_store: EventStore
+    ) -> None:
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_esc_resolved",
+                data={
+                    "execution_id": "exec_esc_resolved",
+                    "seed_id": "seed_esc_resolved",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_esc_resolved",
+                data={
+                    "execution_id": "exec_esc_resolved",
+                    "completed_count": 0,
+                    "total_count": 1,
+                    "acceptance_criteria": [
+                        {
+                            "node_id": "ac_1",
+                            "index": 1,
+                            "content": "Stubborn criterion",
+                            "status": "executing",
+                        },
+                    ],
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec_esc_resolved",
+                data={
+                    "execution_id": "exec_esc_resolved",
+                    "session_id": "sess_esc_resolved",
+                    "node_id": "ac_1",
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker"],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": "hacker",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_resolved",
+                aggregate_type="execution",
+                aggregate_id="exec_esc_resolved",
+                data={
+                    "execution_id": "exec_esc_resolved",
+                    "session_id": "sess_esc_resolved",
+                    "node_id": "ac_1",
+                    "root_ac_index": 0,
+                },
+            )
+        )
+
+        handler = ACTreeHUDHandler(event_store=memory_event_store)
+
+        tree_result = await handler.handle(
+            {"session_id": "sess_esc_resolved", "cursor": 0, "view": "tree"}
+        )
+        assert tree_result.is_ok
+        assert "persona:hacker" not in tree_result.value.text_content
         assert "Trust/Escalation" not in tree_result.value.text_content
 
 

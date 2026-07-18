@@ -56,6 +56,7 @@ _TREE_CHANGE_EVENT_TYPES = frozenset(
         # False and the handler short-circuited to "unchanged" before ever
         # reaching the merge step that folds them in.
         "execution.ac.decomposition_attested",
+        "execution.ac.lateral_escalation_progressed",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
     }
@@ -512,8 +513,12 @@ def _normalize_explicit_tree(value: Mapping[str, Any]) -> dict[str, Any]:
         if trust_verdict:
             node["trust_verdict"] = trust_verdict
             node["trustworthy"] = bool(raw_node.get("trustworthy"))
-        if raw_node.get("escalation_state") == "parked":
-            node["escalation_state"] = "parked"
+        escalation_state = raw_node.get("escalation_state")
+        if escalation_state in {"parked", "escalating"}:
+            node["escalation_state"] = escalation_state
+            persona = _coerce_non_empty_string(raw_node.get("escalation_persona"))
+            if persona:
+                node["escalation_persona"] = persona
         nodes[node_id] = node
 
     root_id = _coerce_non_empty_string(value.get("root_id")) or _ROOT_ID
@@ -841,6 +846,7 @@ def _merge_subtask_events_into_snapshot(
 _TRUST_ESCALATION_EVENT_TYPES = frozenset(
     {
         "execution.ac.decomposition_attested",
+        "execution.ac.lateral_escalation_progressed",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
     }
@@ -892,16 +898,27 @@ def _merge_trust_escalation_events_into_snapshot(
             if verdict:
                 nodes[target_id]["trust_verdict"] = verdict
                 nodes[target_id]["trustworthy"] = bool(data.get("trustworthy"))
+        elif event_type == "execution.ac.lateral_escalation_progressed":
+            # Round-4 follow-up: emitted on EVERY ladder iteration, so the
+            # tree shows in-flight persona-escalation progress (which persona
+            # is currently being tried) before the AC is fully parked.
+            nodes[target_id]["escalation_state"] = (
+                "parked" if data.get("parked") is True else "escalating"
+            )
+            persona = _coerce_non_empty_string(data.get("persona"))
+            if persona:
+                nodes[target_id]["escalation_persona"] = persona
         elif event_type == "execution.ac.parked_for_operator":
             nodes[target_id]["escalation_state"] = "parked"
         else:  # execution.ac.parked_resolved (Fix 8): clear the parked badge.
             nodes[target_id].pop("escalation_state", None)
+            nodes[target_id].pop("escalation_persona", None)
 
     return {"root_id": root_id, "nodes": nodes}
 
 
-def _trust_escalation_counts(progress_data: Mapping[str, Any]) -> tuple[int, int]:
-    """Count untrustworthy-decomposition and parked-for-operator nodes.
+def _trust_escalation_counts(progress_data: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Count untrustworthy-decomposition, parked, and actively-escalating nodes.
 
     Reads straight off the composed ``ac_tree.nodes`` payload, so it works
     identically across all three HUD verbosity modes without needing its own
@@ -910,9 +927,10 @@ def _trust_escalation_counts(progress_data: Mapping[str, Any]) -> tuple[int, int
     ac_tree = progress_data.get("ac_tree")
     nodes = ac_tree.get("nodes") if isinstance(ac_tree, Mapping) else None
     if not isinstance(nodes, Mapping):
-        return (0, 0)
+        return (0, 0, 0)
     untrustworthy = 0
     parked = 0
+    escalating = 0
     for node in nodes.values():
         if not isinstance(node, Mapping):
             continue
@@ -920,17 +938,21 @@ def _trust_escalation_counts(progress_data: Mapping[str, Any]) -> tuple[int, int
             untrustworthy += 1
         if node.get("escalation_state") == "parked":
             parked += 1
-    return (untrustworthy, parked)
+        elif node.get("escalation_state") == "escalating":
+            escalating += 1
+    return (untrustworthy, parked, escalating)
 
 
 def _format_trust_escalation_line(progress_data: Mapping[str, Any]) -> str | None:
-    """Format a compact trust/escalation summary, omitted when both are zero."""
-    untrustworthy, parked = _trust_escalation_counts(progress_data)
+    """Format a compact trust/escalation summary, omitted when all are zero."""
+    untrustworthy, parked, escalating = _trust_escalation_counts(progress_data)
     parts: list[str] = []
     if untrustworthy:
         parts.append(f"{untrustworthy} untrustworthy split{'s' if untrustworthy != 1 else ''}")
     if parked:
         parts.append(f"{parked} parked for operator")
+    if escalating:
+        parts.append(f"{escalating} in persona escalation")
     if not parts:
         return None
     return " · ".join(parts)
@@ -1087,11 +1109,16 @@ def _count_descendants(node_id: str, nodes: Mapping[str, Mapping[str, Any]]) -> 
 def _format_trust_escalation_badge(node: Mapping[str, Any]) -> str | None:
     """Format the compact per-node trust/escalation badge, if any (Task 1/2).
 
-    Escalation (parked) takes precedence when both are present — a parked AC
-    is the more actionable signal for an operator scanning the tree.
+    Escalation (parked, then in-flight persona cycling) takes precedence when
+    both are present — an actively-escalating or parked AC is the more
+    actionable signal for an operator scanning the tree.
     """
-    if node.get("escalation_state") == "parked":
+    escalation_state = node.get("escalation_state")
+    if escalation_state == "parked":
         return "parked"
+    if escalation_state == "escalating":
+        persona = node.get("escalation_persona")
+        return f"persona:{persona}" if isinstance(persona, str) and persona else "escalating"
     verdict = node.get("trust_verdict")
     if verdict and node.get("trustworthy") is False:
         return f"untrusted:{verdict}"

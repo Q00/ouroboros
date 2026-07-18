@@ -305,3 +305,79 @@ async def test_no_predecessor_execution_id_skips_trust_escalation_query(store: E
 
     assert result.is_ok
     assert "Trust/escalation" not in result.value.text_content
+
+
+@pytest.mark.asyncio
+async def test_in_flight_persona_escalation_is_surfaced(store: EventStore) -> None:
+    """Round-4 follow-up: an AC actively cycling personas (progressed events,
+    not yet parked) must be cited as 'in persona escalation' so the conductor
+    receipt reflects escalation progress before full parking."""
+    await store.append(
+        BaseEvent(
+            type="execution.ac.lateral_escalation_progressed",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            data={
+                "node_id": "ac_3",
+                "root_ac_index": 2,
+                "personas_tried": ["hacker"],
+                "consecutive_terminal_failures": 3,
+                "parked": False,
+                "persona": "hacker",
+            },
+        )
+    )
+
+    handler = RecordConductorDecisionHandler(store)
+    result = await handler.handle(_selected())
+
+    assert result.is_ok
+    assert "1 AC in persona escalation" in result.value.text_content
+    assert "1 AC in persona escalation" in result.value.meta["trust_escalation_summary"]
+
+
+@pytest.mark.asyncio
+async def test_parked_ac_is_not_double_counted_as_escalating(store: EventStore) -> None:
+    """A node whose latest state is parked must be cited as parked only —
+    never both parked AND 'in persona escalation'."""
+    from datetime import UTC, datetime
+
+    await store.append(
+        BaseEvent(
+            type="execution.ac.lateral_escalation_progressed",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_3",
+                "root_ac_index": 2,
+                "personas_tried": ["hacker"],
+                "consecutive_terminal_failures": 3,
+                "parked": False,
+                "persona": "hacker",
+            },
+        )
+    )
+    await store.append(
+        BaseEvent(
+            type="execution.ac.parked_for_operator",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_3",
+                "root_ac_index": 2,
+                "personas_tried": ["hacker", "researcher", "simplifier"],
+                "consecutive_terminal_failures": 6,
+                "backoff_seconds": 300.0,
+                "reason": "all lateral-thinking personas exhausted",
+            },
+        )
+    )
+
+    handler = RecordConductorDecisionHandler(store)
+    result = await handler.handle(_selected())
+
+    assert result.is_ok
+    assert "1 AC parked for operator" in result.value.text_content
+    assert "in persona escalation" not in result.value.text_content
