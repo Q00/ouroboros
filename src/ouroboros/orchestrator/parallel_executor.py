@@ -6295,25 +6295,27 @@ Respond with either ATOMIC or the structured JSON object only.
         cheapening the real dispatch applies, then never subtracted back out.
 
         Args:
-            same_runtime_retry_available: Whether a FUTURE same-runtime retry
-                of this root AC could still happen under this run's
-                configuration. Defaults to ``True`` (the ordinary case: some
+            same_runtime_retry_available: Whether a FUTURE budget-funded
+                same-runtime retry of this root AC could still happen under
+                this run's configuration. Defaults to ``True`` (some
                 same-runtime retry budget remains, so it is meaningful to ask
-                "would the NEXT retry already be at ceiling"). ``False`` is
-                for the ``self._ac_retry_attempts <= 0`` case (Fix 6 redo,
-                round 3 follow-up review): when the operator configured ZERO
-                same-runtime retries, there is definitionally no future
-                same-runtime dispatch that could ever climb this AC to a
-                higher tier/effort, so ``retry_attempt`` (always ``0`` here,
-                since the AC never got to retry) must not be used to gate
-                ladder eligibility — that premise ("a higher tier might
-                arrive on a future same-runtime retry") is categorically
-                false by construction. Each ACTIVELY-configured routing axis
-                is instead treated as already at this run's ceiling for it
-                (a dormant axis, resolved as ``None``, stays dormant) —
-                eligibility is decided by ``success``/``is_decomposed`` alone
-                for those axes, regardless of what raw tier/effort the
-                single dispatch happened to run at.
+                "would the NEXT retry already be at ceiling"). ``False``
+                means the ordinary same-runtime retry budget is EXHAUSTED
+                (which includes the ``self._ac_retry_attempts <= 0`` case the
+                Fix 6 redo originally special-cased, and — Round-4 Finding
+                #2 — every check made from inside the lateral-escalation
+                ladder, whose redispatches are ladder-owned rather than
+                budget-funded): there is no future budget-funded dispatch
+                that could climb this AC to a higher tier/effort, so the raw
+                tier/effort the dispatches happened to reach must not gate
+                ladder eligibility — effort escalation raises exactly one
+                notch total, so a low/medium base can never literally reach
+                the "xhigh" ceiling regardless of retries. Each
+                ACTIVELY-configured routing axis is instead treated as
+                already at this run's ceiling for it (a dormant axis,
+                resolved as ``None``, stays dormant) — eligibility is
+                decided by ``success``/``is_decomposed`` alone for those
+                axes.
         """
         ac_criterion = seed.acceptance_criteria[ac_idx]
         investment_spec = (
@@ -6624,11 +6626,18 @@ Respond with either ATOMIC or the structured JSON object only.
         exception — anything ``_is_retryable_failure`` does not consider a
         structured, retryable verify-gate/quality failure) is exempt and
         returns ``None`` immediately so it surfaces through whatever existing
-        mechanism already handles that distinction. A retryable failure that
-        has not yet reached its maximum strength (still room to climb the
-        model-tier/effort ceilings) also returns ``None`` — ordinary
-        recovery-exhausted handling applies; this ladder is specifically for
-        an AC stuck at the TOP of both ladders.
+        mechanism already handles that distinction. A run with NO escalation
+        axis actively configured (model routing and effort routing both
+        dormant) also returns ``None`` — there is no "maximum strength" to
+        have exhausted, so the unchanged give-up-after-N-retries behavior
+        applies. Round-4 Finding #2 (BLOCKING): exhausting the same-runtime
+        retry budget is otherwise SUFFICIENT to engage this ladder,
+        regardless of what raw tier/effort the budget-funded dispatches
+        happened to reach — effort escalation raises exactly one notch
+        total, so a low/medium base can never literally reach the "xhigh"
+        ceiling, and gating entry on the ceiling being reached let a small
+        retry budget starve the ladder out entirely (a FAILED status with
+        every persona untried — the exact outcome this feature forbids).
 
         Once engaged, this method OWNS ``ac_idx`` until it produces a
         successful result: it keeps retrying identically until
@@ -6665,25 +6674,38 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_idx=ac_idx,
                 result=current_result,
                 retry_attempt=current_retry_attempt,
-                # Fix 6 redo (round 3 follow-up review): only the VERY FIRST
-                # check of a zero-same-runtime-retry-budget AC (before this
-                # loop has redispatched it even once) has the false premise
-                # "a higher tier might arrive on a future same-runtime
-                # retry" -- there is categorically no such future dispatch
-                # under this config. Once ``engaged`` (this loop has already
-                # redispatched at least once, via the ladder's OWN retry
-                # counter, independent of ``self._ac_retry_attempts``),
-                # normal ceiling semantics resume unchanged.
-                same_runtime_retry_available=engaged or self._ac_retry_attempts > 0,
+                # Round-4 Finding #2 (BLOCKING), generalizing the Fix 6 redo:
+                # this method is ONLY ever reached once the AC's ordinary
+                # same-runtime retry budget is spent (both call sites route
+                # through ``_finalize_batch_ac_with_escalation``), so the
+                # premise "a higher tier/effort might arrive on a future
+                # BUDGET-FUNDED same-runtime retry" is false here in EVERY
+                # case -- not just the zero-budget-from-the-start one the Fix
+                # 6 redo special-cased. Effort escalation raises exactly ONE
+                # notch total (``EFFORT_RAISE_RETRY_THRESHOLD``), so a
+                # low/medium base can NEVER reach the "xhigh" ceiling no
+                # matter how many retries ran: gating ladder entry on
+                # literally reaching the ceiling let a small retry budget
+                # starve the ladder out entirely, surfacing FAILED with every
+                # persona untried. Each ACTIVELY-configured routing axis is
+                # therefore treated as at ceiling on every check (a dormant
+                # axis stays dormant, preserving the
+                # no-escalation-dial-configured opt-out), and eligibility is
+                # decided by ``success``/``is_decomposed`` alone -- the
+                # ladder's own redispatches still resolve their REAL
+                # tier/effort for the actual dispatch.
+                same_runtime_retry_available=False,
             )
             if not terminal:
                 if not engaged:
-                    # Never entered the ladder at all -- today's unchanged
-                    # entry behavior.
+                    # Never entered the ladder at all: success, or no
+                    # escalation axis is actively configured (both dormant) --
+                    # today's unchanged entry behavior for those cases.
                     return None
                 # A redispatch INSIDE the loop bounced into a non-terminal
-                # outcome (e.g. it got decomposed instead of staying atomic,
-                # so ``is_decomposed`` now makes ``is_terminal_state_failure``
+                # outcome (with forced-ceiling semantics this now means: it
+                # got decomposed instead of staying atomic, so
+                # ``is_decomposed`` makes ``is_terminal_state_failure``
                 # false) -- there is cheaper room left that was not tried, so
                 # the persona ladder must stop advancing rather than keep
                 # cycling personas on a result that no longer reflects a

@@ -1506,6 +1506,168 @@ class TestZeroRetryBudgetStillEngagesLadder:
         executor._emit_recovery_exhausted.assert_not_awaited()
 
 
+class TestBudgetExhaustionAloneReachesLadder:
+    """Round-4 Finding #2 (BLOCKING): effort escalation raises exactly ONE
+    notch total (``EFFORT_RAISE_RETRY_THRESHOLD``), so a ``low``/``medium``
+    base can NEVER literally reach the ``xhigh`` ceiling no matter how many
+    same-runtime retries run. Gating ladder eligibility on the ceiling being
+    reached therefore let a small retry budget (e.g. 2) starve the ladder
+    out entirely: the AC exhausted as an ordinary FAILED result with every
+    persona untried -- the exact "give up while escalation remains
+    available" outcome this feature forbids. Exhausting the same-runtime
+    retry budget must be SUFFICIENT to engage the ladder (the ladder's own
+    logic then decides bail-out via success/is_decomposed), extending the
+    same ``same_runtime_retry_available`` mechanism the zero-budget Fix 6
+    redo introduced.
+    """
+
+    @staticmethod
+    def _medium_effort_executor() -> ParallelACExecutor:
+        """Ladder opted in, effort axis configured at ``medium`` (which can
+        only ever climb to ``high`` -- one notch), model axis dormant."""
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._reasoning_effort = "medium"
+        assert executor._model_router is None
+        return executor
+
+    @pytest.mark.asyncio
+    async def test_medium_effort_budget_exhausted_engages_ladder_despite_never_reaching_xhigh(
+        self,
+    ) -> None:
+        """Direct reproduction of the review's scenario via the unmocked
+        ladder: ``medium`` base effort, ``ac_retry_attempts=2`` spent
+        (``retry_attempt=2`` resolves to ``high``, not ``xhigh``). Before
+        the fix, the first terminal check saw effort below ceiling and
+        returned ``None`` -- the AC surfaced FAILED with zero personas
+        tried."""
+        executor = self._medium_effort_executor()
+        executor._ac_retry_attempts = 2
+
+        call_count = {"n": 0}
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                return [_success_result()]
+            return [_failed_result(error=f"ladder attempt {call_count['n']} failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(
+            executor,
+            result=_failed_result(error="budget exhausted at effort=high"),
+            ac_retry_attempts={0: 2},  # configured budget of 2 fully spent
+        )
+
+        # Before the fix: ``outcome is None`` (ladder declined -- effort
+        # never reached "xhigh") and ``_execute_ac_batch`` was never called.
+        assert outcome is not None
+        assert outcome.success is True
+        assert call_count["n"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_medium_effort_end_to_end_retry_loop_hands_off_to_ladder(self) -> None:
+        """End-to-end through ``_run_batch_with_verify_and_retry``: initial
+        dispatch + 2 budget-funded retries all fail, then the ladder's own
+        redispatches continue until a breakthrough -- never a FAILED
+        finalization. Before the fix the third failure finalized as plain
+        recovery-exhausted."""
+        executor = self._medium_effort_executor()
+        executor._ac_retry_attempts = 2
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        call_count = {"n": 0}
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] >= 5:
+                return [_success_result()]
+            return [_failed_result(error=f"attempt {call_count['n']} failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        # Dispatches 1-3 are the ordinary budget (initial + 2 retries);
+        # dispatches 4-5 can only be the engaged ladder's own.
+        assert call_count["n"] == 5
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        executor._emit_recovery_exhausted.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_ladder_survives_its_own_failed_redispatches(self) -> None:
+        """The review's second sub-claim: the zero-budget Fix 6 redo bypass
+        fired only on the FIRST terminal check (``engaged or
+        self._ac_retry_attempts > 0``). Once the ladder had redispatched
+        once, normal ceiling semantics resumed -- and a ``medium`` base
+        (never able to reach ``xhigh``) made the recheck report
+        "not terminal", so the ladder returned the current FAILED result
+        with personas still untried. The ladder must keep going across its
+        OWN failed redispatches."""
+        executor = self._medium_effort_executor()
+        executor._ac_retry_attempts = 0
+
+        call_count = {"n": 0}
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] >= 4:
+                return [_success_result()]
+            return [_failed_result(error=f"ladder attempt {call_count['n']} failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(
+            executor,
+            result=_failed_result(error="single zero-budget dispatch failed"),
+            ac_retry_attempts={0: 0},
+        )
+
+        # Before the fix: the ladder bailed with the FAILED result of its
+        # first redispatch (call_count would stop at 1 and
+        # ``outcome.success`` would be False).
+        assert outcome is not None
+        assert outcome.success is True
+        assert call_count["n"] == 4
+
+    @pytest.mark.asyncio
+    async def test_dormant_axes_still_never_engage_after_budget_exhaustion(self) -> None:
+        """Negative control: the fix must not turn budget exhaustion alone
+        into ladder entry when NO escalation axis is configured at all --
+        that dormant-run opt-out (unchanged give-up-after-N-retries) is
+        deliberate and load-bearing for every unconfigured run."""
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        assert executor._model_router is None
+        assert executor._reasoning_effort is None
+        executor._execute_ac_batch = AsyncMock()
+
+        outcome = await _ladder(
+            executor,
+            result=_failed_result(error="budget exhausted"),
+            ac_retry_attempts={0: 2},
+        )
+
+        assert outcome is None
+        executor._execute_ac_batch.assert_not_called()
+
+
 class TestTerminalEligibilityRecheckedEachIteration:
     """Fix 4 (round 2, BLOCKING): terminal-state eligibility must be
     rechecked after EVERY redispatch inside the ladder loop, not just once
