@@ -1933,10 +1933,19 @@ class OrchestratorRunner:
         exactly the kind of config the durable execution contract exists to
         pin — a resumed run must keep the policy it STARTED with, not
         silently pick up whatever the current config file now says.
+
+        ``ac_retry_attempts`` (Fix 7, round 3, BLOCKING) joins them for the
+        same reason: it directly changes the pre-ladder same-runtime dispatch
+        count, token spend, AND (per Fix 6, round 3) whether the
+        lateral-escalation ladder is even reached at all this run --
+        materially different retry/termination behavior a resumed run must
+        keep exactly as it started with, not silently pick up from whatever
+        the current config file now says.
         """
         return {
             "lateral_escalation_enabled": self._lateral_escalation_enabled,
             "parked_retry_backoff_seconds": self._parked_retry_backoff_seconds,
+            "ac_retry_attempts": self._ac_retry_attempts,
         }
 
     @staticmethod
@@ -1944,10 +1953,12 @@ class OrchestratorRunner:
         if not isinstance(value, Mapping) or set(value) != {
             "lateral_escalation_enabled",
             "parked_retry_backoff_seconds",
+            "ac_retry_attempts",
         }:
             return False
         enabled = value.get("lateral_escalation_enabled")
         backoff = value.get("parked_retry_backoff_seconds")
+        retry_attempts = value.get("ac_retry_attempts")
         return (
             isinstance(enabled, bool)
             and isinstance(backoff, (int, float))
@@ -1964,6 +1975,11 @@ class OrchestratorRunner:
             # config-construction time.
             and math.isfinite(backoff)
             and backoff >= 0
+            # Fix 7 (round 3, BLOCKING): mirror ExecutionConfig.ac_retry_attempts's
+            # own ``ge=0`` contract here too, not just at config-construction time.
+            and isinstance(retry_attempts, int)
+            and not isinstance(retry_attempts, bool)
+            and retry_attempts >= 0
         )
 
     def _guidance_root(self, guidance_ids: tuple[str, ...]) -> Path:
@@ -2637,6 +2653,12 @@ class OrchestratorRunner:
             self._parked_retry_backoff_seconds = float(
                 raw_retry_policy["parked_retry_backoff_seconds"]
             )
+            # Fix 7 (round 3, BLOCKING): restore ac_retry_attempts too -- it
+            # was previously validated/fingerprinted but never actually
+            # restored here, so a resumed run silently kept whatever
+            # __init__ resolved from the CURRENT config instead of the value
+            # the run actually started with and was fingerprinted against.
+            self._ac_retry_attempts = int(raw_retry_policy["ac_retry_attempts"])
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:

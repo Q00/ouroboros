@@ -223,14 +223,19 @@ def test_resume_restores_persisted_retry_policy() -> None:
     """Fix 5 (BLOCKING, PR #1648 review): lateral_escalation_enabled and
     parked_retry_backoff_seconds affect termination/retry semantics, so a
     resumed run must keep the policy it STARTED with rather than picking up
-    whatever the current config now resolves to."""
+    whatever the current config now resolves to. ``ac_retry_attempts`` (Fix
+    7, round 3, BLOCKING) joins them for the same reason -- it directly
+    changes the pre-ladder dispatch count, token spend, and whether the
+    lateral-escalation ladder is even reached."""
     original = _runner()
     original._lateral_escalation_enabled = True
     original._parked_retry_backoff_seconds = 900.0
+    original._ac_retry_attempts = 99
     persisted = original._build_execution_contract()
     assert persisted["retry_policy"] == {
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 900.0,
+        "ac_retry_attempts": 99,
     }
 
     resumed = _runner()
@@ -239,12 +244,14 @@ def test_resume_restores_persisted_retry_policy() -> None:
     # actually happened rather than coincidentally matching a shared default.
     assert resumed._lateral_escalation_enabled is False
     assert resumed._parked_retry_backoff_seconds != 900.0
+    assert resumed._ac_retry_attempts != 99
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is False
     assert resumed._lateral_escalation_enabled is True
     assert resumed._parked_retry_backoff_seconds == 900.0
+    assert resumed._ac_retry_attempts == 99
 
 
 def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
@@ -270,16 +277,19 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     resumed = _runner()
     resumed._lateral_escalation_enabled = True  # current config for THIS process
     resumed._parked_retry_backoff_seconds = 42.0
+    resumed._ac_retry_attempts = 7
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is True
     assert resumed._lateral_escalation_enabled is True
     assert resumed._parked_retry_backoff_seconds == 42.0
+    assert resumed._ac_retry_attempts == 7
     assert resumed._execution_contract is not None
     assert resumed._execution_contract["retry_policy"] == {
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 42.0,
+        "ac_retry_attempts": 7,
     }
 
 
@@ -300,6 +310,33 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         # ``asyncio.sleep(inf)`` and hangs that AC's slot forever.
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("inf")},
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("nan")},
+        # Fix 7 (round 3, BLOCKING): a round-2-era contract (or any tampered
+        # payload) missing/malformed on the NEW ac_retry_attempts field must
+        # fail closed here too, exactly like the other two fields already do.
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+        },  # missing ac_retry_attempts entirely (round-2-era contract shape)
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+            "ac_retry_attempts": "2",
+        },
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+            "ac_retry_attempts": -1,
+        },
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+            "ac_retry_attempts": True,
+        },
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+            "ac_retry_attempts": 2.5,
+        },
     ],
 )
 def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:
