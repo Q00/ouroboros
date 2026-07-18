@@ -54,6 +54,7 @@ def _executor(
     *,
     event_store: object,
     checkpoint_store: CheckpointStore,
+    **overrides: object,
 ) -> ParallelACExecutor:
     return ParallelACExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
@@ -61,6 +62,7 @@ def _executor(
         console=MagicMock(),
         checkpoint_store=checkpoint_store,
         cross_harness_redispatch=False,
+        **overrides,  # type: ignore[arg-type]
     )
 
 
@@ -260,3 +262,190 @@ class TestCrashRestartRestoresExecutionId:
         # an EMPTY aggregate — precisely the bug this regression guards.
         assert await recovered._replay_with_retry("execution", "exec-restarted") == []
         await recovered_events.close()
+
+
+class TestCrashRestartRestoresRetryPolicy:
+    """Round-9 Finding #2 (BLOCKING): RC3 recovery consulted durable
+    ladder/escalation history only when the CURRENTLY-constructed executor's
+    ``lateral_escalation_enabled`` was True — but the checkpoint never
+    persisted the ORIGINAL run's retry policy. A restart under a different
+    config (the default False, or an operator edit between crash and
+    restart) treated a genuinely parked/mid-ladder AC as having no ladder
+    history at all: fresh retry budget, escalation never reached, FAILED
+    surfaced once the budget was spent. Recovery must keep the policy the
+    run STARTED with, exactly like the runner's durable retry_policy
+    contract does for resume_session."""
+
+    @pytest.mark.asyncio
+    async def test_parked_ac_history_honored_when_current_config_disables_escalation(
+        self, tmp_path: Path
+    ) -> None:
+        seed = Seed(
+            goal="Crash-restart policy durability",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Original run: escalation ENABLED with a distinctive policy.
+        # Level 1 completes (checkpoint saved), then the process dies with
+        # AC 1 durably PARKED mid-escalation.
+        original_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await original_events.initialize()
+        original_ckpt = CheckpointStore(base_path=ckpt_path)
+        original_ckpt.initialize()
+        original = _executor(
+            event_store=original_events,
+            checkpoint_store=original_ckpt,
+            lateral_escalation_enabled=True,
+            parked_retry_backoff_seconds=1234.5,
+            ac_retry_attempts=5,
+        )
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            execution_id = str(kwargs["execution_id"])
+            node_id = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id, ac_index=1
+            ).node_id
+            all_personas = tuple(p.value for p in ThinkingPersona)
+            assert await original._event_emitter.emit_lateral_escalation_progressed(
+                execution_id=execution_id,
+                session_id=str(kwargs["session_id"]),
+                node_id=node_id,
+                root_ac_index=1,
+                personas_tried=all_personas,
+                consecutive_terminal_failures=9,
+                parked=True,
+                persona=None,
+                retry_attempt=7,
+            )
+            assert await original._event_emitter.emit_ac_parked_for_operator(
+                execution_id=execution_id,
+                session_id=str(kwargs["session_id"]),
+                node_id=node_id,
+                root_ac_index=1,
+                personas_tried=all_personas,
+                consecutive_terminal_failures=9,
+                backoff_seconds=1234.5,
+                reason="all lateral-thinking personas exhausted",
+            )
+            raise RuntimeError("simulated process crash while parked")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        await original_events.close()
+
+        # Sanity: the checkpoint carries the ORIGINAL run's retry policy.
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["retry_policy"] == {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 1234.5,
+            "ac_retry_attempts": 5,
+        }
+
+        # --- Restart under a DIFFERENT config: the fresh executor is
+        # constructed with escalation DISABLED (the default posture).
+        recovered_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await recovered_events.initialize()
+        recovered = _executor(
+            event_store=recovered_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        assert recovered._lateral_escalation_enabled is False
+        recovered._sleep = AsyncMock()
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def _succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
+
+        recovered._execute_ac_batch = AsyncMock(side_effect=_succeeds)
+        recovered._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+
+        # The checkpointed policy was restored wholesale: recovery keeps the
+        # termination semantics the run started with, not the current config.
+        assert recovered._lateral_escalation_enabled is True
+        assert recovered._parked_retry_backoff_seconds == 1234.5
+        assert recovered._ac_retry_attempts == 5
+        # The parked AC's durable history was consulted and honored: exactly
+        # ONE dispatch through the resumed-ladder re-entry (post-budget, max
+        # strength, parked cadence slept first) — never a fresh retry budget.
+        assert result.all_succeeded
+        assert len(dispatch_calls) == 1
+        assert dispatch_calls[0]["same_runtime_budget_exhausted"] is True
+        assert dispatch_calls[0]["force_frontier_routing"] is True
+        recovered._sleep.assert_any_await(1234.5)
+        # The breakthrough resolved the episode durably under the ORIGINAL
+        # execution_id's aggregate.
+        node_id = ExecutionNodeIdentity.root(
+            execution_context_id="exec-original", ac_index=1
+        ).node_id
+        events = await recovered_events.replay("execution", "exec-original")
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+        await recovered_events.close()
+
+    def test_legacy_checkpoint_without_policy_keeps_current_config(self) -> None:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._restore_checkpoint_retry_policy(None)
+        assert executor._lateral_escalation_enabled is False
+
+    def test_malformed_policy_fails_closed_to_honoring_history(self) -> None:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        before_backoff = executor._parked_retry_backoff_seconds
+        before_attempts = executor._ac_retry_attempts
+        executor._restore_checkpoint_retry_policy(
+            {"lateral_escalation_enabled": "yes", "parked_retry_backoff_seconds": 0}
+        )
+        # Corruption fails closed in the direction the escalation mandate
+        # demands: durable history will be consulted (never silently
+        # dropped), while the unvalidatable numeric values are not adopted.
+        assert executor._lateral_escalation_enabled is True
+        assert executor._parked_retry_backoff_seconds == before_backoff
+        assert executor._ac_retry_attempts == before_attempts

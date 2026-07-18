@@ -1850,6 +1850,70 @@ class ParallelACExecutor:
             return seed_id
         return session_id
 
+    def _restore_checkpoint_retry_policy(self, raw_policy: object) -> None:
+        """Restore the checkpointed run's retry/termination policy (round-9 #2).
+
+        ``None`` means the checkpoint predates the field — a genuine
+        one-time migration that keeps the current-config posture (the
+        pre-fix behavior, never worse). A present policy is validated with
+        the SAME rules the runner's ``_valid_retry_policy_contract``
+        enforces for the durable execution contract (bool flag; finite
+        backoff ``>= 1.0`` matching ``EconomicsConfig``'s own field
+        contract; non-negative int retry budget) and, when well-formed,
+        replaces the values ``__init__`` just resolved from the CURRENT
+        config. A present-but-malformed policy is corruption/tampering:
+        fail closed in the direction the escalation mandate demands —
+        honor possibly-existing durable ladder history (an AC must never
+        surface FAILED while escalation options remain untried) by forcing
+        the escalation gates open, while keeping the current config's
+        validated backoff/budget values.
+        """
+        if raw_policy is None:
+            return
+        if isinstance(raw_policy, Mapping):
+            enabled = raw_policy.get("lateral_escalation_enabled")
+            backoff = raw_policy.get("parked_retry_backoff_seconds")
+            retry_attempts = raw_policy.get("ac_retry_attempts")
+            if (
+                isinstance(enabled, bool)
+                and isinstance(backoff, (int, float))
+                and not isinstance(backoff, bool)
+                and math.isfinite(backoff)
+                and backoff >= 1.0
+                and isinstance(retry_attempts, int)
+                and not isinstance(retry_attempts, bool)
+                and retry_attempts >= 0
+            ):
+                if (
+                    enabled != self._lateral_escalation_enabled
+                    or float(backoff) != self._parked_retry_backoff_seconds
+                    or retry_attempts != self._ac_retry_attempts
+                ):
+                    log.info(
+                        "parallel_executor.recovery.retry_policy_restored",
+                        detail=(
+                            "current config differs from the checkpointed run's "
+                            "retry policy; keeping the policy the run started with"
+                        ),
+                        checkpoint_lateral_escalation_enabled=enabled,
+                        current_lateral_escalation_enabled=self._lateral_escalation_enabled,
+                        checkpoint_ac_retry_attempts=retry_attempts,
+                        current_ac_retry_attempts=self._ac_retry_attempts,
+                    )
+                self._lateral_escalation_enabled = enabled
+                self._parked_retry_backoff_seconds = float(backoff)
+                self._ac_retry_attempts = retry_attempts
+                return
+        log.error(
+            "parallel_executor.recovery.retry_policy_malformed",
+            detail=(
+                "checkpointed retry policy is malformed; failing closed by "
+                "honoring durable escalation history under the current "
+                "config's backoff/budget values"
+            ),
+        )
+        self._lateral_escalation_enabled = True
+
     async def _execute_ac_batch(
         self,
         *,
@@ -2096,6 +2160,30 @@ class ParallelACExecutor:
                                 restored = DecompositionDecisionRecord.from_dict(raw_record)
                                 if restored is not None and restored.node_id == raw_node_id:
                                     self._decomposition_decisions[raw_node_id] = restored
+                        # Round-9 finding #2 (BLOCKING): the ladder-history
+                        # gate in ``_run_batch_with_verify_and_retry`` and
+                        # the ladder-entry gate in
+                        # ``_maybe_run_lateral_escalation_ladder`` both read
+                        # THIS executor's ``_lateral_escalation_enabled`` —
+                        # which was just resolved from the CURRENT config,
+                        # not the config the checkpointed run started with.
+                        # If an operator edit (or the default False) landed
+                        # between crash and restart, a genuinely parked/
+                        # mid-ladder AC would be treated as having no ladder
+                        # history at all: durable state never loaded, a
+                        # fresh retry budget granted, and FAILED surfaced
+                        # once it is spent — the original run's escalation
+                        # guarantee silently lost. A recovered run IS the
+                        # original run continuing (same execution_id, same
+                        # durable aggregate), so restore the persisted
+                        # policy wholesale — the same "a resumed run keeps
+                        # the termination semantics it STARTED with" rule
+                        # the runner's durable retry_policy contract
+                        # enforces for resume_session. A checkpoint
+                        # predating the field keeps the current-config
+                        # posture (genuine one-time migration, like the
+                        # runner's ``retry_policy_migrated``).
+                        self._restore_checkpoint_retry_policy(cp.state.get("retry_policy"))
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
@@ -2661,6 +2749,26 @@ class ParallelACExecutor:
                                 "decomposition_decisions": {
                                     node_id: record.to_dict()
                                     for node_id, record in self._decomposition_decisions.items()
+                                },
+                                # Round-9 finding #2 (BLOCKING): the retry/
+                                # termination policy this run STARTED with.
+                                # A crash-restart constructs a fresh executor
+                                # from whatever the config file says at
+                                # restart time; the recovery block restores
+                                # this persisted policy instead, so a
+                                # parked/mid-ladder AC keeps the original
+                                # run's escalation guarantee even when the
+                                # current config disagrees (mirrors the
+                                # runner's durable retry_policy contract for
+                                # resume_session).
+                                "retry_policy": {
+                                    "lateral_escalation_enabled": (
+                                        self._lateral_escalation_enabled
+                                    ),
+                                    "parked_retry_backoff_seconds": (
+                                        self._parked_retry_backoff_seconds
+                                    ),
+                                    "ac_retry_attempts": self._ac_retry_attempts,
                                 },
                             },
                         )
