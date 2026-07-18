@@ -2646,7 +2646,51 @@ class ParallelACExecutor:
         self._console.print(f"    [green]Starting {len(sub_acs)} Sub-ACs sequentially...[/green]")
         sub_results: list[ACExecutionResult | BaseException | None] = [None] * len(sub_acs)
         sub_depth = depth + 1
+
+        # Per-child artifact-slice oracle: when the PARENT's seed-authored
+        # contract declares expected_artifacts and the decomposer partitioned
+        # them across children (structurally validated against the parent's
+        # set at proposal time -- see validate_decomposition_proposal), each
+        # child is graded against ITS OWN slice with the same deterministic
+        # artifact-existence oracle the parent's gate already trusts
+        # (_missing_expected_artifacts). Because children dispatch strictly
+        # sequentially, existence is snapshotted BEFORE each child runs and
+        # re-checked AFTER it completes, so a child can never borrow credit
+        # for a file an earlier step already created. Gated on
+        # self._run_verify_commands to match every other success-contract
+        # evaluation site in this file (artifact existence checks included --
+        # see _apply_verify_gate and the --skip-completed gate). The runtime
+        # subset filter below is defense in depth on top of the proposal-time
+        # validation: a path outside the parent's declared set is silently
+        # un-creditable, never evidence.
+        artifact_oracle_active = (
+            self._run_verify_commands
+            and isinstance(ac_spec, AcceptanceCriterionSpec)
+            and bool(ac_spec.expected_artifacts)
+            and len(decision.children) == len(sub_acs)
+        )
+        artifact_cwd = ""
+        child_artifact_slices: tuple[tuple[str, ...], ...] = tuple(() for _ in sub_acs)
+        if artifact_oracle_active:
+            assert ac_spec is not None  # narrowed by artifact_oracle_active
+            parent_artifact_set = frozenset(ac_spec.expected_artifacts)
+            child_artifact_slices = tuple(
+                tuple(path for path in child.expected_artifacts if path in parent_artifact_set)
+                for child in decision.children
+            )
+            artifact_cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        # One record per child: (has_verify_command, passed, reason) in the
+        # shape _attest_decomposition_round consumes for the sibling axis.
+        child_artifact_attributions: list[tuple[bool, bool | None, str]] = [
+            (False, None, "no artifact slice assigned to this child")
+        ] * len(sub_acs)
+
         for idx, sub_ac in enumerate(sub_acs):
+            assigned_artifacts = child_artifact_slices[idx]
+            preexisting_count = 0
+            if assigned_artifacts:
+                missing_before = _missing_expected_artifacts(assigned_artifacts, artifact_cwd)
+                preexisting_count = len(assigned_artifacts) - len(missing_before)
             try:
                 child_node_identity = node_identity.child(idx)
                 child_is_sub_ac = child_node_identity.depth > 0
@@ -2718,6 +2762,35 @@ class ParallelACExecutor:
                 if isinstance(exc, anyio.get_cancelled_exc_class()):
                     raise
                 sub_results[idx] = exc
+            if assigned_artifacts:
+                if preexisting_count == len(assigned_artifacts):
+                    # Credit-borrowing guard: every path in this child's slice
+                    # already existed before it dispatched, so its creation
+                    # cannot be attributed to this child. Fail closed to an
+                    # un-evaluable axis (INDETERMINATE for this sibling), never
+                    # a pass.
+                    child_artifact_attributions[idx] = (
+                        False,
+                        None,
+                        "all assigned artifacts pre-existed dispatch; "
+                        "cannot attribute creation to this child",
+                    )
+                else:
+                    missing_after = _missing_expected_artifacts(assigned_artifacts, artifact_cwd)
+                    if missing_after:
+                        child_artifact_attributions[idx] = (
+                            True,
+                            False,
+                            "assigned expected_artifacts missing after dispatch: "
+                            + ", ".join(missing_after),
+                        )
+                    else:
+                        child_artifact_attributions[idx] = (
+                            True,
+                            True,
+                            "assigned expected_artifacts present after dispatch: "
+                            + ", ".join(assigned_artifacts),
+                        )
 
         final_sub_results: list[ACExecutionResult] = []
         for idx, result in enumerate(sub_results):
@@ -2767,6 +2840,7 @@ class ParallelACExecutor:
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=ac_spec,
+            child_artifact_attributions=tuple(child_artifact_attributions),
         )
         self._decomposition_attestations[node_identity.node_id] = attestation
         attestation_persisted = await self._event_emitter.emit_decomposition_attested(
@@ -2848,17 +2922,35 @@ class ParallelACExecutor:
         node_identity: ExecutionNodeIdentity,
         final_sub_results: list[ACExecutionResult],
         ac_spec: AcceptanceCriterionSpec | None,
+        child_artifact_attributions: tuple[tuple[bool, bool | None, str], ...] | None = None,
     ) -> tuple[DecompositionAttestation, _VerifyGateOutcome | None]:
         """Gate-anchor one finished decomposition round (Task 1).
 
         Reuses the SAME verify-gate oracle every other AC success/failure
         decision reuses: :meth:`_run_ac_verify_gate`. Each sibling's own
-        cached gate outcome (populated only when that child carried a
-        ``verify_command``/``expected_artifacts`` contract) stands for
-        "did this sibling pass its own verify gate"; the parent's contract,
-        if any, is RE-RUN here — after every sibling has finished — against
-        the current shared workspace, so a clobbering split fails this check
-        even when every child individually reported success.
+        evidence stands for "did this sibling pass its own verify gate";
+        the parent's contract, if any, is RE-RUN here — after every sibling
+        has finished — against the current shared workspace, so a clobbering
+        split fails this check even when every child individually reported
+        success.
+
+        Per-sibling evidence comes from two possible child-local sources:
+
+        * ``child_artifact_attributions`` — the artifact-slice oracle computed
+          by ``_execute_decomposition_children`` (this child's assigned slice
+          of the PARENT's seed-authored ``expected_artifacts``, snapshotted
+          before dispatch and re-checked after). This is the primary source
+          for live decomposition rounds.
+        * ``result.verify_gate_outcome`` — kept as a fallback for any code
+          path that validly populates a per-child gate outcome. Children never
+          run the PARENT's full verify_command gate (that per-child re-run was
+          removed as both a cost and correctness bug), so this stays ``None``
+          on the live path today.
+
+        When BOTH sources exist for one sibling, they are merged fail-closed:
+        the sibling passes only if EVERY present evidence leg passed. A
+        conflicting signal (one leg passed, the other failed) therefore
+        resolves to NOT-passed — ambiguity never resolves open.
 
         The parent gate is only actually re-run when ``self._run_verify_commands``
         is enabled, mirroring every other verify-gate call site in this file:
@@ -2866,7 +2958,8 @@ class ParallelACExecutor:
         commands run on their behalf by this path either. When disabled, the
         parent axis reports ``has_verify_command=False`` — the same
         fail-closed ``INDETERMINATE`` shape already used for "no contract at
-        all" — never an assumed pass.
+        all" — never an assumed pass. (The artifact-slice oracle is gated on
+        the same flag at its computation site.)
 
         The computed ``_VerifyGateOutcome`` (or ``None`` when not run) is
         returned alongside the attestation so the caller can cache it on the
@@ -2874,23 +2967,64 @@ class ParallelACExecutor:
         outcome (see ``_apply_verify_gate``) instead of invoking a
         possibly-mutating verify_command a second time for the same dispatch.
         """
-        siblings = tuple(
-            SiblingVerifyOutcome(
-                sibling_id=str(idx),
-                has_verify_command=isinstance(result.verify_gate_outcome, _VerifyGateOutcome),
-                passed=(
-                    result.verify_gate_outcome.passed
-                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
-                    else None
-                ),
-                reason=(
-                    (result.verify_gate_outcome.reason or "")
-                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
-                    else "sibling was dispatched without a structured verify contract"
-                ),
+        sibling_outcomes: list[SiblingVerifyOutcome] = []
+        for idx, result in enumerate(final_sub_results):
+            gate = (
+                result.verify_gate_outcome
+                if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                else None
             )
-            for idx, result in enumerate(final_sub_results)
-        )
+            artifact_evidence: tuple[bool, str] | None = None
+            if (
+                child_artifact_attributions is not None
+                and idx < len(child_artifact_attributions)
+                and child_artifact_attributions[idx][0]
+                and child_artifact_attributions[idx][1] is not None
+            ):
+                _, artifact_passed, artifact_reason = child_artifact_attributions[idx]
+                artifact_evidence = (bool(artifact_passed), artifact_reason)
+
+            if artifact_evidence is not None and gate is not None:
+                # Merge choice (documented, fail-closed): both legs are
+                # child-local checks of THIS sibling's own slice of work, so a
+                # failure on either is real negative evidence about this
+                # sibling; the sibling only passes when every present leg
+                # passed. Conflicting legs resolve to NOT-passed, never
+                # passed.
+                sibling_outcomes.append(
+                    SiblingVerifyOutcome(
+                        sibling_id=str(idx),
+                        has_verify_command=True,
+                        passed=artifact_evidence[0] and gate.passed,
+                        reason=(
+                            f"artifact-slice: {artifact_evidence[1]}; "
+                            f"verify-gate: {gate.reason or 'passed'}"
+                        ),
+                    )
+                )
+            elif artifact_evidence is not None:
+                sibling_outcomes.append(
+                    SiblingVerifyOutcome(
+                        sibling_id=str(idx),
+                        has_verify_command=True,
+                        passed=artifact_evidence[0],
+                        reason=artifact_evidence[1],
+                    )
+                )
+            else:
+                sibling_outcomes.append(
+                    SiblingVerifyOutcome(
+                        sibling_id=str(idx),
+                        has_verify_command=gate is not None,
+                        passed=gate.passed if gate is not None else None,
+                        reason=(
+                            (gate.reason or "")
+                            if gate is not None
+                            else "sibling was dispatched without a structured verify contract"
+                        ),
+                    )
+                )
+        siblings = tuple(sibling_outcomes)
 
         parent_has_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
             ac_spec.verify_command or ac_spec.expected_artifacts

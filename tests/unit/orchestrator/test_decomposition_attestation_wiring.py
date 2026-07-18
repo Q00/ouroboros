@@ -436,9 +436,7 @@ class TestLiveDecompositionAttestationEndToEnd:
     """
 
     @pytest.mark.asyncio
-    async def test_live_decomposed_children_never_run_borrowed_parent_gate(
-        self, tmp_path
-    ) -> None:
+    async def test_live_decomposed_children_never_run_borrowed_parent_gate(self, tmp_path) -> None:
         from datetime import UTC, datetime
 
         from tests.unit.orchestrator.test_parallel_executor import (
@@ -586,6 +584,318 @@ class TestLiveDecompositionAttestationEndToEnd:
         # The PARENT's own gate still genuinely ran once and genuinely failed.
         assert result.verify_gate_outcome is not None
         assert result.verify_gate_outcome.passed is False
+
+
+def _artifact_split_decision(
+    node_id: str,
+    slices: tuple[tuple[str, ...], ...],
+) -> DecompositionDecisionRecord:
+    """A structurally trustworthy split whose children carry artifact slices."""
+    children = tuple(
+        DecompositionChild(
+            description=f"child {i}",
+            coverage_claims=(f"distinct scope {i}",),
+            verification_hint=f"check {i}",
+            expected_artifacts=slice_,
+        )
+        for i, slice_ in enumerate(slices)
+    )
+    return DecompositionDecisionRecord(
+        node_id=node_id,
+        source=DecompositionSource.PREFLIGHT,
+        disposition=DecompositionDisposition.SPLIT,
+        children=children,
+        structural_status=StructuralCheckStatus.PASSED,
+        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+        trustworthy=True,
+    )
+
+
+def _make_live_artifact_executor(tmp_path, writes_per_dispatch: list[tuple[str, ...]]):
+    """Build an executor whose stub RUNTIME adapter performs REAL file writes.
+
+    Only the runtime transport is a double; children dispatch through the real
+    ``_execute_single_ac`` -> ``_execute_atomic_ac`` path and every artifact
+    existence check runs against the real filesystem under ``tmp_path``. Each
+    sequential dispatch pops the next tuple of relative paths and creates
+    those files -- modeling what that child's agent session actually produced.
+    """
+    from tests.unit.orchestrator.test_parallel_executor import (
+        _FinalMessageRuntime,
+        _make_replaying_event_store,
+    )
+
+    class _ArtifactWritingRuntime(_FinalMessageRuntime):
+        async def execute_task(self, *args: object, **kwargs: object):
+            if writes_per_dispatch:
+                for relative_path in writes_per_dispatch.pop(0):
+                    target = tmp_path / relative_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("produced", encoding="utf-8")
+            async for message in super().execute_task(*args, **kwargs):
+                yield message
+
+    event_store, _appended = _make_replaying_event_store()
+    runtime = _ArtifactWritingRuntime(
+        "[TASK_COMPLETE]",
+        native_session_id="live-artifact-child",
+        cwd=str(tmp_path),
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+    )
+    executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    executor._emit_workflow_progress = AsyncMock()
+    executor._emit_level_started = AsyncMock()
+    executor._emit_level_completed = AsyncMock()
+    executor._emit_subtask_event = AsyncMock()
+    executor._event_emitter.emit_decomposition_attested = AsyncMock()
+    return executor
+
+
+def _decomposition_children_kwargs(node_identity, decision, ac_spec, execution_id: str):
+    from datetime import UTC, datetime
+
+    return {
+        "decision": decision,
+        "ac_index": 0,
+        "ac_content": "parent AC",
+        "session_id": "s1",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "",
+        "seed_goal": "goal",
+        "depth": 0,
+        "execution_id": execution_id,
+        "level_contexts": None,
+        "retry_attempt": 0,
+        "execution_counters": None,
+        "node_identity": node_identity,
+        "start_time": datetime.now(UTC),
+        "semantic_ac_key": "key",
+        "ac_spec": ac_spec,
+    }
+
+
+class TestPerChildArtifactSliceOracle:
+    """The per-child-local contract that makes TRUSTWORTHY honestly reachable:
+    each child is graded against ITS OWN assigned slice of the PARENT's
+    seed-authored expected_artifacts, via real filesystem existence checks
+    snapshotted before dispatch and re-checked after -- no LLM self-grading,
+    and never the parent's full verify gate re-run per child."""
+
+    PARENT_ARTIFACTS = ("out_a.txt", "out_b.txt")
+
+    def _spec(self) -> AcceptanceCriterionSpec:
+        return AcceptanceCriterionSpec(
+            description="parent AC", expected_artifacts=self.PARENT_ARTIFACTS
+        )
+
+    @pytest.mark.asyncio
+    async def test_children_creating_their_slices_earn_trustworthy(self, tmp_path) -> None:
+        """The whole point of the feature: a real decomposition round where
+        every child genuinely creates its assigned artifacts (and the parent's
+        re-run gate passes) earns TRUSTWORTHY -- without any child ever
+        running the parent's borrowed verify gate (Fix 1 stays intact)."""
+        executor = _make_live_artifact_executor(
+            tmp_path, writes_per_dispatch=[("out_a.txt",), ("out_b.txt",)]
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-1", ac_index=0)
+        decision = _artifact_split_decision(
+            node_identity.node_id, slices=(("out_a.txt",), ("out_b.txt",))
+        )
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-1")
+        )
+
+        # Fix 1 intact: no child ever ran the borrowed parent-wide gate.
+        for sub_result in result.sub_results:
+            assert sub_result.verify_gate_outcome is None
+
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.TRUSTWORTHY
+        assert result.decomposition_attestation.trustworthy is True
+        # The parent's own artifact gate also genuinely re-ran and passed.
+        assert result.verify_gate_outcome is not None
+        assert result.verify_gate_outcome.passed is True
+
+    @pytest.mark.asyncio
+    async def test_preexisting_slice_denies_credit_fail_closed(self, tmp_path) -> None:
+        """Safety invariant 1 (credit-borrowing): if ALL of a child's assigned
+        artifacts already existed before it dispatched, that child's axis is
+        un-evaluable -- it must never be graded as passed, so the round stays
+        INDETERMINATE (not TRUSTWORTHY)."""
+        (tmp_path / "out_a.txt").write_text("already here", encoding="utf-8")
+        executor = _make_live_artifact_executor(tmp_path, writes_per_dispatch=[(), ("out_b.txt",)])
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-2", ac_index=0)
+        decision = _artifact_split_decision(
+            node_identity.node_id, slices=(("out_a.txt",), ("out_b.txt",))
+        )
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-2")
+        )
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert attestation.trustworthy is False
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "0"
+
+    @pytest.mark.asyncio
+    async def test_child_missing_its_slice_makes_round_untrustworthy(self, tmp_path) -> None:
+        """A child that finishes without its assigned artifacts existing is
+        REAL, evaluated negative evidence: the round is UNTRUSTWORTHY and the
+        failure is attributed to that child."""
+        executor = _make_live_artifact_executor(tmp_path, writes_per_dispatch=[(), ("out_b.txt",)])
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-3", ac_index=0)
+        decision = _artifact_split_decision(
+            node_identity.node_id, slices=(("out_a.txt",), ("out_b.txt",))
+        )
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-3")
+        )
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "0"
+        assert "out_a.txt" in attestation.reason
+
+    @pytest.mark.asyncio
+    async def test_slice_outside_parent_contract_is_never_credited(self, tmp_path) -> None:
+        """Safety invariant 2 (runtime leg, defense in depth on top of the
+        proposal-time subset validation): a child slice path that is NOT part
+        of the parent's seed-authored set is silently un-creditable -- it can
+        never become passing evidence, so the round cannot reach TRUSTWORTHY
+        on a self-invented oracle."""
+        executor = _make_live_artifact_executor(
+            tmp_path,
+            writes_per_dispatch=[("invented.txt",), ("out_a.txt", "out_b.txt")],
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-4", ac_index=0)
+        # Child 0 claims a path the parent never declared.
+        decision = _artifact_split_decision(
+            node_identity.node_id, slices=(("invented.txt",), ("out_a.txt", "out_b.txt"))
+        )
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-4")
+        )
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        # Child 0 has no evaluable (parent-authored) slice left after the
+        # runtime subset filter -> its axis is indeterminate, never passed.
+        assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "0"
+
+    @pytest.mark.asyncio
+    async def test_no_parent_artifacts_keeps_prior_behavior(self, tmp_path) -> None:
+        """Safety invariant 4 (regression): when the parent declares NO
+        expected_artifacts, none of the new machinery activates -- even if a
+        (malformed) decision carries child slices -- and the round resolves
+        INDETERMINATE exactly as before this feature."""
+        executor = _make_live_artifact_executor(
+            tmp_path, writes_per_dispatch=[("whatever.txt",), ()]
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-5", ac_index=0)
+        decision = _artifact_split_decision(node_identity.node_id, slices=(("whatever.txt",), ()))
+        spec_without_artifacts = AcceptanceCriterionSpec(description="parent AC")
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(
+                node_identity, decision, spec_without_artifacts, "exec-art-5"
+            )
+        )
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert attestation.trustworthy is False
+        assert result.verify_gate_outcome is None
+        for sub_result in result.sub_results:
+            assert sub_result.verify_gate_outcome is None
+
+    @pytest.mark.asyncio
+    async def test_run_verify_commands_disabled_skips_artifact_checks(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Safety invariant 6: artifact existence checks follow the SAME
+        ``self._run_verify_commands`` posture as every other success-contract
+        evaluation site (the parent's own artifact-only gate included) -- an
+        operator who disabled contract execution gets no filesystem oracle
+        runs and a fail-closed INDETERMINATE round."""
+        import ouroboros.orchestrator.parallel_executor as pe
+
+        executor = _make_live_artifact_executor(
+            tmp_path, writes_per_dispatch=[("out_a.txt",), ("out_b.txt",)]
+        )
+        executor._run_verify_commands = False
+
+        def _must_not_run(artifacts, cwd):  # pragma: no cover - failure path
+            msg = "artifact existence oracle must not run when verify commands are disabled"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(pe, "_missing_expected_artifacts", _must_not_run)
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-6", ac_index=0)
+        decision = _artifact_split_decision(
+            node_identity.node_id, slices=(("out_a.txt",), ("out_b.txt",))
+        )
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-6")
+        )
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert attestation.trustworthy is False
+        assert result.verify_gate_outcome is None
+
+    @pytest.mark.asyncio
+    async def test_conflicting_artifact_and_gate_evidence_fails_closed(self) -> None:
+        """Merge rule: when a sibling somehow carries BOTH artifact-slice
+        evidence and a per-child verify-gate outcome, a failure on EITHER leg
+        fails that sibling -- a conflicting signal never resolves to passed."""
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-7", ac_index=0)
+        final_sub_results = [
+            _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(
+                    passed=False, reason="gate says no", output_tail=""
+                ),
+            ),
+            _child_result(1, verify_gate_outcome=None),
+        ]
+        ac_spec = AcceptanceCriterionSpec(description="parent AC", verify_command="true")
+
+        attestation, _parent = await executor._attest_decomposition_round(
+            node_identity=node_identity,
+            final_sub_results=final_sub_results,
+            ac_spec=ac_spec,
+            child_artifact_attributions=(
+                (True, True, "artifact leg passed"),  # conflicts with failing gate leg
+                (True, True, "artifact leg passed"),
+            ),
+        )
+
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.failed_sibling_id == "0"
 
 
 class TestDecompositionAttestationReplayOnResume:
@@ -818,7 +1128,9 @@ class TestDecompositionAttestationFailsClosedOnReplayFailure:
                 node_identity=node_identity,
                 start_time=datetime.now(UTC),
                 semantic_ac_key="key",
-                ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+                ac_spec=AcceptanceCriterionSpec(
+                    description="parent AC", verify_command="pytest -q"
+                ),
             )
 
         assert decision.trustworthy is True
