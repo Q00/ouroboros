@@ -166,7 +166,12 @@ class ACTreeWidget(Widget):
         except Exception:
             width = 0
         if width and width > 0:
-            return max(_MIN_LABEL_WIDTH, width - _LABEL_WIDTH_RESERVED_CHARS)
+            # Round-7 (non-blocking), mirroring ``ac_progress.py``'s Round-6
+            # fix: the 20-cell minimum exists so labels stay readable in
+            # tight-but-usable panes — but a pane NARROWER than the minimum
+            # must still bound truncation by its actual width, or the
+            # "minimum" exceeds the space that exists at all.
+            return max(min(_MIN_LABEL_WIDTH, width), width - _LABEL_WIDTH_RESERVED_CHARS)
         return default
 
     def _format_root_label(self, root_content: str) -> str:

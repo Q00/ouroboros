@@ -498,6 +498,29 @@ class TestACTreeWidget:
 
         assert widget._label_max_width() == 50
 
+    def test_label_max_width_is_bounded_by_panes_narrower_than_the_minimum(self) -> None:
+        """Round-7 (non-blocking), mirroring ``ac_progress.py``'s Round-6
+        fix: the 20-cell minimum truncation width must not exceed the
+        widget's ACTUAL width in a very narrow pane — the truncation budget
+        is capped by the space that exists."""
+        from unittest.mock import PropertyMock, patch
+
+        widget = ACTreeWidget()
+
+        def _width_for(size_width: int) -> int:
+            fake_size = type("Size", (), {"width": size_width, "height": 5})()
+            with patch.object(
+                ACTreeWidget, "size", new_callable=PropertyMock, return_value=fake_size
+            ):
+                return widget._label_max_width()
+
+        # Narrower than the minimum: bounded by the actual pane width.
+        assert _width_for(10) == 10
+        # Tight-but-usable pane: the readability minimum still applies.
+        assert _width_for(25) == 20
+        # Ample pane: reserved chars subtracted as before.
+        assert _width_for(100) == 80
+
     def test_on_resize_retruncates_root_and_child_labels(self) -> None:
         """Fix 9 (P2, PR #1648 review): labels are computed once at compose
         time using the widget's width at that moment; without a resize
