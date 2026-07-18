@@ -2609,7 +2609,7 @@ class ParallelACExecutor:
         # heuristic on ``decision.trustworthy``. The verdict is cached per node id
         # so the NEXT retry of this same root AC can condition its child-tier
         # discount on it (see ``child_decomposition_trustworthy`` above).
-        attestation = await self._attest_decomposition_round(
+        attestation, parent_verify_gate_outcome = await self._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=ac_spec,
@@ -2651,6 +2651,13 @@ class ParallelACExecutor:
             depth=depth,
             decomposition_decision=decision,
             decomposition_attestation=attestation,
+            # Thread the SAME parent verify-gate outcome computed for
+            # attestation into the result's cache slot. The final acceptance
+            # gate (``_apply_verify_gate``) reads this cache and, when
+            # present, only cheaply revalidates the filesystem leg instead of
+            # re-running a (possibly non-idempotent/mutating) verify_command a
+            # second time for the same dispatch.
+            verify_gate_outcome=parent_verify_gate_outcome,
         )
 
     async def _attest_decomposition_round(
@@ -2659,7 +2666,7 @@ class ParallelACExecutor:
         node_identity: ExecutionNodeIdentity,
         final_sub_results: list[ACExecutionResult],
         ac_spec: AcceptanceCriterionSpec | None,
-    ) -> DecompositionAttestation:
+    ) -> tuple[DecompositionAttestation, _VerifyGateOutcome | None]:
         """Gate-anchor one finished decomposition round (Task 1).
 
         Reuses the SAME verify-gate oracle every other AC success/failure
@@ -2670,6 +2677,20 @@ class ParallelACExecutor:
         if any, is RE-RUN here — after every sibling has finished — against
         the current shared workspace, so a clobbering split fails this check
         even when every child individually reported success.
+
+        The parent gate is only actually re-run when ``self._run_verify_commands``
+        is enabled, mirroring every other verify-gate call site in this file:
+        an operator who disabled verify-command execution must not have shell
+        commands run on their behalf by this path either. When disabled, the
+        parent axis reports ``has_verify_command=False`` — the same
+        fail-closed ``INDETERMINATE`` shape already used for "no contract at
+        all" — never an assumed pass.
+
+        The computed ``_VerifyGateOutcome`` (or ``None`` when not run) is
+        returned alongside the attestation so the caller can cache it on the
+        dispatch result; the final acceptance gate then reuses that cached
+        outcome (see ``_apply_verify_gate``) instead of invoking a
+        possibly-mutating verify_command a second time for the same dispatch.
         """
         siblings = tuple(
             SiblingVerifyOutcome(
@@ -2692,23 +2713,25 @@ class ParallelACExecutor:
         parent_has_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
             ac_spec.verify_command or ac_spec.expected_artifacts
         )
-        if parent_has_contract:
+        parent_verify_gate_outcome: _VerifyGateOutcome | None = None
+        if parent_has_contract and self._run_verify_commands:
             assert ac_spec is not None  # narrowed by parent_has_contract
             cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-            parent_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+            parent_verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
             parent = ParentVerifyOutcome(
                 has_verify_command=True,
-                passed=parent_outcome.passed,
-                reason=parent_outcome.reason or "",
+                passed=parent_verify_gate_outcome.passed,
+                reason=parent_verify_gate_outcome.reason or "",
             )
         else:
             parent = ParentVerifyOutcome(has_verify_command=False, passed=None)
 
-        return attest_decomposition(
+        attestation = attest_decomposition(
             node_id=node_identity.node_id,
             siblings=siblings,
             parent=parent,
         )
+        return attestation, parent_verify_gate_outcome
 
     def _build_decomposition_trace_summary(
         self,

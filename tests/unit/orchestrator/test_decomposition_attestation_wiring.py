@@ -97,7 +97,7 @@ class TestAttestDecompositionRound:
             ),
         ]
 
-        attestation = await executor._attest_decomposition_round(
+        attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=None,
@@ -105,6 +105,7 @@ class TestAttestDecompositionRound:
 
         assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
         assert attestation.trustworthy is False
+        assert parent_outcome is None
 
     @pytest.mark.asyncio
     async def test_parent_gate_reverified_and_passes(self) -> None:
@@ -123,7 +124,7 @@ class TestAttestDecompositionRound:
         ]
         ac_spec = AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q")
 
-        attestation = await executor._attest_decomposition_round(
+        attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=ac_spec,
@@ -131,6 +132,37 @@ class TestAttestDecompositionRound:
 
         assert attestation.verdict is DecompositionTrustVerdict.TRUSTWORTHY
         executor._run_ac_verify_gate.assert_awaited_once()
+        assert parent_outcome is not None
+        assert parent_outcome.passed is True
+
+    @pytest.mark.asyncio
+    async def test_verify_commands_disabled_is_indeterminate_and_skips_execution(self) -> None:
+        """Fix 1 (BLOCKING): an operator who disabled verify-command execution
+        must not have the parent's shell command run on their behalf by the
+        attestation path either — this must mirror every other verify-gate
+        call site's ``self._run_verify_commands`` guard."""
+        executor = _make_executor()
+        executor._run_verify_commands = False
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        final_sub_results = [
+            _child_result(0, verify_gate_outcome=None),
+            _child_result(1, verify_gate_outcome=None),
+        ]
+        ac_spec = AcceptanceCriterionSpec(description="parent AC", verify_command="rm -rf /tmp/x")
+
+        attestation, parent_outcome = await executor._attest_decomposition_round(
+            node_identity=node_identity,
+            final_sub_results=final_sub_results,
+            ac_spec=ac_spec,
+        )
+
+        executor._run_ac_verify_gate.assert_not_awaited()
+        assert parent_outcome is None
+        assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert attestation.trustworthy is False
 
     @pytest.mark.asyncio
     async def test_clobbering_scenario_parent_gate_fails(self) -> None:
@@ -153,7 +185,7 @@ class TestAttestDecompositionRound:
         ]
         ac_spec = AcceptanceCriterionSpec(description="parent AC", expected_artifacts=("out.json",))
 
-        attestation = await executor._attest_decomposition_round(
+        attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=ac_spec,
@@ -161,6 +193,8 @@ class TestAttestDecompositionRound:
 
         assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
         assert attestation.trustworthy is False
+        assert parent_outcome is not None
+        assert parent_outcome.passed is False
 
     @pytest.mark.asyncio
     async def test_sibling_failure_is_untrustworthy(self) -> None:
@@ -181,7 +215,7 @@ class TestAttestDecompositionRound:
         ]
         ac_spec = AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q")
 
-        attestation = await executor._attest_decomposition_round(
+        attestation, _parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=ac_spec,
@@ -238,6 +272,81 @@ class TestExecuteDecompositionChildrenWiring:
         assert result.decomposition_attestation.trustworthy is True
         assert executor._decomposition_attestations[node_identity.node_id].trustworthy is True
         executor._event_emitter.emit_decomposition_attested.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_parent_verify_gate_outcome_reused_not_rerun_by_final_acceptance(self) -> None:
+        """Fix 2 (BLOCKING): the parent verify-gate outcome computed for
+        attestation must be threaded onto the returned result's
+        ``verify_gate_outcome`` cache slot so the LATER, real acceptance gate
+        (``_apply_verify_gate``) reuses it instead of invoking
+        ``_run_ac_verify_gate`` — and therefore the underlying shell command —
+        a second time for the same dispatch."""
+        from datetime import UTC, datetime
+
+        from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        ac_spec = AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q")
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        result = await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-1",
+            level_contexts=None,
+            retry_attempt=0,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=ac_spec,
+        )
+
+        # The gate ran exactly once, and the outcome was threaded onto the
+        # result's cache slot.
+        executor._run_ac_verify_gate.assert_awaited_once()
+        assert isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+        assert result.verify_gate_outcome.passed is True
+
+        # The real, later acceptance gate must consume that SAME cached
+        # outcome rather than re-invoking ``_run_ac_verify_gate``.
+        seed = Seed(
+            goal="goal",
+            constraints=(),
+            acceptance_criteria=(ac_spec,),
+            ontology_schema=OntologySchema(name="Attest", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        gated = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=result,
+            session_id="s1",
+            execution_id="exec-1",
+        )
+
+        executor._run_ac_verify_gate.assert_awaited_once()  # still only once
+        assert gated.success is True
 
     @pytest.mark.asyncio
     async def test_prior_untrustworthy_attestation_poisons_next_retry_child_tier(self) -> None:
