@@ -3412,8 +3412,7 @@ class TestInfraFatalExemption:
                         "subtype": "error",
                         "error_type": "RuntimeError",
                         "error": (
-                            "authentication failed: invalid credentials "
-                            "for configured account"
+                            "authentication failed: invalid credentials for configured account"
                         ),
                     },
                 )

@@ -5324,8 +5324,7 @@ class OrchestratorRunner:
                     "node_id": node_id,
                     "root_ac_index": data.get("root_ac_index"),
                     "parked": (
-                        event_type == "execution.ac.parked_for_operator"
-                        or bool(data.get("parked"))
+                        event_type == "execution.ac.parked_for_operator" or bool(data.get("parked"))
                     ),
                 }
             elif event_type in {

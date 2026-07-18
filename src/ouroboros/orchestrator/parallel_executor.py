@@ -1214,9 +1214,7 @@ class ParallelACExecutor:
         # another persona. Reconstructed alongside
         # ``_lateral_escalation_resume_attempts`` during replay and
         # consumed (popped) by ``_resume_escalated_ac``.
-        self._lateral_escalation_resume_attempt_finalized: dict[
-            int, tuple[bool, bool] | None
-        ] = {}
+        self._lateral_escalation_resume_attempt_finalized: dict[int, tuple[bool, bool] | None] = {}
         # Round-7 follow-up finding: ``lateral_escalation_progressed
         # (parked=True)`` is persisted BEFORE the separate
         # ``parked_for_operator`` event. If that second write fails and the
@@ -7196,7 +7194,9 @@ Respond with either ATOMIC or the structured JSON object only.
         description = log_key
         if log_context:
             description += (
-                " (" + ", ".join(f"{key}={value}" for key, value in sorted(log_context.items())) + ")"
+                " ("
+                + ", ".join(f"{key}={value}" for key, value in sorted(log_context.items()))
+                + ")"
             )
 
         async def _retry_loop() -> None:

@@ -1803,9 +1803,7 @@ class TestOrchestratorRunner:
             open_episodes = result.error.details["open_escalations"]
             assert len(open_episodes) == 1
             assert open_episodes[0]["root_ac_index"] == 0
-            assert open_episodes[0]["parked"] is (
-                event_type == "execution.ac.parked_for_operator"
-            )
+            assert open_episodes[0]["parked"] is (event_type == "execution.ac.parked_for_operator")
             # Never silently proceeded: no tools set up, no dispatch, lock
             # released like the other rejection blocks.
             get_merged_tools.assert_not_called()
