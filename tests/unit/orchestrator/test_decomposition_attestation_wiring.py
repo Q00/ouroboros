@@ -1208,3 +1208,142 @@ class TestDecompositionAttestationFailsClosedOnReplayFailure:
         assert decision.trustworthy is True
         assert captured_trust_flags
         assert all(flag is False for flag in captured_trust_flags)
+
+
+class TestDecompositionAttestationFailsClosedOnMalformedEventData:
+    """Round-4 Finding #4 (BLOCKING): replay SUCCEEDS and a matching
+    ``execution.ac.decomposition_attested`` event for this node id IS found,
+    but its payload fails to parse into a valid
+    :class:`DecompositionAttestation`. Returning ``None`` for that case is
+    indistinguishable from the legitimate "never attested" miss at the
+    caller (``prior_attestation is None`` re-admits the child-tier
+    discount), so a corrupt record of a prior UNTRUSTWORTHY verdict would
+    silently un-poison the node id. The loader must return the SAME
+    synthetic fail-closed UNTRUSTWORTHY sentinel as the total-replay-failure
+    case; ``None`` stays reserved for "no matching event exists at all".
+    """
+
+    @staticmethod
+    def _store_with_malformed_attested_event(node_id: str, execution_id: str):
+        from ouroboros.events.base import BaseEvent
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _make_replaying_event_store,
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        appended_events.append(
+            BaseEvent(
+                type="execution.ac.decomposition_attested",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    # node_id matches, so the loader FINDS this event -- but
+                    # the verdict is not a valid DecompositionTrustVerdict
+                    # value and required fields are missing/wrong-typed, so
+                    # _decomposition_attestation_from_event_data returns None.
+                    "node_id": node_id,
+                    "verdict": "corrupted-not-a-verdict",
+                    "failed_axis": 42,
+                    "execution_id": execution_id,
+                    "session_id": "s1",
+                },
+            )
+        )
+        return event_store
+
+    @pytest.mark.asyncio
+    async def test_malformed_found_event_fails_closed_to_untrustworthy(self) -> None:
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec-corrupt", ac_index=0
+        )
+        event_store = self._store_with_malformed_attested_event(
+            node_identity.node_id, "exec-corrupt"
+        )
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        attestation = await executor._load_decomposition_attestation(
+            node_identity.node_id, execution_id="exec-corrupt", session_id="s1"
+        )
+
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.trustworthy is False
+        # The fail-closed sentinel is NOT cached -- consistent with the
+        # total-replay-failure convention.
+        assert node_identity.node_id not in executor._decomposition_attestations
+
+    @pytest.mark.asyncio
+    async def test_malformed_found_event_withholds_child_tier_discount_on_next_round(
+        self,
+    ) -> None:
+        """Caller-side effect: even though the FRESH proposal is trustworthy
+        (``decision.trustworthy is True``), the corrupt prior record must
+        force ``child_decomposition_trustworthy`` to ``False`` for this node
+        id's next retry -- exactly like a REAL prior UNTRUSTWORTHY verdict."""
+        from datetime import UTC, datetime
+
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec-corrupt2", ac_index=0
+        )
+        event_store = self._store_with_malformed_attested_event(
+            node_identity.node_id, "exec-corrupt2"
+        )
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+        executor._emit_workflow_progress = AsyncMock()
+        executor._emit_level_started = AsyncMock()
+        executor._emit_level_completed = AsyncMock()
+        executor._emit_subtask_event = AsyncMock()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        captured_trust_flags: list[bool] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-corrupt2",
+            level_contexts=None,
+            retry_attempt=1,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        )
+
+        # The fresh proposal itself is trustworthy...
+        assert decision.trustworthy is True
+        # ...but the corrupt prior record must still withhold trust for
+        # every child dispatched this round.
+        assert captured_trust_flags
+        assert all(flag is False for flag in captured_trust_flags)

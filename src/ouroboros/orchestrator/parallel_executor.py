@@ -6379,6 +6379,19 @@ Respond with either ATOMIC or the structured JSON object only.
         if node_id in self._decomposition_attestations:
             return self._decomposition_attestations[node_id]
 
+        def _fail_closed_sentinel(reason: str) -> DecompositionAttestation:
+            # Shared synthetic fail-closed verdict for BOTH "replay failed
+            # entirely" and "replay succeeded but the found payload is
+            # malformed". Not cached: a LATER successful read in this same
+            # process must not stay poisoned by a transient failure.
+            return DecompositionAttestation(
+                node_id=node_id,
+                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason=reason,
+            )
+
         aggregate_id = execution_id or session_id
         events = await self._replay_with_retry("execution", aggregate_id)
         if events is None:
@@ -6388,23 +6401,15 @@ Respond with either ATOMIC or the structured JSON object only.
             # let a restart re-authorize a cheap child tier this exact node
             # id was already proven untrustworthy for. Fail closed with a
             # synthetic UNTRUSTWORTHY verdict instead of falling through to
-            # the legitimate-miss ``None`` path below. Not cached: a LATER
-            # successful read in this same process must not stay poisoned by
-            # a transient failure.
+            # the legitimate-miss ``None`` path below.
             log.warning(
                 "parallel_executor.decomposition_attestation.state_reconstruction_failed",
                 node_id=node_id,
                 execution_id=execution_id,
             )
-            return DecompositionAttestation(
-                node_id=node_id,
-                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
-                failed_axis=None,
-                failed_sibling_id=None,
-                reason=(
-                    "durable event replay failed after retries; failing closed "
-                    "(untrustworthy) rather than assuming no prior attestation exists"
-                ),
+            return _fail_closed_sentinel(
+                "durable event replay failed after retries; failing closed "
+                "(untrustworthy) rather than assuming no prior attestation exists"
             )
 
         latest_data: dict[str, Any] | None = None
@@ -6417,11 +6422,32 @@ Respond with either ATOMIC or the structured JSON object only.
             latest_data = data
 
         if latest_data is None:
+            # ONLY the genuine "no matching event exists at all" case may
+            # return ``None`` -- the caller treats ``None`` as "never
+            # attested; proposal trust applies".
             return None
 
         attestation = _decomposition_attestation_from_event_data(latest_data)
-        if attestation is not None:
-            self._decomposition_attestations[node_id] = attestation
+        if attestation is None:
+            # Round-4 Finding #4 (BLOCKING): a matching event WAS found but
+            # its payload does not round-trip into a valid attestation.
+            # Returning ``None`` here is indistinguishable from "never
+            # attested" at the caller (``prior_attestation is None`` admits
+            # the child-tier discount) -- so a corrupt record of a prior
+            # UNTRUSTWORTHY verdict would silently un-poison this node id.
+            # Fail closed with the SAME synthetic UNTRUSTWORTHY sentinel the
+            # total-replay-failure case above uses.
+            log.warning(
+                "parallel_executor.decomposition_attestation.malformed_event_data",
+                node_id=node_id,
+                execution_id=execution_id,
+            )
+            return _fail_closed_sentinel(
+                "durable attestation event found for this node id but its payload "
+                "is malformed; failing closed (untrustworthy) rather than treating "
+                "corruption as 'never attested'"
+            )
+        self._decomposition_attestations[node_id] = attestation
         return attestation
 
     async def _load_lateral_escalation_state(
