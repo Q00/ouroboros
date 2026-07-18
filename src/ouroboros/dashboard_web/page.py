@@ -168,16 +168,23 @@ function cardHtml(c) {
   const trust = (c.trust_verdict && c.trustworthy === false)
     ? `<span class="badge" style="background:#9e2a2b" title="decomposition trust: ${esc(c.trust_verdict)}">⚠ ${esc(c.trust_verdict)}</span>`
     : "";
-  // Task 2: lateral-escalation parking — this AC never surfaces FAILED, it
-  // keeps retrying at a long backoff, so the badge is the only visible sign
-  // it needs an operator's attention.
-  const parked = (c.escalation_state === "parked")
-    ? `<span class="badge" style="background:#7a5c00" title="parked for operator: all lateral personas exhausted">⏸ parked</span>`
-    : "";
+  // Task 2: lateral-escalation badges. "parked" — this AC never surfaces
+  // FAILED, it keeps retrying at a long backoff, so the badge is the only
+  // visible sign it needs an operator's attention. "escalating" (round-5
+  // follow-up) — the in-flight persona cycling the shared reducer already
+  // exposes for the TUI/HUD/board surfaces; mirror the HUD's persona-first
+  // framing so the web card shows WHICH persona is currently being tried.
+  let escal = "";
+  if (c.escalation_state === "parked") {
+    escal = `<span class="badge" style="background:#7a5c00" title="parked for operator: all lateral personas exhausted">⏸ parked</span>`;
+  } else if (c.escalation_state === "escalating") {
+    const persona = c.escalation_persona ? `persona:${esc(c.escalation_persona)}` : "escalating";
+    escal = `<span class="badge" style="background:#5a3d8a" title="lateral escalation in progress: cycling personas">⤴ ${persona}</span>`;
+  }
   const indent = c.depth ? `style="margin-left:${Math.min(c.depth,4)*10}px"` : "";
   return `<div class="card st-${esc(c.status)}" ${indent}>
     <div class="title">${esc(truncate(c.title, 160))}</div>
-    <div class="sub">${prov}${tier}${trust}${parked}${ac}${tokHtml}${tool}</div></div>`;
+    <div class="sub">${prov}${tier}${trust}${escal}${ac}${tokHtml}${tool}</div></div>`;
 }
 
 __BOOTSTRAP__

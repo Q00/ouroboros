@@ -38,6 +38,15 @@ class TestLivePage:
         assert "unaccepted" in INDEX_HTML
         assert "coverage" in INDEX_HTML
 
+    def test_index_html_renders_both_escalation_states(self) -> None:
+        # Round-5 follow-up: the reducer exposes BOTH escalation states —
+        # "parked" and the in-flight "escalating" persona cycling (added for
+        # the TUI/HUD/board surfaces) — and the web card must render both,
+        # including WHICH persona is currently being tried.
+        assert 'c.escalation_state === "parked"' in INDEX_HTML
+        assert 'c.escalation_state === "escalating"' in INDEX_HTML
+        assert "c.escalation_persona" in INDEX_HTML
+
     def test_index_html_polls_for_pending_run(self) -> None:
         # The daemon base URL is published before a run exists (auto flow links it
         # while interview/seed are still running). The page must NOT dead-end on the
