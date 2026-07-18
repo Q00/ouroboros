@@ -122,6 +122,29 @@ _INFRA_FATAL_CONTENT_PATTERNS = (
     "model not found",
     "unknown model",
     "no such model",
+    # Round-4 fix: the shapes below are the REAL auth/authorization failure
+    # strings Pi's underlying provider libraries produce, verified against
+    # the installed @earendil-works/pi-ai provider sources -- none of the
+    # generic phrases above matched them, so a genuine Pi 401 retried
+    # forever instead of failing immediately.
+    #
+    # 1. pi-ai's OpenAI-responses/Azure/Mistral providers format HTTP-level
+    #    failures as ``"<Provider> API error (<status>): <detail>"`` (e.g.
+    #    ``"OpenAI API error (401)"``). Only 401/403 are matched -- other
+    #    statuses (429, 5xx) are transient, not infra-fatal.
+    "api error (401",
+    "api error (403",
+    # 2. The OpenAI SDK (pi-ai's openai-completions provider surfaces its
+    #    ``error.message`` verbatim) phrases a bad key as
+    #    ``"401 Incorrect API key provided: ..."``.
+    "incorrect api key",
+    # 3. The Anthropic SDK formats API errors as ``"<status> <json body>"``
+    #    where an auth failure's body carries ``"type":"authentication_error"``
+    #    (401, message ``"invalid x-api-key"``) or ``"type":"permission_error"``
+    #    (403). These typed tags never appear in ordinary task narration.
+    "authentication_error",
+    "permission_error",
+    "invalid x-api-key",
 )
 
 

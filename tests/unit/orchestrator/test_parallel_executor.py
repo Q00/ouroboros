@@ -3158,6 +3158,145 @@ class TestInfraFatalExemption:
         assert executor._is_retryable_failure(result) is False
 
     @pytest.mark.asyncio
+    async def test_pi_real_openai_401_error_shape_marks_infra_fatal(self) -> None:
+        """Round-4 Finding #1 reproduction: Pi's ACTUAL auth-failure payload.
+
+        ``pi_runtime.py`` reports a genuine authentication failure with the
+        generic ``error_type="PiError"`` and mirrors the extracted
+        ``errorMessage`` into ``data["error"]``. The real string Pi's
+        underlying provider library produces (verified against the installed
+        ``@earendil-works/pi-ai`` openai-responses provider:
+        ``\\`OpenAI API error (${statusCode}): ${error.message}\\```) is
+        ``"OpenAI API error (401)"`` -- which matched NONE of the existing
+        content patterns (``"401 unauthorized"``/``"unauthorized"`` are not
+        substrings of it), so a genuine Pi 401 was classified
+        ``infra_fatal=False`` and retried forever instead of failing
+        immediately.
+        """
+
+        class _PiRealAuthFailureRuntime:
+            _runtime_handle_backend = "pi"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                # Exactly what pi_runtime.py yields for a ``stopReason:
+                # "error"`` turn whose ``errorMessage`` is the real
+                # pi-ai-formatted 401 (see tests/unit/orchestrator/
+                # test_pi_runtime.py's fixtures using the same string).
+                error_text = "OpenAI API error (401)"
+                yield AgentMessage(
+                    type="result",
+                    content=error_text,
+                    data={
+                        "subtype": "error",
+                        "returncode": 0,
+                        "error_type": "PiError",
+                        "error": error_text,
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_PiRealAuthFailureRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_pi_401",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_pi_401",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_ordinary_pi_task_failure_is_not_infra_fatal(self) -> None:
+        """Round-4 Finding #1 negative control: an ordinary Pi task failure
+        (generic ``error_type="PiError"``, no auth phrasing in the structured
+        error field) must still classify ``infra_fatal=False`` -- adding
+        ``"PiError"`` to ``_INFRA_FATAL_ERROR_TYPES`` would have been too
+        broad and would wrongly skip real retry/escalation opportunities for
+        exactly this case.
+        """
+
+        class _PiOrdinaryFailureRuntime:
+            _runtime_handle_backend = "pi"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                error_text = "Pi exited with code 1."
+                yield AgentMessage(
+                    type="result",
+                    content=error_text,
+                    data={
+                        "subtype": "error",
+                        "returncode": 1,
+                        "error_type": "PiError",
+                        "error": error_text,
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_PiOrdinaryFailureRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_pi_ordinary",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_pi_ordinary",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is False
+        assert executor._is_retryable_failure(result) is True
+
+    @pytest.mark.asyncio
     async def test_infra_fatal_phrase_in_narrative_content_only_is_not_infra_fatal(self) -> None:
         """Fix 4 redo (round 3 follow-up review): regression test for the
         exact false-positive scenario the review found. The agent's own
