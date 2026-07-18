@@ -2951,6 +2951,155 @@ class TestProfileAwareContextGovernance:
         )
 
 
+class TestInfraFatalExemption:
+    """Fix 4 (BLOCKING, PR #1648 review): a genuinely infra-fatal exception
+    (adapter crash, auth failure, network partition) raised by the runtime
+    mid-dispatch must be marked so recovery logic can never feed it back
+    into the ordinary retry loop or the lateral-escalation ladder — even
+    though ``_execute_atomic_ac`` catches it and returns an ordinary-looking
+    ``ACExecutionResult`` (kept only so existing logging/event-emission code
+    keeps working).
+    """
+
+    @pytest.mark.asyncio
+    async def test_adapter_exception_marks_result_infra_fatal(self) -> None:
+        """Drive the REAL production catch boundary: the adapter's
+        ``execute_task`` async generator raises before yielding anything,
+        exactly like a real auth failure (401) or adapter crash would. This
+        must propagate through ``LeafDispatcher.stream`` (no catch there)
+        into ``_execute_atomic_ac``'s own ``except Exception`` handler — not
+        a shortcut that hands a raw ``BaseException`` straight to a helper
+        function."""
+
+        class _CrashingRuntime:
+            _runtime_handle_backend = "opencode"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                if False:  # pragma: no cover - keeps this an async generator
+                    yield
+                raise PermissionError("401 Unauthorized: invalid API key")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_CrashingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert result.error is not None
+        assert "401" in result.error
+        assert executor._is_retryable_failure(result) is False
+
+        failed_event = next(
+            event for event in appended_events if event.type == "execution.session.failed"
+        )
+        assert "401" in failed_event.data["error"]
+
+    def test_is_retryable_failure_excludes_infra_fatal_even_when_shape_matches_ordinary_failure(
+        self,
+    ) -> None:
+        """Direct unit check: ``infra_fatal`` must gate ``_is_retryable_failure``
+        even though every OTHER field (``success=False``, not blocked, a
+        non-stall error string) looks identical to an ordinary, retryable
+        verify-gate/quality failure — the two must not be distinguishable by
+        shape alone, only by the explicit flag."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        ordinary_failure = ACExecutionResult(
+            ac_index=0,
+            ac_content="x",
+            success=False,
+            error="verify_command failed",
+        )
+        infra_fatal_failure = ACExecutionResult(
+            ac_index=0,
+            ac_content="x",
+            success=False,
+            error="verify_command failed",
+            infra_fatal=True,
+        )
+
+        assert executor._is_retryable_failure(ordinary_failure) is True
+        assert executor._is_retryable_failure(infra_fatal_failure) is False
+
+    @pytest.mark.asyncio
+    async def test_infra_fatal_result_is_exempt_from_lateral_escalation_ladder(self) -> None:
+        """End-to-end through the actual gate the ladder uses: an infra-fatal
+        result must make ``_maybe_run_lateral_escalation_ladder`` bail out
+        immediately (``None``) even when the ladder is opted in, rather than
+        engaging retries for a failure the runtime itself caused."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        seed = Seed(
+            goal="Implement the widget",
+            constraints=(),
+            acceptance_criteria=(AcceptanceCriterionSpec(description="Implement the widget"),),
+            ontology_schema=OntologySchema(name="Infra", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        infra_fatal_failure = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="401 Unauthorized",
+            infra_fatal=True,
+        )
+
+        escalated = await executor._maybe_run_lateral_escalation_ladder(
+            seed=seed,
+            ac_idx=0,
+            result=infra_fatal_failure,
+            ac_retry_attempts={0: 1},
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            execution_counters=None,
+        )
+
+        assert escalated is None
+
+
 class TestParallelACExecutor:
     """Tests for staged hybrid result handling."""
 

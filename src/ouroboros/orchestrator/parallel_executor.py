@@ -5091,6 +5091,20 @@ Respond with either ATOMIC or the structured JSON object only.
             )
 
         except Exception as e:
+            # Anything reaching this handler escaped the runtime dispatch
+            # (``LeafDispatcher.stream`` / ``self._adapter.execute_task``) or
+            # the bookkeeping around it WITHOUT going through the normal
+            # message-stream contract (``message.is_error`` -> a structured,
+            # ordinary AC-level failure). That makes it infra-fatal by
+            # construction — an adapter crash, an auth failure (401/403), a
+            # network partition, or some other environmental fault, never an
+            # AC's own verify-gate/quality failure. It is still wrapped as a
+            # normal-looking ``ACExecutionResult`` (not re-raised) purely so
+            # existing logging/event-emission/teardown code keeps working —
+            # ``infra_fatal=True`` is the one bit downstream recovery logic
+            # (``_is_retryable_failure``) needs to keep it OUT of the
+            # ordinary retry loop and the lateral-escalation ladder, exactly
+            # as it would if this had surfaced as a raw, uncaught exception.
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
             self._remember_ac_runtime_handle(
@@ -5133,6 +5147,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_attempt=retry_attempt,
                 depth=depth,
                 runtime_handle=dispatch_state.runtime_handle,
+                infra_fatal=True,
             )
         finally:
             try:
@@ -5735,8 +5750,24 @@ Respond with either ATOMIC or the structured JSON object only.
         return None
 
     def _is_retryable_failure(self, result: ACExecutionResult | BaseException) -> bool:
-        """Whether a batch result is a non-stall, non-blocked AC failure (PR-V V3)."""
+        """Whether a batch result is a non-stall, non-blocked AC failure (PR-V V3).
+
+        A raw ``BaseException`` (an uncaught exception that escaped even the
+        atomic leaf's own exception handling) is never retryable. Neither is
+        an ``ACExecutionResult`` with ``infra_fatal=True`` — a genuinely
+        infra-fatal exception (adapter crash, auth failure, network
+        partition) that the atomic leaf caught and wrapped as a structured
+        result purely for logging/observability. Both shapes must be treated
+        identically here: whether an infra-fatal failure arrives as a raw
+        exception or as this wrapped form is an implementation detail of
+        WHERE it was caught, not a difference in what recovery is
+        appropriate. Neither may re-enter the ordinary retry loop or the
+        lateral-escalation ladder — the runtime itself failed, not the AC's
+        work, so redispatching cannot help.
+        """
         if not isinstance(result, ACExecutionResult):
+            return False
+        if result.infra_fatal:
             return False
         if result.success or result.is_blocked:
             return False

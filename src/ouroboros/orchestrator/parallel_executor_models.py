@@ -73,6 +73,18 @@ class ACExecutionResult:
             immediately after this node's decomposition round finished (all
             siblings dispatched). ``None`` for atomic nodes and for decomposed
             nodes before the attestation runs.
+        infra_fatal: ``True`` only when this result was built by catching an
+            exception the runtime raised mid-dispatch (adapter crash, auth
+            failure, network partition, ...) instead of reporting an ordinary
+            AC-level failure through the message stream. The atomic leaf
+            still wraps it as a normal-looking ``ACExecutionResult`` so
+            existing logging/observability/event-emission code keeps working
+            unchanged, but the flag lets recovery logic
+            (``_is_retryable_failure``) tell this apart from a structured
+            verify-gate/quality failure: an infra-fatal result must never be
+            fed back into the ordinary retry loop or the lateral-escalation
+            ladder, since the runtime itself — not the AC's work — is what
+            failed. ``False`` for every ordinary result (default).
     """
 
     ac_index: int
@@ -97,6 +109,7 @@ class ACExecutionResult:
     verify_gate_outcome: Any | None = None
     decomposition_decision: DecompositionDecisionRecord | None = None
     decomposition_attestation: DecompositionAttestation | None = None
+    infra_fatal: bool = False
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""
