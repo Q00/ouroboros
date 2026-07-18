@@ -2753,6 +2753,15 @@ class ParallelACExecutor:
             depth=depth,
             decomposition_decision=decision,
             decomposition_attestation=attestation,
+            # Fix 2 (round 3, BLOCKING): record the trust value ACTUALLY
+            # consumed to dispatch THIS round's children -- computed BEFORE
+            # this round ran (``child_decomposition_trustworthy`` above), not
+            # this round's own just-computed ``attestation``. Model-routing
+            # probes that ask "what was true for the dispatch that just
+            # finished" must read this field; probes asking "what will be
+            # true for the next dispatch" must read ``decomposition_attestation``
+            # instead (this round's verdict becomes the NEXT round's prior).
+            dispatched_decomposition_trustworthy=child_decomposition_trustworthy,
             # Thread the SAME parent verify-gate outcome computed for
             # attestation into the result's cache slot. The final acceptance
             # gate (``_apply_verify_gate``) reads this cache and, when
@@ -6613,21 +6622,44 @@ Respond with either ATOMIC or the structured JSON object only.
                         routes_as_child = (
                             isinstance(gated, ACExecutionResult) and gated.is_decomposed
                         )
-                        decomposition_trustworthy = (
-                            isinstance(gated, ACExecutionResult) and gated.decomposition_trustworthy
+                        # Fix 2 (round 3, BLOCKING): these two probes ask two
+                        # DIFFERENT questions and must read two DIFFERENT trust
+                        # values, not the same stale proposal-time heuristic.
+                        # ``just_dispatched`` asks "what trust was ACTUALLY
+                        # ACTIVE for the dispatch that just finished" -- the
+                        # value ``_execute_decomposition_children`` actually
+                        # consumed to pick the child tier THIS round, computed
+                        # from the PRIOR round's attestation before this round
+                        # ran. ``next_scheduled`` asks "what will be active for
+                        # the NEXT dispatch" -- the CURRENT/latest gate-anchored
+                        # attestation, i.e. THIS round's own just-computed
+                        # verdict, which becomes the prior attestation the next
+                        # retry's decomposition consults. Reading the same
+                        # (stale, pre-dispatch) value for both meant a round
+                        # that just flipped from trustworthy to untrustworthy
+                        # could early-stop retries before that change ever took
+                        # effect.
+                        just_dispatched_trustworthy = (
+                            isinstance(gated, ACExecutionResult)
+                            and gated.dispatched_decomposition_trustworthy
+                        )
+                        next_scheduled_trustworthy = (
+                            isinstance(gated, ACExecutionResult)
+                            and gated.decomposition_attestation is not None
+                            and gated.decomposition_attestation.trustworthy
                         )
                         just_dispatched = decide_model(
                             model_support,
                             router=self._model_router,
                             is_decomposed_child=routes_as_child,
-                            decomposition_trustworthy=decomposition_trustworthy,
+                            decomposition_trustworthy=just_dispatched_trustworthy,
                             retry_attempt=ac_retry_attempts[ac_idx],
                         )
                         next_scheduled = decide_model(
                             model_support,
                             router=self._model_router,
                             is_decomposed_child=routes_as_child,
-                            decomposition_trustworthy=decomposition_trustworthy,
+                            decomposition_trustworthy=next_scheduled_trustworthy,
                             retry_attempt=ac_retry_attempts[ac_idx] + 1,
                         )
                         pending_enforced_escalation = (

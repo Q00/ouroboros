@@ -16,6 +16,10 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.harness.decomposition_attestation import (
+    DecompositionAttestation,
+    DecompositionTrustVerdict,
+)
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
@@ -722,6 +726,13 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
     def _decomposed_fail() -> ACExecutionResult:
         # A decomposed parent whose children (routed one tier cheaper) failed:
         # the predicate requires both child status and a trusted split record.
+        # Fix 2 (round 3): the early-stop probe now reads two dedicated trust
+        # fields instead of the stale proposal-time ``decomposition_trustworthy``
+        # property -- ``dispatched_decomposition_trustworthy`` (trust active for
+        # the dispatch that just finished) and ``decomposition_attestation``
+        # (the CURRENT/latest gate-anchored verdict, consulted for the next
+        # scheduled dispatch). Both must be populated as TRUSTWORTHY here so
+        # this test still exercises the "trusted decomposed child" ladder.
         base = _fail(0, "EVIDENCE_MISSING")
         return replace(
             base,
@@ -737,6 +748,14 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
                 structural_status=StructuralCheckStatus.PASSED,
                 semantic_status=SemanticAttestationStatus.ESTABLISHED,
                 trustworthy=True,
+            ),
+            dispatched_decomposition_trustworthy=True,
+            decomposition_attestation=DecompositionAttestation(
+                node_id="trusted-decomposed-parent",
+                verdict=DecompositionTrustVerdict.TRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason="test: gate-anchored trust held for this round",
             ),
         )
 

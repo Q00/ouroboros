@@ -73,6 +73,18 @@ class ACExecutionResult:
             immediately after this node's decomposition round finished (all
             siblings dispatched). ``None`` for atomic nodes and for decomposed
             nodes before the attestation runs.
+        dispatched_decomposition_trustworthy: The trust value ACTUALLY consumed
+            to select the model tier for this round's children -- i.e.
+            ``decision.trustworthy AND (prior_attestation is None or
+            prior_attestation.trustworthy)``, evaluated BEFORE this round ran
+            (see ``_execute_decomposition_children``). This is distinct from
+            ``decomposition_attestation.trustworthy``, which is this round's
+            OWN just-computed verdict (only known AFTER the round finishes and
+            becomes the "prior" attestation the NEXT retry consults). Model-
+            routing probes must read the value matching what they are asking
+            about: "what was active at the dispatch that just happened" (this
+            field) versus "what will be active for the next dispatch" (the
+            latest ``decomposition_attestation``). ``False`` for atomic nodes.
         infra_fatal: ``True`` only when this result was built by catching an
             exception the runtime raised mid-dispatch (adapter crash, auth
             failure, network partition, ...) instead of reporting an ordinary
@@ -109,6 +121,7 @@ class ACExecutionResult:
     verify_gate_outcome: Any | None = None
     decomposition_decision: DecompositionDecisionRecord | None = None
     decomposition_attestation: DecompositionAttestation | None = None
+    dispatched_decomposition_trustworthy: bool = False
     infra_fatal: bool = False
 
     def __post_init__(self) -> None:
