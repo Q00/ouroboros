@@ -1550,10 +1550,33 @@ class OrchestratorRunner:
         }
 
     @staticmethod
-    def _routing_fingerprint(routing_contract: Mapping[str, Any]) -> str:
-        """Hash a resolved routing contract into a stable cohort key."""
+    def _routing_fingerprint(
+        routing_contract: Mapping[str, Any],
+        *,
+        retry_policy: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Hash a resolved routing contract into a stable cohort key.
+
+        ``retry_policy`` (Fix 6, round 2, BLOCKING) is folded into the SAME
+        hash when provided: ``lateral_escalation_enabled``/
+        ``parked_retry_backoff_seconds`` materially change a run's
+        retry/termination behavior (one can retry indefinitely; the other
+        gives up after the configured budget) and therefore its token
+        spend. Two runs differing ONLY in retry_policy must never collapse
+        into the same "exact" cohort for frugality-proof comparisons, which
+        would corrupt an apples-to-apples spend/outcome comparison. Folded
+        in here rather than persisted into ``model_routing`` itself (which
+        stays scoped to model/runtime identity) so the persisted contract
+        shape is unchanged; only the fingerprint computation changes.
+        ``None`` (the pre-Fix-6 call shape, and what a legacy persisted
+        contract with no ``retry_policy`` key re-derives) reproduces the
+        EXACT pre-fix hash, so old cohort history keeps matching itself.
+        """
+        payload: dict[str, Any] = dict(routing_contract)
+        if retry_policy is not None:
+            payload["retry_policy"] = dict(retry_policy)
         encoded = json.dumps(
-            dict(routing_contract),
+            payload,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -2065,9 +2088,12 @@ class OrchestratorRunner:
         routing_contract["runtime_backend"] = self._runtime_backend_contract()
         routing_contract["llm_backend"] = self._llm_backend_contract()
         routing_contract["permission_mode"] = self._permission_mode_contract()
+        retry_policy_contract = self._retry_policy_contract()
         proof_contract: dict[str, Any] = {
             "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
-            "routing_fingerprint": self._routing_fingerprint(routing_contract),
+            "routing_fingerprint": self._routing_fingerprint(
+                routing_contract, retry_policy=retry_policy_contract
+            ),
         }
         workspace_identity = self._proof_workspace_identity()
         if workspace_identity is not None:
@@ -2086,7 +2112,7 @@ class OrchestratorRunner:
             "resume": {
                 "workspace": self._resume_workspace_identity(),
             },
-            "retry_policy": self._retry_policy_contract(),
+            "retry_policy": retry_policy_contract,
         }
 
     async def _emit_run_configuration_resolved(
@@ -2410,7 +2436,17 @@ class OrchestratorRunner:
             or not isinstance(persisted_workspace_path, str)
             or not persisted_workspace_path.strip()
             or not isinstance(persisted_routing_fingerprint, str)
-            or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
+            # Fix 6 (round 2, BLOCKING): re-derive the fingerprint the SAME
+            # way it was computed at persist time -- folding in retry_policy
+            # (already validated above) when this contract carries one, or
+            # ``None`` for a genuinely legacy contract predating this field
+            # (``retry_policy_migrated``), which reproduces that contract's
+            # original, unfolded fingerprint.
+            or persisted_routing_fingerprint
+            != self._routing_fingerprint(
+                raw_routing,
+                retry_policy=None if retry_policy_migrated else raw_retry_policy,
+            )
             or (seed is not None and not valid_seed_fingerprint)
             or not self._valid_constructor_model_contract(persisted_constructor_model)
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
@@ -2699,7 +2735,29 @@ class OrchestratorRunner:
             or any(char not in "0123456789abcdef" for char in routing_fingerprint)
         ):
             return None
-        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(routing_contract):
+        # Fix 6 (round 2, BLOCKING): re-derive the fingerprint the SAME way it
+        # was computed at persist time -- folding in retry_policy when
+        # present -- so two historical runs differing ONLY in retry_policy
+        # (materially different retry/termination behavior and therefore
+        # token spend) never collapse into the same cohort identity. A
+        # present-but-malformed retry_policy fails this entry closed (return
+        # None, excluding it from cohort candidacy) rather than silently
+        # treating it as absent. A genuinely absent key (pre-Fix-6 legacy
+        # contract) passes ``None`` through, reproducing that contract's
+        # original, unfolded fingerprint.
+        raw_retry_policy_for_fingerprint = raw_contract.get("retry_policy")
+        if raw_retry_policy_for_fingerprint is not None and not (
+            OrchestratorRunner._valid_retry_policy_contract(raw_retry_policy_for_fingerprint)
+        ):
+            return None
+        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(
+            routing_contract,
+            retry_policy=(
+                raw_retry_policy_for_fingerprint
+                if isinstance(raw_retry_policy_for_fingerprint, Mapping)
+                else None
+            ),
+        ):
             return None
         if (
             not isinstance(seed_fingerprint, str)

@@ -256,6 +256,16 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     original = _runner()
     persisted = original._build_execution_contract()
     del persisted["retry_policy"]
+    # Fix 6 (round 2, BLOCKING): a GENUINELY legacy contract (predating both
+    # the retry_policy field AND its folding into the routing fingerprint)
+    # would never have had retry_policy baked into its fingerprint either.
+    # Recompute it that way so this simulated legacy contract is internally
+    # consistent -- otherwise the fingerprint would still encode the
+    # now-deleted retry_policy data and spuriously fail identity validation
+    # before ever reaching the migration path this test exercises.
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        persisted["model_routing"]
+    )
 
     resumed = _runner()
     resumed._lateral_escalation_enabled = True  # current config for THIS process
@@ -302,6 +312,130 @@ def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> 
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
+def test_retry_policy_is_folded_into_routing_fingerprint() -> None:
+    """Fix 6 (BLOCKING, PR #1648 round 2 review): retry_policy
+    (lateral_escalation_enabled/parked_retry_backoff_seconds) materially
+    changes a run's retry/termination behavior and therefore its token
+    spend. Two otherwise-identical runs differing ONLY in retry_policy must
+    produce DIFFERENT routing fingerprints, or the frugality proof would
+    treat them as the same "exact" cohort and corrupt its spend/outcome
+    comparison."""
+    disabled = _runner()
+    disabled._lateral_escalation_enabled = False
+    disabled._parked_retry_backoff_seconds = 300.0
+    disabled_contract = disabled._build_execution_contract()
+
+    enabled = _runner()
+    enabled._lateral_escalation_enabled = True
+    enabled._parked_retry_backoff_seconds = 300.0
+    enabled_contract = enabled._build_execution_contract()
+
+    # The two contracts' MODEL ROUTING is otherwise identical -- the ONLY
+    # difference is retry_policy.
+    assert disabled_contract["model_routing"] == enabled_contract["model_routing"]
+    assert disabled_contract["retry_policy"] != enabled_contract["retry_policy"]
+
+    assert (
+        disabled_contract["frugality_proof"]["routing_fingerprint"]
+        != enabled_contract["frugality_proof"]["routing_fingerprint"]
+    )
+
+
+def test_retry_policy_is_folded_into_proof_cohort_identity() -> None:
+    """End-to-end through ``_proof_cohort_identity``: two runs differing
+    ONLY in retry_policy must resolve to DIFFERENT cohort identities so a
+    frugality-proof cohort scan never groups them together."""
+    disabled = _runner()
+    disabled._lateral_escalation_enabled = False
+
+    enabled = _runner()
+    enabled._lateral_escalation_enabled = True
+
+    seed = _seed()
+    disabled_identity = disabled._proof_cohort_identity(
+        {
+            "seed_id": seed.metadata.seed_id,
+            EXECUTION_CONTRACT_PROGRESS_KEY: disabled._build_execution_contract(seed=seed),
+        }
+    )
+    enabled_identity = enabled._proof_cohort_identity(
+        {
+            "seed_id": seed.metadata.seed_id,
+            EXECUTION_CONTRACT_PROGRESS_KEY: enabled._build_execution_contract(seed=seed),
+        }
+    )
+
+    assert disabled_identity is not None
+    assert enabled_identity is not None
+    assert disabled_identity != enabled_identity
+
+
+def test_same_retry_policy_still_produces_the_same_cohort_identity() -> None:
+    """Regression guard: retry_policy must be an identity axis, not a
+    source of spurious cohort splitting -- two runs with the SAME
+    retry_policy (and everything else identical) still cohort together."""
+    seed = _seed()
+    first = _runner()
+    first._lateral_escalation_enabled = True
+    first._parked_retry_backoff_seconds = 600.0
+
+    second = _runner()
+    second._lateral_escalation_enabled = True
+    second._parked_retry_backoff_seconds = 600.0
+
+    first_identity = first._proof_cohort_identity(
+        {
+            "seed_id": seed.metadata.seed_id,
+            EXECUTION_CONTRACT_PROGRESS_KEY: first._build_execution_contract(seed=seed),
+        }
+    )
+    second_identity = second._proof_cohort_identity(
+        {
+            "seed_id": seed.metadata.seed_id,
+            EXECUTION_CONTRACT_PROGRESS_KEY: second._build_execution_contract(seed=seed),
+        }
+    )
+
+    assert first_identity is not None
+    assert first_identity == second_identity
+
+
+def test_legacy_contract_missing_retry_policy_still_resolves_a_cohort_identity() -> None:
+    """A genuinely legacy persisted contract (no retry_policy key at all,
+    predating both round-1 Fix 5 and this fix) must still resolve to a
+    stable, self-consistent cohort identity -- Fix 6 must not regress
+    reading old history."""
+    seed = _seed()
+    runner = _runner()
+    contract = runner._build_execution_contract(seed=seed)
+    contract["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        contract["model_routing"]
+    )
+    del contract["retry_policy"]
+
+    identity = runner._proof_cohort_identity(
+        {"seed_id": seed.metadata.seed_id, EXECUTION_CONTRACT_PROGRESS_KEY: contract}
+    )
+
+    assert identity is not None
+
+
+def test_malformed_retry_policy_excludes_entry_from_cohort_identity() -> None:
+    """A present-but-malformed retry_policy on a historical contract must
+    fail cohort-identity extraction closed (excluded from candidacy), not
+    be silently treated as absent."""
+    seed = _seed()
+    runner = _runner()
+    contract = runner._build_execution_contract(seed=seed)
+    contract["retry_policy"] = {"lateral_escalation_enabled": True}  # missing backoff field
+
+    identity = runner._proof_cohort_identity(
+        {"seed_id": seed.metadata.seed_id, EXECUTION_CONTRACT_PROGRESS_KEY: contract}
+    )
+
+    assert identity is None
+
+
 def test_empty_observed_runtime_identity_is_rejected() -> None:
     original = _runner()
     persisted = original._build_execution_contract(seed=_seed())
@@ -318,7 +452,9 @@ def test_empty_observed_runtime_identity_is_rejected() -> None:
         "model_routing": malformed_routing,
         "frugality_proof": {
             **persisted["frugality_proof"],
-            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(malformed_routing),
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
+                malformed_routing, retry_policy=persisted["retry_policy"]
+            ),
         },
     }
 
@@ -372,7 +508,9 @@ def test_explicit_tier_does_not_bypass_malformed_persisted_router() -> None:
         "model_routing": malformed_routing,
         "frugality_proof": {
             **persisted["frugality_proof"],
-            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(malformed_routing),
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
+                malformed_routing, retry_policy=persisted["retry_policy"]
+            ),
         },
     }
 
@@ -401,7 +539,9 @@ def test_explicit_tier_does_not_bypass_nested_backend_mismatch() -> None:
         "model_routing": inconsistent_routing,
         "frugality_proof": {
             **persisted["frugality_proof"],
-            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(inconsistent_routing),
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
+                inconsistent_routing, retry_policy=persisted["retry_policy"]
+            ),
         },
     }
 
