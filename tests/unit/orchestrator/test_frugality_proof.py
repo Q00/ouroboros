@@ -656,10 +656,15 @@ class TestDecompositionAttestedOverride:
         assert row.decomposition_trustworthy is True
         assert row.counts_in_proof
 
-    def test_missing_attestation_falls_back_to_shadow_replay_value(self) -> None:
-        """No ``execution.ac.decomposition_attested`` event at all (older event
-        streams predating this fix, or a degraded write) must not itself
-        invalidate a row -- only a REAL untrustworthy verdict does."""
+    def test_missing_attestation_excludes_decomposed_child_row(self) -> None:
+        """A row carrying ``parent_node_id`` is a decomposed-child row whose
+        round SHOULD have emitted an attestation. A MISSING attestation event
+        (legacy stream, or a lost/failed write) must fail closed and exclude
+        the row: since properly-attested rounds legitimately emit
+        non-trustworthy verdicts most of the time, defaulting missing
+        telemetry to trustworthy would make a lost write MORE trusted than a
+        present one -- the only rows still counting would be the degraded
+        ones."""
         events = _triad_events("ac1", "r1", retry_attempt=0)
         for event in events:
             if event["type"] == EVENT_SHADOW_REPLAY:
@@ -668,8 +673,45 @@ class TestDecompositionAttestedOverride:
 
         row = assemble_triads(events)[0]
 
+        assert row.decomposition_trustworthy is False
+        assert not row.counts_in_proof
+
+    def test_row_without_parent_node_id_keeps_prior_behavior(self) -> None:
+        """A legacy row with NO ``parent_node_id`` at all cannot be joined to
+        any attestation round; the attestation override machinery leaves it
+        untouched (its trust still comes from the shadow-replay snapshot
+        alone), exactly as before."""
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+
+        row = assemble_triads(events)[0]
+
         assert row.decomposition_trustworthy is True
         assert row.counts_in_proof
+
+    def test_conflicting_parent_node_ids_exclude_row(self) -> None:
+        """Ambiguous parentage: a row reporting two different decomposition
+        rounds cannot bind its attestation, so it is excluded (previously it
+        silently skipped the override and stayed trustworthy)."""
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        for event in events:
+            if event["type"] == EVENT_SHADOW_REPLAY:
+                event["data"]["parent_node_id"] = "node-root-1"
+            elif event["type"] == EVENT_MODEL_ROUTED:
+                event["data"]["parent_node_id"] = "node-root-OTHER"
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r1",
+                retry_attempt=0,
+                trustworthy=True,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.decomposition_trustworthy is False
+        assert not row.counts_in_proof
 
     def test_duplicate_attestation_for_same_round_attempt_is_ambiguous_and_poisons_row(
         self,
@@ -705,12 +747,24 @@ class TestDecompositionAttestedOverride:
         assert not row.counts_in_proof
 
     def test_attestation_for_a_different_run_does_not_leak_across_runs(self) -> None:
+        """Attestations are keyed by run: an UNTRUSTWORTHY verdict from a
+        DIFFERENT run must not poison this run's row, which carries its own
+        real TRUSTWORTHY attestation."""
         events = _triad_events("ac1", "r1", retry_attempt=0)
         for event in events:
             if event["type"] == EVENT_SHADOW_REPLAY:
                 event["data"]["decomposition_trustworthy"] = True
                 event["data"]["parent_node_id"] = "node-root-1"
 
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r1",
+                retry_attempt=0,
+                trustworthy=True,
+            )
+        )
         events.append(
             _evt(
                 EVENT_DECOMPOSITION_ATTESTED,

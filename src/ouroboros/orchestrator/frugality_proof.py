@@ -478,7 +478,12 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             node_id = data.get("node_id")
             attempt = parse_retry_attempt(data)
             trustworthy = _strict_bool(data.get("trustworthy"))
-            if not isinstance(node_id, str) or not node_id or attempt is None or trustworthy is None:
+            if (
+                not isinstance(node_id, str)
+                or not node_id
+                or attempt is None
+                or trustworthy is None
+            ):
                 continue
             attestation_key = (run_key, node_id, attempt)
             if attestation_key in attestations:
@@ -573,17 +578,29 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         # ``execution.ac.decomposition_attested`` verdict exists for one of
         # this row's attempts, it is authoritative: an untrustworthy
         # attestation invalidates that attempt even if the earlier
-        # shadow-replay snapshot said trustworthy. A missing attestation for
-        # an attempt (older event streams predating this fix, or a degraded
-        # write) does not itself invalidate the row -- only a REAL
-        # untrustworthy verdict, or an unresolvable duplicate, does.
+        # shadow-replay snapshot said trustworthy.
+        #
+        # A MISSING attestation for an attempt fails closed too: every row
+        # carrying a ``parent_node_id`` is a decomposed-child row whose round
+        # SHOULD have emitted an attestation, and properly-attested rounds
+        # legitimately produce non-trustworthy verdicts most of the time --
+        # so if missing telemetry defaulted to trustworthy, a lost/failed
+        # attestation write (or a legacy stream) would be the ONLY way a row
+        # could still count in the proof, making degraded telemetry MORE
+        # trusted than present telemetry. Backwards. A row with a
+        # ``parent_node_id`` therefore only counts when a real TRUSTWORTHY
+        # attestation exists for every one of its attempts; ambiguous
+        # parentage (``parent_node_id_invalid``) excludes the row for the
+        # same reason instead of silently skipping the override.
         parent_node_id = v.get("parent_node_id")
         attestation_trustworthy = True
-        if isinstance(parent_node_id, str) and not v.get("parent_node_id_invalid", False):
+        if v.get("parent_node_id_invalid", False):
+            attestation_trustworthy = False
+        elif isinstance(parent_node_id, str):
             for attempt in attempt_sets[0]:
                 attestation_key = (v.get("seed_run_id"), parent_node_id, attempt)
                 if attestation_key in attestations_invalid or not attestations.get(
-                    attestation_key, True
+                    attestation_key, False
                 ):
                     attestation_trustworthy = False
                     break
