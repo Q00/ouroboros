@@ -373,21 +373,41 @@ class RecordConductorDecisionHandler:
         except Exception:  # noqa: BLE001 - optional audit enrichment, never fatal.
             return None
 
+        # Fix 8 (round 3, BLOCKING): fold events in CHRONOLOGICAL order per
+        # node id and keep only the LATEST state per node -- matching
+        # ``board.py``'s ``reduce_board`` reducer exactly (the established
+        # pattern for this exact shape of problem) -- instead of the
+        # previous "ever true across all history" set accumulation, which
+        # could never fully reverse: (a) a node that was untrustworthy and
+        # later became trustworthy again stayed reported as untrustworthy
+        # forever, and (b) a park -> resolve -> park cycle stayed reported
+        # as "resolved" forever after the first resolve, even though the
+        # node was parked again later. ``query_events`` returns newest-first;
+        # sort by timestamp ascending to replay in true chronological order
+        # so a later event always overwrites an earlier one's state for that
+        # node id.
+        combined = sorted((*attested, *parked, *resolved), key=lambda item: item.timestamp)
+        node_states: dict[str, dict[str, Any]] = {}
+        for item in combined:
+            if not isinstance(item.data, dict):
+                continue
+            node_id = item.data.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                continue
+            state = node_states.setdefault(node_id, {})
+            if item.type == "execution.ac.decomposition_attested":
+                state["trustworthy"] = item.data.get("trustworthy") is True
+            elif item.type == "execution.ac.parked_for_operator":
+                state["parked"] = True
+            elif item.type == "execution.ac.parked_resolved":
+                state["parked"] = False
+
         untrustworthy_nodes = {
-            item.data.get("node_id")
-            for item in attested
-            if isinstance(item.data, dict) and item.data.get("trustworthy") is False
-        }
-        resolved_nodes = {
-            item.data.get("node_id")
-            for item in resolved
-            if isinstance(item.data, dict) and item.data.get("node_id")
+            node_id for node_id, state in node_states.items() if state.get("trustworthy") is False
         }
         parked_nodes = {
-            item.data.get("node_id")
-            for item in parked
-            if isinstance(item.data, dict) and item.data.get("node_id")
-        } - resolved_nodes
+            node_id for node_id, state in node_states.items() if state.get("parked") is True
+        }
         parts: list[str] = []
         if untrustworthy_nodes:
             plural = "s" if len(untrustworthy_nodes) != 1 else ""

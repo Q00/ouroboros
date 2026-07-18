@@ -171,6 +171,113 @@ async def test_resolved_parked_ac_is_excluded_from_the_summary(store: EventStore
 
 
 @pytest.mark.asyncio
+async def test_node_untrustworthy_then_trustworthy_again_is_not_reported(
+    store: EventStore,
+) -> None:
+    """Fix 8 (round 3, BLOCKING): a node that was untrustworthy and LATER
+    became trustworthy again (a fresh decomposition round re-attested) must
+    NOT keep being reported as untrustworthy forever -- the summary must
+    reflect the LATEST attestation, folded in chronological order, not "was
+    it EVER untrustworthy across the whole history."""
+    from datetime import UTC, datetime
+
+    await store.append(
+        BaseEvent(
+            type="execution.ac.decomposition_attested",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_1",
+                "verdict": "untrustworthy",
+                "trustworthy": False,
+                "reason": "parent verify gate failed after decomposition",
+            },
+        )
+    )
+    await store.append(
+        BaseEvent(
+            type="execution.ac.decomposition_attested",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_1",
+                "verdict": "trustworthy",
+                "trustworthy": True,
+                "reason": "every sibling and the parent gate passed on retry",
+            },
+        )
+    )
+
+    handler = RecordConductorDecisionHandler(store)
+    result = await handler.handle(_selected())
+
+    assert result.is_ok
+    assert "untrustworthy decomposition" not in result.value.text_content
+    assert "trust_escalation_summary" not in result.value.meta
+
+
+@pytest.mark.asyncio
+async def test_park_resolve_park_cycle_still_reports_parked(store: EventStore) -> None:
+    """Fix 8 (round 3, BLOCKING): a node parked, then resolved, then parked
+    AGAIN (a second escalation cycle) must be reported as CURRENTLY parked --
+    the LATEST event for that node id, not "was it EVER resolved across the
+    whole history" (which used to permanently subtract it out via set
+    subtraction, even after a later re-park)."""
+    from datetime import UTC, datetime
+
+    await store.append(
+        BaseEvent(
+            type="execution.ac.parked_for_operator",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_2",
+                "root_ac_index": 1,
+                "personas_tried": ["hacker"],
+                "consecutive_terminal_failures": 3,
+                "backoff_seconds": 300.0,
+                "reason": "all lateral-thinking personas exhausted",
+            },
+        )
+    )
+    await store.append(
+        BaseEvent(
+            type="execution.ac.parked_resolved",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC),
+            data={"node_id": "ac_2", "root_ac_index": 1},
+        )
+    )
+    await store.append(
+        BaseEvent(
+            type="execution.ac.parked_for_operator",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_2",
+                "root_ac_index": 1,
+                "personas_tried": ["hacker", "researcher", "simplifier"],
+                "consecutive_terminal_failures": 6,
+                "backoff_seconds": 300.0,
+                "reason": "all lateral-thinking personas exhausted",
+            },
+        )
+    )
+
+    handler = RecordConductorDecisionHandler(store)
+    result = await handler.handle(_selected())
+
+    assert result.is_ok
+    assert "1 AC parked for operator" in result.value.text_content
+    assert "1 AC parked for operator" in result.value.meta["trust_escalation_summary"]
+
+
+@pytest.mark.asyncio
 async def test_no_trust_escalation_line_when_nothing_reported(store: EventStore) -> None:
     handler = RecordConductorDecisionHandler(store)
 
