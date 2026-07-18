@@ -263,6 +263,7 @@ class ExecutionEventEmitter:
         consecutive_terminal_failures: int,
         parked: bool,
         persona: str | None,
+        retry_attempt: int,
     ) -> bool:
         """Persist EVERY persona-escalation streak advancement (Fix 5, round 2).
 
@@ -289,6 +290,16 @@ class ExecutionEventEmitter:
         ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
         .node_id`` every other per-node event for this root AC carries.
 
+        ``retry_attempt`` (Round-6 Finding #1) is the dispatch-attempt
+        counter the redispatch this event precedes will run under. Runtime
+        handles and frugality-proof telemetry are attempt-scoped (keyed by
+        ``retry_attempt``, the same convention ``emit_decomposition_attested``
+        already follows), so a cold resume must re-enter the ladder at the
+        ACTUAL in-flight attempt number — not the configured retry cap,
+        which after multiple ladder attempts could collide with an OLDER
+        attempt's number, resuming a stale runtime handle and
+        double-counting that attempt's telemetry.
+
         Returns:
             Whether the write was durably persisted (Fix 5, round 3,
             BLOCKING) -- correctness-bearing state, so the caller must check
@@ -308,6 +319,7 @@ class ExecutionEventEmitter:
                     "consecutive_terminal_failures": consecutive_terminal_failures,
                     "parked": parked,
                     "persona": persona,
+                    "retry_attempt": retry_attempt,
                 },
             )
         )

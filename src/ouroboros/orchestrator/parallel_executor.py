@@ -1122,6 +1122,17 @@ class ParallelACExecutor:
         # by ``ac_index``. Injectable sleep so tests never wait through a real
         # backoff duration.
         self._lateral_escalation_states: dict[int, LateralEscalationState] = {}
+        # Round-6 Finding #1: the ACTUAL in-flight dispatch-attempt number
+        # durably recorded by the latest ``lateral_escalation_progressed``
+        # event for each root AC, reconstructed alongside
+        # ``_lateral_escalation_states`` during replay. Consumed by the
+        # resumed-ladder re-entry path so a cold resume restores the real
+        # attempt counter instead of resetting it to the configured retry
+        # cap (runtime handles and frugality telemetry are attempt-scoped;
+        # a cap-reset could resume an older attempt's stale handle and
+        # double-count its telemetry). ``None`` means the durable record
+        # predates the field — the cap fallback then applies.
+        self._lateral_escalation_resume_attempts: dict[int, int | None] = {}
         # Fix 7 (round 2, BLOCKING) defense-in-depth: the two contract
         # boundaries that populate this value (EconomicsConfig's Pydantic
         # field validator, and the resume-time
@@ -6681,6 +6692,7 @@ Respond with either ATOMIC or the structured JSON object only.
 
         latest_state_data: dict[str, Any] | None = None
         latest_state_type: str | None = None
+        latest_progressed_data: dict[str, Any] | None = None
         for event in events:
             event_type = getattr(event, "type", None)
             if event_type not in {
@@ -6695,9 +6707,17 @@ Respond with either ATOMIC or the structured JSON object only.
             if event_type == "execution.ac.parked_resolved":
                 latest_state_data = None
                 latest_state_type = None
+                latest_progressed_data = None
             else:
                 latest_state_data = data
                 latest_state_type = event_type
+                # Round-6 Finding #1: the in-flight attempt number lives only
+                # on ``progressed`` events (``parked_for_operator`` is always
+                # emitted in the same iteration right after one, describing
+                # the same step), so track the latest ``progressed`` payload
+                # separately for attempt reconstruction below.
+                if event_type == "execution.ac.lateral_escalation_progressed":
+                    latest_progressed_data = data
 
         state = LateralEscalationState()
         if latest_state_data is not None:
@@ -6756,6 +6776,29 @@ Respond with either ATOMIC or the structured JSON object only.
                 personas_tried=personas,
                 parked=parked_flag,
             )
+
+        # Round-6 Finding #1: reconstruct the in-flight dispatch-attempt
+        # number alongside the streak/persona state, from the latest
+        # ``progressed`` event for this node id. Wrong-typed values are
+        # corruption (the emitter always writes a non-negative int) and fail
+        # closed like any other malformed field; a MISSING key is a durable
+        # record written before the field existed — restore falls back to
+        # the configured-cap behavior for those, which is the pre-fix
+        # posture, never worse.
+        resume_attempt: int | None = None
+        if latest_progressed_data is not None and "retry_attempt" in latest_progressed_data:
+            raw_attempt = latest_progressed_data["retry_attempt"]
+            if not isinstance(raw_attempt, int) or isinstance(raw_attempt, bool) or raw_attempt < 0:
+                log.warning(
+                    "parallel_executor.lateral_escalation.malformed_event_data",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    event_type="execution.ac.lateral_escalation_progressed",
+                    reason=f"retry_attempt is not a non-negative int: {raw_attempt!r}",
+                )
+                return LateralEscalationState(parked=True)
+            resume_attempt = raw_attempt
+        self._lateral_escalation_resume_attempts[ac_idx] = resume_attempt
 
         self._lateral_escalation_states[ac_idx] = state
         return state
@@ -7087,6 +7130,15 @@ Respond with either ATOMIC or the structured JSON object only.
                 consecutive_terminal_failures=state.consecutive_terminal_failures,
                 parked=state.parked,
                 persona=step.persona.value if step.persona is not None else None,
+                # Round-6 Finding #1: the redispatch this event precedes runs
+                # under ``current_retry_attempt + 1`` (incremented just before
+                # ``_execute_ac_batch`` below). Persisting THAT attempt number
+                # lets a cold resume re-enter at the exact in-flight attempt —
+                # runtime-handle resumption and frugality telemetry are both
+                # attempt-scoped, so restoring the configured cap instead
+                # could resume an OLDER attempt's stale handle and
+                # double-count its telemetry.
+                retry_attempt=current_retry_attempt + 1,
             )
             if not progressed_persisted:
                 # Round-5 Finding #4 (BLOCKING, superseding round 4's log-only
@@ -7324,8 +7376,20 @@ Respond with either ATOMIC or the structured JSON object only.
                     # Re-enter at the post-budget phase — the durable record
                     # proves this AC already spent its ordinary budget before
                     # the ladder engaged. Never reset to a fresh budget.
+                    # Round-6 Finding #1: prefer the ACTUAL in-flight attempt
+                    # number the latest ``progressed`` event durably recorded
+                    # over the configured cap — runtime handles and frugality
+                    # telemetry are attempt-scoped, so resetting to the cap
+                    # after multiple ladder attempts could resume an OLDER
+                    # attempt's stale handle and double-count its telemetry.
+                    # The cap fallback only applies to durable records that
+                    # predate the field.
+                    persisted_attempt = self._lateral_escalation_resume_attempts.get(ac_idx)
                     ac_retry_attempts[ac_idx] = max(
-                        ac_retry_attempts[ac_idx], self._ac_retry_attempts
+                        ac_retry_attempts[ac_idx],
+                        persisted_attempt
+                        if persisted_attempt is not None
+                        else self._ac_retry_attempts,
                     )
 
         position_by_idx = {ac_idx: position for position, ac_idx in enumerate(batch_executable)}

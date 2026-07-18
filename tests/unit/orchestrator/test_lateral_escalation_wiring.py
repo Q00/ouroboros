@@ -2364,3 +2364,193 @@ class TestResumeReentersLadderAtRestoredPhase:
         # No escalation episode existed, so no resolution event may appear.
         events = await memory_event_store.replay("execution", "exec-1")
         assert not any(event.type == "execution.ac.parked_resolved" for event in events)
+
+
+class TestResumeRestoresPersistedRetryAttempt:
+    """Round-6 Finding #1 (BLOCKING): ``lateral_escalation_progressed`` did
+    not persist the in-flight dispatch-attempt counter, and the resume path
+    reset the counter to the CONFIGURED retry cap instead of the actual
+    attempt in flight at the crash. Runtime handles and frugality-proof
+    telemetry are attempt-scoped, so after multiple ladder attempts the
+    cap-reset could resume an OLDER attempt's stale runtime handle and
+    double-count that attempt's telemetry."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    def _cold_start_executor(event_store: EventStore) -> ParallelACExecutor:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        executor._ac_retry_attempts = 2
+        executor._model_router = ModelRouter(
+            tier_models={"frontier": "gpt-frontier"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="frontier",
+            escalation_retry_threshold=999,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._sleep = AsyncMock()
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        return executor
+
+    @staticmethod
+    def _progressed_event(
+        node_id: str, *, personas: list[str], streak: int, retry_attempt: int | None
+    ) -> BaseEvent:
+        data: dict[str, object] = {
+            "execution_id": "exec-1",
+            "session_id": "s1",
+            "node_id": node_id,
+            "root_ac_index": 0,
+            "personas_tried": personas,
+            "consecutive_terminal_failures": streak,
+            "parked": False,
+            "persona": personas[-1] if personas else None,
+        }
+        if retry_attempt is not None:
+            data["retry_attempt"] = retry_attempt
+        return BaseEvent(
+            type="execution.ac.lateral_escalation_progressed",
+            aggregate_type="execution",
+            aggregate_id="exec-1",
+            data=data,
+        )
+
+    async def _run_batch(
+        self, executor: ParallelACExecutor, *, ac_retry_attempts: dict[int, int]
+    ) -> list[ACExecutionResult | BaseException]:
+        return await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts=ac_retry_attempts,
+            execution_counters=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_ladder_persists_each_redispatch_attempt_number(self) -> None:
+        """Every ``progressed`` event must carry the attempt number the
+        redispatch it precedes runs under — the value a cold resume needs to
+        re-enter at the exact in-flight attempt."""
+        executor = _make_executor_with_active_ladder()
+        executor._event_emitter.emit_lateral_escalation_progressed = AsyncMock(return_value=True)
+
+        call_count = {"n": 0}
+
+        async def fails_once_then_succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                return [_success_result()]
+            return [_failed_result(error="attempt failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fails_once_then_succeeds)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        ac_retry_attempts = {0: 2}
+        outcome = await _ladder(
+            executor,
+            result=_failed_result(error="attempt 0 failed"),
+            ac_retry_attempts=ac_retry_attempts,
+        )
+
+        assert outcome is not None and outcome.success is True
+        progressed_mock = executor._event_emitter.emit_lateral_escalation_progressed
+        emitted_attempts = [call.kwargs["retry_attempt"] for call in progressed_mock.await_args_list]
+        # Entered at attempt 2 (budget spent): the two ladder redispatches
+        # ran as attempts 3 and 4, and each preceding event recorded exactly
+        # the attempt its redispatch would run under.
+        assert emitted_attempts == [3, 4]
+        assert ac_retry_attempts[0] == 4
+
+    @pytest.mark.asyncio
+    async def test_resume_restores_actual_attempt_not_configured_cap(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """The reported scenario: after 3 durably-recorded ladder attempts
+        (latest in-flight attempt 5), a cold resume must restore attempt 5 —
+        not reset to the configured cap (2), which an earlier attempt
+        already used."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        for personas, streak, attempt in (
+            (["hacker"], 3, 3),
+            (["hacker", "architect"], 4, 4),
+            (["hacker", "architect", "researcher"], 5, 5),
+        ):
+            await memory_event_store.append(
+                self._progressed_event(
+                    node_id, personas=personas, streak=streak, retry_attempt=attempt
+                )
+            )
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        ac_retry_attempts = {0: 0}  # the post-crash reset
+        results = await self._run_batch(executor, ac_retry_attempts=ac_retry_attempts)
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Restored to the durably-recorded in-flight attempt, not the cap.
+        assert ac_retry_attempts[0] == 5
+        assert ac_retry_attempts[0] != executor._ac_retry_attempts
+
+    @pytest.mark.asyncio
+    async def test_legacy_event_without_attempt_falls_back_to_cap(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Negative control: a durable record written before the field
+        existed keeps the pre-fix configured-cap restore — never worse."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            self._progressed_event(node_id, personas=["hacker"], streak=3, retry_attempt=None)
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        executor._execute_ac_batch = AsyncMock(return_value=[_success_result()])
+
+        ac_retry_attempts = {0: 0}
+        results = await self._run_batch(executor, ac_retry_attempts=ac_retry_attempts)
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        assert ac_retry_attempts[0] == executor._ac_retry_attempts
+
+    @pytest.mark.asyncio
+    async def test_wrong_typed_attempt_fails_closed_to_parked(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """The emitter always writes a non-negative int, so a wrong-typed
+        value is corruption — reconstruction fails closed to the parked
+        sentinel like any other malformed field (round-4 convention)."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            self._progressed_event(node_id, personas=["hacker"], streak=3, retry_attempt=None)
+        )
+        # Corrupt the field in a fresh event (latest wins).
+        corrupted = self._progressed_event(
+            node_id, personas=["hacker"], streak=3, retry_attempt=None
+        )
+        corrupted.data["retry_attempt"] = "seven"
+        await memory_event_store.append(corrupted)
+        executor = self._cold_start_executor(memory_event_store)
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is True

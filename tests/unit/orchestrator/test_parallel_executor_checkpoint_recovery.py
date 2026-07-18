@@ -182,6 +182,7 @@ class TestCrashRestartRestoresExecutionId:
                 consecutive_terminal_failures=3,
                 parked=False,
                 persona="researcher",
+                retry_attempt=7,
             )
             assert persisted
             raise RuntimeError("simulated process crash mid-ladder")
