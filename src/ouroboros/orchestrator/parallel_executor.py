@@ -2687,10 +2687,19 @@ class ParallelACExecutor:
 
         for idx, sub_ac in enumerate(sub_acs):
             assigned_artifacts = child_artifact_slices[idx]
-            preexisting_count = 0
+            # Snapshot WHICH specific paths already existed before this child
+            # dispatched (not merely how many): ANY pre-existing path in the
+            # slice voids credit for the whole slice, so the post-dispatch
+            # check needs the exact set. Kept in the slice's declared order
+            # for stable reason strings.
+            preexisting_paths: tuple[str, ...] = ()
             if assigned_artifacts:
-                missing_before = _missing_expected_artifacts(assigned_artifacts, artifact_cwd)
-                preexisting_count = len(assigned_artifacts) - len(missing_before)
+                missing_before = frozenset(
+                    _missing_expected_artifacts(assigned_artifacts, artifact_cwd)
+                )
+                preexisting_paths = tuple(
+                    path for path in assigned_artifacts if path not in missing_before
+                )
             try:
                 child_node_identity = node_identity.child(idx)
                 child_is_sub_ac = child_node_identity.depth > 0
@@ -2745,17 +2754,24 @@ class ParallelACExecutor:
                     raise
                 sub_results[idx] = exc
             if assigned_artifacts:
-                if preexisting_count == len(assigned_artifacts):
-                    # Credit-borrowing guard: every path in this child's slice
-                    # already existed before it dispatched, so its creation
-                    # cannot be attributed to this child. Fail closed to an
-                    # un-evaluable axis (INDETERMINATE for this sibling), never
-                    # a pass.
+                if preexisting_paths:
+                    # Credit-borrowing guard: at least one path in this child's
+                    # slice already existed before it dispatched (e.g. leftovers
+                    # from a prior retry attempt on the same un-reset
+                    # workspace), so creation of the slice cannot be attributed
+                    # to this child. Partial pre-existence is treated exactly
+                    # like full pre-existence: a slice is either fully,
+                    # verifiably this child's own fresh work (every path absent
+                    # before dispatch and present after) or it is not
+                    # attributable at all -- never a mix, never partial credit.
+                    # Fail closed to an un-evaluable axis (INDETERMINATE for
+                    # this sibling), never a pass.
                     child_artifact_attributions[idx] = (
                         False,
                         None,
-                        "all assigned artifacts pre-existed dispatch; "
-                        "cannot attribute creation to this child",
+                        "assigned artifacts pre-existed dispatch: "
+                        + ", ".join(preexisting_paths)
+                        + "; cannot attribute this child's slice to its own work",
                     )
                 else:
                     missing_after = _missing_expected_artifacts(assigned_artifacts, artifact_cwd)
@@ -2994,6 +3010,17 @@ class ParallelACExecutor:
                     )
                 )
             else:
+                # Surface the artifact oracle's UNEVALUABLE record's reason
+                # (e.g. "assigned artifacts pre-existed dispatch: ...") so an
+                # INDETERMINATE round stays diagnosable, instead of the
+                # generic no-contract string.
+                unevaluable_artifact_reason = ""
+                if (
+                    child_artifact_attributions is not None
+                    and idx < len(child_artifact_attributions)
+                    and not child_artifact_attributions[idx][0]
+                ):
+                    unevaluable_artifact_reason = child_artifact_attributions[idx][2]
                 sibling_outcomes.append(
                     SiblingVerifyOutcome(
                         sibling_id=str(idx),
@@ -3002,7 +3029,8 @@ class ParallelACExecutor:
                         reason=(
                             (gate.reason or "")
                             if gate is not None
-                            else "sibling was dispatched without a structured verify contract"
+                            else unevaluable_artifact_reason
+                            or "sibling was dispatched without a structured verify contract"
                         ),
                     )
                 )

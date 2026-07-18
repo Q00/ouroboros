@@ -14,6 +14,7 @@ from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.harness.decomposition_attestation import (
     DecompositionTrustAxis,
     DecompositionTrustVerdict,
+    SiblingVerifyOutcome,
 )
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
@@ -744,6 +745,73 @@ class TestPerChildArtifactSliceOracle:
         result = await executor._execute_decomposition_children(
             **_decomposition_children_kwargs(node_identity, decision, self._spec(), "exec-art-2")
         )
+
+        attestation = result.decomposition_attestation
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.INDETERMINATE
+        assert attestation.trustworthy is False
+        assert attestation.failed_axis is DecompositionTrustAxis.SIBLING_GATE
+        assert attestation.failed_sibling_id == "0"
+
+    @pytest.mark.asyncio
+    async def test_partial_preexisting_slice_denies_credit_fail_closed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Safety invariant 1, partial-contamination leg (live regression for
+        the count-based snapshot bug): a child assigned a MULTI-artifact slice
+        where only ONE path already existed before dispatch -- and the child
+        genuinely creates the rest -- must NOT earn credit for its slice. A
+        count-based snapshot ('deny only when ALL pre-existed') would grade
+        this child passed=True and launder the round into TRUSTWORTHY, which
+        is the false-positive the fail-closed mandate forbids. The realistic
+        trigger is a retry attempt on the same un-reset workspace whose
+        earlier children left artifacts behind. The child's sibling axis must
+        come back un-evaluable (has_verify_command=False, passed=None), never
+        passed=True."""
+        import ouroboros.orchestrator.parallel_executor as pe
+
+        (tmp_path / "out_a.txt").write_text("leftover from a prior attempt", encoding="utf-8")
+        # Child 0 is assigned (out_a, out_b): out_a pre-exists, and the child
+        # genuinely creates out_b. Child 1 genuinely creates out_c.
+        executor = _make_live_artifact_executor(
+            tmp_path, writes_per_dispatch=[("out_b.txt",), ("out_c.txt",)]
+        )
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-art-7", ac_index=0)
+        decision = _artifact_split_decision(
+            node_identity.node_id,
+            slices=(("out_a.txt", "out_b.txt"), ("out_c.txt",)),
+        )
+        spec = AcceptanceCriterionSpec(
+            description="parent AC",
+            expected_artifacts=("out_a.txt", "out_b.txt", "out_c.txt"),
+        )
+
+        # Pass-through spy on the real attestation judge so the test can
+        # assert the exact sibling-axis shape handed to it (nothing mocked:
+        # the real function still computes the real verdict).
+        real_attest = pe.attest_decomposition
+        captured_siblings: list[tuple[SiblingVerifyOutcome, ...]] = []
+
+        def _capturing_attest(*, node_id, siblings, parent):
+            captured_siblings.append(siblings)
+            return real_attest(node_id=node_id, siblings=siblings, parent=parent)
+
+        monkeypatch.setattr(pe, "attest_decomposition", _capturing_attest)
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(node_identity, decision, spec, "exec-art-7")
+        )
+
+        # The contaminated child's axis is un-evaluable -- NOT passed=True.
+        assert captured_siblings
+        contaminated_axis = captured_siblings[-1][0]
+        assert contaminated_axis.has_verify_command is False
+        assert contaminated_axis.passed is None
+        assert "out_a.txt" in contaminated_axis.reason
+        # The sibling with a genuinely fresh slice still earns real evidence.
+        clean_axis = captured_siblings[-1][1]
+        assert clean_axis.has_verify_command is True
+        assert clean_axis.passed is True
 
         attestation = result.decomposition_attestation
         assert attestation is not None
