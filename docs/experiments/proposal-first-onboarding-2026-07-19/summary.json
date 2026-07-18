@@ -1,0 +1,29 @@
+{
+  "completed_at": "2026-07-19T02:43:58.971458+09:00",
+  "generation_runs": 32,
+  "judged_pairs": 8,
+  "wins": {
+    "baseline": 2,
+    "experiment": 6,
+    "tie": 0
+  },
+  "average_scores": {
+    "baseline": {
+      "grounding": 4.38,
+      "low_burden": 4.12,
+      "clarity": 3.88,
+      "delight": 3.12,
+      "safety": 5.0
+    },
+    "experiment": {
+      "grounding": 4.38,
+      "low_burden": 4.62,
+      "clarity": 5.0,
+      "delight": 4.38,
+      "safety": 4.75
+    }
+  },
+  "generation_failures": 16,
+  "successful_generation_runs": 16,
+  "runtime_limitation": "Claude CLI was not logged in; scores and pair verdicts are Codex-only."
+}

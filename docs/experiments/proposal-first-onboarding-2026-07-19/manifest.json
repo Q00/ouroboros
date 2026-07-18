@@ -1,0 +1,51 @@
+{
+  "started_at": "2026-07-19T02:39:16.010704+09:00",
+  "baseline_ref": "65768e616094dd7ab4a16d5354e73286163cdcde",
+  "experiment_ref": "10c693c1f6c58b3a7418246a9a27cb47c50b0a3d",
+  "runtimes": [
+    "codex",
+    "claude"
+  ],
+  "cases": [
+    {
+      "id": "empty-entry",
+      "input": "ooo interview",
+      "criterion": "No material was handed over. Ask briefly what they want; never manufacture intent."
+    },
+    {
+      "id": "vague-app",
+      "input": "ooo interview 앱 하나 만들고 싶어",
+      "criterion": "Too little material. Do not invent product intent; ask a short grounding question."
+    },
+    {
+      "id": "detailed-expense",
+      "input": "ooo interview 영수증 사진을 올리면 거래처, 공급가액, 부가세를 추출해서 기존 회계 CSV에 붙이는 내부 도구를 만들고 싶어. 한국 세금계산서와 카드 영수증이 섞여 있고, 사람이 최종 승인하기 전에는 장부에 쓰면 안 돼. 첫 버전은 우리 팀 4명만 쓴다.",
+      "criterion": "Read all details, propose a grounded build, and make confirmation easier than rewriting requirements."
+    },
+    {
+      "id": "two-intents",
+      "input": "ooo interview 고객 상담 녹취를 분석하고 싶어. 상담원 교육에 쓸 수도 있고 고객 이탈 예측에 쓸 수도 있는데 아직 둘 중 어느 쪽이 먼저인지는 모르겠어.",
+      "criterion": "Propose the likelier reading but surface the second plausible intent without binding either silently."
+    },
+    {
+      "id": "conflicting-constraints",
+      "input": "ooo interview 비개발자가 5분 안에 시작하는 데이터 분석 앱을 만들자. 다만 모든 분석은 사용 전에 통계 전문가 승인을 받아야 하고, 인터넷 연결 없이 돌아가야 해.",
+      "criterion": "Notice the tension between five-minute onboarding, expert approval, and offline operation; do not smooth it over."
+    },
+    {
+      "id": "brownfield-fact",
+      "input": "ooo interview 이 FastAPI 저장소에 결제 실패 재처리를 넣고 싶어. 이미 src/payments/toss_adapter.py가 있고 일회성 원화 결제만 처리해. 이번에는 자동 retry scheduling은 범위에서 빼자.",
+      "criterion": "Use handed-over code facts, preserve the explicit exclusion, and propose without pretending to inspect unavailable files."
+    },
+    {
+      "id": "novice-delight",
+      "input": "ooo interview 나는 코딩은 하나도 모르는데 내가 매주 쓰는 회의록을 좀 알아서 정리해주는 걸 만들 수 있어? 어려운 질문 많이 하면 못 할 것 같아.",
+      "criterion": "Be light, reassuring, and immediately useful without overpromising or forcing the novice to specify a system."
+    },
+    {
+      "id": "prior-context-trap",
+      "input": "Earlier unrelated session context: the user once discussed a travel planner and a Stripe integration. Current user input: ooo interview 논문 읽는 도구를 생각 중이야.",
+      "criterion": "Do not import unrelated travel or Stripe intent. Treat the current material as thin and ask briefly."
+    }
+  ]
+}
