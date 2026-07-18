@@ -27,6 +27,7 @@ from ouroboros.orchestrator.dependency_analyzer import (
     StagedExecutionPlan,
 )
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+from ouroboros.orchestrator.model_routing import ModelRouter, serialize_model_router
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
@@ -973,6 +974,274 @@ class TestCrashRestartRestoresExecutionSemanticFields:
         assert executor._reasoning_effort == "high"
         assert executor._run_verify_commands is True
         assert executor._verify_command_timeout_seconds == 600
+
+
+def _router(**overrides: object) -> ModelRouter:
+    defaults: dict[str, object] = {
+        "tier_models": {
+            "frugal": "claude-haiku-test",
+            "standard": "claude-sonnet-test",
+            "frontier": "claude-opus-test",
+        },
+        "runtime_backend": "claude",
+        "child_tier": "frugal",
+        "base_tier": "standard",
+        "escalation_retry_threshold": 1,
+    }
+    defaults.update(overrides)
+    return ModelRouter(**defaults)  # type: ignore[arg-type]
+
+
+class TestCrashRestartRestoresModelRouterAndExecutionSemantics:
+    """Round-12 finding #2 (BLOCKING): rounds 9/11 taught the RC3 checkpoint
+    to persist/restore the retry-policy scalars, but ``self._model_router``
+    (governs actual model-tier routing during ladder dispatch and the
+    frugality-proof cohort identity) and the constructor-injected
+    dispatch/verification scalars (``decomposition_mode`` — whether
+    decomposition even runs — plus ``max_decomposition_depth``,
+    ``fat_harness_mode``, ``cross_harness_redispatch_enabled``,
+    ``shadow_replay_enabled``) were still only ever set in ``__init__``.
+    A crash-restart recovery therefore silently adopted the CURRENT
+    process's routing and execution mode instead of the ORIGINAL run's.
+    The checkpoint now persists both — the router in the SAME versioned
+    ``serialize_model_router`` contract the runner-level session-resume
+    path already uses — and recovery restores them with the established
+    fail-closed conventions."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_restores_original_router_and_semantics(self, tmp_path: Path) -> None:
+        """(a)+(b) end to end: the original run crashes after level 1 with a
+        DISTINCTIVE router + execution semantics; the restart process is
+        constructed with a DIFFERENT router and mode. The recovered level
+        must dispatch under the ORIGINAL run's router and semantics."""
+        seed = Seed(
+            goal="Crash-restart router durability",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+        original_router = _router()
+
+        original_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await original_events.initialize()
+        original_ckpt = CheckpointStore(base_path=ckpt_path)
+        original_ckpt.initialize()
+        original = _executor(
+            event_store=original_events,
+            checkpoint_store=original_ckpt,
+            model_router=original_router,
+            decomposition_mode="bounce_only",
+            max_decomposition_depth=1,
+            fat_harness_mode=True,
+            shadow_replay_enabled=True,
+        )
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            raise RuntimeError("simulated process crash after level 1")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        await original_events.close()
+
+        # Sanity: the checkpoint carries the versioned routing contract and
+        # the execution-semantic scalars the run started with.
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["model_routing"] == serialize_model_router(original_router)
+        assert saved.value.state["execution_semantics"] == {
+            "decomposition_mode": "bounce_only",
+            "max_decomposition_depth": 1,
+            "fat_harness_mode": True,
+            "cross_harness_redispatch_enabled": False,
+            "shadow_replay_enabled": True,
+        }
+
+        # --- Restart under DIFFERENT construction args: another router
+        # (different tier models / starting tiers) and the default
+        # "preflight" mode.
+        recovered_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await recovered_events.initialize()
+        recovered = _executor(
+            event_store=recovered_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            model_router=_router(
+                tier_models={"frontier": "gpt-frontier-test"},
+                runtime_backend="codex_cli",
+                child_tier="frontier",
+                base_tier="frontier",
+                escalation_retry_threshold=2,
+            ),
+        )
+        captured: dict[str, object] = {}
+
+        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            # Snapshot the executor's live routing/semantics AT dispatch
+            # time: this is what actually governs the recovered level.
+            captured["router"] = recovered._model_router
+            captured["decomposition_mode"] = recovered._decomposition_mode
+            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+
+        assert result.all_succeeded
+        # The recovered level dispatched under the ORIGINAL run's router —
+        # its tier->model map and starting tiers, not the restart's.
+        assert captured["router"] == original_router
+        assert captured["decomposition_mode"] == "bounce_only"
+        assert recovered._model_router == original_router
+        assert recovered._decomposition_mode == "bounce_only"
+        assert recovered._enable_decomposition is True
+        assert recovered._max_decomposition_depth == 1
+        assert recovered._fat_harness_mode is True
+        assert recovered._shadow_replay_enabled is True
+        await recovered_events.close()
+
+    def _unit_executor(self, **overrides: object) -> ParallelACExecutor:
+        return ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            cross_harness_redispatch=False,
+            **overrides,  # type: ignore[arg-type]
+        )
+
+    def test_dormant_router_contract_is_restored_over_current_router(self) -> None:
+        """``enabled=False`` is a real persisted contract (kill-switched
+        run), distinct from a legacy checkpoint with no contract at all: it
+        must override a currently-constructed router, keeping the resumed
+        run dormant."""
+        executor = self._unit_executor(model_router=_router())
+        executor._restore_checkpoint_model_router(serialize_model_router(None))
+        assert executor._model_router is None
+        assert executor._lateral_escalation_enabled is False
+
+    def test_legacy_checkpoint_without_router_keeps_current_router(self) -> None:
+        current = _router()
+        executor = self._unit_executor(model_router=current)
+        executor._restore_checkpoint_model_router(None)
+        assert executor._model_router == current
+        assert executor._lateral_escalation_enabled is False
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "not-a-mapping",
+            {"version": 99, "enabled": True},
+            {"version": 1, "enabled": "yes"},
+            {"version": 1, "enabled": True, "router": {"tier_models": {}}},
+            {
+                "version": 1,
+                "enabled": True,
+                "router": {
+                    "tier_models": {"frugal": "m"},
+                    "runtime_backend": "claude",
+                    "child_tier": "ultra",
+                    "base_tier": "frugal",
+                    "escalation_retry_threshold": 1,
+                },
+            },
+        ],
+    )
+    def test_malformed_router_contract_fails_closed(self, corruption: object) -> None:
+        """(c) corruption/tampering: escalation gates forced open (durable
+        ladder history must be honored) while the CURRENT router is kept
+        for actual dispatch — mirrors the malformed retry-policy branch."""
+        current = _router()
+        executor = self._unit_executor(model_router=current)
+        executor._restore_checkpoint_model_router(corruption)
+        assert executor._model_router == current
+        assert executor._lateral_escalation_enabled is True
+
+    def test_legacy_checkpoint_without_semantics_keeps_current_config(self) -> None:
+        executor = self._unit_executor(decomposition_mode="preflight")
+        executor._restore_checkpoint_execution_semantics(None)
+        assert executor._decomposition_mode == "preflight"
+        assert executor._lateral_escalation_enabled is False
+
+    def test_absent_semantics_keys_migrate_from_current_config(self) -> None:
+        """A partial mapping (forward-compat migration shape) restores only
+        the present keys and keeps the current value for absent ones."""
+        executor = self._unit_executor(decomposition_mode="preflight", fat_harness_mode=True)
+        executor._restore_checkpoint_execution_semantics({"decomposition_mode": "off"})
+        assert executor._decomposition_mode == "off"
+        assert executor._enable_decomposition is False
+        assert executor._fat_harness_mode is True
+        assert executor._lateral_escalation_enabled is False
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "not-a-mapping",
+            {"decomposition_mode": "sideways"},
+            {"decomposition_mode": None},
+            {"max_decomposition_depth": -1},
+            {"max_decomposition_depth": True},
+            {"max_decomposition_depth": 2.0},
+            {"fat_harness_mode": "yes"},
+            {"cross_harness_redispatch_enabled": 1},
+            {"shadow_replay_enabled": "on"},
+        ],
+    )
+    def test_malformed_semantics_fails_closed(self, corruption: object) -> None:
+        """(c) any present-but-malformed key takes the whole mapping down
+        the established fail-closed branch: escalation gates forced open,
+        nothing adopted."""
+        executor = self._unit_executor(
+            decomposition_mode="preflight",
+            max_decomposition_depth=3,
+            fat_harness_mode=False,
+            shadow_replay_enabled=False,
+        )
+        valid = {
+            "decomposition_mode": "bounce_only",
+            "max_decomposition_depth": 1,
+            "fat_harness_mode": True,
+            "cross_harness_redispatch_enabled": True,
+            "shadow_replay_enabled": True,
+        }
+        payload: object = (
+            corruption if not isinstance(corruption, dict) else {**valid, **corruption}
+        )
+        executor._restore_checkpoint_execution_semantics(payload)
+        assert executor._decomposition_mode == "preflight"
+        assert executor._enable_decomposition is True
+        assert executor._max_decomposition_depth == 3
+        assert executor._fat_harness_mode is False
+        assert executor._cross_harness_redispatch_enabled is False
+        assert executor._shadow_replay_enabled is False
+        assert executor._lateral_escalation_enabled is True
 
 
 class TestRunnerAdoptsRecoveredExecutionId:

@@ -37,7 +37,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import anyio
 from rich.console import Console
@@ -291,7 +291,9 @@ from ouroboros.orchestrator.level_context import (
 from ouroboros.orchestrator.model_routing import (
     DEFAULT_TIER_CEILING,
     decide_model,
+    deserialize_model_router,
     resolve_execute_model,
+    serialize_model_router,
     tier_from_profile_hint,
 )
 from ouroboros.orchestrator.parallel_executor_models import (
@@ -1979,6 +1981,172 @@ class ParallelACExecutor:
         )
         self._lateral_escalation_enabled = True
 
+    def _restore_checkpoint_model_router(self, raw_routing: object) -> None:
+        """Restore the checkpointed run's resolved model router (round-12 #2).
+
+        The router governs actual model-tier routing during ladder dispatch
+        (``resolve_execute_model``/``decide_model``) and thereby the
+        frugality-proof cohort identity — an execution-semantic input exactly
+        like the retry policy. The runner's durable execution contract
+        already pins it for the session-resume path via
+        ``serialize_model_router``/``deserialize_model_router``; this
+        CHECKPOINT-level restore (the executor-internal RC3 crash-recovery
+        path) reuses the SAME versioned contract, so a crash-restart adopts
+        the ORIGINAL run's routing, not whatever the current process was
+        constructed with.
+
+        ``None`` means the checkpoint predates the field — a genuine
+        one-time migration that keeps the current constructor-provided
+        router (the pre-fix behavior, never worse). A recognized contract is
+        restored wholesale, including the deliberate dormant shape
+        (``enabled=False`` -> router ``None``): a kill-switched run stays
+        dormant when resumed in an environment where routing is on. A
+        restored router resolved for a DIFFERENT backend than the live
+        adapter is safe to adopt as-is: ``resolve_execute_model`` already
+        treats a backend-mismatched router as absent rather than issuing a
+        model id the adapter cannot execute. A present-but-unrecognized
+        payload is corruption/tampering: fail closed exactly like a
+        malformed retry policy — force the escalation gates open (durable
+        ladder history must be honored) while keeping the current process's
+        router for actual dispatch.
+        """
+        if raw_routing is None:
+            return
+        recognized, restored_router = deserialize_model_router(raw_routing)
+        if not recognized:
+            log.error(
+                "parallel_executor.recovery.model_routing_malformed",
+                detail=(
+                    "checkpointed model-routing contract is malformed; failing "
+                    "closed by honoring durable escalation history while "
+                    "keeping the current process's router for dispatch"
+                ),
+            )
+            self._lateral_escalation_enabled = True
+            return
+        if restored_router != self._model_router:
+            log.info(
+                "parallel_executor.recovery.model_router_restored",
+                detail=(
+                    "current process's model router differs from the "
+                    "checkpointed run's; keeping the router the run started with"
+                ),
+                checkpoint_routing_enabled=restored_router is not None,
+                current_routing_enabled=self._model_router is not None,
+            )
+        self._model_router = restored_router
+
+    #: The closed vocabulary ``__init__`` accepts for ``decomposition_mode``.
+    _DECOMPOSITION_MODES = frozenset({"preflight", "bounce_only", "off"})
+
+    def _restore_checkpoint_execution_semantics(self, raw_semantics: object) -> None:
+        """Restore the remaining execution-semantic scalars (round-12 #2).
+
+        These are constructor-injected inputs that directly change what a
+        run dispatches or how it accepts work, yet were never persisted, so
+        a crash-restart silently adopted the CURRENT process's values:
+
+        - ``decomposition_mode`` — whether decomposition runs at all
+          (``preflight``/``bounce_only``/``off`` are fundamentally different
+          execution modes; also drives ``_enable_decomposition``).
+        - ``max_decomposition_depth`` — how deep recursive decomposition may
+          go before an AC must execute atomically.
+        - ``fat_harness_mode`` — whether atomic acceptance enforces typed
+          evidence plus a verifier PASS (verification semantics).
+        - ``cross_harness_redispatch_enabled`` — whether the cross-harness
+          redispatch escalation option is available (escalation semantics).
+        - ``shadow_replay_enabled`` — whether successful decomposed children
+          are re-dispatched for the parent-tier baseline measurement.
+
+        Conventions mirror ``_restore_checkpoint_retry_policy`` exactly:
+        ``None`` (checkpoint predates the field) keeps the current
+        constructor values — a genuine one-time migration. A key ABSENT
+        from a present mapping likewise keeps the current value for that
+        field only (forward-compat migration shape). Any key PRESENT but
+        malformed is corruption/tampering and takes the whole mapping down
+        the fail-closed branch: escalation gates forced open, nothing
+        adopted.
+        """
+        if raw_semantics is None:
+            return
+        if isinstance(raw_semantics, Mapping):
+            mode_present = "decomposition_mode" in raw_semantics
+            depth_present = "max_decomposition_depth" in raw_semantics
+            fat_present = "fat_harness_mode" in raw_semantics
+            cross_present = "cross_harness_redispatch_enabled" in raw_semantics
+            shadow_present = "shadow_replay_enabled" in raw_semantics
+            mode = raw_semantics.get("decomposition_mode")
+            depth = raw_semantics.get("max_decomposition_depth")
+            fat = raw_semantics.get("fat_harness_mode")
+            cross = raw_semantics.get("cross_harness_redispatch_enabled")
+            shadow = raw_semantics.get("shadow_replay_enabled")
+            if (
+                (not mode_present or mode in self._DECOMPOSITION_MODES)
+                and (
+                    not depth_present
+                    or (isinstance(depth, int) and not isinstance(depth, bool) and depth >= 0)
+                )
+                and (not fat_present or isinstance(fat, bool))
+                and (not cross_present or isinstance(cross, bool))
+                and (not shadow_present or isinstance(shadow, bool))
+            ):
+                if (
+                    (mode_present and mode != self._decomposition_mode)
+                    or (depth_present and depth != self._max_decomposition_depth)
+                    or (fat_present and fat != self._fat_harness_mode)
+                    or (cross_present and cross != self._cross_harness_redispatch_enabled)
+                    or (shadow_present and shadow != self._shadow_replay_enabled)
+                ):
+                    log.info(
+                        "parallel_executor.recovery.execution_semantics_restored",
+                        detail=(
+                            "current process's execution-semantic config "
+                            "differs from the checkpointed run's; keeping the "
+                            "semantics the run started with"
+                        ),
+                        checkpoint_decomposition_mode=(mode if mode_present else "<absent>"),
+                        current_decomposition_mode=self._decomposition_mode,
+                        checkpoint_max_decomposition_depth=(depth if depth_present else "<absent>"),
+                        current_max_decomposition_depth=self._max_decomposition_depth,
+                        checkpoint_fat_harness_mode=(fat if fat_present else "<absent>"),
+                        current_fat_harness_mode=self._fat_harness_mode,
+                        checkpoint_cross_harness_redispatch_enabled=(
+                            cross if cross_present else "<absent>"
+                        ),
+                        current_cross_harness_redispatch_enabled=(
+                            self._cross_harness_redispatch_enabled
+                        ),
+                        checkpoint_shadow_replay_enabled=(shadow if shadow_present else "<absent>"),
+                        current_shadow_replay_enabled=self._shadow_replay_enabled,
+                    )
+                # The isinstance re-checks are guaranteed true by the block
+                # above; they only re-narrow types for mypy.
+                if mode_present and isinstance(mode, str) and mode in self._DECOMPOSITION_MODES:
+                    self._decomposition_mode = cast(
+                        Literal["preflight", "bounce_only", "off"], mode
+                    )
+                    # ``_enable_decomposition`` is DERIVED from the mode in
+                    # ``__init__``; keep the pair consistent on restore.
+                    self._enable_decomposition = mode != "off"
+                if depth_present and isinstance(depth, int):
+                    self._max_decomposition_depth = depth
+                if fat_present and isinstance(fat, bool):
+                    self._fat_harness_mode = fat
+                if cross_present and isinstance(cross, bool):
+                    self._cross_harness_redispatch_enabled = cross
+                if shadow_present and isinstance(shadow, bool):
+                    self._shadow_replay_enabled = shadow
+                return
+        log.error(
+            "parallel_executor.recovery.execution_semantics_malformed",
+            detail=(
+                "checkpointed execution-semantic config is malformed; failing "
+                "closed by honoring durable escalation history under the "
+                "current config's values"
+            ),
+        )
+        self._lateral_escalation_enabled = True
+
     #: Terminal statuses after which a run can never be resumed — mirrors
     #: ``resume_session``'s non-resumable SessionStatus set (COMPLETED /
     #: FAILED / CANCELLED). ``paused`` is deliberately absent: a paused run
@@ -2374,6 +2542,21 @@ class ParallelACExecutor:
                         # posture (genuine one-time migration, like the
                         # runner's ``retry_policy_migrated``).
                         self._restore_checkpoint_retry_policy(cp.state.get("retry_policy"))
+                        # Round-12 finding #2 (BLOCKING): two more
+                        # execution-semantic input groups the checkpoint
+                        # never carried — the resolved model router (tier
+                        # routing / frugality cohort identity) and the
+                        # constructor-injected dispatch/verification scalars
+                        # (decomposition mode & depth, fat-harness gate,
+                        # cross-harness redispatch, shadow replay). A
+                        # recovered run IS the original run continuing, so it
+                        # must keep the routing and dispatch semantics it
+                        # STARTED with, not the current process's
+                        # construction args.
+                        self._restore_checkpoint_model_router(cp.state.get("model_routing"))
+                        self._restore_checkpoint_execution_semantics(
+                            cp.state.get("execution_semantics")
+                        )
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
@@ -2973,6 +3156,27 @@ class ParallelACExecutor:
                                     "verify_command_timeout_seconds": (
                                         self._verify_command_timeout_seconds
                                     ),
+                                },
+                                # Round-12 finding #2 (BLOCKING): the resolved
+                                # model-routing contract this run STARTED
+                                # with, in the SAME versioned shape the
+                                # runner's durable execution contract already
+                                # persists for session-resume (see
+                                # ``_restore_checkpoint_model_router``).
+                                "model_routing": serialize_model_router(self._model_router),
+                                # Round-12 finding #2 (BLOCKING): the
+                                # remaining constructor-injected scalars that
+                                # change what a run dispatches or how it
+                                # accepts work (see
+                                # ``_restore_checkpoint_execution_semantics``).
+                                "execution_semantics": {
+                                    "decomposition_mode": self._decomposition_mode,
+                                    "max_decomposition_depth": (self._max_decomposition_depth),
+                                    "fat_harness_mode": self._fat_harness_mode,
+                                    "cross_harness_redispatch_enabled": (
+                                        self._cross_harness_redispatch_enabled
+                                    ),
+                                    "shadow_replay_enabled": self._shadow_replay_enabled,
                                 },
                             },
                         )
