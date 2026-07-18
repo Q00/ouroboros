@@ -6063,12 +6063,21 @@ Respond with either ATOMIC or the structured JSON object only.
         event store on a miss (see
         ``ACRuntimeHandleManager._load_persisted_ac_runtime_handle``): a
         cache hit returns immediately; a miss replays this execution's own
-        durable events and rebuilds the state from the latest UNRESOLVED
-        ``execution.ac.parked_for_operator`` event for this AC's node id
-        (Fix 8's ``execution.ac.parked_resolved`` marks one resolved, so a
-        parked-then-succeeded AC correctly reconstructs as fresh, not
-        still-parked). No matching event means a fresh, never-parked state —
-        identical to today's in-memory default.
+        durable events and rebuilds the state from the LATEST of three event
+        types for this AC's node id, in log order:
+
+        * ``execution.ac.lateral_escalation_progressed`` (Fix 5, round 2) —
+          emitted every loop iteration, so an in-flight persona
+          attempt/streak advancement that never reached parking is still
+          reconstructed instead of lost.
+        * ``execution.ac.parked_for_operator`` — the full-parking transition;
+          always implies ``parked=True``.
+        * ``execution.ac.parked_resolved`` (Fix 8) — resets reconstruction to
+          a fresh state, so a parked-then-succeeded AC correctly starts a
+          brand new cycle rather than staying "still parked" forever.
+
+        No matching event means a fresh, never-escalated state — identical
+        to today's in-memory default.
 
         The rebuilt (or freshly-defaulted) state is cached back onto
         ``self._lateral_escalation_states`` so later calls in the SAME
@@ -6093,27 +6102,29 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             events = []
 
-        latest_parked_data: dict[str, Any] | None = None
-        resolved = False
+        latest_state_data: dict[str, Any] | None = None
+        latest_state_type: str | None = None
         for event in events:
             event_type = getattr(event, "type", None)
             if event_type not in {
                 "execution.ac.parked_for_operator",
+                "execution.ac.lateral_escalation_progressed",
                 "execution.ac.parked_resolved",
             }:
                 continue
             data = getattr(event, "data", None)
             if not isinstance(data, dict) or data.get("node_id") != node_id:
                 continue
-            if event_type == "execution.ac.parked_for_operator":
-                latest_parked_data = data
-                resolved = False
+            if event_type == "execution.ac.parked_resolved":
+                latest_state_data = None
+                latest_state_type = None
             else:
-                resolved = True
+                latest_state_data = data
+                latest_state_type = event_type
 
         state = LateralEscalationState()
-        if latest_parked_data is not None and not resolved:
-            raw_personas = latest_parked_data.get("personas_tried")
+        if latest_state_data is not None:
+            raw_personas = latest_state_data.get("personas_tried")
             personas: tuple[ThinkingPersona, ...] = ()
             if isinstance(raw_personas, list):
                 recovered: list[ThinkingPersona] = []
@@ -6123,16 +6134,27 @@ Respond with either ATOMIC or the structured JSON object only.
                     except ValueError:
                         continue
                 personas = tuple(recovered)
-            raw_streak = latest_parked_data.get("consecutive_terminal_failures")
+            raw_streak = latest_state_data.get("consecutive_terminal_failures")
             streak = (
                 raw_streak
                 if isinstance(raw_streak, int) and not isinstance(raw_streak, bool)
                 else 0
             )
+            # ``parked_for_operator``'s payload predates Fix 5 and has no
+            # ``parked`` field of its own -- it is ALWAYS emitted exactly on
+            # the parking transition, so winning with that event type means
+            # parked=True unconditionally. The newer ``progressed`` event
+            # carries the field explicitly (it fires every iteration, parked
+            # or not).
+            if latest_state_type == "execution.ac.parked_for_operator":
+                parked_flag = True
+            else:
+                raw_parked = latest_state_data.get("parked")
+                parked_flag = raw_parked is True
             state = LateralEscalationState(
                 consecutive_terminal_failures=streak,
                 personas_tried=personas,
-                parked=True,
+                parked=parked_flag,
             )
 
         self._lateral_escalation_states[ac_idx] = state
@@ -6229,6 +6251,25 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             state = step.state
             self._lateral_escalation_states[ac_idx] = state
+            # Fix 5 (round 2, BLOCKING): persist EVERY streak advancement, not
+            # just the moment this AC actually reaches full parking, so a
+            # process cancelled/restarted mid-persona-attempt can reconstruct
+            # exactly which personas were already tried instead of restarting
+            # the ladder from scratch. Emitted BEFORE the redispatch below so
+            # a crash during that redispatch still leaves this step's
+            # progress durably recorded.
+            await self._event_emitter.emit_lateral_escalation_progressed(
+                execution_id=execution_id,
+                session_id=session_id,
+                node_id=ExecutionNodeIdentity.root(
+                    execution_context_id=execution_id, ac_index=ac_idx
+                ).node_id,
+                root_ac_index=ac_idx,
+                personas_tried=tuple(p.value for p in state.personas_tried),
+                consecutive_terminal_failures=state.consecutive_terminal_failures,
+                parked=state.parked,
+                persona=step.persona.value if step.persona is not None else None,
+            )
 
             if step.just_parked:
                 parked_node_id = ExecutionNodeIdentity.root(

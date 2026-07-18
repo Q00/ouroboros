@@ -217,6 +217,61 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_lateral_escalation_progressed(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_id: str,
+        root_ac_index: int,
+        personas_tried: tuple[str, ...],
+        consecutive_terminal_failures: int,
+        parked: bool,
+        persona: str | None,
+    ) -> None:
+        """Persist EVERY persona-escalation streak advancement (Fix 5, round 2).
+
+        ``execution.ac.parked_for_operator`` only records state at the
+        moment an AC actually reaches full parking — every earlier streak
+        advancement (the identical-retry count building up, and each
+        individual persona tried before parking) previously lived ONLY in
+        ``self._lateral_escalation_states``, an in-memory dict. A process
+        cancelled/restarted mid-persona-attempt (before parking) silently
+        lost that in-flight progress: ``_load_lateral_escalation_state``
+        would reconstruct a fresh, never-escalated state on resume, and the
+        ladder would restart persona cycling from scratch instead of
+        continuing where it left off.
+
+        Emitted once per loop iteration, right after
+        ``advance_lateral_escalation`` computes the new state and BEFORE the
+        (possibly long-running, possibly crash-prone) redispatch that
+        follows — so even a crash mid-redispatch leaves the streak/persona
+        progress that led to it durably recorded. ``_load_lateral_escalation_state``
+        folds this event into its reconstruction the same way it already
+        folds ``parked_for_operator``/``parked_resolved``, keyed by the
+        latest event (of any of the three types) for this node id.
+
+        ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
+        .node_id`` every other per-node event for this root AC carries.
+        """
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "node_id": node_id,
+                    "root_ac_index": root_ac_index,
+                    "personas_tried": list(personas_tried),
+                    "consecutive_terminal_failures": consecutive_terminal_failures,
+                    "parked": parked,
+                    "persona": persona,
+                },
+            )
+        )
+
     async def emit_bounce_classified(
         self,
         *,

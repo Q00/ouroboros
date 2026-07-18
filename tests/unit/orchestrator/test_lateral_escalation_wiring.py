@@ -625,6 +625,188 @@ class TestLateralEscalationStateDurability:
         # more identical retry" without sleeping at all.
         executor._sleep.assert_awaited_once_with(executor._parked_retry_backoff_seconds)
 
+    @pytest.mark.asyncio
+    async def test_reconstructs_in_flight_streak_from_progressed_event_before_parking(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Fix 5 (round 2, BLOCKING): an AC that accrued streak/persona
+        progress but never actually reached full parking must still
+        reconstruct that in-flight state from
+        ``execution.ac.lateral_escalation_progressed`` on a cold start --
+        not silently restart the ladder from scratch."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker"],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": "hacker",
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+        assert executor._lateral_escalation_states == {}
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is False
+        assert state.consecutive_terminal_failures == 3
+        assert state.personas_tried == (ThinkingPersona.HACKER,)
+
+    @pytest.mark.asyncio
+    async def test_latest_progressed_event_wins_over_earlier_ones(
+        self, memory_event_store: EventStore
+    ) -> None:
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        for streak, persona in ((1, None), (2, "hacker"), (3, "architect")):
+            await memory_event_store.append(
+                BaseEvent(
+                    type="execution.ac.lateral_escalation_progressed",
+                    aggregate_type="execution",
+                    aggregate_id="exec-1",
+                    data={
+                        "execution_id": "exec-1",
+                        "session_id": "s1",
+                        "node_id": node_id,
+                        "root_ac_index": 0,
+                        "personas_tried": (
+                            []
+                            if persona is None
+                            else (["hacker"] if persona == "hacker" else ["hacker", "architect"])
+                        ),
+                        "consecutive_terminal_failures": streak,
+                        "parked": False,
+                        "persona": persona,
+                    },
+                )
+            )
+        executor = self._cold_start_executor(memory_event_store)
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.consecutive_terminal_failures == 3
+        assert state.personas_tried == (ThinkingPersona.HACKER, ThinkingPersona.ARCHITECT)
+
+    @pytest.mark.asyncio
+    async def test_progressed_event_after_resolution_reconstructs_the_new_cycle(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """A parked-then-resolved AC that later re-engages the ladder for a
+        FRESH failure cycle must reconstruct that NEW cycle's progress, not
+        stay stuck at "resolved -> fresh empty" forever."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_for_operator",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [p.value for p in ThinkingPersona],
+                    "consecutive_terminal_failures": 10,
+                    "backoff_seconds": 300.0,
+                    "reason": "all lateral-thinking personas exhausted",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.parked_resolved",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                },
+            )
+        )
+        # A brand new failure cycle for the SAME root AC starts accruing
+        # progress again after the resolution.
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [],
+                    "consecutive_terminal_failures": 1,
+                    "parked": False,
+                    "persona": None,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is False
+        assert state.consecutive_terminal_failures == 1
+        assert state.personas_tried == ()
+
+    @pytest.mark.asyncio
+    async def test_resume_after_crash_mid_redispatch_continues_ladder_not_restarts(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """End-to-end: a process that crashes DURING a redispatch (nothing
+        catches it -- simulating the whole process dying, not just an
+        infra-fatal AC result) must not lose the persona/streak progress
+        from the iterations that already completed before the crash."""
+        executor = _make_executor_with_active_ladder()
+        executor._event_store = memory_event_store
+
+        call_count = {"n": 0}
+
+        async def fails_then_crashes(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            if call_count["n"] in (1, 2):
+                return [_failed_result(error=f"attempt {call_count['n']} failed")]
+            # Third redispatch: the process itself crashes -- nothing ever
+            # returns, and nothing here catches it.
+            raise RuntimeError("simulated process crash")
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fails_then_crashes)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        with pytest.raises(RuntimeError, match="simulated process crash"):
+            await _ladder(
+                executor,
+                result=_failed_result(error="attempt 0 failed"),
+                ac_retry_attempts={0: 2},
+            )
+
+        # "Resume": a brand-new executor, same durable store, empty in-memory
+        # cache -- exactly what a process restart looks like.
+        resumed = _make_executor_with_active_ladder()
+        resumed._event_store = memory_event_store
+        assert resumed._lateral_escalation_states == {}
+
+        state = await resumed._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        # 3 loop iterations ran before the crash on the 3rd redispatch call
+        # (streak 1 -> 2 -> 3, with a persona selected on iterations 2 and 3
+        # once the streak reached the persona-cycling threshold) -- that
+        # progress must have survived even though parking never happened.
+        assert state.parked is False
+        assert state.consecutive_terminal_failures == 3
+        assert len(state.personas_tried) == 2
+
 
 class TestParkedRetryBackoffSecondsFiniteGuard:
     """Fix 7 (round 2, BLOCKING) defense-in-depth: this low-level constructor
