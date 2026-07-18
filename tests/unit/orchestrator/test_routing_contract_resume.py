@@ -231,11 +231,19 @@ def test_resume_restores_persisted_retry_policy() -> None:
     original._lateral_escalation_enabled = True
     original._parked_retry_backoff_seconds = 900.0
     original._ac_retry_attempts = 99
+    # Round-9 finding #4: ladder-eligibility effort and verify-gate config
+    # join the contract for the same reason.
+    original._reasoning_effort = "high"
+    original._run_verify_commands = False
+    original._verify_command_timeout_seconds = 123
     persisted = original._build_execution_contract()
     assert persisted["retry_policy"] == {
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 900.0,
         "ac_retry_attempts": 99,
+        "reasoning_effort": "high",
+        "run_verify_commands": False,
+        "verify_command_timeout_seconds": 123,
     }
 
     resumed = _runner()
@@ -245,6 +253,11 @@ def test_resume_restores_persisted_retry_policy() -> None:
     assert resumed._lateral_escalation_enabled is False
     assert resumed._parked_retry_backoff_seconds != 900.0
     assert resumed._ac_retry_attempts != 99
+    # The new fields' current-config values are forced to differ explicitly
+    # (their config-resolved defaults depend on the environment).
+    resumed._reasoning_effort = None
+    resumed._run_verify_commands = True
+    resumed._verify_command_timeout_seconds = 600
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -252,6 +265,9 @@ def test_resume_restores_persisted_retry_policy() -> None:
     assert resumed._lateral_escalation_enabled is True
     assert resumed._parked_retry_backoff_seconds == 900.0
     assert resumed._ac_retry_attempts == 99
+    assert resumed._reasoning_effort == "high"
+    assert resumed._run_verify_commands is False
+    assert resumed._verify_command_timeout_seconds == 123
 
 
 def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
@@ -278,6 +294,9 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     resumed._lateral_escalation_enabled = True  # current config for THIS process
     resumed._parked_retry_backoff_seconds = 42.0
     resumed._ac_retry_attempts = 7
+    resumed._reasoning_effort = "medium"
+    resumed._run_verify_commands = True
+    resumed._verify_command_timeout_seconds = 77
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -290,17 +309,34 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 42.0,
         "ac_retry_attempts": 7,
+        "reasoning_effort": "medium",
+        "run_verify_commands": True,
+        "verify_command_timeout_seconds": 77,
     }
+
+
+def _full_retry_policy(**overrides: object) -> dict[str, object]:
+    """A well-formed six-field policy, with targeted per-test corruption."""
+    policy: dict[str, object] = {
+        "lateral_escalation_enabled": True,
+        "parked_retry_backoff_seconds": 300.0,
+        "ac_retry_attempts": 2,
+        "reasoning_effort": "high",
+        "run_verify_commands": True,
+        "verify_command_timeout_seconds": 600,
+    }
+    policy.update(overrides)
+    return policy
 
 
 @pytest.mark.parametrize(
     "malformed_retry_policy",
     [
-        {"lateral_escalation_enabled": True},  # missing parked_retry_backoff_seconds
-        {"lateral_escalation_enabled": "yes", "parked_retry_backoff_seconds": 300.0},
-        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": "300"},
-        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": -5.0},
-        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": True},
+        {"lateral_escalation_enabled": True},  # missing every other field
+        _full_retry_policy(lateral_escalation_enabled="yes"),
+        _full_retry_policy(parked_retry_backoff_seconds="300"),
+        _full_retry_policy(parked_retry_backoff_seconds=-5.0),
+        _full_retry_policy(parked_retry_backoff_seconds=True),
         "not-a-mapping",
         # Fix 7 (round 2, BLOCKING): a deserialized contract carrying
         # float("inf")/nan must be rejected here too, not just at
@@ -308,24 +344,16 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         # replays THIS check, not the config field validator, so
         # ``float("inf")`` must fail closed at both boundaries or it reaches
         # ``asyncio.sleep(inf)`` and hangs that AC's slot forever.
-        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("inf")},
-        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("nan")},
+        _full_retry_policy(parked_retry_backoff_seconds=float("inf")),
+        _full_retry_policy(parked_retry_backoff_seconds=float("nan")),
         # Fix 9 (round 3, BLOCKING): 0 (and any value below EconomicsConfig's
         # own ``ge=1.0`` floor) must be rejected HERE, at resume validation --
         # not silently accepted and then clamped to 1.0 by the executor
         # constructor's defense-in-depth floor, which would let the
         # persisted/fingerprinted policy (0) diverge from the policy actually
         # executed (1.0).
-        {
-            "lateral_escalation_enabled": True,
-            "parked_retry_backoff_seconds": 0.0,
-            "ac_retry_attempts": 2,
-        },
-        {
-            "lateral_escalation_enabled": True,
-            "parked_retry_backoff_seconds": 0.5,
-            "ac_retry_attempts": 2,
-        },
+        _full_retry_policy(parked_retry_backoff_seconds=0.0),
+        _full_retry_policy(parked_retry_backoff_seconds=0.5),
         # Fix 7 (round 3, BLOCKING): a round-2-era contract (or any tampered
         # payload) missing/malformed on the NEW ac_retry_attempts field must
         # fail closed here too, exactly like the other two fields already do.
@@ -333,26 +361,26 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
             "lateral_escalation_enabled": True,
             "parked_retry_backoff_seconds": 300.0,
         },  # missing ac_retry_attempts entirely (round-2-era contract shape)
+        _full_retry_policy(ac_retry_attempts="2"),
+        _full_retry_policy(ac_retry_attempts=-1),
+        _full_retry_policy(ac_retry_attempts=True),
+        _full_retry_policy(ac_retry_attempts=2.5),
+        # Round-9 finding #4: an earlier-round three-field contract shape (or
+        # any tampered payload) missing/malformed on the NEW effort and
+        # verify-gate fields must fail closed here too.
         {
             "lateral_escalation_enabled": True,
             "parked_retry_backoff_seconds": 300.0,
-            "ac_retry_attempts": "2",
-        },
-        {
-            "lateral_escalation_enabled": True,
-            "parked_retry_backoff_seconds": 300.0,
-            "ac_retry_attempts": -1,
-        },
-        {
-            "lateral_escalation_enabled": True,
-            "parked_retry_backoff_seconds": 300.0,
-            "ac_retry_attempts": True,
-        },
-        {
-            "lateral_escalation_enabled": True,
-            "parked_retry_backoff_seconds": 300.0,
-            "ac_retry_attempts": 2.5,
-        },
+            "ac_retry_attempts": 2,
+        },  # rounds-1-8-era contract shape, missing the round-9 fields
+        _full_retry_policy(reasoning_effort="minimal"),  # Codex-only value
+        _full_retry_policy(reasoning_effort=True),
+        _full_retry_policy(run_verify_commands="yes"),
+        _full_retry_policy(run_verify_commands=None),
+        _full_retry_policy(verify_command_timeout_seconds=0),
+        _full_retry_policy(verify_command_timeout_seconds="600"),
+        _full_retry_policy(verify_command_timeout_seconds=True),
+        _full_retry_policy(verify_command_timeout_seconds=600.5),
     ],
 )
 def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:
@@ -391,6 +419,40 @@ def test_retry_policy_is_folded_into_routing_fingerprint() -> None:
     assert (
         disabled_contract["frugality_proof"]["routing_fingerprint"]
         != enabled_contract["frugality_proof"]["routing_fingerprint"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "first_value", "second_value"),
+    [
+        ("_reasoning_effort", None, "high"),
+        ("_reasoning_effort", "low", "xhigh"),
+        ("_run_verify_commands", True, False),
+        ("_verify_command_timeout_seconds", 600, 30),
+    ],
+)
+def test_effort_and_verify_gate_are_folded_into_routing_fingerprint(
+    field: str, first_value: object, second_value: object
+) -> None:
+    """Round-9 finding #4 (BLOCKING): ``reasoning_effort`` governs ladder
+    eligibility (terminal-state/frontier-effort checks) and the verify-gate
+    pair governs whether attestation — and thus the cheap-tier discount —
+    can be evaluated at all. Two runs differing ONLY on one of these axes
+    behave materially differently and must never collapse into the same
+    frugality-proof cohort."""
+    first = _runner()
+    setattr(first, field, first_value)
+    first_contract = first._build_execution_contract()
+
+    second = _runner()
+    setattr(second, field, second_value)
+    second_contract = second._build_execution_contract()
+
+    assert first_contract["model_routing"] == second_contract["model_routing"]
+    assert first_contract["retry_policy"] != second_contract["retry_policy"]
+    assert (
+        first_contract["frugality_proof"]["routing_fingerprint"]
+        != second_contract["frugality_proof"]["routing_fingerprint"]
     )
 
 

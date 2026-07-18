@@ -1941,11 +1941,28 @@ class OrchestratorRunner:
         materially different retry/termination behavior a resumed run must
         keep exactly as it started with, not silently pick up from whatever
         the current config file now says.
+
+        Round-9 finding #4 (BLOCKING): two more config values the
+        ladder/attestation state machine directly depends on join for the
+        same reason. ``reasoning_effort`` governs ladder eligibility through
+        the terminal-state/frontier-effort checks (whether an axis is
+        actively configured and what "maximum strength" means), and the
+        verify-gate pair (``run_verify_commands`` /
+        ``verify_command_timeout_seconds``) governs whether attestation can
+        even be evaluated — and thus whether the cheap-tier discount
+        applies. Left out of the contract, a change to either between the
+        original run and a resume silently drifts resumed execution
+        semantics, and the frugality proof's cohort fingerprint (which
+        folds this policy in) would conflate runs that actually behaved
+        differently.
         """
         return {
             "lateral_escalation_enabled": self._lateral_escalation_enabled,
             "parked_retry_backoff_seconds": self._parked_retry_backoff_seconds,
             "ac_retry_attempts": self._ac_retry_attempts,
+            "reasoning_effort": self._reasoning_effort,
+            "run_verify_commands": self._run_verify_commands,
+            "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
         }
 
     @staticmethod
@@ -1954,11 +1971,38 @@ class OrchestratorRunner:
             "lateral_escalation_enabled",
             "parked_retry_backoff_seconds",
             "ac_retry_attempts",
+            "reasoning_effort",
+            "run_verify_commands",
+            "verify_command_timeout_seconds",
         }:
             return False
         enabled = value.get("lateral_escalation_enabled")
         backoff = value.get("parked_retry_backoff_seconds")
         retry_attempts = value.get("ac_retry_attempts")
+        reasoning_effort = value.get("reasoning_effort")
+        run_verify_commands = value.get("run_verify_commands")
+        verify_timeout = value.get("verify_command_timeout_seconds")
+        # Round-9 finding #4: the new fields mirror their own config-schema
+        # contracts exactly, like the fields above mirror theirs —
+        # ``reasoning_effort`` is the effort-routing vocabulary or ``None``
+        # (dormant axis), ``run_verify_commands`` is a plain bool, and
+        # ``verify_command_timeout_seconds`` mirrors
+        # ``ExecutionConfig.verify_command_timeout_seconds``'s ``ge=1``.
+        if reasoning_effort is not None and reasoning_effort not in {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }:
+            return False
+        if not isinstance(run_verify_commands, bool):
+            return False
+        if (
+            not isinstance(verify_timeout, int)
+            or isinstance(verify_timeout, bool)
+            or verify_timeout < 1
+        ):
+            return False
         return (
             isinstance(enabled, bool)
             and isinstance(backoff, (int, float))
@@ -2670,6 +2714,17 @@ class OrchestratorRunner:
             # __init__ resolved from the CURRENT config instead of the value
             # the run actually started with and was fingerprinted against.
             self._ac_retry_attempts = int(raw_retry_policy["ac_retry_attempts"])
+            # Round-9 finding #4 (BLOCKING): restore the ladder-eligibility
+            # and verify-gate config the run started with, exactly like the
+            # three fields above — otherwise a config change between the
+            # original run and this resume silently drifts what "maximum
+            # strength" means for the ladder and whether attestation (and
+            # thus the cheap-tier discount) can be evaluated at all.
+            self._reasoning_effort = raw_retry_policy["reasoning_effort"]
+            self._run_verify_commands = bool(raw_retry_policy["run_verify_commands"])
+            self._verify_command_timeout_seconds = int(
+                raw_retry_policy["verify_command_timeout_seconds"]
+            )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
