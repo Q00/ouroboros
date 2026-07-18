@@ -1251,6 +1251,56 @@ class ParallelACExecutor:
                     )
         return False
 
+    async def _replay_with_retry(
+        self, aggregate_type: str, aggregate_id: str, *, max_retries: int = 3
+    ) -> list[Any] | None:
+        """Replay durable events with retry, mirroring ``_safe_emit_event`` (Fix 5,
+        round 3, BLOCKING).
+
+        Attestation/escalation/parked state now controls live routing
+        decisions (child model discount, persona/parking replay), so a
+        failed READ must never be silently treated as "no prior state
+        exists" — that is fail-OPEN and directly violates this PR's
+        fail-closed mandate (a restart could silently re-authorize an
+        already-untrustworthy cheap child tier, repeat already-tried
+        personas, or lose parked status).
+
+        Returns:
+            The replayed events on success (an empty list is a LEGITIMATE
+            "nothing was ever written" result, distinct from failure).
+            ``None`` only when every attempt raised — callers MUST treat
+            ``None`` as "we don't know" and fail closed for whatever piece
+            of state they are reconstructing, never fall back to acting as
+            if an empty/optimistic history were confirmed.
+        """
+        for attempt in range(max_retries):
+            try:
+                return await self._event_store.replay(aggregate_type, aggregate_id)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = min(1.0 * (2**attempt), 5.0)
+                    log.warning(
+                        "parallel_executor.event_replay.retry",
+                        aggregate_type=aggregate_type,
+                        aggregate_id=aggregate_id,
+                        attempt=attempt + 1,
+                        error=str(e),
+                    )
+                    await anyio.sleep(wait)
+                else:
+                    log.error(
+                        "parallel_executor.event_replay.failed",
+                        aggregate_type=aggregate_type,
+                        aggregate_id=aggregate_id,
+                        attempts=max_retries,
+                        error=str(e),
+                    )
+                    self._console.print(
+                        f"  [yellow]Event replay degraded: {aggregate_type}/{aggregate_id} "
+                        f"failed after {max_retries} retries[/yellow]"
+                    )
+        return None
+
     @staticmethod
     def _build_expected_ac_runtime_metadata(
         runtime_scope: Any,
@@ -2717,13 +2767,31 @@ class ParallelACExecutor:
             ac_spec=ac_spec,
         )
         self._decomposition_attestations[node_identity.node_id] = attestation
-        await self._event_emitter.emit_decomposition_attested(
+        attestation_persisted = await self._event_emitter.emit_decomposition_attested(
             execution_id=execution_id,
             session_id=session_id,
             node_identity=node_identity,
             attestation=attestation,
             retry_attempt=retry_attempt,
         )
+        if not attestation_persisted:
+            # Fix 5 (round 3, BLOCKING): ``_safe_emit_event`` already retried
+            # and logged the generic "event dropped" warning; this correctness-
+            # bearing write additionally gets its OWN loud, specifically-named
+            # signal, because THIS process's in-memory cache (set just above)
+            # stays correct, but a FUTURE resume that replays this node id and
+            # finds no matching durable event cannot tell "never attested" from
+            # "attested but the write failed" -- it will fail closed on a
+            # genuine read exception (see ``_load_decomposition_attestation``),
+            # but a clean empty replay of a lost write is indistinguishable
+            # from a legitimate first run and defaults to trustworthy.
+            log.error(
+                "parallel_executor.decomposition_attestation.write_failed_correctness_risk",
+                node_id=node_identity.node_id,
+                execution_id=execution_id,
+                verdict=attestation.verdict.value,
+                trustworthy=attestation.trustworthy,
+            )
 
         return ACExecutionResult(
             ac_index=ac_index,
@@ -6070,15 +6138,32 @@ Respond with either ATOMIC or the structured JSON object only.
             return self._decomposition_attestations[node_id]
 
         aggregate_id = execution_id or session_id
-        try:
-            events = await self._event_store.replay("execution", aggregate_id)
-        except Exception:
+        events = await self._replay_with_retry("execution", aggregate_id)
+        if events is None:
+            # Fix 5 (round 3, BLOCKING): a genuine READ failure (every retry
+            # exhausted) must NOT be silently treated the same as "no prior
+            # attestation was ever recorded" -- that is fail-OPEN and would
+            # let a restart re-authorize a cheap child tier this exact node
+            # id was already proven untrustworthy for. Fail closed with a
+            # synthetic UNTRUSTWORTHY verdict instead of falling through to
+            # the legitimate-miss ``None`` path below. Not cached: a LATER
+            # successful read in this same process must not stay poisoned by
+            # a transient failure.
             log.warning(
                 "parallel_executor.decomposition_attestation.state_reconstruction_failed",
                 node_id=node_id,
                 execution_id=execution_id,
             )
-            events = []
+            return DecompositionAttestation(
+                node_id=node_id,
+                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason=(
+                    "durable event replay failed after retries; failing closed "
+                    "(untrustworthy) rather than assuming no prior attestation exists"
+                ),
+            )
 
         latest_data: dict[str, Any] | None = None
         for event in events:
@@ -6143,15 +6228,26 @@ Respond with either ATOMIC or the structured JSON object only.
         node_id = ExecutionNodeIdentity.root(
             execution_context_id=execution_id, ac_index=ac_idx
         ).node_id
-        try:
-            events = await self._event_store.replay("execution", execution_id)
-        except Exception:
+        events = await self._replay_with_retry("execution", execution_id)
+        if events is None:
+            # Fix 5 (round 3, BLOCKING): a genuine READ failure must not be
+            # silently treated as "this AC was never escalated" -- that is
+            # fail-OPEN and would let a restart repeat already-tried personas
+            # or forget a parked AC's long-backoff cadence. Fail closed by
+            # assuming this AC is ALREADY PARKED: ``advance_lateral_escalation``
+            # treats ``parked=True`` as authoritative on its own (it applies
+            # the long-backoff cadence and never selects a new persona
+            # regardless of ``personas_tried`` contents), so this single flag
+            # is sufficient to prevent both hazards without fabricating a
+            # persona history we cannot actually reconstruct. Not cached: a
+            # LATER successful read in this same process must not stay
+            # poisoned by a transient failure.
             log.warning(
                 "parallel_executor.lateral_escalation.state_reconstruction_failed",
                 ac_idx=ac_idx,
                 execution_id=execution_id,
             )
-            events = []
+            return LateralEscalationState(parked=True)
 
         latest_state_data: dict[str, Any] | None = None
         latest_state_type: str | None = None
@@ -6309,7 +6405,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # the ladder from scratch. Emitted BEFORE the redispatch below so
             # a crash during that redispatch still leaves this step's
             # progress durably recorded.
-            await self._event_emitter.emit_lateral_escalation_progressed(
+            progressed_persisted = await self._event_emitter.emit_lateral_escalation_progressed(
                 execution_id=execution_id,
                 session_id=session_id,
                 node_id=ExecutionNodeIdentity.root(
@@ -6321,12 +6417,27 @@ Respond with either ATOMIC or the structured JSON object only.
                 parked=state.parked,
                 persona=step.persona.value if step.persona is not None else None,
             )
+            if not progressed_persisted:
+                # Fix 5 (round 3, BLOCKING): this process's in-memory
+                # ``self._lateral_escalation_states`` (set just above) stays
+                # correct, but a FUTURE resume that cannot find this streak
+                # step durably recorded would silently restart persona
+                # cycling from scratch or lose parked status -- surface it
+                # loudly with correctness-specific framing rather than only
+                # the generic degraded-event-persistence warning.
+                log.error(
+                    "parallel_executor.lateral_escalation.progressed_write_failed_correctness_risk",
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    personas_tried=[p.value for p in state.personas_tried],
+                    parked=state.parked,
+                )
 
             if step.just_parked:
                 parked_node_id = ExecutionNodeIdentity.root(
                     execution_context_id=execution_id, ac_index=ac_idx
                 ).node_id
-                await self._event_emitter.emit_ac_parked_for_operator(
+                parked_persisted = await self._event_emitter.emit_ac_parked_for_operator(
                     execution_id=execution_id,
                     session_id=session_id,
                     node_id=parked_node_id,
@@ -6339,6 +6450,20 @@ Respond with either ATOMIC or the structured JSON object only.
                         "at maximum strength"
                     ),
                 )
+                if not parked_persisted:
+                    # Same correctness risk as above, specifically for the
+                    # full-parking transition: a future resume unable to find
+                    # THIS event durably recorded would lose parked status
+                    # entirely and re-cycle exhausted personas from scratch
+                    # (``_load_lateral_escalation_state`` fails closed --
+                    # assumes still-parked -- only on a genuine replay
+                    # exception, not on a clean-but-incomplete durable log).
+                    log.error(
+                        "parallel_executor.lateral_escalation.parked_write_failed_correctness_risk",
+                        ac_idx=ac_idx,
+                        execution_id=execution_id,
+                        node_id=parked_node_id,
+                    )
 
             if step.apply_long_backoff:
                 await self._sleep(self._parked_retry_backoff_seconds)
@@ -6423,14 +6548,29 @@ Respond with either ATOMIC or the structured JSON object only.
                 # still-``parked`` forever, since ``parked_for_operator`` has
                 # no other durable "un-parked" signal.
                 if state.parked:
-                    await self._event_emitter.emit_ac_parked_resolved(
+                    resolved_node_id = ExecutionNodeIdentity.root(
+                        execution_context_id=execution_id, ac_index=ac_idx
+                    ).node_id
+                    resolved_persisted = await self._event_emitter.emit_ac_parked_resolved(
                         execution_id=execution_id,
                         session_id=session_id,
-                        node_id=ExecutionNodeIdentity.root(
-                            execution_context_id=execution_id, ac_index=ac_idx
-                        ).node_id,
+                        node_id=resolved_node_id,
                         root_ac_index=ac_idx,
                     )
+                    if not resolved_persisted:
+                        # Fix 5 (round 3, BLOCKING): a durably-missing
+                        # resolution leaves the latest replayable event for
+                        # this node id still ``parked_for_operator`` -- any
+                        # future replay-based reconstruction of this node id
+                        # (Kanban/HUD projections, or a later resume that
+                        # somehow revisits this AC) would keep showing it as
+                        # parked even though it already succeeded.
+                        log.error(
+                            "parallel_executor.lateral_escalation.resolved_write_failed_correctness_risk",
+                            ac_idx=ac_idx,
+                            execution_id=execution_id,
+                            node_id=resolved_node_id,
+                        )
                 self._lateral_escalation_states.pop(ac_idx, None)
                 return candidate
 

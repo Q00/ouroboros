@@ -109,7 +109,7 @@ class ExecutionEventEmitter:
         node_identity: ExecutionNodeIdentity,
         attestation: DecompositionAttestation,
         retry_attempt: int,
-    ) -> None:
+    ) -> bool:
         """Persist the gate-anchored decomposition trust verdict (Task 1).
 
         Computed once a decomposition round's siblings have all finished
@@ -127,8 +127,13 @@ class ExecutionEventEmitter:
         ``node_identity.to_event_metadata()`` carries no retry information
         (a node id is structural/path-based and stable across retries), so
         this field is threaded explicitly rather than folded into it.
+
+        Returns:
+            Whether the write was durably persisted (Fix 5, round 3,
+            BLOCKING) -- correctness-bearing state, so the caller must check
+            this rather than silently proceeding as if it always succeeds.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.decomposition_attested",
                 aggregate_type="execution",
@@ -154,7 +159,7 @@ class ExecutionEventEmitter:
         consecutive_terminal_failures: int,
         backoff_seconds: float,
         reason: str,
-    ) -> None:
+    ) -> bool:
         """Persist that a root AC exhausted the lateral-escalation ladder (Task 2).
 
         This AC has failed at its most expensive configuration, cycled
@@ -167,8 +172,13 @@ class ExecutionEventEmitter:
         ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
         .node_id`` every other per-node event for this root AC carries, so
         Kanban/HUD consumers can key off it exactly like any other event.
+
+        Returns:
+            Whether the write was durably persisted (Fix 5, round 3,
+            BLOCKING) -- correctness-bearing state, so the caller must check
+            this rather than silently proceeding as if it always succeeds.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.parked_for_operator",
                 aggregate_type="execution",
@@ -193,7 +203,7 @@ class ExecutionEventEmitter:
         session_id: str,
         node_id: str,
         root_ac_index: int,
-    ) -> None:
+    ) -> bool:
         """Persist that a previously-parked root AC has succeeded (Task 2/Fix 8).
 
         ``execution.ac.parked_for_operator`` has no companion "un-parked"
@@ -214,8 +224,13 @@ class ExecutionEventEmitter:
         .node_id`` the original ``parked_for_operator`` event carried, so a
         projection can pair the two by node id exactly like any other
         per-node event.
+
+        Returns:
+            Whether the write was durably persisted (Fix 5, round 3,
+            BLOCKING) -- correctness-bearing state, so the caller must check
+            this rather than silently proceeding as if it always succeeds.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.parked_resolved",
                 aggregate_type="execution",
@@ -240,7 +255,7 @@ class ExecutionEventEmitter:
         consecutive_terminal_failures: int,
         parked: bool,
         persona: str | None,
-    ) -> None:
+    ) -> bool:
         """Persist EVERY persona-escalation streak advancement (Fix 5, round 2).
 
         ``execution.ac.parked_for_operator`` only records state at the
@@ -265,8 +280,13 @@ class ExecutionEventEmitter:
 
         ``node_id`` is the SAME canonical ``ExecutionNodeIdentity.root(...)
         .node_id`` every other per-node event for this root AC carries.
+
+        Returns:
+            Whether the write was durably persisted (Fix 5, round 3,
+            BLOCKING) -- correctness-bearing state, so the caller must check
+            this rather than silently proceeding as if it always succeeds.
         """
-        await self._safe_emit_event(
+        return await self._safe_emit_event(
             BaseEvent(
                 type="execution.ac.lateral_escalation_progressed",
                 aggregate_type="execution",

@@ -7,7 +7,7 @@ always mocked — this suite never actually sleeps or dispatches a real agent.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -806,6 +806,74 @@ class TestLateralEscalationStateDurability:
         assert state.parked is False
         assert state.consecutive_terminal_failures == 3
         assert len(state.personas_tried) == 2
+
+
+class TestLateralEscalationStateFailsClosedOnReplayFailure:
+    """Fix 5 (round 3, BLOCKING): a genuine READ failure (every
+    ``_replay_with_retry`` attempt raises) must NOT be silently treated the
+    same as "this AC was never escalated" -- that is fail-OPEN and would let
+    a restart repeat already-tried personas or lose a parked AC's long-backoff
+    cadence entirely. ``_load_lateral_escalation_state`` must fail closed by
+    assuming ``parked=True`` instead of falling through to a fresh, empty
+    state.
+    """
+
+    @pytest.mark.asyncio
+    async def test_replay_exception_fails_closed_to_parked(self) -> None:
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._event_store.replay = AsyncMock(side_effect=RuntimeError("db unavailable"))
+
+        with patch("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock()):
+            state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is True
+        # Fail-closed default is NOT cached -- a later successful read in the
+        # same process must not stay poisoned by a transient failure.
+        assert 0 not in executor._lateral_escalation_states
+
+    @pytest.mark.asyncio
+    async def test_replay_retries_before_failing_closed(self) -> None:
+        """``_replay_with_retry`` must actually retry (mirroring
+        ``_safe_emit_event``'s pattern) before giving up."""
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        attempts = {"n": 0}
+
+        async def _flaky_replay(aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+            attempts["n"] += 1
+            raise RuntimeError(f"transient failure {attempts['n']}")
+
+        executor._event_store.replay = AsyncMock(side_effect=_flaky_replay)
+
+        with patch("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock()):
+            events = await executor._replay_with_retry("execution", "exec-1", max_retries=3)
+
+        assert events is None
+        assert attempts["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_replay_succeeds_after_transient_failure(self) -> None:
+        """A transient failure that recovers before the retry budget is spent
+        must return the REAL events, not the fail-closed sentinel."""
+        executor = _make_executor()
+        attempts = {"n": 0}
+
+        async def _recovers_on_second_try(
+            aggregate_type: str, aggregate_id: str
+        ) -> list[BaseEvent]:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("transient failure")
+            return []
+
+        executor._event_store.replay = AsyncMock(side_effect=_recovers_on_second_try)
+
+        with patch("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock()):
+            events = await executor._replay_with_retry("execution", "exec-1", max_retries=3)
+
+        assert events == []
+        assert attempts["n"] == 2
 
 
 class TestParkedRetryBackoffSecondsFiniteGuard:

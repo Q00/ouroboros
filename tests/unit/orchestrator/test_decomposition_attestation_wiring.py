@@ -726,3 +726,101 @@ class TestDecompositionAttestationReplayOnResume:
 
         assert result is None
         assert "node-never-seen" not in executor._decomposition_attestations
+
+
+class TestDecompositionAttestationFailsClosedOnReplayFailure:
+    """Fix 5 (round 3, BLOCKING): a genuine READ failure (every
+    ``_replay_with_retry`` attempt raises) must NOT be silently treated the
+    same as "no prior attestation was ever recorded" -- that is fail-OPEN and
+    would let a restart re-authorize a cheap child tier this exact node id
+    was already proven untrustworthy for. ``_load_decomposition_attestation``
+    must fail closed with a synthetic UNTRUSTWORTHY verdict instead of
+    falling through to the legitimate-miss ``None`` path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_replay_exception_fails_closed_to_untrustworthy(self) -> None:
+        from unittest.mock import patch
+
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._event_store.replay = AsyncMock(side_effect=RuntimeError("db unavailable"))
+
+        with patch("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock()):
+            attestation = await executor._load_decomposition_attestation(
+                "node-x", execution_id="exec-broken", session_id="s1"
+            )
+
+        assert attestation is not None
+        assert attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert attestation.trustworthy is False
+        # Fail-closed default is NOT cached -- a later successful read in the
+        # same process must not stay poisoned by a transient failure.
+        assert "node-x" not in executor._decomposition_attestations
+
+    @pytest.mark.asyncio
+    async def test_replay_exception_withholds_child_tier_discount_on_next_round(self) -> None:
+        """End-to-end: the fail-closed attestation must actually withhold the
+        child-tier discount for the NEXT decomposition round of this root AC,
+        the same way a REAL prior UNTRUSTWORTHY verdict already does."""
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-broken", ac_index=0)
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._event_store.replay = AsyncMock(side_effect=RuntimeError("db unavailable"))
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+        executor._emit_workflow_progress = AsyncMock()
+        executor._emit_level_started = AsyncMock()
+        executor._emit_level_completed = AsyncMock()
+        executor._emit_subtask_event = AsyncMock()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        captured_trust_flags: list[bool] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        with patch("ouroboros.orchestrator.parallel_executor.anyio.sleep", AsyncMock()):
+            await executor._execute_decomposition_children(
+                decision=decision,
+                ac_index=0,
+                ac_content="parent AC",
+                session_id="s1",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="",
+                seed_goal="goal",
+                depth=0,
+                execution_id="exec-broken",
+                level_contexts=None,
+                retry_attempt=1,
+                execution_counters=None,
+                node_identity=node_identity,
+                start_time=datetime.now(UTC),
+                semantic_ac_key="key",
+                ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+            )
+
+        assert decision.trustworthy is True
+        assert captured_trust_flags
+        assert all(flag is False for flag in captured_trust_flags)
