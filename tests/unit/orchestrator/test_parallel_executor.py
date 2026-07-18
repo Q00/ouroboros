@@ -9260,6 +9260,62 @@ class TestParallelACExecutor:
         executor._execute_ac_batch.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_execute_parallel_drains_deferred_durable_writes_before_returning(
+        self,
+    ) -> None:
+        """Adversarial-review Bug #1 (part b): ``execute_parallel`` must give
+        in-flight deferred durable writes a bounded final shot BEFORE it
+        returns — the CLI's ``asyncio.run`` teardown cancels every pending
+        task the moment the run coroutine completes, so a write scheduled
+        near the end of the run would otherwise be silently cancelled with
+        zero real attempts."""
+        import asyncio
+
+        seed = _make_seed("AC 1")
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content="AC 1", depends_on=()),),
+            execution_levels=((0,),),
+        )
+        executor = _make_executor()
+        landed = asyncio.Event()
+
+        async def slow_write() -> bool:
+            # Slower than the rest of the (fully mocked) run, so ONLY the
+            # drain step can be what awaited its completion.
+            await asyncio.sleep(0.2)
+            landed.set()
+            return True
+
+        async def batch_and_schedule(**kwargs: object) -> list[ACExecutionResult]:
+            executor._schedule_deferred_durable_write(
+                write=slow_write, on_persisted=None, log_key="test.deferred"
+            )
+            return [
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="AC 1",
+                    success=True,
+                    final_message="Implemented AC 1",
+                )
+            ]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=batch_and_schedule)
+
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=dependency_graph.to_execution_plan(),
+            session_id="orch_drain",
+            execution_id="exec_drain",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+        )
+
+        assert result.success_count == 1
+        # The deferred write landed BEFORE execute_parallel returned.
+        assert landed.is_set()
+
+    @pytest.mark.asyncio
     async def test_execute_parallel_logs_dependency_edges(self) -> None:
         """The inferred dependency graph should be visible before cascaded skips."""
         seed = _make_seed("AC 0 foundation", "AC 1 dependent flow")

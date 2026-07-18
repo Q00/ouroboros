@@ -707,6 +707,15 @@ _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 # still bounded, so a truly unwritable store does not spin a leaked task
 # forever after the run ends.
 _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS = 48
+# How long ``execute_parallel`` waits for still-pending deferred durable
+# writes before the run completes. The primary CLI entrypoint wraps the whole
+# run in ``asyncio.run``, whose teardown CANCELS every pending task the
+# moment the run coroutine returns — without a bounded drain, a deferred
+# write scheduled near the end of a run (the common case: they fire right
+# after an AC/round completes) would be silently cancelled with zero real
+# attempts. Deliberately a final-shot bound for the in-flight attempt, not
+# the full multi-hour parked-cadence budget.
+_DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS = 10.0
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 
 
@@ -2572,6 +2581,15 @@ class ParallelACExecutor:
 
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
+
+        # Give any deferred correctness-bearing writes (ladder resolution,
+        # decomposition attestation — scheduled disproportionately near the
+        # END of a run) a bounded final shot BEFORE returning control toward
+        # the ``asyncio.run`` boundary, whose teardown cancels all pending
+        # tasks. Anything still pending after the timeout is cancelled
+        # explicitly so its own cancellation handler logs loudly instead of
+        # dying silently at loop teardown.
+        await self._drain_deferred_durable_writes()
 
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
@@ -6905,23 +6923,88 @@ Respond with either ATOMIC or the structured JSON object only.
         """
 
         async def _retry_loop() -> None:
-            for _ in range(_DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS):
-                await self._sleep(self._parked_retry_backoff_seconds)
-                try:
-                    persisted = await write()
-                except Exception as exc:  # noqa: BLE001 - store may be closing down.
-                    log.warning(f"{log_key}.deferred_write_error", error=str(exc), **log_context)
-                    persisted = False
-                if persisted:
-                    if on_persisted is not None:
-                        on_persisted()
-                    log.info(f"{log_key}.deferred_write_recovered", **log_context)
-                    return
-            log.error(f"{log_key}.deferred_write_gave_up", **log_context)
+            attempts_remaining = _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS
+            try:
+                for attempt in range(_DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS):
+                    # The FIRST attempt runs immediately — never behind the
+                    # full parked cadence. Deferred writes are scheduled
+                    # disproportionately near the END of a run (they fire
+                    # right after an AC/round completes), and the primary CLI
+                    # entrypoint wraps the whole run in ``asyncio.run``,
+                    # whose teardown cancels every still-pending task once
+                    # the run coroutine returns: a sleep-first loop gave
+                    # short runs ZERO real attempts before silent
+                    # cancellation. The precondition for reaching here at
+                    # all was a handful of just-failed foreground retries
+                    # (most plausibly a transient blip), so the immediate
+                    # attempt is also the one most likely to succeed.
+                    # Subsequent attempts hold the long operator-visible
+                    # parked cadence as before.
+                    if attempt:
+                        await self._sleep(self._parked_retry_backoff_seconds)
+                    try:
+                        persisted = await write()
+                    except Exception as exc:  # noqa: BLE001 - store may be closing down.
+                        log.warning(
+                            f"{log_key}.deferred_write_error", error=str(exc), **log_context
+                        )
+                        persisted = False
+                    attempts_remaining -= 1
+                    if persisted:
+                        if on_persisted is not None:
+                            on_persisted()
+                        log.info(f"{log_key}.deferred_write_recovered", **log_context)
+                        return
+                log.error(f"{log_key}.deferred_write_gave_up", **log_context)
+            except asyncio.CancelledError:
+                # Cancellation (the bounded drain at run completion timing
+                # out, or genuine process shutdown) must never be silent: it
+                # bypasses both the "recovered" and "gave up" logs above,
+                # and the durable log may still be missing this
+                # correctness-bearing record.
+                log.warning(
+                    f"{log_key}.deferred_write_cancelled",
+                    attempts_remaining=attempts_remaining,
+                    detail="durable state may be stale",
+                    **log_context,
+                )
+                raise
 
         task = asyncio.create_task(_retry_loop())
         self._deferred_durable_write_tasks.add(task)
         task.add_done_callback(self._deferred_durable_write_tasks.discard)
+
+    async def _drain_deferred_durable_writes(self) -> None:
+        """Give in-flight deferred durable writes a bounded final shot.
+
+        Called when the run's top-level execution flow completes, BEFORE
+        control returns toward the CLI's ``asyncio.run`` boundary — whose
+        teardown cancels every still-pending task, and deferred writes are
+        scheduled disproportionately near the END of a run. Bounded by
+        :data:`_DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS`: the goal is a
+        fair final shot for the in-flight attempt (the immediate first
+        attempt in particular), never sitting out the full multi-hour
+        parked-cadence budget. Tasks still pending after the timeout are
+        cancelled EXPLICITLY here — and then awaited — so ``_retry_loop``'s
+        own ``CancelledError`` handler logs the loud "durable state may be
+        stale" warning instead of the task dying silently at event-loop
+        teardown.
+        """
+        pending_tasks = {task for task in self._deferred_durable_write_tasks if not task.done()}
+        if not pending_tasks:
+            return
+        log.info(
+            "parallel_executor.deferred_durable_writes.draining",
+            pending=len(pending_tasks),
+            timeout_seconds=_DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS,
+        )
+        _done, still_pending = await asyncio.wait(
+            pending_tasks, timeout=_DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS
+        )
+        for task in still_pending:
+            task.cancel()
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
 
     async def _resolve_escalation_success(
         self, *, ac_idx: int, execution_id: str, session_id: str

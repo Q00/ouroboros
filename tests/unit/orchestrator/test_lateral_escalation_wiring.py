@@ -2790,3 +2790,155 @@ class TestResolvedWriteExhaustionRetriesInBackground:
 
         assert 0 not in executor._lateral_escalation_states
         assert not executor._deferred_durable_write_tasks
+
+
+class TestDeferredWriteFirstAttemptIsImmediate:
+    """Adversarial-review Bug #1: the deferred retry loop slept the FULL
+    parked cadence (default 300s) BEFORE its first attempt, while the
+    primary CLI entrypoint's ``asyncio.run`` teardown cancels all pending
+    tasks the moment the run coroutine returns. Deferred writes are
+    scheduled disproportionately near the END of a run, so in the common
+    CLI case the write got ZERO real attempts — silently, since
+    ``CancelledError`` bypassed the recovered/gave-up logging too. The
+    first attempt must run immediately; only SUBSEQUENT attempts hold the
+    parked cadence."""
+
+    @pytest.mark.asyncio
+    async def test_first_background_attempt_runs_before_any_cadence_sleep(self) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        write = AsyncMock(return_value=True)
+        on_persisted = MagicMock()
+
+        executor._schedule_deferred_durable_write(
+            write=write, on_persisted=on_persisted, log_key="test.deferred"
+        )
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        write.assert_awaited_once()
+        on_persisted.assert_called_once()
+        # The write landed with NO sleep at all — a short-lived run tears
+        # down long before the parked cadence would have elapsed.
+        executor._sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_subsequent_attempts_still_hold_parked_cadence(self) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        write = AsyncMock(side_effect=[False, False, True])
+
+        executor._schedule_deferred_durable_write(
+            write=write, on_persisted=None, log_key="test.deferred"
+        )
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        assert write.await_count == 3
+        # Exactly one cadence sleep BETWEEN each pair of attempts — never
+        # before the first.
+        assert executor._sleep.await_count == 2
+        executor._sleep.assert_awaited_with(executor._parked_retry_backoff_seconds)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_logged_not_silent(self) -> None:
+        import asyncio
+
+        import structlog.testing
+
+        executor = _make_executor_with_active_ladder()
+        started = asyncio.Event()
+
+        async def hanging_write() -> bool:
+            started.set()
+            await asyncio.Event().wait()  # pragma: no cover - cancelled mid-wait
+            return True
+
+        executor._schedule_deferred_durable_write(
+            write=hanging_write, on_persisted=None, log_key="test.deferred"
+        )
+        (task,) = executor._deferred_durable_write_tasks
+        with structlog.testing.capture_logs() as captured:
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        cancelled_logs = [
+            entry
+            for entry in captured
+            if entry["event"] == "test.deferred.deferred_write_cancelled"
+        ]
+        assert cancelled_logs, "cancellation must be loud, never silent"
+        assert cancelled_logs[0]["attempts_remaining"] > 0
+        assert "stale" in cancelled_logs[0]["detail"]
+
+
+class TestDeferredWritesDrainAtRunCompletion:
+    """Adversarial-review Bug #1 (part b): when the run's top-level flow
+    completes, in-flight deferred durable writes must get a bounded final
+    shot (``asyncio.wait`` with a timeout) before teardown cancels them —
+    and anything still pending after the timeout must be cancelled
+    explicitly (so the loop's own handler logs) rather than left for the
+    event loop to kill silently."""
+
+    @pytest.mark.asyncio
+    async def test_drain_waits_for_inflight_write_to_land(self) -> None:
+        import asyncio
+
+        executor = _make_executor_with_active_ladder()
+        landed = asyncio.Event()
+
+        async def slow_write() -> bool:
+            await asyncio.sleep(0.05)
+            landed.set()
+            return True
+
+        executor._schedule_deferred_durable_write(
+            write=slow_write, on_persisted=None, log_key="test.deferred"
+        )
+        await executor._drain_deferred_durable_writes()
+
+        assert landed.is_set()
+        await asyncio.sleep(0)  # let done-callbacks discard finished tasks
+        assert not executor._deferred_durable_write_tasks
+
+    @pytest.mark.asyncio
+    async def test_drain_cancels_stalled_writes_after_bounded_timeout(self) -> None:
+        import asyncio
+
+        import structlog.testing
+
+        executor = _make_executor_with_active_ladder()
+        started = asyncio.Event()
+
+        async def hanging_write() -> bool:
+            started.set()
+            await asyncio.Event().wait()  # pragma: no cover - cancelled mid-wait
+            return True
+
+        executor._schedule_deferred_durable_write(
+            write=hanging_write, on_persisted=None, log_key="test.deferred"
+        )
+        with (
+            patch(
+                "ouroboros.orchestrator.parallel_executor"
+                "._DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS",
+                0.05,
+            ),
+            structlog.testing.capture_logs() as captured,
+        ):
+            await executor._drain_deferred_durable_writes()
+
+        assert started.is_set()
+        await asyncio.sleep(0)
+        assert not executor._deferred_durable_write_tasks
+        # The drain's explicit cancel routed through the loop's own loud
+        # cancellation handler.
+        assert any(entry["event"] == "test.deferred.deferred_write_cancelled" for entry in captured)
+
+    @pytest.mark.asyncio
+    async def test_drain_is_a_noop_with_no_pending_writes(self) -> None:
+        executor = _make_executor_with_active_ladder()
+        await executor._drain_deferred_durable_writes()
+        assert not executor._deferred_durable_write_tasks
