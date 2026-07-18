@@ -19,6 +19,19 @@ A triad row joins three measured axes by ``ac_id``:
   accepted-leaf journal evidence (seed AC4).
 * **baseline** — ``execution.ac.shadow_replay`` (baseline_token_spend at parent
   model tier), emitted only by the opt-in isolated replay experiment (seed AC5).
+  Its own ``decomposition_trustworthy`` field is only the PROPOSAL/prior-round
+  trust signal available before this round's real gate-anchored attestation
+  has run (Fix 1 -- see ``decomposition_attestation.py``), so it is later
+  authoritatively overridden per matching ``(node, retry_attempt)`` by
+  ``execution.ac.decomposition_attested`` below whenever that event exists.
+* **attestation override** — ``execution.ac.decomposition_attested`` (Fix 3,
+  round 3): the REAL, post-round, gate-anchored trust verdict for the same
+  decomposition round the child's baseline was measured in. When present for
+  a row's attempt, it is authoritative over the shadow-replay proposal-time
+  value -- an untrustworthy post-round attestation invalidates that attempt's
+  row even if the earlier shadow-replay snapshot said trustworthy. Correlated
+  by ``(run, parent_node_id, retry_attempt)`` since this event carries no
+  ``ac_id`` (it is scoped to the decomposition ROUND, not one child).
 * **acceptance** — ``execution.ac.outcome_finalized``. Proof rows remain provisional
   until the seed-level verify/retry layer authoritatively accepts their root AC.
 
@@ -65,6 +78,7 @@ EVENT_TOKEN_ATTRIBUTION = "execution.ac.token_attribution.reported"
 EVENT_DELIVER_VERDICT = "execution.ac.deliver_verdict"
 EVENT_SHADOW_REPLAY = "execution.ac.shadow_replay"
 EVENT_AC_OUTCOME_FINALIZED = "execution.ac.outcome_finalized"
+EVENT_DECOMPOSITION_ATTESTED = "execution.ac.decomposition_attested"
 
 EFFORT_MODE_ENFORCED = "enforced"
 MODEL_MODE_ENFORCED = "enforced"
@@ -241,6 +255,14 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         dict[int, list[tuple[bool | None, bool | None]]],
     ] = {}
     finalized_invalid: set[tuple[str | None, int]] = set()
+    # Fix 3 (round 3, BLOCKING): the REAL post-round gate-anchored trust verdict,
+    # keyed by (run, decomposition-round node id, retry_attempt) since
+    # ``execution.ac.decomposition_attested`` is scoped to the ROUND, not one
+    # child, and carries no ``ac_id`` to join through ``slot()``. A duplicate
+    # attestation for the same (run, node, attempt) is ambiguous replay, not a
+    # authoritative measurement -- poisoned rather than silently picked.
+    attestations: dict[tuple[str | None, str, int], bool] = {}
+    attestations_invalid: set[tuple[str | None, str, int]] = set()
 
     def merge_root(row: dict, data: Mapping) -> None:
         observed = parse_root_ac_index(data)
@@ -262,6 +284,18 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             row["is_decomposed_child"] = observed
         elif current != observed:
             row["decomposition_flag_invalid"] = True
+
+    def merge_parent_node_id(row: dict, data: Mapping) -> None:
+        # The decomposition round's node id this child belongs to -- the join
+        # key to ``execution.ac.decomposition_attested`` (Fix 3, round 3).
+        observed = data.get("parent_node_id")
+        if not isinstance(observed, str) or not observed:
+            return
+        current = row.get("parent_node_id")
+        if current is None:
+            row["parent_node_id"] = observed
+        elif current != observed:
+            row["parent_node_id_invalid"] = True
 
     def slot(data: Mapping) -> dict | None:
         ac_id = data.get("ac_id")
@@ -300,6 +334,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             merge_root(row, data)
             merge_decomposed(row, data)
+            merge_parent_node_id(row, data)
             row.setdefault("effort_levels", set()).add(data.get("effort_level"))
             row.setdefault("effort_modes", set()).add(data.get("effort_mode"))
             if data.get("parent_effort") is not None:
@@ -310,6 +345,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             merge_root(row, data)
             merge_decomposed(row, data)
+            merge_parent_node_id(row, data)
             attempt = parse_retry_attempt(data)
             if attempt is None:
                 row["model_invalid"] = True
@@ -337,6 +373,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
+            merge_parent_node_id(row, data)
             attempt = parse_retry_attempt(data)
             # One logical AC may emit one attribution event per retry/resume
             # attempt. Spend is cumulative across those attempts, and EventStore
@@ -362,6 +399,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
+            merge_parent_node_id(row, data)
             attempt = parse_retry_attempt(data)
             verdict = data.get("traceguard_verdict")
             claim_rate = _finite_number(data.get("unsupported_claim_rate"))
@@ -395,6 +433,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             if row is None:
                 continue
             merge_root(row, data)
+            merge_parent_node_id(row, data)
             attempt = parse_retry_attempt(data)
             baseline = _finite_number(data.get("baseline_token_spend"))
             baseline_mode = data.get("baseline_mode")
@@ -428,6 +467,27 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 # A replay is run once per live attempt. Summing a duplicate only
                 # on the denominator can turn an ordinary row into a false PASS.
                 row["baseline_invalid"] = True
+        elif etype == EVENT_DECOMPOSITION_ATTESTED:
+            # Fix 3 (round 3, BLOCKING): the REAL post-round gate-anchored
+            # verdict for this decomposition round, keyed by (run, node,
+            # retry_attempt) rather than joined through ``slot()`` -- this
+            # event has no ``ac_id`` (it is scoped to the whole round, not one
+            # child). Applied as an authoritative override per matching
+            # attempt when building each row below.
+            run_key = execution_run_anchor(data)
+            node_id = data.get("node_id")
+            attempt = parse_retry_attempt(data)
+            trustworthy = _strict_bool(data.get("trustworthy"))
+            if not isinstance(node_id, str) or not node_id or attempt is None or trustworthy is None:
+                continue
+            attestation_key = (run_key, node_id, attempt)
+            if attestation_key in attestations:
+                # A duplicate attestation for the same round+attempt is
+                # ambiguous replay, not a second measurement -- poison it
+                # rather than silently keep whichever arrived first.
+                attestations_invalid.add(attestation_key)
+            else:
+                attestations[attestation_key] = trustworthy
 
     rows: list[FrugalityTriadRow] = []
     for v in acc.values():
@@ -505,6 +565,29 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         effort_levels = v.get("effort_levels", set())
         effort_modes = v.get("effort_modes", set())
         parent_efforts = v.get("parent_efforts", set())
+
+        # Fix 3 (round 3, BLOCKING): the shadow-replay baseline's own
+        # ``decomposition_trustworthy`` is only the PROPOSAL/prior-round trust
+        # signal (recorded before this round's real gate-anchored attestation
+        # runs -- see the module docstring). Whenever a REAL post-round
+        # ``execution.ac.decomposition_attested`` verdict exists for one of
+        # this row's attempts, it is authoritative: an untrustworthy
+        # attestation invalidates that attempt even if the earlier
+        # shadow-replay snapshot said trustworthy. A missing attestation for
+        # an attempt (older event streams predating this fix, or a degraded
+        # write) does not itself invalidate the row -- only a REAL
+        # untrustworthy verdict, or an unresolvable duplicate, does.
+        parent_node_id = v.get("parent_node_id")
+        attestation_trustworthy = True
+        if isinstance(parent_node_id, str) and not v.get("parent_node_id_invalid", False):
+            for attempt in attempt_sets[0]:
+                attestation_key = (v.get("seed_run_id"), parent_node_id, attempt)
+                if attestation_key in attestations_invalid or not attestations.get(
+                    attestation_key, True
+                ):
+                    attestation_trustworthy = False
+                    break
+
         rows.append(
             FrugalityTriadRow(
                 ac_id=v["ac_id"],
@@ -518,6 +601,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                     bool(baselines)
                     and all(value[3] for value in baselines.values())
                     and not v.get("baseline_invalid", False)
+                    and attestation_trustworthy
                 ),
                 effort_level=next(iter(effort_levels)) if len(effort_levels) == 1 else None,
                 effort_mode=next(iter(effort_modes)) if len(effort_modes) == 1 else None,

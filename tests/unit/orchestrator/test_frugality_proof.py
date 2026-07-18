@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros.orchestrator.frugality_proof import (
     EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_DECOMPOSITION_ATTESTED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
     EVENT_MODEL_ROUTED,
@@ -596,6 +597,134 @@ class TestAssembleTriads:
         assert row.model == row.baseline_model
         assert not row.model_lowering_enforced
         assert not row.counts_in_proof
+
+
+class TestDecompositionAttestedOverride:
+    """Fix 3 (round 3, BLOCKING): ``execution.ac.shadow_replay`` records the
+    PROPOSAL/prior-round trust signal BEFORE the current decomposition round
+    is attested by the real gate-anchored oracle (attestation happens later,
+    after all children finish -- see ``_attest_decomposition_round``). The
+    proof must not keep treating an initially-cheap split as trustworthy once
+    the post-round attestation proves otherwise for that same attempt.
+    """
+
+    def test_untrustworthy_post_round_attestation_overrides_trustworthy_shadow_replay(
+        self,
+    ) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        for event in events:
+            if event["type"] == EVENT_SHADOW_REPLAY:
+                # Proposal-time snapshot: looked trustworthy before the round
+                # attested.
+                event["data"]["decomposition_trustworthy"] = True
+                event["data"]["parent_node_id"] = "node-root-1"
+
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r1",
+                retry_attempt=0,
+                trustworthy=False,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.decomposition_trustworthy is False
+        assert not row.counts_in_proof
+
+    def test_trustworthy_post_round_attestation_keeps_row_trustworthy(self) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        for event in events:
+            if event["type"] == EVENT_SHADOW_REPLAY:
+                event["data"]["decomposition_trustworthy"] = True
+                event["data"]["parent_node_id"] = "node-root-1"
+
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r1",
+                retry_attempt=0,
+                trustworthy=True,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.decomposition_trustworthy is True
+        assert row.counts_in_proof
+
+    def test_missing_attestation_falls_back_to_shadow_replay_value(self) -> None:
+        """No ``execution.ac.decomposition_attested`` event at all (older event
+        streams predating this fix, or a degraded write) must not itself
+        invalidate a row -- only a REAL untrustworthy verdict does."""
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        for event in events:
+            if event["type"] == EVENT_SHADOW_REPLAY:
+                event["data"]["decomposition_trustworthy"] = True
+                event["data"]["parent_node_id"] = "node-root-1"
+
+        row = assemble_triads(events)[0]
+
+        assert row.decomposition_trustworthy is True
+        assert row.counts_in_proof
+
+    def test_duplicate_attestation_for_same_round_attempt_is_ambiguous_and_poisons_row(
+        self,
+    ) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        for event in events:
+            if event["type"] == EVENT_SHADOW_REPLAY:
+                event["data"]["decomposition_trustworthy"] = True
+                event["data"]["parent_node_id"] = "node-root-1"
+
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r1",
+                retry_attempt=0,
+                trustworthy=True,
+            )
+        )
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r1",
+                retry_attempt=0,
+                trustworthy=True,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.decomposition_trustworthy is False
+        assert not row.counts_in_proof
+
+    def test_attestation_for_a_different_run_does_not_leak_across_runs(self) -> None:
+        events = _triad_events("ac1", "r1", retry_attempt=0)
+        for event in events:
+            if event["type"] == EVENT_SHADOW_REPLAY:
+                event["data"]["decomposition_trustworthy"] = True
+                event["data"]["parent_node_id"] = "node-root-1"
+
+        events.append(
+            _evt(
+                EVENT_DECOMPOSITION_ATTESTED,
+                node_id="node-root-1",
+                seed_run_id="r-OTHER",
+                retry_attempt=0,
+                trustworthy=False,
+            )
+        )
+
+        row = assemble_triads(events)[0]
+
+        assert row.decomposition_trustworthy is True
+        assert row.counts_in_proof
 
 
 class TestEvaluateProof:

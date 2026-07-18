@@ -108,6 +108,7 @@ class ExecutionEventEmitter:
         session_id: str,
         node_identity: ExecutionNodeIdentity,
         attestation: DecompositionAttestation,
+        retry_attempt: int,
     ) -> None:
         """Persist the gate-anchored decomposition trust verdict (Task 1).
 
@@ -116,6 +117,16 @@ class ExecutionEventEmitter:
         resulting shared workspace. Durable so Kanban/HUD/conductor surfaces
         (Task 3) and the frugality proof's ``decomposition_trustworthy`` axis
         can read it without recomputing anything.
+
+        ``retry_attempt`` is the root AC's retry index for the round just
+        attested -- the SAME value forwarded to every child dispatched this
+        round (see ``_execute_decomposition_children``), so the frugality
+        proof (Fix 3, round 3) can correlate this event with the exact
+        per-attempt rows it should (re-)authorize or invalidate, the same way
+        every other per-child event already correlates by ``retry_attempt``.
+        ``node_identity.to_event_metadata()`` carries no retry information
+        (a node id is structural/path-based and stable across retries), so
+        this field is threaded explicitly rather than folded into it.
         """
         await self._safe_emit_event(
             BaseEvent(
@@ -127,6 +138,7 @@ class ExecutionEventEmitter:
                     **attestation.to_event_data(),
                     "execution_id": execution_id,
                     "session_id": session_id,
+                    "retry_attempt": retry_attempt,
                 },
             )
         )

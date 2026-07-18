@@ -2722,6 +2722,7 @@ class ParallelACExecutor:
             session_id=session_id,
             node_identity=node_identity,
             attestation=attestation,
+            retry_attempt=retry_attempt,
         )
 
         return ACExecutionResult(
