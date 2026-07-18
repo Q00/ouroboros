@@ -2988,6 +2988,7 @@ class ParallelACExecutor:
                 verdict=attestation.verdict.value,
                 trustworthy=attestation.trustworthy,
             )
+            computed_attestation = attestation
             attestation = DecompositionAttestation(
                 node_id=node_identity.node_id,
                 verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
@@ -3000,6 +3001,50 @@ class ParallelACExecutor:
                 ),
             )
             self._decomposition_attestations[node_identity.node_id] = attestation
+            # Round-6 Finding #4 (BLOCKING): the in-memory sentinel above
+            # protects THIS process, but after a crash the durable log is
+            # genuinely EMPTY for this node id — and
+            # ``_load_decomposition_attestation`` reads a clean log with no
+            # matching event as the legitimate "never attested" miss
+            # (``None``), re-authorizing the proposal-trust discount. That
+            # is the same "write failed vs never happened" silence problem
+            # finding #3 fixed for the ladder's resolution write; reuse its
+            # exact convention: keep retrying the ORIGINAL computed
+            # attestation at the long parked cadence in the background, and
+            # only restore the truthful verdict to the in-memory cache once
+            # the durable log actually corroborates it.
+            sentinel = attestation
+
+            async def _retry_attestation_write() -> bool:
+                # A newer round for this node id has since replaced the
+                # sentinel (its own attestation was computed and written):
+                # backfilling the OLDER round's event now would append it
+                # AFTER the newer one and win the loader's last-write-wins
+                # replay. Stop retrying — the newer record is authoritative.
+                if self._decomposition_attestations.get(node_identity.node_id) is not sentinel:
+                    return True
+                persisted = await self._event_emitter.emit_decomposition_attested(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_identity=node_identity,
+                    attestation=computed_attestation,
+                    retry_attempt=retry_attempt,
+                )
+                if persisted and (
+                    self._decomposition_attestations.get(node_identity.node_id) is sentinel
+                ):
+                    self._decomposition_attestations[node_identity.node_id] = (
+                        computed_attestation
+                    )
+                return persisted
+
+            self._schedule_deferred_durable_write(
+                write=_retry_attestation_write,
+                on_persisted=None,
+                log_key="parallel_executor.decomposition_attestation",
+                node_id=node_identity.node_id,
+                execution_id=execution_id,
+            )
 
         return ACExecutionResult(
             ac_index=ac_index,

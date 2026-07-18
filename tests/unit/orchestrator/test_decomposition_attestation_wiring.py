@@ -1601,6 +1601,23 @@ class TestAttestationWriteFailureFailsClosed:
         assert cached.trustworthy is False
         assert cached.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
 
+        # Round-6 Finding #4: the exhausted write keeps retrying in the
+        # background; when it NEVER lands, the give-up is loud and the
+        # cache keeps the fail-closed sentinel.
+        import asyncio
+
+        from ouroboros.orchestrator.parallel_executor import (
+            _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS,
+        )
+
+        assert executor._deferred_durable_write_tasks
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+        assert executor._event_emitter.emit_decomposition_attested.await_count == (
+            3 + _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS
+        )
+        still_cached = executor._decomposition_attestations[node_identity.node_id]
+        assert still_cached.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+
     @pytest.mark.asyncio
     async def test_transient_write_failure_recovers_and_keeps_real_verdict(self) -> None:
         """Control: a write that lands on an extra retry round keeps the
@@ -1631,3 +1648,108 @@ class TestAttestationWriteFailureFailsClosed:
         assert result.decomposition_attestation is not None
         assert result.decomposition_attestation.trustworthy is True
         assert executor._decomposition_attestations[node_identity.node_id].trustworthy is True
+        # No background retry task for a write that landed in the foreground.
+        assert not executor._deferred_durable_write_tasks
+
+    @pytest.mark.asyncio
+    async def test_background_retry_lands_original_attestation_and_restores_cache(
+        self,
+    ) -> None:
+        """Round-6 Finding #4 (BLOCKING): after a crash, an EMPTY durable log
+        for this node id replays as the legitimate 'never attested' miss and
+        re-authorizes the proposal-trust discount — 'write failed' and
+        'never happened' are indistinguishable silence. The exhausted write
+        must keep retrying in the background (finding #3's convention), and
+        once the ORIGINAL computed attestation finally lands, the durable
+        log corroborates it and the in-memory cache is restored to the
+        truthful verdict."""
+        import asyncio
+
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(
+            side_effect=[False, False, False, True]
+        )
+        executor._sleep = AsyncMock()
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        result = await executor._execute_decomposition_children(
+            decision=decision, **self._dispatch_kwargs(node_identity)
+        )
+
+        # The round itself still fails closed (unchanged round-5 behavior).
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.trustworthy is False
+        assert executor._deferred_durable_write_tasks
+
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        # The background retry re-emitted the ORIGINAL computed attestation
+        # (trustworthy), not the sentinel...
+        assert executor._event_emitter.emit_decomposition_attested.await_count == 4
+        landed = executor._event_emitter.emit_decomposition_attested.await_args_list[-1]
+        assert landed.kwargs["attestation"].trustworthy is True
+        assert landed.kwargs["attestation"].verdict is DecompositionTrustVerdict.TRUSTWORTHY
+        # ...and the cache was restored to the now-corroborated verdict.
+        assert executor._decomposition_attestations[node_identity.node_id].trustworthy is True
+
+    @pytest.mark.asyncio
+    async def test_background_retry_stops_when_superseded_by_newer_round(self) -> None:
+        """A newer round's attestation for the same node id must never be
+        overwritten in replay by a late-landing backfill of the OLDER
+        round's event (the loader is last-write-wins): once the sentinel is
+        replaced, the background retry stops without emitting."""
+        import asyncio
+
+        from ouroboros.harness.decomposition_attestation import DecompositionAttestation
+
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(return_value=False)
+        executor._sleep = AsyncMock()
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        await executor._execute_decomposition_children(
+            decision=decision, **self._dispatch_kwargs(node_identity)
+        )
+        assert executor._event_emitter.emit_decomposition_attested.await_count == 3
+
+        # A newer round replaces the sentinel before the background retry
+        # fires (its own write path owns durability for the new verdict).
+        newer = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="newer round",
+        )
+        executor._decomposition_attestations[node_identity.node_id] = newer
+
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        # The background loop stopped WITHOUT emitting the stale event and
+        # WITHOUT touching the newer cached verdict.
+        assert executor._event_emitter.emit_decomposition_attested.await_count == 3
+        assert executor._decomposition_attestations[node_identity.node_id] is newer
