@@ -2554,3 +2554,150 @@ class TestResumeRestoresPersistedRetryAttempt:
         state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
 
         assert state.parked is True
+
+
+class TestNonSuccessLadderExitsResolveDurableState:
+    """Round-6 Finding #2 (BLOCKING): two ladder exits are terminal but NOT
+    successes — a redispatch that came back decomposed, and a redispatch
+    that produced a non-retryable result. Neither emitted any terminal
+    transition, so the node's latest replayable escalation record stayed
+    ``progressed``: replay presented a terminally-done AC as still actively
+    escalating forever, and a later resume re-entered stale ladder state.
+    Both exits must durably close the episode (with the distinct
+    ``lateral_escalation_interrupted`` signal — ``parked_resolved`` means
+    SUCCESS per round 5)."""
+
+    @pytest.fixture
+    async def memory_event_store(self) -> AsyncIterator[EventStore]:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    @staticmethod
+    def _durable_ladder_executor(event_store: EventStore) -> ParallelACExecutor:
+        """Active-ladder executor with the REAL emitter over a REAL durable
+        store — these tests verify the durable event log itself."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._lateral_escalation_enabled = True
+        executor._model_router = ModelRouter(
+            tier_models={"frontier": "gpt-frontier"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="frontier",
+            escalation_retry_threshold=999,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._emit_ac_outcome_finalized = AsyncMock()
+        executor._sleep = AsyncMock()
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        return executor
+
+    async def _escalation_events(self, store: EventStore, node_id: str) -> list[BaseEvent]:
+        events = await store.replay("execution", "exec-1")
+        return [
+            event
+            for event in events
+            if event.type
+            in {
+                "execution.ac.lateral_escalation_progressed",
+                "execution.ac.parked_for_operator",
+                "execution.ac.parked_resolved",
+                "execution.ac.lateral_escalation_interrupted",
+            }
+            and event.data.get("node_id") == node_id
+        ]
+
+    @pytest.mark.asyncio
+    async def test_decomposed_redispatch_exit_durably_closes_episode(
+        self, memory_event_store: EventStore
+    ) -> None:
+        executor = self._durable_ladder_executor(memory_event_store)
+        decomposed_failure = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="decomposition children failed",
+            is_decomposed=True,
+        )
+        executor._execute_ac_batch = AsyncMock(return_value=[decomposed_failure])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        # The ladder handed back the CURRENT decomposed result (exit a).
+        assert outcome is not None
+        assert outcome.is_decomposed is True
+        assert outcome.success is False
+
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        escalation_events = await self._escalation_events(memory_event_store, node_id)
+        # The episode durably began...
+        assert any(
+            event.type == "execution.ac.lateral_escalation_progressed"
+            for event in escalation_events
+        )
+        # ...and the LATEST durable record closes it — no stale "escalating".
+        assert escalation_events[-1].type == "execution.ac.lateral_escalation_interrupted"
+        assert escalation_events[-1].data["reason"] == "redispatch_decomposed"
+
+        # A later cold start reconstructs FRESH state (ordinary path), not a
+        # stale mid-ladder streak.
+        cold = self._durable_ladder_executor(memory_event_store)
+        state = await cold._load_lateral_escalation_state(0, execution_id="exec-1")
+        assert state == LateralEscalationState()
+
+        # And the board projection shows no escalation badge for the node.
+        from ouroboros.dashboard.board import reduce_board
+
+        events = await memory_event_store.replay("execution", "exec-1")
+        board = reduce_board(
+            [{"event_type": event.type, "payload": event.data} for event in events],
+            execution_id="exec-1",
+        )
+        all_cards = [card for column in board["columns"].values() for card in column]
+        for card in all_cards:
+            if card.get("id") == node_id:
+                assert "escalation_state" not in card
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_redispatch_exit_durably_closes_episode(
+        self, memory_event_store: EventStore
+    ) -> None:
+        executor = self._durable_ladder_executor(memory_event_store)
+        infra_fatal = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="adapter crashed mid-redispatch",
+            infra_fatal=True,
+        )
+        executor._execute_ac_batch = AsyncMock(return_value=[infra_fatal])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        # The ladder propagated the fresh non-retryable result (exit b).
+        assert outcome is not None
+        assert outcome.success is False
+        assert outcome.infra_fatal is True
+
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        escalation_events = await self._escalation_events(memory_event_store, node_id)
+        assert any(
+            event.type == "execution.ac.lateral_escalation_progressed"
+            for event in escalation_events
+        )
+        assert escalation_events[-1].type == "execution.ac.lateral_escalation_interrupted"
+        assert escalation_events[-1].data["reason"] == "not_retryable"
+
+        # A later resume must NOT auto-redispatch this AC through the
+        # resumed-ladder path: reconstruction is fresh.
+        cold = self._durable_ladder_executor(memory_event_store)
+        state = await cold._load_lateral_escalation_state(0, execution_id="exec-1")
+        assert state == LateralEscalationState()

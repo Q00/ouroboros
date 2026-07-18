@@ -380,6 +380,15 @@ class RecordConductorDecisionHandler:
                 event_type="execution.ac.lateral_escalation_progressed",
                 limit=200,
             )
+            # Round-6 Finding #2: the NON-SUCCESS terminal ladder exit
+            # (redispatch decomposed / non-retryable). Without folding it,
+            # this summary would keep citing a terminally-done AC as still
+            # actively escalating/parked forever.
+            interrupted = await self.event_store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.ac.lateral_escalation_interrupted",
+                limit=200,
+            )
         except Exception:  # noqa: BLE001 - optional audit enrichment, never fatal.
             return None
 
@@ -397,7 +406,8 @@ class RecordConductorDecisionHandler:
         # so a later event always overwrites an earlier one's state for that
         # node id.
         combined = sorted(
-            (*attested, *parked, *resolved, *progressed), key=lambda item: item.timestamp
+            (*attested, *parked, *resolved, *progressed, *interrupted),
+            key=lambda item: item.timestamp,
         )
         node_states: dict[str, dict[str, Any]] = {}
         for item in combined:
@@ -416,7 +426,10 @@ class RecordConductorDecisionHandler:
             elif item.type == "execution.ac.parked_for_operator":
                 state["parked"] = True
                 state["escalating"] = False
-            elif item.type == "execution.ac.parked_resolved":
+            elif item.type in {
+                "execution.ac.parked_resolved",
+                "execution.ac.lateral_escalation_interrupted",
+            }:
                 state["parked"] = False
                 state["escalating"] = False
 

@@ -72,6 +72,7 @@ _TRUST_ESCALATION_EVENTS = frozenset(
         "execution.ac.lateral_escalation_progressed",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
+        "execution.ac.lateral_escalation_interrupted",
     }
 )
 
@@ -465,12 +466,19 @@ def reduce_board(
                 if isinstance(personas_tried, list):
                     card["escalation_personas_tried"] = len(personas_tried)
 
-        elif event_type == "execution.ac.parked_resolved":
+        elif event_type in {
+            "execution.ac.parked_resolved",
+            "execution.ac.lateral_escalation_interrupted",
+        }:
             # Fix 8: the parked AC above eventually succeeded. Clear the
             # badge so the card does not show ``completed`` AND still-
             # ``parked`` at once — without this, folding the event log alone
             # (no other durable "un-parked" signal exists) leaves the parked
             # badge stuck forever.
+            # Round-6 Finding #2: ``lateral_escalation_interrupted`` is the
+            # NON-SUCCESS terminal exit (redispatch decomposed /
+            # non-retryable) — same "episode over" badge-clearing fold, so a
+            # terminally-done card never shows as still actively escalating.
             node_id = payload.get("node_id")
             if isinstance(node_id, str) and node_id:
                 card = _card(cards, node_id)

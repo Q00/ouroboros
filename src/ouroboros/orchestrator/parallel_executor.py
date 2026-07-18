@@ -6641,6 +6641,11 @@ Respond with either ATOMIC or the structured JSON object only.
         * ``execution.ac.parked_resolved`` (Fix 8) — resets reconstruction to
           a fresh state, so a parked-then-succeeded AC correctly starts a
           brand new cycle rather than staying "still parked" forever.
+        * ``execution.ac.lateral_escalation_interrupted`` (Round-6 #2) — the
+          NON-SUCCESS terminal ladder exit (redispatch decomposed /
+          non-retryable); resets reconstruction to fresh exactly like the
+          success resolution, so a later resume never re-enters stale ladder
+          state for a terminally-done AC.
 
         No matching event means a fresh, never-escalated state — identical
         to today's in-memory default.
@@ -6699,12 +6704,21 @@ Respond with either ATOMIC or the structured JSON object only.
                 "execution.ac.parked_for_operator",
                 "execution.ac.lateral_escalation_progressed",
                 "execution.ac.parked_resolved",
+                "execution.ac.lateral_escalation_interrupted",
             }:
                 continue
             data = getattr(event, "data", None)
             if not isinstance(data, dict) or data.get("node_id") != node_id:
                 continue
-            if event_type == "execution.ac.parked_resolved":
+            if event_type in {
+                "execution.ac.parked_resolved",
+                # Round-6 Finding #2: a non-success terminal ladder exit
+                # (redispatch decomposed / non-retryable) also ends the
+                # episode — reconstruction resets to fresh exactly like the
+                # success resolution, so a later resume takes the ordinary
+                # path instead of re-entering stale ladder state.
+                "execution.ac.lateral_escalation_interrupted",
+            }:
                 latest_state_data = None
                 latest_state_type = None
                 latest_progressed_data = None
@@ -6847,6 +6861,56 @@ Respond with either ATOMIC or the structured JSON object only.
                 node_id=resolved_node_id,
             )
         self._lateral_escalation_states.pop(ac_idx, None)
+        self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+
+    async def _terminate_escalation_episode(
+        self, *, ac_idx: int, execution_id: str, session_id: str, reason: str
+    ) -> None:
+        """Durably close this root AC's escalation episode on a NON-SUCCESS exit.
+
+        Round-6 Finding #2 (BLOCKING): two ladder exits are terminal but not
+        successes — a redispatch that came back decomposed, and a redispatch
+        that produced a non-retryable/infra-fatal result. Neither may reuse
+        ``parked_resolved`` (Round-5 established it means SUCCESS), but both
+        still need SOME durable terminal transition: without one, the node's
+        latest replayable escalation record stays ``progressed``, replay
+        shows a terminally-done AC as still actively escalating forever, and
+        a later resume re-enters stale ladder state (auto-redispatching an
+        AC whose last real outcome was, e.g., infra-fatal — contra the
+        "infra-fatal fails immediately" mandate) instead of the ordinary
+        fresh path.
+
+        Same write-durability convention as ``_resolve_escalation_success``
+        (Round-5 Finding #4): a terminal exit cannot be held hostage by a
+        failing write, so it gets bounded EXTRA retry rounds on top of
+        ``_safe_emit_event``'s own, then a loud correctness-specific error.
+        """
+        node_id = ExecutionNodeIdentity.root(
+            execution_context_id=execution_id, ac_index=ac_idx
+        ).node_id
+        interrupted_persisted = False
+        for extra_attempt in range(3):
+            if extra_attempt:
+                await self._sleep(min(2.0 * (2**extra_attempt), 10.0))
+            interrupted_persisted = await self._event_emitter.emit_lateral_escalation_interrupted(
+                execution_id=execution_id,
+                session_id=session_id,
+                node_id=node_id,
+                root_ac_index=ac_idx,
+                reason=reason,
+            )
+            if interrupted_persisted:
+                break
+        if not interrupted_persisted:
+            log.error(
+                "parallel_executor.lateral_escalation.interrupted_write_failed_correctness_risk",
+                ac_idx=ac_idx,
+                execution_id=execution_id,
+                node_id=node_id,
+                reason=reason,
+            )
+        self._lateral_escalation_states.pop(ac_idx, None)
+        self._lateral_escalation_resume_attempts.pop(ac_idx, None)
 
     async def _resume_escalated_ac(
         self,
@@ -7099,6 +7163,15 @@ Respond with either ATOMIC or the structured JSON object only.
                 # CURRENT result (not ``None``, which would make the caller
                 # fall back to the stale pre-ladder result -- the same class
                 # of bug Fix 3 fixes for the infra-fatal case).
+                # Round-6 Finding #2: this is a terminal ladder exit that is
+                # NOT a success — durably close the episode so replay/resume
+                # never sees this AC as still "actively escalating".
+                await self._terminate_escalation_episode(
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    reason="redispatch_decomposed",
+                )
                 return current_result
             engaged = True
 
@@ -7323,6 +7396,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 # AC's final state. The caller now distinguishes a returned
                 # FAILED result from a returned SUCCESS result and emits
                 # recovery-exhausted for the former using THIS fresh result.
+                # Round-6 Finding #2: this is a terminal ladder exit that is
+                # NOT a success — durably close the episode so replay/resume
+                # never sees this AC as still "actively escalating", and a
+                # later resume never auto-redispatches an AC whose last real
+                # outcome was non-retryable/infra-fatal.
+                await self._terminate_escalation_episode(
+                    ac_idx=ac_idx,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    reason="not_retryable",
+                )
                 return candidate
 
     async def _run_batch_with_verify_and_retry(

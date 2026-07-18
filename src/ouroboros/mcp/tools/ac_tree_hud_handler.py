@@ -59,6 +59,7 @@ _TREE_CHANGE_EVENT_TYPES = frozenset(
         "execution.ac.lateral_escalation_progressed",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
+        "execution.ac.lateral_escalation_interrupted",
     }
 )
 
@@ -849,6 +850,7 @@ _TRUST_ESCALATION_EVENT_TYPES = frozenset(
         "execution.ac.lateral_escalation_progressed",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
+        "execution.ac.lateral_escalation_interrupted",
     }
 )
 
@@ -910,7 +912,12 @@ def _merge_trust_escalation_events_into_snapshot(
                 nodes[target_id]["escalation_persona"] = persona
         elif event_type == "execution.ac.parked_for_operator":
             nodes[target_id]["escalation_state"] = "parked"
-        else:  # execution.ac.parked_resolved (Fix 8): clear the parked badge.
+        else:
+            # execution.ac.parked_resolved (Fix 8) and
+            # execution.ac.lateral_escalation_interrupted (Round-6 #2):
+            # either way the node's escalation episode is over — clear the
+            # badge so a terminally-done node never shows as still
+            # parked/escalating.
             nodes[target_id].pop("escalation_state", None)
             nodes[target_id].pop("escalation_persona", None)
 

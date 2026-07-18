@@ -324,6 +324,55 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_lateral_escalation_interrupted(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_id: str,
+        root_ac_index: int,
+        reason: str,
+    ) -> bool:
+        """Persist a NON-SUCCESS terminal exit of the escalation ladder (Round-6 #2).
+
+        ``parked_resolved`` means "this node's escalation episode ended in
+        SUCCESS" (Round-5 Finding #3 established that meaning for every
+        consumer), so the two ladder exits that are NOT successes — a
+        redispatch that came back decomposed (the AC is no longer stuck at
+        maximum strength, so the persona ladder stops), and a redispatch
+        that produced a non-retryable/infra-fatal result (surfaced as
+        terminal failure) — previously emitted NO terminal transition at
+        all. The node's latest replayable escalation record stayed
+        ``lateral_escalation_progressed``, so replay-based projections
+        showed a terminally-done AC as still actively "escalating" forever,
+        and a later resume re-entered stale ladder state (auto-redispatching
+        an AC whose last real outcome was, e.g., infra-fatal) instead of the
+        ordinary fresh path.
+
+        Consumers treat this exactly like ``parked_resolved`` structurally
+        ("this node's escalation episode is over": clear badges, reset
+        durable-state reconstruction to fresh) while ``reason`` records that
+        the exit was not a success.
+
+        Returns:
+            Whether the write was durably persisted -- correctness-bearing
+            state, same contract as every other escalation write here.
+        """
+        return await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_interrupted",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "node_id": node_id,
+                    "root_ac_index": root_ac_index,
+                    "reason": reason,
+                },
+            )
+        )
+
     async def emit_bounce_classified(
         self,
         *,
