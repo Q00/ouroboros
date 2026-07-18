@@ -1704,6 +1704,7 @@ class ParallelACExecutor:
         execution_counters: dict[str, int] | None = None,
         retry_prompts: dict[int, str] | None = None,
         same_runtime_budget_exhausted: bool = True,
+        force_frontier_routing: bool = False,
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool.
 
@@ -1711,6 +1712,14 @@ class ParallelACExecutor:
         it is ``True`` only on the batch attempt that spends the AC's configured
         same-runtime retry budget, gating cross-harness redispatch (PR-X X1) so
         it never pre-empts those retries.
+
+        ``force_frontier_routing`` (Round-5 Finding #2, BLOCKING) is set only
+        by the lateral-escalation ladder's own redispatches: each ACTIVELY
+        configured routing axis is forced to its true ceiling (frontier tier /
+        max effort) instead of the incremental per-retry climb designed for
+        the pre-ladder retry loop — the ladder's eligibility check already
+        treats the AC as operating at those ceilings, so its dispatches must
+        actually run there.
         """
         batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
         sibling_acs: list[_SiblingACRef] = (
@@ -1739,6 +1748,7 @@ class ParallelACExecutor:
                         execution_counters=execution_counters,
                         retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
                         same_runtime_budget_exhausted=same_runtime_budget_exhausted,
+                        force_frontier_routing=force_frontier_routing,
                         ac_spec=(
                             ac_criterion
                             if isinstance(ac_criterion, AcceptanceCriterionSpec)
@@ -3421,6 +3431,7 @@ class ParallelACExecutor:
         investment_spec: InvestmentSpec | None = None,
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
+        force_frontier_routing: bool = False,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -3465,6 +3476,12 @@ class ParallelACExecutor:
             decomposition_trustworthy: Explicit deterministic trust for this unit's
                 decomposition. Defaults fail closed; current live decomposition has
                 no trusted producer.
+            force_frontier_routing: Round-5 Finding #2 (BLOCKING). ``True`` only
+                for lateral-escalation-ladder-owned redispatches: each ACTIVELY
+                configured routing axis dispatches at its true ceiling (frontier
+                tier / max effort) instead of the incremental per-retry climb.
+                Forwarded to the atomic leaf and to a cross-harness replay of
+                this same call; dormant axes stay dormant.
 
         Returns:
             ACExecutionResult for this AC.
@@ -3616,6 +3633,7 @@ class ParallelACExecutor:
             "investment_spec": investment_spec,
             "decomposition_trustworthy": decomposition_trustworthy,
             "semantic_ac_key": semantic_ac_key,
+            "force_frontier_routing": force_frontier_routing,
         }
         while True:
             atomic_result = await self._execute_atomic_ac(
@@ -3642,6 +3660,7 @@ class ParallelACExecutor:
                 investment_spec=investment_spec,
                 decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
+                force_frontier_routing=force_frontier_routing,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if not atomic_result.success:
@@ -4776,8 +4795,24 @@ Respond with either ATOMIC or the structured JSON object only.
         investment_spec: InvestmentSpec | None = None,
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
+        force_frontier_routing: bool = False,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
+
+        ``force_frontier_routing`` (Round-5 Finding #2, BLOCKING): ``True``
+        only for lateral-escalation-ladder-owned redispatches. The ladder's
+        eligibility check (``_root_ac_terminal_state`` with
+        ``same_runtime_retry_available=False``) treats every ACTIVELY
+        configured routing axis as already at its ceiling — but normal
+        incremental routing raises effort exactly ONE notch above base
+        (``EFFORT_RAISE_RETRY_THRESHOLD``), so a low/medium-base AC could
+        cycle the whole persona ladder without ever actually dispatching at
+        max effort. When set, an ACTIVE effort axis dispatches at
+        ``DEFAULT_EFFORT_CEILING`` (investment cheapening suspended — the
+        ladder's premise is maximum strength) and an ACTIVE model axis is
+        anchored at ``DEFAULT_TIER_CEILING``; a dormant axis (no base
+        effort / no router) stays dormant, preserving the
+        no-escalation-dial-configured opt-out.
 
         Returns:
             ACExecutionResult for this AC.
@@ -4880,12 +4915,21 @@ Respond with either ATOMIC or the structured JSON object only.
         # chosen runtime will honor it from its declared capability — enforced via a
         # native knob, or advised. The level is passed to execute_task; an advised
         # runtime ignores it. Dormant by default (base effort None → level None).
+        # Round-5 Finding #2 (BLOCKING): a ladder-owned redispatch runs an
+        # ACTIVE effort axis at the true ceiling — the incremental one-notch
+        # retry raise below can never reach it from a low/medium base — and
+        # suspends investment cheapening (the ladder's premise is maximum
+        # strength). A dormant axis (``base_effort=None``) stays dormant.
         effort_decision, execute_effort_kwargs = resolve_execute_effort(
             self._adapter,
-            base_effort=self._reasoning_effort,
+            base_effort=(
+                DEFAULT_EFFORT_CEILING
+                if force_frontier_routing and self._reasoning_effort
+                else self._reasoning_effort
+            ),
             is_decomposed_child=is_sub_ac,
             retry_attempt=retry_attempt,
-            investment_assessment=investment_assessment,
+            investment_assessment=(None if force_frontier_routing else investment_assessment),
         )
         if effort_decision.level is not None:
             log.debug(
@@ -4927,7 +4971,12 @@ Respond with either ATOMIC or the structured JSON object only.
         # Sibling of the effort routing above: decide WHICH model tier runs this
         # unit. A decomposed child drops one tier only with explicit trust; current
         # live decomposition supplies none. Retry escalation is applied afterward.
-        suggested_tier = self._suggested_model_tier_hint()
+        # Round-5 Finding #2 (BLOCKING): a ladder-owned redispatch anchors an
+        # ACTIVE model axis at the frontier ceiling (escalation notches can only
+        # raise, never lower, so this holds); a dormant router stays dormant.
+        suggested_tier = (
+            DEFAULT_TIER_CEILING if force_frontier_routing else self._suggested_model_tier_hint()
+        )
         model_decision, execute_model_kwargs = resolve_execute_model(
             self._adapter,
             router=self._model_router,
@@ -6827,6 +6876,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 execution_counters=execution_counters,
                 retry_prompts={ac_idx: retry_prompt},
                 same_runtime_budget_exhausted=True,
+                # Round-5 Finding #2 (BLOCKING): the eligibility check above
+                # treats every active routing axis as at ceiling — make the
+                # actual dispatch honor that instead of the one-notch
+                # incremental climb designed for the pre-ladder retry loop.
+                force_frontier_routing=True,
             )
             candidate = retry_results[0]
             if not isinstance(candidate, ACExecutionResult):

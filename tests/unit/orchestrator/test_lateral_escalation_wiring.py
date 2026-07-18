@@ -1738,3 +1738,174 @@ class TestTerminalEligibilityRecheckedEachIteration:
         assert outcome is not None
         assert outcome.success is True
         assert call_count["n"] == 5
+
+
+class TestLadderRedispatchForcesFrontierRouting:
+    """Round-5 Finding #2 (BLOCKING): once the ladder deems an AC eligible
+    (its eligibility check treats every ACTIVE routing axis as at ceiling),
+    the ladder's ACTUAL persona redispatches must run at the true frontier
+    tier + max effort — not the incremental one-notch-per-attempt climb the
+    pre-ladder retry loop uses. Before this fix a medium-effort-configured
+    AC could cycle every persona and end up parked having only ever
+    dispatched at "high", never "xhigh"."""
+
+    @pytest.mark.asyncio
+    async def test_every_ladder_redispatch_requests_forced_frontier_routing(self) -> None:
+        executor = _make_executor_with_active_ladder()
+
+        captured_kwargs: list[dict[str, object]] = []
+        call_count = {"n": 0}
+
+        async def capture_batch(**kwargs: object) -> list[ACExecutionResult]:
+            call_count["n"] += 1
+            captured_kwargs.append(kwargs)
+            if call_count["n"] >= 3:
+                return [_success_result()]
+            return [_failed_result(error=f"attempt {call_count['n']} failed")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=capture_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        assert len(captured_kwargs) == 3
+        for kwargs in captured_kwargs:
+            assert kwargs["force_frontier_routing"] is True
+
+    @pytest.mark.asyncio
+    async def test_forced_routing_dispatches_at_true_ceiling_not_one_notch(self) -> None:
+        """End-to-end through ``_execute_atomic_ac``: with a ``medium``
+        effort base and a standard-tier router, a ladder-owned dispatch
+        (``force_frontier_routing=True``) must hand the runtime
+        ``reasoning_effort="xhigh"`` and the FRONTIER model — while the
+        ordinary incremental path at the same retry attempt only reaches
+        ``high`` (one notch), reproducing the exact reported gap."""
+        from datetime import UTC, datetime
+
+        from ouroboros.events.base import BaseEvent as _BaseEvent
+        from ouroboros.orchestrator.adapter import (
+            CLAUDE_REASONING_EFFORT_LEVELS,
+            AgentMessage,
+            ParamSupport,
+            RuntimeCapabilities,
+        )
+
+        class _CapturingRuntime:
+            _cwd = "/tmp/project"
+
+            def __init__(self) -> None:
+                self.captured: list[dict[str, object]] = []
+                self.capabilities = RuntimeCapabilities(
+                    skill_dispatch=False,
+                    targeted_resume=False,
+                    structured_output=True,
+                    reasoning_effort_support=ParamSupport.NATIVE,
+                    enforceable_reasoning_efforts=CLAUDE_REASONING_EFFORT_LEVELS,
+                    model_override_support=ParamSupport.NATIVE,
+                )
+
+            @property
+            def runtime_backend(self) -> str:
+                return "claude"
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return "acceptEdits"
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: object = None,
+                resume_session_id: str | None = None,
+                reasoning_effort: str | None = None,
+                model: str | None = None,
+            ) -> AsyncIterator[AgentMessage]:
+                del prompt, tools, system_prompt, resume_handle, resume_session_id
+                self.captured.append({"reasoning_effort": reasoning_effort, "model": model})
+                yield AgentMessage(
+                    type="result",
+                    content="done",
+                    data={"subtype": "success"},
+                )
+
+        def _make_dispatch_executor() -> tuple[ParallelACExecutor, _CapturingRuntime]:
+            runtime = _CapturingRuntime()
+            event_store = AsyncMock()
+            appended: list[_BaseEvent] = []
+
+            async def _append(event: _BaseEvent) -> None:
+                appended.append(event)
+
+            async def _replay(aggregate_type: str, aggregate_id: str) -> list[_BaseEvent]:
+                return [
+                    event
+                    for event in appended
+                    if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
+                ]
+
+            event_store.append.side_effect = _append
+            event_store.replay.side_effect = _replay
+            executor = ParallelACExecutor(
+                adapter=runtime,
+                event_store=event_store,
+                console=MagicMock(),
+                enable_decomposition=False,
+                reasoning_effort="medium",
+                model_router=ModelRouter(
+                    tier_models={
+                        "standard": "claude-standard",
+                        "frontier": "claude-frontier",
+                    },
+                    runtime_backend="claude",
+                    child_tier="frugal",
+                    base_tier="standard",
+                    escalation_retry_threshold=999,  # incremental climb never fires
+                ),
+            )
+            return executor, runtime
+
+        # Ladder-owned dispatch: BOTH active axes at their true ceilings.
+        executor, runtime = _make_dispatch_executor()
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the widget",
+            session_id="s1",
+            tools=[],
+            system_prompt="",
+            seed_goal="Implement the stubborn widget",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec-forced",
+            retry_attempt=3,
+            force_frontier_routing=True,
+        )
+        assert result.success is True
+        assert runtime.captured == [{"reasoning_effort": "xhigh", "model": "claude-frontier"}]
+
+        # Control — the ordinary incremental path at the SAME retry attempt:
+        # effort reaches only ONE notch above base ("high", never "xhigh")
+        # and the tier stays wherever the incremental climb left it. This is
+        # the exact pre-fix behavior the ladder's redispatches were stuck on.
+        executor, runtime = _make_dispatch_executor()
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the widget",
+            session_id="s1",
+            tools=[],
+            system_prompt="",
+            seed_goal="Implement the stubborn widget",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec-ordinary",
+            retry_attempt=3,
+        )
+        assert result.success is True
+        assert runtime.captured == [{"reasoning_effort": "high", "model": "claude-standard"}]
