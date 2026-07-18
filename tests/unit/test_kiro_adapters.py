@@ -676,10 +676,13 @@ class TestKiroAgentAdapterExecuteTask:
         nonzero-exit path must reach the structured ``data["error"]`` field
         that leaf_dispatcher's infra-fatal classifier scans (it never scans
         free-text ``content``), so it fails immediately instead of entering
-        the retry/escalation ladder forever."""
+        the retry/escalation ladder forever. Post-review narrowing: the
+        mirror only applies to exit codes OUTSIDE ``_RETRYABLE_EXIT_CODES``
+        — this uses exit 2, an unusual/severe code the adapter's own
+        convention does not treat as ordinary-retryable."""
         from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
 
-        proc = _make_proc(stdout=b"", stderr=b"Unauthorized: invalid API key", returncode=1)
+        proc = _make_proc(stdout=b"", stderr=b"Unauthorized: invalid API key", returncode=2)
         with patch(
             "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
             return_value=proc,
@@ -698,7 +701,9 @@ class TestKiroAgentAdapterExecuteTask:
     async def test_nonzero_exit_ordinary_task_failure_is_not_infra_fatal(self) -> None:
         """Negative control for the round-6 fix: an ordinary task failure
         that happens to exit nonzero (e.g. failing tests) must NOT be
-        classified infra-fatal — it still deserves retry/escalation."""
+        classified infra-fatal — it still deserves retry/escalation. Exit 1
+        is in the adapter's own retryable set, so its stderr is no longer
+        mirrored into the pattern-scanned field at all."""
         from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
 
         proc = _make_proc(stdout=b"", stderr=b"2 tests failed", returncode=1)
@@ -713,7 +718,50 @@ class TestKiroAgentAdapterExecuteTask:
 
         result = messages[-1]
         assert result.is_error
-        assert result.data["error"] == "2 tests failed"
+        assert "error" not in result.data
+        # The free-text content still carries the detail for humans/retry
+        # classification ("exit 1" keeps _is_retryable True).
+        assert "2 tests failed" in result.content
+        assert _is_infra_fatal_error_message(result) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retryable_exit_code", [1, 137])
+    async def test_retryable_exit_with_incidental_infra_phrase_is_not_infra_fatal(
+        self, retryable_exit_code: int
+    ) -> None:
+        """Adversarial-review Bug #3, the negative control the round-6 suite
+        was missing: Kiro is an agentic CLI whose stderr can forward a
+        sub-tool's own output — an incidental "no such file or directory"
+        (or "unauthorized") from a task's failing shell command, for an
+        entirely ordinary, non-infra reason. On the adapter's own
+        ordinary-retryable exit codes (``_RETRYABLE_EXIT_CODES`` = 1, 137)
+        that chatty stream must NOT be mirrored into the pattern-scanned
+        ``data["error"]`` field: the phrase being present must not flip the
+        failure to infra-fatal and skip real retry/escalation."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        forwarded_tool_stderr = (
+            b"$ ./scripts/build.sh\n"
+            b"sh: ./scripts/build.sh: No such file or directory\n"
+            b"task step failed, agent will try another approach"
+        )
+        proc = _make_proc(stdout=b"", stderr=forwarded_tool_stderr, returncode=retryable_exit_code)
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("fail")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["exit_code"] == retryable_exit_code
+        # The infra-sounding phrase IS present in the raw stderr...
+        assert "no such file or directory" in result.content.lower()
+        # ...but never reaches the structured field the classifier scans.
+        assert "error" not in result.data
         assert _is_infra_fatal_error_message(result) is False
 
     @pytest.mark.asyncio
