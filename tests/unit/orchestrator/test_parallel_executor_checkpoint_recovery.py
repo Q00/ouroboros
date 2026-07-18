@@ -26,8 +26,11 @@ from ouroboros.orchestrator.dependency_analyzer import (
     ExecutionStage,
     StagedExecutionPlan,
 )
+from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
 from ouroboros.persistence.checkpoint import CheckpointStore
+from ouroboros.persistence.event_store import EventStore
+from ouroboros.resilience.lateral import ThinkingPersona
 
 
 def _seed(goal: str = "Checkpoint keying") -> Seed:
@@ -110,3 +113,149 @@ class TestCheckpointSeedIdKeying:
         assert loaded.is_ok
         assert loaded.value.state["execution_id"] == "exec-original"
         assert store.load("session-original").is_err
+
+
+class TestCrashRestartRestoresExecutionId:
+    """Fix 2: recovery must rejoin the ORIGINAL run's event aggregate.
+
+    Simulated as close to a real crash-restart as this codebase's test
+    infrastructure allows: a real file-backed ``CheckpointStore``, a real
+    SQLite ``EventStore`` on disk, a crashed run that durably records
+    mid-ladder escalation events under its execution_id before dying, and a
+    genuinely FRESH executor instance (empty in-memory caches, fresh store
+    handles) recovering with the new session/execution ids a restarted
+    process would mint.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recovery_threads_original_execution_id_to_ladder_state(
+        self, tmp_path: Path
+    ) -> None:
+        seed = Seed(
+            goal="Crash-restart ladder durability",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Original run: level 1 completes (checkpoint saved with
+        # execution_id "exec-original"), then the process dies mid-ladder
+        # during level 2 — AFTER the ladder durably recorded its persona
+        # streak, exactly the window emit_lateral_escalation_progressed
+        # exists to cover.
+        original_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await original_events.initialize()
+        original_ckpt = CheckpointStore(base_path=ckpt_path)
+        original_ckpt.initialize()
+        original = _executor(event_store=original_events, checkpoint_store=original_ckpt)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            execution_id = kwargs["execution_id"]
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            # Level 2: the ladder durably records in-flight escalation
+            # progress under THIS run's execution_id, then the process
+            # crashes before the redispatch finishes.
+            node_id = ExecutionNodeIdentity.root(
+                execution_context_id=str(execution_id), ac_index=1
+            ).node_id
+            persisted = await original._event_emitter.emit_lateral_escalation_progressed(
+                execution_id=str(execution_id),
+                session_id=str(kwargs["session_id"]),
+                node_id=node_id,
+                root_ac_index=1,
+                personas_tried=("hacker", "researcher"),
+                consecutive_terminal_failures=3,
+                parked=False,
+                persona="researcher",
+            )
+            assert persisted
+            raise RuntimeError("simulated process crash mid-ladder")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        # The anyio task group surfaces the crash wrapped in an
+        # ExceptionGroup — unwrap before matching.
+        with pytest.raises(BaseException) as crash_info:
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+
+        def _flatten(exc: BaseException) -> list[BaseException]:
+            if isinstance(exc, BaseExceptionGroup):
+                return [leaf for sub in exc.exceptions for leaf in _flatten(sub)]
+            return [exc]
+
+        assert any("simulated process crash" in str(leaf) for leaf in _flatten(crash_info.value))
+        await original_events.close()
+
+        # Sanity: the crashed run left a level-1 checkpoint carrying its
+        # execution_id, keyed by the stable seed id.
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["execution_id"] == "exec-original"
+        assert saved.value.state["completed_levels"] == 1
+
+        # --- Recovery run: a genuinely fresh process — new executor, new
+        # store handles, and the NEW session/execution ids prepare_session
+        # would mint for a restart.
+        recovered_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await recovered_events.initialize()
+        recovered = _executor(
+            event_store=recovered_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+
+        # Recovery skipped the completed level and re-ran only level 2 —
+        # under the ORIGINAL execution_id restored from the checkpoint.
+        assert captured["batch_executable"] == [1]
+        assert captured["execution_id"] == "exec-original"
+        assert result.all_succeeded
+
+        # The durable-state loader, keyed off the restored execution_id,
+        # finds the REAL prior ladder events — not an empty replay.
+        state = await recovered._load_lateral_escalation_state(
+            1, execution_id=str(captured["execution_id"])
+        )
+        assert state.personas_tried == (ThinkingPersona.HACKER, ThinkingPersona.RESEARCHER)
+        assert state.consecutive_terminal_failures == 3
+        assert state.parked is False
+
+        # Negative control: the naive (un-restored) fresh execution_id sees
+        # an EMPTY aggregate — precisely the bug this regression guards.
+        assert await recovered._replay_with_retry("execution", "exec-restarted") == []
+        await recovered_events.close()

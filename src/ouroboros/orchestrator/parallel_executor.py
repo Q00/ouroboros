@@ -1871,6 +1871,26 @@ class ParallelACExecutor:
                 if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
                     cp = load_result.value
                     if cp.phase == "parallel_execution":
+                        # Restore the ORIGINAL run's execution_id. A crash-
+                        # restart run is created with a fresh execution_id,
+                        # but every durable-state loader keyed off
+                        # execution_id — ``_load_lateral_escalation_state``,
+                        # ``_load_decomposition_attestation``, and the node
+                        # ids derived via ``ExecutionNodeIdentity.root`` —
+                        # reads the event aggregate of the ORIGINAL
+                        # execution. Without restoring it, a recovered run
+                        # replays an EMPTY aggregate and
+                        # ``_resume_escalated_ac`` can never find the prior
+                        # ladder/parked state (the AC would restart its
+                        # escalation from scratch with a fresh, un-backed-off
+                        # budget — exactly what 242e3529f exists to prevent).
+                        # ``session_id`` is deliberately NOT restored:
+                        # cancellation checks, signal-hub scoping, and
+                        # progress events must keep following the LIVE
+                        # session driving this recovery run.
+                        saved_execution_id = cp.state.get("execution_id")
+                        if isinstance(saved_execution_id, str) and saved_execution_id:
+                            execution_id = saved_execution_id
                         resume_from_level = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
                             ac_statuses[int(idx)] = status
@@ -1894,6 +1914,7 @@ class ParallelACExecutor:
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
                             seed_id=seed_id,
+                            execution_id=execution_id,
                             restored_contexts=len(level_contexts),
                         )
                         # Reconstruct all_results for completed/failed/skipped ACs.
