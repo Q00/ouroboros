@@ -197,3 +197,72 @@ async def test_parked_for_operator_event_alone_triggers_rerender_after_cursor(
     assert tool_result.meta["changed"] is True
     assert not tool_result.text_content.startswith("unchanged cursor=")
     assert "[parked]" in tool_result.text_content
+
+
+async def test_lateral_escalation_step_event_alone_triggers_rerender_after_cursor(
+    memory_event_store: EventStore,
+) -> None:
+    await memory_event_store.append(
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="sess_escalating_cursor",
+            data={
+                "execution_id": "exec_escalating_cursor",
+                "seed_id": "seed_escalating_cursor",
+                "start_time": "2026-04-05T12:00:00+00:00",
+            },
+        )
+    )
+    await memory_event_store.append(
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_escalating_cursor",
+            data={
+                "execution_id": "exec_escalating_cursor",
+                "completed_count": 0,
+                "total_count": 1,
+                "acceptance_criteria": [
+                    {
+                        "node_id": "ac_1",
+                        "index": 1,
+                        "content": "Stubborn criterion",
+                        "status": "executing",
+                    },
+                ],
+            },
+        )
+    )
+    handler = ACTreeHUDHandler(event_store=memory_event_store)
+    initial_result = await handler.handle(
+        {"session_id": "sess_escalating_cursor", "cursor": 0, "view": "tree"}
+    )
+    assert initial_result.is_ok
+    initial_cursor = initial_result.value.meta["cursor"]
+
+    await memory_event_store.append(
+        BaseEvent(
+            type="execution.ac.lateral_escalation_step",
+            aggregate_type="execution",
+            aggregate_id="exec_escalating_cursor",
+            data={
+                "execution_id": "exec_escalating_cursor",
+                "session_id": "sess_escalating_cursor",
+                "node_id": "ac_1",
+                "root_ac_index": 0,
+                "personas_tried": ["hacker"],
+                "consecutive_terminal_failures": 3,
+                "parked": False,
+                "selected_persona": "hacker",
+            },
+        )
+    )
+
+    changed_result = await handler.handle(
+        {"session_id": "sess_escalating_cursor", "cursor": initial_cursor, "view": "tree"}
+    )
+
+    assert changed_result.is_ok
+    assert changed_result.value.meta["changed"] is True
+    assert not changed_result.value.text_content.startswith("unchanged cursor=")

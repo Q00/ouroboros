@@ -340,8 +340,10 @@ class RecordConductorDecisionHandler:
         """Bounded Task 1/2 summary for the AC(s) this decision followed.
 
         Queries the SAME durable events Kanban/HUD already read
-        (``execution.ac.decomposition_attested`` / ``execution.ac.parked_for_operator``
-        / ``execution.ac.parked_resolved``), scoped to ``execution_id`` (the
+        (``execution.ac.decomposition_attested`` /
+        ``execution.ac.lateral_escalation_step`` /
+        ``execution.ac.parked_for_operator`` / ``execution.ac.parked_resolved``),
+        scoped to ``execution_id`` (the
         execution the selected successor follows) — the concrete link
         between this conductor decision and the AC(s) it is "relevant for".
         Fails closed to ``None`` on any query error so an audit-surface
@@ -358,6 +360,11 @@ class RecordConductorDecisionHandler:
             parked = await self.event_store.query_events(
                 aggregate_id=execution_id,
                 event_type="execution.ac.parked_for_operator",
+                limit=200,
+            )
+            escalating = await self.event_store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.ac.lateral_escalation_step",
                 limit=200,
             )
             # Fix 8: a parked AC that later succeeded emits this durable
@@ -388,6 +395,17 @@ class RecordConductorDecisionHandler:
             for item in parked
             if isinstance(item.data, dict) and item.data.get("node_id")
         } - resolved_nodes
+        escalating_nodes = (
+            {
+                item.data.get("node_id")
+                for item in escalating
+                if isinstance(item.data, dict)
+                and item.data.get("node_id")
+                and item.data.get("parked") is not True
+            }
+            - resolved_nodes
+            - parked_nodes
+        )
         parts: list[str] = []
         if untrustworthy_nodes:
             plural = "s" if len(untrustworthy_nodes) != 1 else ""
@@ -395,6 +413,9 @@ class RecordConductorDecisionHandler:
         if parked_nodes:
             plural = "s" if len(parked_nodes) != 1 else ""
             parts.append(f"{len(parked_nodes)} AC{plural} parked for operator")
+        if escalating_nodes:
+            plural = "s" if len(escalating_nodes) != 1 else ""
+            parts.append(f"{len(escalating_nodes)} AC{plural} in lateral escalation")
         if not parts:
             return None
 

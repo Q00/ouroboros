@@ -68,6 +68,8 @@ from ouroboros.events.session_signal import (
 from ouroboros.harness.claim_term_guard import strict_deterministic_claim_term_guard
 from ouroboros.harness.decomposition_attestation import (
     DecompositionAttestation,
+    DecompositionTrustAxis,
+    DecompositionTrustVerdict,
     ParentVerifyOutcome,
     SiblingVerifyOutcome,
     attest_decomposition,
@@ -1034,7 +1036,14 @@ class ParallelACExecutor:
         # by ``ac_index``. Injectable sleep so tests never wait through a real
         # backoff duration.
         self._lateral_escalation_states: dict[int, LateralEscalationState] = {}
-        self._parked_retry_backoff_seconds = max(1.0, parked_retry_backoff_seconds)
+        if (
+            isinstance(parked_retry_backoff_seconds, (int, float))
+            and not isinstance(parked_retry_backoff_seconds, bool)
+            and math.isfinite(float(parked_retry_backoff_seconds))
+        ):
+            self._parked_retry_backoff_seconds = max(1.0, float(parked_retry_backoff_seconds))
+        else:
+            self._parked_retry_backoff_seconds = 300.0
         self._lateral_escalation_enabled = lateral_escalation_enabled
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._execution_counters_lock = asyncio.Lock()
@@ -2496,7 +2505,10 @@ class ParallelACExecutor:
         # AC's future retries: once a decomposition round is proven untrustworthy
         # by re-running the parent's own verify gate, a fresh (unverified) SPLIT
         # proposal on the next retry must not re-admit the cheap child tier.
-        prior_attestation = self._decomposition_attestations.get(node_identity.node_id)
+        prior_attestation = await self._load_decomposition_attestation(
+            node_identity=node_identity,
+            execution_id=execution_id or session_id,
+        )
         child_decomposition_trustworthy = decision.trustworthy and (
             prior_attestation is None or prior_attestation.trustworthy
         )
@@ -2525,6 +2537,9 @@ class ParallelACExecutor:
         for idx, sub_ac in enumerate(sub_acs):
             try:
                 child_node_identity = node_identity.child(idx)
+                child_contract = self._child_ac_spec_from_decomposition_child(
+                    decision.children[idx],
+                )
                 child_is_sub_ac = child_node_identity.depth > 0
                 legacy_parent_ac_index = (
                     node_identity.root_ac_index if child_node_identity.depth == 1 else None
@@ -2558,6 +2573,7 @@ class ParallelACExecutor:
                     investment_spec=investment_spec,
                     decomposition_trustworthy=child_decomposition_trustworthy,
                     semantic_ac_key=semantic_ac_key,
+                    ac_spec=child_contract,
                 )
             except BaseException as exc:
                 if isinstance(exc, anyio.get_cancelled_exc_class()):
@@ -2658,6 +2674,94 @@ class ParallelACExecutor:
             # second time for the same dispatch.
             verify_gate_outcome=parent_verify_gate_outcome,
         )
+
+    @staticmethod
+    def _child_ac_spec_from_decomposition_child(
+        child: Any,
+    ) -> AcceptanceCriterionSpec | None:
+        """Return a child-owned executable success contract when one exists.
+
+        ``verification_hint`` is natural-language guidance, not an executable
+        oracle. A child verify gate is attainable only when the decomposition
+        proposal declares a concrete command or artifact list for that child.
+        """
+        verify_command = getattr(child, "verify_command", None)
+        expected_artifacts = getattr(child, "expected_artifacts", ())
+        if verify_command is not None and not isinstance(verify_command, str):
+            verify_command = None
+        if isinstance(expected_artifacts, str | bytes):
+            expected_artifacts = ()
+        expected_artifacts = tuple(
+            artifact
+            for artifact in expected_artifacts
+            if isinstance(artifact, str) and artifact.strip()
+        )
+        if not verify_command and not expected_artifacts:
+            return None
+        return AcceptanceCriterionSpec(
+            description=getattr(child, "description", ""),
+            verify_command=verify_command,
+            expected_artifacts=expected_artifacts,
+            semantic_ac_key=derive_semantic_ac_key(getattr(child, "description", "")),
+        )
+
+    async def _load_decomposition_attestation(
+        self,
+        *,
+        node_identity: ExecutionNodeIdentity,
+        execution_id: str,
+    ) -> DecompositionAttestation | None:
+        """Load the latest durable attestation for a node on a cache miss."""
+        cached = self._decomposition_attestations.get(node_identity.node_id)
+        if cached is not None:
+            return cached
+        try:
+            events = await self._event_store.replay("execution", execution_id)
+        except Exception:
+            log.warning(
+                "parallel_executor.decomposition.attestation_reconstruction_failed",
+                node_id=node_identity.node_id,
+                execution_id=execution_id,
+            )
+            return None
+        latest: DecompositionAttestation | None = None
+        for event in events:
+            if getattr(event, "type", None) != "execution.ac.decomposition_attested":
+                continue
+            data = getattr(event, "data", None)
+            if not isinstance(data, Mapping) or data.get("node_id") != node_identity.node_id:
+                continue
+            restored = self._decomposition_attestation_from_event_data(data)
+            if restored is not None:
+                latest = restored
+        if latest is not None:
+            self._decomposition_attestations[node_identity.node_id] = latest
+        return latest
+
+    @staticmethod
+    def _decomposition_attestation_from_event_data(
+        data: Mapping[str, Any],
+    ) -> DecompositionAttestation | None:
+        try:
+            verdict = DecompositionTrustVerdict(data["verdict"])
+            raw_axis = data.get("failed_axis")
+            failed_axis = DecompositionTrustAxis(raw_axis) if isinstance(raw_axis, str) else None
+            failed_sibling_id = data.get("failed_sibling_id")
+            reason = data.get("reason")
+            node_id = data.get("node_id")
+            if not isinstance(node_id, str) or not isinstance(reason, str):
+                return None
+            if failed_sibling_id is not None and not isinstance(failed_sibling_id, str):
+                return None
+            return DecompositionAttestation(
+                node_id=node_id,
+                verdict=verdict,
+                failed_axis=failed_axis,
+                failed_sibling_id=failed_sibling_id,
+                reason=reason,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
     async def _attest_decomposition_round(
         self,
@@ -3777,7 +3881,8 @@ class ParallelACExecutor:
             f"Bounded attempt trace:\n{trace_summary or 'none'}\n\n"
             f"Return {min_sub_acs}-{max_sub_acs} children in this shape:\n"
             '{"children":[{"description":"...","coverage_claims":["..."],'
-            '"verification_hint":"..."}],"covers_parent":true,"rationale":"..."}'
+            '"verification_hint":"human-readable check","verify_command":"optional shell command",'
+            '"expected_artifacts":["optional/path"]}],"covers_parent":true,"rationale":"..."}'
         )
 
     async def _verify_generic_decomposition(
@@ -3891,7 +3996,9 @@ If the AC is one focused outcome, respond with: ATOMIC
 
 If decomposing, respond with ONLY this structured JSON object:
 {{"children":[{{"description":"...","coverage_claims":["distinct parent scope"],
-"verification_hint":"how this child is independently checked"}}],
+"verification_hint":"how this child is independently checked",
+"verify_command":"optional shell command this child must pass",
+"expected_artifacts":["optional/path/created/by/this/child"]}}],
 "covers_parent":true,"rationale":"why the children cover the parent without overlap"}}
 
 Respond with either ATOMIC or the structured JSON object only.
@@ -5923,11 +6030,13 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             events = []
 
-        latest_parked_data: dict[str, Any] | None = None
+        latest_state_data: dict[str, Any] | None = None
+        latest_state_event_type: str | None = None
         resolved = False
         for event in events:
             event_type = getattr(event, "type", None)
             if event_type not in {
+                "execution.ac.lateral_escalation_step",
                 "execution.ac.parked_for_operator",
                 "execution.ac.parked_resolved",
             }:
@@ -5935,15 +6044,19 @@ Respond with either ATOMIC or the structured JSON object only.
             data = getattr(event, "data", None)
             if not isinstance(data, dict) or data.get("node_id") != node_id:
                 continue
-            if event_type == "execution.ac.parked_for_operator":
-                latest_parked_data = data
+            if event_type in {
+                "execution.ac.lateral_escalation_step",
+                "execution.ac.parked_for_operator",
+            }:
+                latest_state_data = data
+                latest_state_event_type = event_type
                 resolved = False
             else:
                 resolved = True
 
         state = LateralEscalationState()
-        if latest_parked_data is not None and not resolved:
-            raw_personas = latest_parked_data.get("personas_tried")
+        if latest_state_data is not None and not resolved:
+            raw_personas = latest_state_data.get("personas_tried")
             personas: tuple[ThinkingPersona, ...] = ()
             if isinstance(raw_personas, list):
                 recovered: list[ThinkingPersona] = []
@@ -5953,16 +6066,20 @@ Respond with either ATOMIC or the structured JSON object only.
                     except ValueError:
                         continue
                 personas = tuple(recovered)
-            raw_streak = latest_parked_data.get("consecutive_terminal_failures")
+            raw_streak = latest_state_data.get("consecutive_terminal_failures")
             streak = (
                 raw_streak
                 if isinstance(raw_streak, int) and not isinstance(raw_streak, bool)
                 else 0
             )
+            raw_parked = latest_state_data.get("parked")
+            parked = raw_parked if isinstance(raw_parked, bool) else False
+            if latest_state_event_type == "execution.ac.parked_for_operator":
+                parked = True
             state = LateralEscalationState(
                 consecutive_terminal_failures=streak,
                 personas_tried=personas,
-                parked=True,
+                parked=parked,
             )
 
         self._lateral_escalation_states[ac_idx] = state
@@ -6038,15 +6155,25 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             state = step.state
             self._lateral_escalation_states[ac_idx] = state
+            node_id = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id, ac_index=ac_idx
+            ).node_id
+            await self._event_emitter.emit_ac_lateral_escalation_step(
+                execution_id=execution_id,
+                session_id=session_id,
+                node_id=node_id,
+                root_ac_index=ac_idx,
+                personas_tried=tuple(p.value for p in state.personas_tried),
+                consecutive_terminal_failures=state.consecutive_terminal_failures,
+                parked=state.parked,
+                selected_persona=step.persona.value if step.persona is not None else None,
+            )
 
             if step.just_parked:
-                parked_node_id = ExecutionNodeIdentity.root(
-                    execution_context_id=execution_id, ac_index=ac_idx
-                ).node_id
                 await self._event_emitter.emit_ac_parked_for_operator(
                     execution_id=execution_id,
                     session_id=session_id,
-                    node_id=parked_node_id,
+                    node_id=node_id,
                     root_ac_index=ac_idx,
                     personas_tried=tuple(p.value for p in state.personas_tried),
                     consecutive_terminal_failures=state.consecutive_terminal_failures,
@@ -6139,7 +6266,15 @@ Respond with either ATOMIC or the structured JSON object only.
 
             current_result = candidate
             if not self._is_retryable_failure(candidate):
-                return None
+                return candidate
+            terminal = await self._root_ac_terminal_state(
+                seed=seed,
+                ac_idx=ac_idx,
+                result=candidate,
+                retry_attempt=current_retry_attempt,
+            )
+            if not terminal:
+                return candidate
 
     async def _run_batch_with_verify_and_retry(
         self,

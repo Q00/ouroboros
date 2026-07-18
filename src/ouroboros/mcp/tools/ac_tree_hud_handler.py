@@ -56,6 +56,7 @@ _TREE_CHANGE_EVENT_TYPES = frozenset(
         # False and the handler short-circuited to "unchanged" before ever
         # reaching the merge step that folds them in.
         "execution.ac.decomposition_attested",
+        "execution.ac.lateral_escalation_step",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
     }
@@ -512,8 +513,9 @@ def _normalize_explicit_tree(value: Mapping[str, Any]) -> dict[str, Any]:
         if trust_verdict:
             node["trust_verdict"] = trust_verdict
             node["trustworthy"] = bool(raw_node.get("trustworthy"))
-        if raw_node.get("escalation_state") == "parked":
-            node["escalation_state"] = "parked"
+        escalation_state = raw_node.get("escalation_state")
+        if escalation_state in {"escalating", "parked"}:
+            node["escalation_state"] = escalation_state
         nodes[node_id] = node
 
     root_id = _coerce_non_empty_string(value.get("root_id")) or _ROOT_ID
@@ -841,6 +843,7 @@ def _merge_subtask_events_into_snapshot(
 _TRUST_ESCALATION_EVENT_TYPES = frozenset(
     {
         "execution.ac.decomposition_attested",
+        "execution.ac.lateral_escalation_step",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
     }
@@ -892,10 +895,18 @@ def _merge_trust_escalation_events_into_snapshot(
             if verdict:
                 nodes[target_id]["trust_verdict"] = verdict
                 nodes[target_id]["trustworthy"] = bool(data.get("trustworthy"))
+        elif event_type == "execution.ac.lateral_escalation_step":
+            nodes[target_id]["escalation_state"] = (
+                "parked" if bool(data.get("parked")) else "escalating"
+            )
+            personas_tried = data.get("personas_tried")
+            if isinstance(personas_tried, list):
+                nodes[target_id]["escalation_personas_tried"] = len(personas_tried)
         elif event_type == "execution.ac.parked_for_operator":
             nodes[target_id]["escalation_state"] = "parked"
         else:  # execution.ac.parked_resolved (Fix 8): clear the parked badge.
             nodes[target_id].pop("escalation_state", None)
+            nodes[target_id].pop("escalation_personas_tried", None)
 
     return {"root_id": root_id, "nodes": nodes}
 

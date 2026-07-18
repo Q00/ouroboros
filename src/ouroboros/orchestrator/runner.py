@@ -1550,10 +1550,16 @@ class OrchestratorRunner:
         }
 
     @staticmethod
-    def _routing_fingerprint(routing_contract: Mapping[str, Any]) -> str:
+    def _routing_fingerprint(
+        routing_contract: Mapping[str, Any],
+        retry_policy_contract: Mapping[str, Any] | None = None,
+    ) -> str:
         """Hash a resolved routing contract into a stable cohort key."""
+        payload: dict[str, Any] = dict(routing_contract)
+        if retry_policy_contract is not None:
+            payload["retry_policy"] = dict(retry_policy_contract)
         encoded = json.dumps(
-            dict(routing_contract),
+            payload,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -1929,7 +1935,8 @@ class OrchestratorRunner:
             isinstance(enabled, bool)
             and isinstance(backoff, (int, float))
             and not isinstance(backoff, bool)
-            and backoff >= 0
+            and math.isfinite(float(backoff))
+            and backoff >= 1.0
         )
 
     def _guidance_root(self, guidance_ids: tuple[str, ...]) -> Path:
@@ -2054,9 +2061,13 @@ class OrchestratorRunner:
         routing_contract["runtime_backend"] = self._runtime_backend_contract()
         routing_contract["llm_backend"] = self._llm_backend_contract()
         routing_contract["permission_mode"] = self._permission_mode_contract()
+        retry_policy_contract = self._retry_policy_contract()
         proof_contract: dict[str, Any] = {
             "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
-            "routing_fingerprint": self._routing_fingerprint(routing_contract),
+            "routing_fingerprint": self._routing_fingerprint(
+                routing_contract,
+                retry_policy_contract=retry_policy_contract,
+            ),
         }
         workspace_identity = self._proof_workspace_identity()
         if workspace_identity is not None:
@@ -2075,7 +2086,7 @@ class OrchestratorRunner:
             "resume": {
                 "workspace": self._resume_workspace_identity(),
             },
-            "retry_policy": self._retry_policy_contract(),
+            "retry_policy": retry_policy_contract,
         }
 
     async def _emit_run_configuration_resolved(
@@ -2399,7 +2410,13 @@ class OrchestratorRunner:
             or not isinstance(persisted_workspace_path, str)
             or not persisted_workspace_path.strip()
             or not isinstance(persisted_routing_fingerprint, str)
-            or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
+            or persisted_routing_fingerprint
+            != self._routing_fingerprint(
+                raw_routing,
+                retry_policy_contract=(
+                    raw_retry_policy if isinstance(raw_retry_policy, Mapping) else None
+                ),
+            )
             or (seed is not None and not valid_seed_fingerprint)
             or not self._valid_constructor_model_contract(persisted_constructor_model)
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
@@ -2638,6 +2655,9 @@ class OrchestratorRunner:
         routing_contract = raw_contract.get("model_routing")
         if not isinstance(routing_contract, Mapping):
             return None
+        retry_policy_contract = raw_contract.get("retry_policy")
+        if not OrchestratorRunner._valid_retry_policy_contract(retry_policy_contract):
+            return None
         guidance_contract = raw_contract.get("guidance")
         if guidance_contract is None:
             guidance_fingerprint = "legacy:no-declared-guidance"
@@ -2688,7 +2708,10 @@ class OrchestratorRunner:
             or any(char not in "0123456789abcdef" for char in routing_fingerprint)
         ):
             return None
-        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(routing_contract):
+        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(
+            routing_contract,
+            retry_policy_contract=retry_policy_contract,
+        ):
             return None
         if (
             not isinstance(seed_fingerprint, str)

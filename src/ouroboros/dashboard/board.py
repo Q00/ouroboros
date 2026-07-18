@@ -69,6 +69,7 @@ _TELEMETRY_EVENTS = frozenset(
 _TRUST_ESCALATION_EVENTS = frozenset(
     {
         "execution.ac.decomposition_attested",
+        "execution.ac.lateral_escalation_step",
         "execution.ac.parked_for_operator",
         "execution.ac.parked_resolved",
     }
@@ -433,6 +434,15 @@ def reduce_board(
                 if isinstance(verdict, str) and verdict:
                     card["trust_verdict"] = verdict
                     card["trustworthy"] = bool(payload.get("trustworthy"))
+
+        elif event_type == "execution.ac.lateral_escalation_step":
+            node_id = payload.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                card = _card(cards, node_id)
+                card["escalation_state"] = "parked" if bool(payload.get("parked")) else "escalating"
+                personas_tried = payload.get("personas_tried")
+                if isinstance(personas_tried, list):
+                    card["escalation_personas_tried"] = len(personas_tried)
 
         elif event_type == "execution.ac.parked_for_operator":
             # Task 2: this root AC exhausted the lateral-escalation ladder and

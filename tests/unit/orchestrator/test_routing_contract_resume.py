@@ -256,6 +256,10 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     original = _runner()
     persisted = original._build_execution_contract()
     del persisted["retry_policy"]
+    persisted["frugality_proof"] = {
+        **persisted["frugality_proof"],
+        "routing_fingerprint": OrchestratorRunner._routing_fingerprint(persisted["model_routing"]),
+    }
 
     resumed = _runner()
     resumed._lateral_escalation_enabled = True  # current config for THIS process
@@ -280,6 +284,9 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         {"lateral_escalation_enabled": "yes", "parked_retry_backoff_seconds": 300.0},
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": "300"},
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": -5.0},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": 0.0},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("inf")},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("nan")},
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": True},
         "not-a-mapping",
     ],
@@ -292,6 +299,27 @@ def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> 
     resumed = _runner()
     with pytest.raises(OrchestratorError, match="invalid execution contract"):
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_retry_policy_participates_in_proof_routing_fingerprint() -> None:
+    """BLOCKING #6: different lateral retry semantics must not share an
+    exact frugality/proof cohort."""
+    first = _runner()
+    first._lateral_escalation_enabled = False
+    first._parked_retry_backoff_seconds = 300.0
+    first_contract = first._build_execution_contract()
+
+    second = _runner()
+    second._lateral_escalation_enabled = True
+    second._parked_retry_backoff_seconds = 900.0
+    second_contract = second._build_execution_contract()
+
+    assert first_contract["model_routing"] == second_contract["model_routing"]
+    assert first_contract["retry_policy"] != second_contract["retry_policy"]
+    assert (
+        first_contract["frugality_proof"]["routing_fingerprint"]
+        != second_contract["frugality_proof"]["routing_fingerprint"]
+    )
 
 
 def test_empty_observed_runtime_identity_is_rejected() -> None:
@@ -393,7 +421,10 @@ def test_explicit_tier_does_not_bypass_nested_backend_mismatch() -> None:
         "model_routing": inconsistent_routing,
         "frugality_proof": {
             **persisted["frugality_proof"],
-            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(inconsistent_routing),
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
+                inconsistent_routing,
+                retry_policy_contract=persisted["retry_policy"],
+            ),
         },
     }
 

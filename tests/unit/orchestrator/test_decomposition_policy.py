@@ -31,11 +31,13 @@ def _proposal_payload() -> dict[str, object]:
                 "description": "Implement parser for persisted policy records",
                 "coverage_claims": ["record schema is parsed"],
                 "verification_hint": "unit tests cover round trip",
+                "verify_command": "python -m pytest tests/unit/test_policy_parser.py -q",
             },
             {
                 "description": "Implement invariant checks for trusted split decisions",
                 "coverage_claims": ["trust invariant is enforced"],
                 "verification_hint": "unit tests cover invalid trust",
+                "expected_artifacts": ["reports/trust-invariants.json"],
             },
         ],
         "covers_parent": True,
@@ -49,11 +51,13 @@ def _children() -> tuple[DecompositionChild, DecompositionChild]:
             description="Implement parser for persisted policy records",
             coverage_claims=("record schema is parsed",),
             verification_hint="unit tests cover round trip",
+            verify_command="python -m pytest tests/unit/test_policy_parser.py -q",
         ),
         DecompositionChild(
             description="Implement invariant checks for trusted split decisions",
             coverage_claims=("trust invariant is enforced",),
             verification_hint="unit tests cover invalid trust",
+            expected_artifacts=("reports/trust-invariants.json",),
         ),
     )
 
@@ -265,6 +269,32 @@ class TestProposalValidation:
 
         assert "child 0 must declare at least one coverage claim" in errors
         assert "child 0 verification_hint must be non-empty" in errors
+
+    def test_child_executable_verify_contract_round_trips(self) -> None:
+        proposal = parse_decomposition_proposal(_proposal_payload())
+        assert isinstance(proposal, DecompositionProposal)
+
+        first, second = proposal.children
+        assert first.verify_command == "python -m pytest tests/unit/test_policy_parser.py -q"
+        assert first.expected_artifacts == ()
+        assert second.verify_command is None
+        assert second.expected_artifacts == ("reports/trust-invariants.json",)
+        assert DecompositionProposal.from_dict(proposal.to_dict()) == proposal
+
+    def test_rejects_invalid_child_executable_contract_fields(self) -> None:
+        payload = _proposal_payload()
+        children = payload["children"]
+        assert isinstance(children, list)
+        first = children[0]
+        assert isinstance(first, dict)
+        first["verify_command"] = ""
+        first["expected_artifacts"] = ["", "../" * 120]
+
+        errors = validate_decomposition_proposal(payload)
+
+        assert "child 0 verify_command must be non-empty" in errors
+        assert "child 0 expected artifact 0 must be a non-empty string" in errors
+        assert "child 0 expected artifact 1 is too large" in errors
 
     @pytest.mark.parametrize(
         ("children", "covers_parent"),

@@ -149,6 +149,8 @@ class DecompositionChild:
     description: str
     coverage_claims: tuple[str, ...] = field(default_factory=tuple)
     verification_hint: str = ""
+    verify_command: str | None = None
+    expected_artifacts: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.description, str):
@@ -156,6 +158,9 @@ class DecompositionChild:
             raise ValueError(msg)
         if not isinstance(self.verification_hint, str):
             msg = "verification_hint must be a string"
+            raise ValueError(msg)
+        if self.verify_command is not None and not isinstance(self.verify_command, str):
+            msg = "verify_command must be a string or None"
             raise ValueError(msg)
         description = _bounded_nonblank_text(
             self.description,
@@ -166,6 +171,22 @@ class DecompositionChild:
             self.verification_hint,
             field_name="verification_hint",
             max_chars=MAX_VERIFICATION_HINT_CHARS,
+        )
+        verify_command = (
+            _bounded_nonblank_text(
+                self.verify_command,
+                field_name="verify_command",
+                max_chars=MAX_VERIFICATION_HINT_CHARS,
+            )
+            if self.verify_command is not None
+            else None
+        )
+        expected_artifacts = _bounded_strings(
+            self.expected_artifacts,
+            field_name="expected_artifacts",
+            max_count=MAX_COVERAGE_CLAIMS,
+            max_chars=MAX_VERIFICATION_HINT_CHARS,
+            require_nonblank=True,
         )
         claims = _bounded_strings(
             self.coverage_claims,
@@ -180,12 +201,16 @@ class DecompositionChild:
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "coverage_claims", claims)
         object.__setattr__(self, "verification_hint", verification_hint)
+        object.__setattr__(self, "verify_command", verify_command)
+        object.__setattr__(self, "expected_artifacts", expected_artifacts)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "description": self.description,
             "coverage_claims": list(self.coverage_claims),
             "verification_hint": self.verification_hint,
+            "verify_command": self.verify_command,
+            "expected_artifacts": list(self.expected_artifacts),
         }
 
     @classmethod
@@ -197,6 +222,12 @@ class DecompositionChild:
                 description=data["description"],
                 coverage_claims=_read_string_list(data.get("coverage_claims", ())),
                 verification_hint=data["verification_hint"],
+                verify_command=(
+                    data.get("verify_command")
+                    if isinstance(data.get("verify_command"), str)
+                    else None
+                ),
+                expected_artifacts=_read_string_list(data.get("expected_artifacts", ())),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -528,6 +559,27 @@ def validate_decomposition_proposal(
             errors.append(f"child {index} verification_hint must be non-empty")
         elif len(hint) > MAX_VERIFICATION_HINT_CHARS:
             errors.append(f"child {index} verification_hint is too large")
+        verify_command = child_raw.get("verify_command")
+        expected_artifacts = child_raw.get("expected_artifacts", ())
+        if verify_command is not None:
+            if not isinstance(verify_command, str):
+                errors.append(f"child {index} verify_command must be a string")
+            elif not _normalize_spaces(verify_command):
+                errors.append(f"child {index} verify_command must be non-empty")
+            elif len(verify_command) > MAX_VERIFICATION_HINT_CHARS:
+                errors.append(f"child {index} verify_command is too large")
+        if not isinstance(expected_artifacts, Sequence) or isinstance(
+            expected_artifacts, str | bytes
+        ):
+            errors.append(f"child {index} expected_artifacts must be a list")
+        else:
+            for artifact_index, artifact in enumerate(expected_artifacts):
+                if not isinstance(artifact, str) or not _normalize_spaces(artifact):
+                    errors.append(
+                        f"child {index} expected artifact {artifact_index} must be a non-empty string"
+                    )
+                elif len(artifact) > MAX_VERIFICATION_HINT_CHARS:
+                    errors.append(f"child {index} expected artifact {artifact_index} is too large")
 
     return tuple(errors)
 

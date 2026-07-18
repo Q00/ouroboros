@@ -21,6 +21,7 @@ Classes:
     OuroborosConfig: Top-level configuration combining all sections
 """
 
+import math
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -130,6 +131,15 @@ class EconomicsConfig(BaseModel, frozen=True):
     downgrade_success_streak: int = Field(default=5, ge=1)
     parked_retry_backoff_seconds: float = Field(default=300.0, ge=1.0)
     lateral_escalation_enabled: bool = False
+
+    @field_validator("parked_retry_backoff_seconds")
+    @classmethod
+    def validate_parked_retry_backoff_seconds(cls, v: float) -> float:
+        """The parked retry cadence must stay bounded and finite."""
+        if not math.isfinite(v):
+            msg = "parked_retry_backoff_seconds must be finite"
+            raise ValueError(msg)
+        return v
 
 
 class LLMConfig(BaseModel, frozen=True):

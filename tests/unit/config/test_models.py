@@ -156,6 +156,12 @@ class TestEconomicsConfig:
         with pytest.raises(ValidationError):
             EconomicsConfig(default_tier="invalid")  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize("bad_value", [float("inf"), float("nan")])
+    def test_parked_retry_backoff_rejects_non_finite_values(self, bad_value: float) -> None:
+        """The lateral-escalation parked cadence is advertised as bounded."""
+        with pytest.raises(ValidationError):
+            EconomicsConfig(parked_retry_backoff_seconds=bad_value)
+
 
 class TestClarificationConfig:
     """Test ClarificationConfig for Phase 0 settings."""

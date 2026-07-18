@@ -174,6 +174,37 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_ac_lateral_escalation_step(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        node_id: str,
+        root_ac_index: int,
+        personas_tried: tuple[str, ...],
+        consecutive_terminal_failures: int,
+        parked: bool,
+        selected_persona: str | None,
+    ) -> None:
+        """Persist every lateral-escalation state transition before redispatch."""
+        await self._safe_emit_event(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_step",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "node_id": node_id,
+                    "root_ac_index": root_ac_index,
+                    "personas_tried": list(personas_tried),
+                    "consecutive_terminal_failures": consecutive_terminal_failures,
+                    "parked": parked,
+                    "selected_persona": selected_persona,
+                },
+            )
+        )
+
     async def emit_ac_parked_resolved(
         self,
         *,

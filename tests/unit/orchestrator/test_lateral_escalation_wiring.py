@@ -48,6 +48,7 @@ def _make_executor() -> ParallelACExecutor:
     executor._emit_subtask_event = AsyncMock()
     executor._emit_ac_outcome_finalized = AsyncMock()
     executor._event_emitter.emit_ac_parked_for_operator = AsyncMock()
+    executor._event_emitter.emit_ac_lateral_escalation_step = AsyncMock()
     executor._event_emitter.emit_ac_parked_resolved = AsyncMock()
     executor._sleep = AsyncMock()
     return executor
@@ -87,13 +88,20 @@ def _make_seed() -> Seed:
     )
 
 
-def _failed_result(*, ac_index: int = 0, error: str = "verify_command failed") -> ACExecutionResult:
+def _failed_result(
+    *,
+    ac_index: int = 0,
+    error: str = "verify_command failed",
+    is_decomposed: bool = False,
+    infra_fatal: bool = False,
+) -> ACExecutionResult:
     return ACExecutionResult(
         ac_index=ac_index,
         ac_content="Implement the widget",
         success=False,
         error=error,
-        is_decomposed=False,
+        is_decomposed=is_decomposed,
+        infra_fatal=infra_fatal,
     )
 
 
@@ -332,6 +340,61 @@ class TestLadderProgression:
         # Fix 8: the eventual breakthrough still resolves the (pre-seeded)
         # parked state exactly once.
         executor._event_emitter.emit_ac_parked_resolved.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_each_lateral_step_is_durably_emitted_before_redispatch(self) -> None:
+        executor = _make_executor_with_active_ladder()
+
+        async def succeeds(**kwargs: object) -> list[ACExecutionResult]:
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="attempt 0 failed"))
+
+        assert outcome is not None
+        assert outcome.success is True
+        executor._event_emitter.emit_ac_lateral_escalation_step.assert_awaited_once()
+        _, kwargs = executor._event_emitter.emit_ac_lateral_escalation_step.await_args
+        assert kwargs["root_ac_index"] == 0
+        assert (
+            kwargs["node_id"]
+            == ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        )
+        assert kwargs["consecutive_terminal_failures"] == 1
+        assert kwargs["parked"] is False
+
+    @pytest.mark.asyncio
+    async def test_mid_ladder_infra_fatal_result_replaces_older_quality_failure(self) -> None:
+        """BLOCKING #3: a caught adapter/auth crash returned from inside the
+        ladder must not be discarded as ``None`` and replaced by the older
+        verify/quality failure."""
+        executor = _make_executor_with_active_ladder()
+        infra = _failed_result(error="401 Unauthorized", infra_fatal=True)
+        executor._execute_ac_batch = AsyncMock(return_value=[infra])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="quality failure"))
+
+        assert outcome is infra
+        assert outcome.infra_fatal is True
+
+    @pytest.mark.asyncio
+    async def test_ladder_rechecks_terminal_state_after_each_redispatch(self) -> None:
+        """BLOCKING #4: a redispatch can return a non-terminal decomposed
+        failure. The ladder must stop there instead of continuing persona
+        cycling and eventually parking a result that is explicitly not a
+        terminal-strength atomic failure."""
+        executor = _make_executor_with_active_ladder()
+        non_terminal = _failed_result(error="bounce split failed", is_decomposed=True)
+        executor._execute_ac_batch = AsyncMock(return_value=[non_terminal])
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        outcome = await _ladder(executor, result=_failed_result(error="quality failure"))
+
+        assert outcome is non_terminal
+        executor._execute_ac_batch.assert_awaited_once()
 
 
 class TestRootAcTerminalStateMatchesLiveDispatch:
@@ -624,3 +687,35 @@ class TestLateralEscalationStateDurability:
         # not a fresh LateralEscalationState() that would instead do "one
         # more identical retry" without sleeping at all.
         executor._sleep.assert_awaited_once_with(executor._parked_retry_backoff_seconds)
+
+    @pytest.mark.asyncio
+    async def test_reconstructs_pre_parking_persona_state_from_step_event(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """BLOCKING #5: cancellation after a persona attempt but before
+        parking must not reset the persona cycle on resume."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_step",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": ["hacker", "architect"],
+                    "consecutive_terminal_failures": 4,
+                    "parked": False,
+                    "selected_persona": "architect",
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        state = await executor._load_lateral_escalation_state(0, execution_id="exec-1")
+
+        assert state.parked is False
+        assert state.consecutive_terminal_failures == 4
+        assert state.personas_tried == (ThinkingPersona.HACKER, ThinkingPersona.ARCHITECT)

@@ -53,6 +53,7 @@ def _trustworthy_split_decision(
             description=f"child {i}",
             coverage_claims=(f"distinct scope {i}",),
             verification_hint=f"check {i}",
+            verify_command=f"python -m pytest tests/unit/test_child_{i}.py -q",
         )
         for i in range(child_count)
     )
@@ -413,3 +414,140 @@ class TestExecuteDecompositionChildrenWiring:
         assert decision.trustworthy is True  # the fresh decision itself looked fine...
         assert captured_trust_flags  # ...but every child was dispatched with:
         assert all(flag is False for flag in captured_trust_flags)  # trust withheld
+
+    @pytest.mark.asyncio
+    async def test_live_children_receive_their_own_executable_verify_contracts(self) -> None:
+        """BLOCKING #1: a production-shaped decomposition must give children
+        attainable verify gates. The child does not inherit the whole parent
+        AC contract; it receives only the executable contract declared on its
+        own decomposition child."""
+        from datetime import UTC, datetime
+
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        captured_specs: list[AcceptanceCriterionSpec | None] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_specs.append(kwargs["ac_spec"])  # type: ignore[arg-type]
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-1",
+            level_contexts=None,
+            retry_attempt=0,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="parent-key",
+            ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        )
+
+        assert captured_specs
+        assert all(isinstance(spec, AcceptanceCriterionSpec) for spec in captured_specs)
+        assert [spec.verify_command for spec in captured_specs if spec is not None] == [
+            "python -m pytest tests/unit/test_child_0.py -q",
+            "python -m pytest tests/unit/test_child_1.py -q",
+        ]
+        assert all(spec.description.startswith("child ") for spec in captured_specs if spec)
+
+    @pytest.mark.asyncio
+    async def test_prior_untrustworthy_attestation_replayed_after_restart(self) -> None:
+        """BLOCKING #2: durable attestation events must poison a resumed
+        executor's future child-tier routing, not only the original process's
+        in-memory cache."""
+        from datetime import UTC, datetime
+
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.harness.decomposition_attestation import (
+            DecompositionAttestation,
+            DecompositionTrustAxis,
+        )
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        prior = DecompositionAttestation(
+            node_id=node_identity.node_id,
+            verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+            failed_axis=DecompositionTrustAxis.PARENT_GATE,
+            failed_sibling_id=None,
+            reason="prior round clobbered the workspace",
+        )
+        store = AsyncMock()
+        store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="execution.ac.decomposition_attested",
+                    aggregate_type="execution",
+                    aggregate_id="exec-1",
+                    data={
+                        **node_identity.to_event_metadata(),
+                        **prior.to_event_data(),
+                        "execution_id": "exec-1",
+                        "session_id": "s1",
+                    },
+                )
+            ]
+        )
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        captured_trust_flags: list[bool] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-1",
+            level_contexts=None,
+            retry_attempt=1,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        )
+
+        assert captured_trust_flags
+        assert all(flag is False for flag in captured_trust_flags)
