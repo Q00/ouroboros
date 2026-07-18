@@ -5237,6 +5237,24 @@ class OrchestratorRunner:
 
         Reconstructs session state from events and continues execution.
 
+        KNOWN LIMITATION (documented, not yet fixed): this resume path drives
+        a SINGLE ``adapter.execute_task`` stream and bypasses the parallel AC
+        executor entirely — it never constructs a ``ParallelACExecutor``, so
+        none of the per-AC lateral-escalation machinery runs here:
+        ``_resume_escalated_ac``, ``_load_lateral_escalation_state``, and the
+        RC3 checkpoint recovery block are all unreachable from this path. An
+        AC that was parked or mid-persona-escalation-ladder before a
+        ``--resume-session`` / MCP ``is_resume`` restart will therefore
+        restart its escalation from scratch (fresh retry budget, no
+        long-backoff parked cadence, already-tried personas repeated) instead
+        of re-entering the ladder at its durable phase. Mid-ladder durability
+        is only guaranteed for the crash-restart flow that re-dispatches
+        through ``ParallelACExecutor.execute_parallel`` (checkpoint
+        recovery). Fixing this would require re-architecting how this path
+        dispatches ACs — see the existing fat-harness / investment-metadata
+        resume blocks below, which exist for the same structural reason (this
+        path cannot enforce per-AC executor semantics).
+
         Args:
             session_id: Session to resume.
             seed: Original seed (needed for prompt building).

@@ -6604,6 +6604,17 @@ Respond with either ATOMIC or the structured JSON object only.
         The rebuilt (or freshly-defaulted) state is cached back onto
         ``self._lateral_escalation_states`` so later calls in the SAME
         process do not repeat the replay.
+
+        SCOPE OF THE DURABILITY GUARANTEE: this reconstruction only runs for
+        executions dispatched through ``ParallelACExecutor`` — i.e. fresh
+        runs and crash-restarts recovered via the RC3 checkpoint block in
+        ``execute_parallel`` (which restores the original ``execution_id``
+        so this replay targets the right aggregate). The OTHER resume path,
+        ``OrchestratorRunner.resume_session`` (CLI ``--resume-session`` /
+        MCP ``is_resume``), drives a single ``adapter.execute_task`` stream
+        and bypasses this executor entirely, so an AC parked or mid-ladder
+        before such a resume restarts its escalation from scratch. See the
+        limitation note on ``resume_session`` in ``runner.py``.
         """
         cached = self._lateral_escalation_states.get(ac_idx)
         if cached is not None:
