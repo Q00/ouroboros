@@ -2333,6 +2333,101 @@ class TestResumeReentersLadderAtRestoredPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_completed_persona_dispatch_is_not_rerun_on_resume(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Round-7 Finding #4 (BLOCKING) reproduction: ``progressed`` is
+        written BEFORE its dispatch runs, so on its own it cannot distinguish
+        "crash mid-dispatch" from "dispatch completed with a failure, crash
+        before the NEXT progression". Durably record the ``progressed`` event
+        for the hacker persona's attempt (retry_attempt=7) AND the
+        ``execution.ac.outcome_finalized`` marker proving that attempt's
+        dispatch COMPLETED (with failure), then cold-start. Resume must NOT
+        re-run hacker under the same attempt identity (duplicated work and
+        attempt-scoped telemetry) — it must advance the ladder to the next
+        persona under a NEW attempt number."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.lateral_escalation_progressed",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "node_id": node_id,
+                    "root_ac_index": 0,
+                    "personas_tried": [ThinkingPersona.HACKER.value],
+                    "consecutive_terminal_failures": 3,
+                    "parked": False,
+                    "persona": ThinkingPersona.HACKER.value,
+                    "retry_attempt": 7,
+                },
+            )
+        )
+        # The persona dispatch this progression preceded COMPLETED (and
+        # failed) before the crash: its authoritative outcome marker landed.
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={
+                    "execution_id": "exec-1",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 7,
+                    "success": False,
+                    "outcome": None,
+                    "is_decomposed": False,
+                },
+            )
+        )
+        executor = self._cold_start_executor(memory_event_store)
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        async def succeeds_immediately(**kwargs: object) -> list[ACExecutionResult]:
+            dispatch_calls.append(kwargs)
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=succeeds_immediately)
+
+        ac_retry_attempts = {0: 0}
+        results = await self._run_batch(executor, ac_retry_attempts=ac_retry_attempts)
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Exactly ONE dispatch: the ladder's advance to the NEXT persona.
+        # The buggy behavior dispatched a hacker re-run FIRST (a second run
+        # of an attempt whose failure was already durably finalized).
+        assert len(dispatch_calls) == 1
+        first_prompt = dispatch_calls[0]["retry_prompts"][0]  # type: ignore[index]
+        assert ThinkingPersona.HACKER.value not in first_prompt.lower()
+        # The ladder advanced PAST hacker: the resumed ``progressed`` record
+        # extends the persona history with a NEW persona and runs under a NEW
+        # attempt number (8), never re-using attempt 7's identity.
+        events = await memory_event_store.replay("execution", "exec-1")
+        progressed_after_resume = [
+            event
+            for event in events[2:]  # skip the two pre-seeded crash-era events
+            if event.type == "execution.ac.lateral_escalation_progressed"
+            and event.data.get("node_id") == node_id
+        ]
+        assert progressed_after_resume, "ladder never durably progressed after resume"
+        resumed_data = progressed_after_resume[-1].data
+        assert resumed_data["personas_tried"][0] == ThinkingPersona.HACKER.value
+        assert len(resumed_data["personas_tried"]) == 2
+        assert resumed_data["personas_tried"][-1] != ThinkingPersona.HACKER.value
+        assert resumed_data["retry_attempt"] == 8
+        # And the eventual success still resolved the episode durably.
+        assert any(
+            event.type == "execution.ac.parked_resolved" and event.data.get("node_id") == node_id
+            for event in events
+        )
+
+    @pytest.mark.asyncio
     async def test_fresh_ac_without_escalation_history_keeps_ordinary_path(
         self, memory_event_store: EventStore
     ) -> None:

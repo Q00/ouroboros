@@ -1160,6 +1160,20 @@ class ParallelACExecutor:
         # double-count its telemetry). ``None`` means the durable record
         # predates the field — the cap fallback then applies.
         self._lateral_escalation_resume_attempts: dict[int, int | None] = {}
+        # Round-7 Finding #4: whether the in-flight attempt recorded by the
+        # latest ``progressed`` event already has a durably-finalized outcome
+        # (``execution.ac.outcome_finalized`` correlated by root_ac_index +
+        # retry_attempt). ``progressed`` is written BEFORE its dispatch runs,
+        # so on its own it cannot distinguish "crash mid-dispatch (re-run the
+        # persona)" from "dispatch completed with a failure, crash before the
+        # NEXT progression (advance PAST the persona)". The finalized marker
+        # — emitted right after every ladder dispatch returns — makes that
+        # distinction exact; without it, resume re-ran an already-tried-and-
+        # failed persona under the same attempt identity, duplicating work
+        # and attempt-scoped telemetry. Reconstructed alongside
+        # ``_lateral_escalation_resume_attempts`` during replay and consumed
+        # (popped) by ``_resume_escalated_ac``.
+        self._lateral_escalation_resume_attempt_completed: dict[int, bool] = {}
         # Fix 7 (round 2, BLOCKING) defense-in-depth: the two contract
         # boundaries that populate this value (EconomicsConfig's Pydantic
         # field validator, and the resume-time
@@ -6861,8 +6875,30 @@ Respond with either ATOMIC or the structured JSON object only.
         latest_state_data: dict[str, Any] | None = None
         latest_state_type: str | None = None
         latest_progressed_data: dict[str, Any] | None = None
+        # Round-7 Finding #4: attempt numbers this root AC has a durably
+        # FINALIZED outcome for. ``execution.ac.outcome_finalized`` is
+        # emitted right after every ladder dispatch returns (post
+        # verify-gate), so its presence for the attempt number the latest
+        # ``progressed`` event recorded proves that dispatch COMPLETED —
+        # the crash happened after it, not mid-dispatch. Correlated by
+        # ``root_ac_index`` + ``retry_attempt`` (the event carries no
+        # node_id); an unparseable attempt value is simply not collected,
+        # which degrades to the pre-fix "re-run the in-flight persona"
+        # posture rather than skipping a persona that never really ran.
+        finalized_attempts: set[int] = set()
         for event in events:
             event_type = getattr(event, "type", None)
+            if event_type == "execution.ac.outcome_finalized":
+                data = getattr(event, "data", None)
+                if isinstance(data, dict) and data.get("root_ac_index") == ac_idx:
+                    raw_finalized_attempt = data.get("retry_attempt")
+                    if (
+                        isinstance(raw_finalized_attempt, int)
+                        and not isinstance(raw_finalized_attempt, bool)
+                        and raw_finalized_attempt >= 0
+                    ):
+                        finalized_attempts.add(raw_finalized_attempt)
+                continue
             if event_type not in {
                 "execution.ac.parked_for_operator",
                 "execution.ac.lateral_escalation_progressed",
@@ -6976,6 +7012,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 return LateralEscalationState(parked=True)
             resume_attempt = raw_attempt
         self._lateral_escalation_resume_attempts[ac_idx] = resume_attempt
+        # Round-7 Finding #4: the in-flight attempt is only "still in flight"
+        # when NO finalized outcome exists for it. A finalized outcome means
+        # the dispatch completed before the crash — resume must advance the
+        # ladder past that persona instead of re-running it under the same
+        # attempt identity.
+        self._lateral_escalation_resume_attempt_completed[ac_idx] = (
+            resume_attempt is not None and resume_attempt in finalized_attempts
+        )
 
         self._lateral_escalation_states[ac_idx] = state
         return state
@@ -7162,6 +7206,7 @@ Respond with either ATOMIC or the structured JSON object only.
             def _clear_in_memory_state() -> None:
                 self._lateral_escalation_states.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+                self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
 
             self._schedule_deferred_durable_write(
                 write=lambda: self._event_emitter.emit_ac_parked_resolved(
@@ -7179,6 +7224,7 @@ Respond with either ATOMIC or the structured JSON object only.
             return
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+        self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
 
     async def _terminate_escalation_episode(
         self, *, ac_idx: int, execution_id: str, session_id: str, reason: str
@@ -7234,6 +7280,7 @@ Respond with either ATOMIC or the structured JSON object only.
             def _clear_in_memory_state() -> None:
                 self._lateral_escalation_states.pop(ac_idx, None)
                 self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+                self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
 
             self._schedule_deferred_durable_write(
                 write=lambda: self._event_emitter.emit_lateral_escalation_interrupted(
@@ -7252,6 +7299,7 @@ Respond with either ATOMIC or the structured JSON object only.
             return
         self._lateral_escalation_states.pop(ac_idx, None)
         self._lateral_escalation_resume_attempts.pop(ac_idx, None)
+        self._lateral_escalation_resume_attempt_completed.pop(ac_idx, None)
 
     async def _resume_escalated_ac(
         self,
@@ -7288,6 +7336,48 @@ Respond with either ATOMIC or the structured JSON object only.
         top-of-ladder state.
         """
         ac_content = ac_text(seed.acceptance_criteria[ac_idx])
+        # Round-7 Finding #4: ``progressed`` is written BEFORE its dispatch
+        # runs, so the restored "in-flight" attempt may in fact have
+        # COMPLETED (with a failure) before the crash — the crash then
+        # happened between that dispatch's finalized outcome and the next
+        # ``progressed`` write. Re-running it here would repeat an
+        # already-tried-and-failed persona under the SAME attempt identity,
+        # duplicating work and attempt-scoped telemetry. When the durable log
+        # carries a finalized outcome for exactly that attempt number, skip
+        # this pre-ladder redispatch entirely and hand the AC straight to the
+        # ladder, which advances PAST the completed step (personas are never
+        # repeated once recorded) under a NEW attempt number. Consumed
+        # (popped) so a later resolution/termination never sees a stale flag.
+        in_flight_attempt_completed = self._lateral_escalation_resume_attempt_completed.pop(
+            ac_idx, False
+        )
+        if in_flight_attempt_completed:
+            completed_prior = ACExecutionResult(
+                ac_index=ac_idx,
+                ac_content=ac_content,
+                success=False,
+                error=(
+                    "Execution restarted mid-escalation AFTER the in-flight "
+                    "attempt's dispatch had already completed with a durably "
+                    "finalized failure; advancing the lateral-escalation "
+                    "ladder past it instead of re-running the same attempt."
+                ),
+                retry_attempt=ac_retry_attempts[ac_idx],
+            )
+            return await self._finalize_batch_ac_with_escalation(
+                seed=seed,
+                ac_idx=ac_idx,
+                result=completed_prior,
+                ac_retry_attempts=ac_retry_attempts,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                execution_counters=execution_counters,
+                retry_termination_reason="budget_exhausted",
+            )
         synthetic_prior = ACExecutionResult(
             ac_index=ac_idx,
             ac_content=ac_content,
