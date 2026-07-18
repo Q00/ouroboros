@@ -6573,11 +6573,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     return _malformed(f"unrecognized persona value: {raw_value!r}")
             personas = tuple(recovered)
             raw_streak = latest_state_data.get("consecutive_terminal_failures")
-            if (
-                not isinstance(raw_streak, int)
-                or isinstance(raw_streak, bool)
-                or raw_streak < 0
-            ):
+            if not isinstance(raw_streak, int) or isinstance(raw_streak, bool) or raw_streak < 0:
                 return _malformed(
                     f"consecutive_terminal_failures is not a non-negative int: {raw_streak!r}"
                 )
