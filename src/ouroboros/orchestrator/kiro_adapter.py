@@ -411,7 +411,22 @@ class KiroAgentAdapter:
                 yield AgentMessage(
                     type="result",
                     content=f"Kiro CLI failed (exit {proc.returncode}): {stderr_text}",
-                    data={"subtype": "error", "exit_code": proc.returncode},
+                    data={
+                        "subtype": "error",
+                        "exit_code": proc.returncode,
+                        # Mirror stderr into the structured ``data["error"]``
+                        # field so leaf_dispatcher's infra-fatal classifier
+                        # (which deliberately never scans free-text
+                        # ``content``) can evaluate it against its narrow,
+                        # vetted auth/infra pattern list. Kiro has no
+                        # auth-specific exit code or stderr prefix we could
+                        # match more narrowly; without this bridge a genuine
+                        # "Unauthorized"/"invalid API key" failure was
+                        # invisible to the classifier and retried forever.
+                        # Same convention as worker_runtime.py (WorkerTurn
+                        # .error) and pi_runtime.py (errorMessage).
+                        **({"error": stderr_text} if stderr_text else {}),
+                    },
                     resume_handle=current_handle,
                 )
 

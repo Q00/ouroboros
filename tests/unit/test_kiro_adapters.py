@@ -671,6 +671,52 @@ class TestKiroAgentAdapterExecuteTask:
         assert "exit 2" in result.content
 
     @pytest.mark.asyncio
+    async def test_nonzero_exit_auth_failure_is_infra_fatal(self) -> None:
+        """Round-6 regression: a genuine Kiro auth failure on the generic
+        nonzero-exit path must reach the structured ``data["error"]`` field
+        that leaf_dispatcher's infra-fatal classifier scans (it never scans
+        free-text ``content``), so it fails immediately instead of entering
+        the retry/escalation ladder forever."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(stdout=b"", stderr=b"Unauthorized: invalid API key", returncode=1)
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("fail")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["error"] == "Unauthorized: invalid API key"
+        assert _is_infra_fatal_error_message(result) is True
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_ordinary_task_failure_is_not_infra_fatal(self) -> None:
+        """Negative control for the round-6 fix: an ordinary task failure
+        that happens to exit nonzero (e.g. failing tests) must NOT be
+        classified infra-fatal — it still deserves retry/escalation."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(stdout=b"", stderr=b"2 tests failed", returncode=1)
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("fail")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["error"] == "2 tests failed"
+        assert _is_infra_fatal_error_message(result) is False
+
+    @pytest.mark.asyncio
     async def test_respects_cwd(self) -> None:
         proc = _make_proc(stdout=b"ok\n", returncode=0)
         captured_kwargs: dict = {}
