@@ -156,6 +156,25 @@ class TestEconomicsConfig:
         with pytest.raises(ValidationError):
             EconomicsConfig(default_tier="invalid")  # type: ignore[arg-type]
 
+    def test_parked_retry_backoff_seconds_rejects_infinity(self) -> None:
+        """Fix 7 (round 2, BLOCKING): ``ge=1.0`` alone admits ``float("inf")``,
+        which reaches ``asyncio.sleep(inf)`` in the parked-retry loop and
+        hangs that AC's slot forever with no operator-visible signal --
+        worse than the original "give up and surface FAILED" behavior this
+        feature exists to avoid. Reject non-finite values at construction."""
+        with pytest.raises(ValidationError):
+            EconomicsConfig(parked_retry_backoff_seconds=float("inf"))
+
+    def test_parked_retry_backoff_seconds_rejects_nan(self) -> None:
+        """NaN is likewise never a valid backoff duration."""
+        with pytest.raises(ValidationError):
+            EconomicsConfig(parked_retry_backoff_seconds=float("nan"))
+
+    def test_parked_retry_backoff_seconds_accepts_finite_value(self) -> None:
+        """A normal finite backoff still constructs cleanly."""
+        config = EconomicsConfig(parked_retry_backoff_seconds=600.0)
+        assert config.parked_retry_backoff_seconds == 600.0
+
 
 class TestClarificationConfig:
     """Test ClarificationConfig for Phase 0 settings."""

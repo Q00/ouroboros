@@ -1929,6 +1929,17 @@ class OrchestratorRunner:
             isinstance(enabled, bool)
             and isinstance(backoff, (int, float))
             and not isinstance(backoff, bool)
+            # Fix 7 (round 2, BLOCKING): a deserialized contract from an older
+            # persisted run (or one tampered with out-of-band) must be
+            # re-validated with the SAME finite-and-positive rule the
+            # Pydantic config field enforces at construction time
+            # (EconomicsConfig.parked_retry_backoff_seconds). Without the
+            # ``math.isfinite`` check, ``backoff >= 0`` alone admits
+            # ``float("inf")``, which reaches ``asyncio.sleep(inf)`` in the
+            # parked-retry loop and hangs that AC's slot forever with no
+            # operator-visible signal. Fail closed here too, not just at
+            # config-construction time.
+            and math.isfinite(backoff)
             and backoff >= 0
         )
 

@@ -624,3 +624,43 @@ class TestLateralEscalationStateDurability:
         # not a fresh LateralEscalationState() that would instead do "one
         # more identical retry" without sleeping at all.
         executor._sleep.assert_awaited_once_with(executor._parked_retry_backoff_seconds)
+
+
+class TestParkedRetryBackoffSecondsFiniteGuard:
+    """Fix 7 (round 2, BLOCKING) defense-in-depth: this low-level constructor
+    is a direct, unvalidated entry point of its own -- independent of the two
+    contract boundaries covered by ``tests/unit/config/test_models.py`` and
+    ``tests/unit/orchestrator/test_routing_contract_resume.py``. Without this
+    guard, ``max(1.0, parked_retry_backoff_seconds)`` happily lets
+    ``float("inf")`` through to ``asyncio.sleep(inf)``, hanging that AC's slot
+    forever with no operator-visible signal."""
+
+    def test_infinite_backoff_is_rejected_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            ParallelACExecutor(
+                adapter=MagicMock(),
+                event_store=AsyncMock(),
+                console=MagicMock(),
+                enable_decomposition=False,
+                parked_retry_backoff_seconds=float("inf"),
+            )
+
+    def test_nan_backoff_is_rejected_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            ParallelACExecutor(
+                adapter=MagicMock(),
+                event_store=AsyncMock(),
+                console=MagicMock(),
+                enable_decomposition=False,
+                parked_retry_backoff_seconds=float("nan"),
+            )
+
+    def test_finite_backoff_still_constructs(self) -> None:
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            parked_retry_backoff_seconds=900.0,
+        )
+        assert executor._parked_retry_backoff_seconds == 900.0

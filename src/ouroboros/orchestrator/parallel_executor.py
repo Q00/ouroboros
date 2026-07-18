@@ -1034,6 +1034,19 @@ class ParallelACExecutor:
         # by ``ac_index``. Injectable sleep so tests never wait through a real
         # backoff duration.
         self._lateral_escalation_states: dict[int, LateralEscalationState] = {}
+        # Fix 7 (round 2, BLOCKING) defense-in-depth: the two contract
+        # boundaries that populate this value (EconomicsConfig's Pydantic
+        # field validator, and the resume-time
+        # ``_valid_retry_policy_contract`` re-check in runner.py) both now
+        # reject non-finite values, but this low-level constructor is a
+        # direct, unvalidated entry point of its own. ``max(1.0, ...)`` only
+        # enforces a floor -- it happily lets ``float("inf")`` through, which
+        # reaches ``asyncio.sleep(inf)`` below and hangs that AC's slot
+        # forever with no operator-visible signal. Fail closed here too
+        # rather than silently clamping to an arbitrary finite ceiling.
+        if not math.isfinite(parked_retry_backoff_seconds):
+            msg = "parked_retry_backoff_seconds must be finite"
+            raise ValueError(msg)
         self._parked_retry_backoff_seconds = max(1.0, parked_retry_backoff_seconds)
         self._lateral_escalation_enabled = lateral_escalation_enabled
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep

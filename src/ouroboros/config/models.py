@@ -21,6 +21,7 @@ Classes:
     OuroborosConfig: Top-level configuration combining all sections
 """
 
+import math
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -130,6 +131,25 @@ class EconomicsConfig(BaseModel, frozen=True):
     downgrade_success_streak: int = Field(default=5, ge=1)
     parked_retry_backoff_seconds: float = Field(default=300.0, ge=1.0)
     lateral_escalation_enabled: bool = False
+
+    @field_validator("parked_retry_backoff_seconds")
+    @classmethod
+    def _finite_parked_retry_backoff_seconds(cls, value: float) -> float:
+        """Reject non-finite backoff values (Fix 7, round 2, BLOCKING).
+
+        ``ge=1.0`` alone admits ``float("inf")`` as "valid". That value
+        reaches ``asyncio.sleep(inf)`` in the parked-retry loop, which never
+        returns -- turning the advertised "bounded long cadence" parked-retry
+        behavior into a genuine, silent, permanent hang for that AC's slot,
+        with none of the operator-visible signal this whole feature exists
+        to provide. Fail closed here rather than silently clamping, so a
+        misconfigured infinite backoff is rejected at construction time
+        instead of surfacing as an unexplained stuck run much later.
+        """
+        if not math.isfinite(value):
+            msg = "parked_retry_backoff_seconds must be finite (got a non-finite value)"
+            raise ValueError(msg)
+        return value
 
 
 class LLMConfig(BaseModel, frozen=True):

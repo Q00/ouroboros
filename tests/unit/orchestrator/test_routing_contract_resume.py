@@ -282,6 +282,14 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": -5.0},
         {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": True},
         "not-a-mapping",
+        # Fix 7 (round 2, BLOCKING): a deserialized contract carrying
+        # float("inf")/nan must be rejected here too, not just at
+        # EconomicsConfig's Pydantic construction layer -- a resumed run
+        # replays THIS check, not the config field validator, so
+        # ``float("inf")`` must fail closed at both boundaries or it reaches
+        # ``asyncio.sleep(inf)`` and hangs that AC's slot forever.
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("inf")},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": float("nan")},
     ],
 )
 def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:
