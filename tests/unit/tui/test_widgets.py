@@ -742,6 +742,28 @@ class TestACProgressWidget:
         assert long_content[:77] in str(wide.render())
         assert str(narrow.render()) != str(wide.render())
 
+    def test_content_max_width_is_bounded_by_panes_narrower_than_the_minimum(self) -> None:
+        """Round-6 (non-blocking): the 20-cell minimum truncation width must
+        not exceed the widget's ACTUAL width in a very narrow pane — the
+        truncation budget is capped by the space that exists."""
+        from unittest.mock import PropertyMock, patch
+
+        widget = ACProgressWidget()
+
+        def _width_for(size_width: int) -> int:
+            fake_size = type("Size", (), {"width": size_width, "height": 5})()
+            with patch.object(
+                ACProgressWidget, "size", new_callable=PropertyMock, return_value=fake_size
+            ):
+                return widget._content_max_width()
+
+        # Narrower than the minimum: bounded by the actual pane width.
+        assert _width_for(10) == 10
+        # Tight-but-usable pane: the readability minimum still applies.
+        assert _width_for(25) == 20
+        # Ample pane: reserved chars subtracted as before.
+        assert _width_for(100) == 80
+
     def test_render_ac_item_truncation_is_cell_width_aware_for_cjk(self) -> None:
         """CJK characters occupy 2 terminal display cells each. Truncating by
         Python code-point count (the pre-fix behavior) could keep TWICE the

@@ -243,7 +243,11 @@ class ACProgressWidget(Widget):
         except Exception:
             width = 0
         if width and width > 0:
-            return max(_MIN_CONTENT_WIDTH, width - _CONTENT_WIDTH_RESERVED_CHARS)
+            # Round-6 (non-blocking): the 20-cell minimum exists so labels
+            # stay readable in tight-but-usable panes — but a pane NARROWER
+            # than the minimum must still bound truncation by its actual
+            # width, or the "minimum" exceeds the space that exists at all.
+            return max(min(_MIN_CONTENT_WIDTH, width), width - _CONTENT_WIDTH_RESERVED_CHARS)
         return default
 
     def _render_ac_item(self, ac: ACProgressItem, *, max_width: int | None = None) -> Static:

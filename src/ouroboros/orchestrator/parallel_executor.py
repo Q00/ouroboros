@@ -1056,7 +1056,12 @@ class ParallelACExecutor:
                 ``shadow_replay_enabled`` — an AC that keeps retrying forever
                 instead of surfacing FAILED is a significant behavior change
                 that direct/test callers must not get for free. Real run
-                paths (CLI `ooo run` via the runner) turn it on.
+                paths (CLI `ooo run` via the runner) honor
+                ``EconomicsConfig.lateral_escalation_enabled``, which ALSO
+                defaults to ``False`` (deliberately opt-in everywhere — an
+                earlier round established that default specifically to avoid
+                an infinite-sleep hang for callers that never asked for the
+                ladder); an operator enables it explicitly via config.
         """
         self._adapter = adapter
         self._event_store = event_store
