@@ -3094,6 +3094,138 @@ class TestInfraFatalExemption:
         assert executor._is_retryable_failure(result) is False
 
     @pytest.mark.asyncio
+    async def test_sdk_not_installed_result_message_marks_infra_fatal(self) -> None:
+        """Round-5 Finding #5 reproduction: ``adapter.py``'s SDK-missing path.
+
+        When the ``claude_agent_sdk`` Python package is not importable,
+        ``adapter.py`` yields a final error result. Before this fix its
+        ``data`` carried ONLY ``{"subtype": "error"}`` — no ``error_type``,
+        no ``error`` — and the classifier (which deliberately never scans
+        free-text ``content``) returned ``False``, so a condition retrying
+        can never cure (the SDK cannot install itself) entered the ordinary
+        retry/escalation ladder forever. The adapter now tags the result
+        with the specific ``SDKNotInstalledError`` type; this mock mirrors
+        the adapter's exact post-fix message shape.
+        """
+
+        class _SdkMissingRuntime:
+            _runtime_handle_backend = "claude"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                error_text = "Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"
+                yield AgentMessage(
+                    type="result",
+                    content=error_text,
+                    data={
+                        "subtype": "error",
+                        "error_type": "SDKNotInstalledError",
+                        "error": error_text,
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_SdkMissingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_sdk",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_sdk",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
+    async def test_kiro_cli_not_found_result_message_marks_infra_fatal(self) -> None:
+        """Round-5 Finding #5 audit: ``kiro_adapter.py``'s CLI-missing path.
+
+        ``kiro_adapter.py`` catches ``FileNotFoundError`` internally and used
+        to yield a final error result whose ``data`` carried only
+        ``{"subtype": "error"}`` — invisible to the structured-field-only
+        classifier. It now tags ``error_type``/``error``; this mock mirrors
+        the adapter's exact post-fix message shape.
+        """
+
+        class _KiroCliMissingRuntime:
+            _runtime_handle_backend = "kiro"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                error_text = "Kiro CLI not found at: /usr/local/bin/kiro"
+                yield AgentMessage(
+                    type="result",
+                    content=error_text,
+                    data={
+                        "subtype": "error",
+                        "error_type": "FileNotFoundError",
+                        "error": error_text,
+                    },
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_KiroCliMissingRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_infra_kiro",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="exec_infra_kiro",
+        )
+
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert executor._is_retryable_failure(result) is False
+
+    @pytest.mark.asyncio
     async def test_pi_auth_failure_result_message_marks_infra_fatal(self) -> None:
         """The second reproduction named by the finding: ``pi_runtime.py``
         reports model/auth failures as an ordinary final error message

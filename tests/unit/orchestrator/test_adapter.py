@@ -1009,7 +1009,15 @@ class TestClaudeAgentAdapter:
         assert messages[0] == AgentMessage(
             type="result",
             content="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
-            data={"subtype": "error"},
+            data={
+                "subtype": "error",
+                # Round-5 Finding #5: this genuinely fatal condition must be
+                # tagged in the STRUCTURED fields so leaf_dispatcher's
+                # infra-fatal classifier (which never scans ``content``)
+                # exempts it from the retry/escalation ladder.
+                "error_type": "SDKNotInstalledError",
+                "error": ("Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"),
+            },
         )
 
     @pytest.mark.asyncio

@@ -1517,7 +1517,19 @@ class ClaudeAgentAdapter:
             yield AgentMessage(
                 type="result",
                 content="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
-                data={"subtype": "error"},
+                data={
+                    "subtype": "error",
+                    # Structured tags so leaf_dispatcher's infra-fatal
+                    # classifier (which deliberately never scans the free-text
+                    # ``content`` field) can recognize this genuinely fatal
+                    # condition: retrying can never install the SDK, so this
+                    # must fail immediately instead of entering the ordinary
+                    # retry / lateral-escalation ladder.
+                    "error_type": "SDKNotInstalledError",
+                    "error": (
+                        "Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"
+                    ),
+                },
             )
             return
 

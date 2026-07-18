@@ -106,6 +106,16 @@ _INFRA_FATAL_ERROR_TYPES = frozenset(
         "ConnectionRefusedError",
         "ConnectionResetError",
         "ConnectionAbortedError",
+        # Round-5 fix: ``adapter.py`` reports a missing ``claude_agent_sdk``
+        # Python package as a structured error result (never a raised
+        # exception), and its narrative-only message previously carried no
+        # ``error_type``/``error`` tag this classifier could see — so a
+        # condition retrying can never cure (the SDK cannot install itself)
+        # entered the ordinary retry/escalation ladder forever. The adapter
+        # now tags that result with this SPECIFIC type; exact-matching it here
+        # is safe because it is only ever emitted for the ImportError of the
+        # SDK package itself, never for ordinary task failures.
+        "SDKNotInstalledError",
     }
 )
 

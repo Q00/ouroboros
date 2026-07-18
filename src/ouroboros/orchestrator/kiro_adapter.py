@@ -425,7 +425,15 @@ class KiroAgentAdapter:
             yield AgentMessage(
                 type="result",
                 content=f"Kiro CLI not found at: {self._cli_path}",
-                data={"subtype": "error"},
+                data={
+                    "subtype": "error",
+                    # Structured tags so leaf_dispatcher's infra-fatal
+                    # classifier (which never scans free-text ``content``)
+                    # recognizes a missing CLI binary as genuinely fatal:
+                    # retrying can never make the executable appear.
+                    "error_type": "FileNotFoundError",
+                    "error": f"Kiro CLI not found at: {self._cli_path}",
+                },
                 resume_handle=current_handle,
             )
         finally:
