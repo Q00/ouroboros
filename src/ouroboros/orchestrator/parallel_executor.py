@@ -1874,6 +1874,47 @@ class ParallelACExecutor:
             enabled = raw_policy.get("lateral_escalation_enabled")
             backoff = raw_policy.get("parked_retry_backoff_seconds")
             retry_attempts = raw_policy.get("ac_retry_attempts")
+            # Round-11 finding #2 (BLOCKING): the three round-9 #4 fields are
+            # execution-semantic inputs the ladder/attestation state machine
+            # depends on (``reasoning_effort`` governs ladder terminal
+            # eligibility via the frontier-effort checks; the verify-gate pair
+            # governs whether attestation can be evaluated at all). The
+            # runner-level durable contract already pins them for the
+            # session-resume path; this CHECKPOINT-level restore (the
+            # executor-internal RC3 crash-recovery path) must pin them too, or
+            # a crash-restart executes the restored level under different
+            # effort/verify-gate semantics than the original run. Validation
+            # mirrors ``_valid_retry_policy_contract`` exactly: effort is the
+            # routing vocabulary or ``None`` (dormant axis); the verify flag
+            # is a plain bool; the timeout mirrors ``ExecutionConfig``'s
+            # ``ge=1`` int contract. A key ABSENT from the persisted policy is
+            # the one-time migration shape (checkpoint written before this
+            # fix): keep the current config's value for that field only,
+            # mirroring the ``raw_policy is None`` posture above. A key
+            # PRESENT but malformed is corruption/tampering and takes the
+            # whole policy down the fail-closed branch below.
+            effort_present = "reasoning_effort" in raw_policy
+            verify_flag_present = "run_verify_commands" in raw_policy
+            timeout_present = "verify_command_timeout_seconds" in raw_policy
+            effort = raw_policy.get("reasoning_effort")
+            verify_flag = raw_policy.get("run_verify_commands")
+            verify_timeout = raw_policy.get("verify_command_timeout_seconds")
+            round9_fields_valid = (
+                (
+                    not effort_present
+                    or effort is None
+                    or (isinstance(effort, str) and effort in {"low", "medium", "high", "xhigh"})
+                )
+                and (not verify_flag_present or isinstance(verify_flag, bool))
+                and (
+                    not timeout_present
+                    or (
+                        isinstance(verify_timeout, int)
+                        and not isinstance(verify_timeout, bool)
+                        and verify_timeout >= 1
+                    )
+                )
+            )
             if (
                 isinstance(enabled, bool)
                 and isinstance(backoff, (int, float))
@@ -1883,11 +1924,15 @@ class ParallelACExecutor:
                 and isinstance(retry_attempts, int)
                 and not isinstance(retry_attempts, bool)
                 and retry_attempts >= 0
+                and round9_fields_valid
             ):
                 if (
                     enabled != self._lateral_escalation_enabled
                     or float(backoff) != self._parked_retry_backoff_seconds
                     or retry_attempts != self._ac_retry_attempts
+                    or (effort_present and effort != self._reasoning_effort)
+                    or (verify_flag_present and verify_flag != self._run_verify_commands)
+                    or (timeout_present and verify_timeout != self._verify_command_timeout_seconds)
                 ):
                     log.info(
                         "parallel_executor.recovery.retry_policy_restored",
@@ -1899,10 +1944,30 @@ class ParallelACExecutor:
                         current_lateral_escalation_enabled=self._lateral_escalation_enabled,
                         checkpoint_ac_retry_attempts=retry_attempts,
                         current_ac_retry_attempts=self._ac_retry_attempts,
+                        checkpoint_reasoning_effort=effort if effort_present else "<absent>",
+                        current_reasoning_effort=self._reasoning_effort,
+                        checkpoint_run_verify_commands=(
+                            verify_flag if verify_flag_present else "<absent>"
+                        ),
+                        current_run_verify_commands=self._run_verify_commands,
+                        checkpoint_verify_command_timeout_seconds=(
+                            verify_timeout if timeout_present else "<absent>"
+                        ),
+                        current_verify_command_timeout_seconds=(
+                            self._verify_command_timeout_seconds
+                        ),
                     )
                 self._lateral_escalation_enabled = enabled
                 self._parked_retry_backoff_seconds = float(backoff)
                 self._ac_retry_attempts = retry_attempts
+                # The isinstance re-checks are guaranteed true by
+                # ``round9_fields_valid`` above; they only re-narrow types.
+                if effort_present and (effort is None or isinstance(effort, str)):
+                    self._reasoning_effort = effort
+                if verify_flag_present and isinstance(verify_flag, bool):
+                    self._run_verify_commands = verify_flag
+                if timeout_present and isinstance(verify_timeout, int):
+                    self._verify_command_timeout_seconds = verify_timeout
                 return
         log.error(
             "parallel_executor.recovery.retry_policy_malformed",
@@ -2894,6 +2959,20 @@ class ParallelACExecutor:
                                         self._parked_retry_backoff_seconds
                                     ),
                                     "ac_retry_attempts": self._ac_retry_attempts,
+                                    # Round-11 finding #2 (BLOCKING): the
+                                    # round-9 #4 execution-semantic trio the
+                                    # runner-level durable contract already
+                                    # pins for session-resume must also ride
+                                    # the RC3 checkpoint, so a crash-restart
+                                    # recovering through THIS mechanism keeps
+                                    # the effort/verify-gate semantics the
+                                    # run started with (see
+                                    # ``_restore_checkpoint_retry_policy``).
+                                    "reasoning_effort": self._reasoning_effort,
+                                    "run_verify_commands": self._run_verify_commands,
+                                    "verify_command_timeout_seconds": (
+                                        self._verify_command_timeout_seconds
+                                    ),
                                 },
                             },
                         )

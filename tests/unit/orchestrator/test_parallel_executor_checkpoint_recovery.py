@@ -317,6 +317,12 @@ class TestCrashRestartRestoresRetryPolicy:
             lateral_escalation_enabled=True,
             parked_retry_backoff_seconds=1234.5,
             ac_retry_attempts=5,
+            # Round-11 finding #2: the round-9 #4 execution-semantic trio
+            # must ride the checkpoint too — distinctive values so the
+            # restart (which defaults to None/True/600) proves restoration.
+            reasoning_effort="xhigh",
+            run_verify_commands=False,
+            verify_command_timeout_seconds=77,
         )
 
         async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
@@ -370,6 +376,9 @@ class TestCrashRestartRestoresRetryPolicy:
             "lateral_escalation_enabled": True,
             "parked_retry_backoff_seconds": 1234.5,
             "ac_retry_attempts": 5,
+            "reasoning_effort": "xhigh",
+            "run_verify_commands": False,
+            "verify_command_timeout_seconds": 77,
         }
 
         # --- Restart under a DIFFERENT config: the fresh executor is
@@ -381,6 +390,9 @@ class TestCrashRestartRestoresRetryPolicy:
             checkpoint_store=CheckpointStore(base_path=ckpt_path),
         )
         assert recovered._lateral_escalation_enabled is False
+        assert recovered._reasoning_effort is None
+        assert recovered._run_verify_commands is True
+        assert recovered._verify_command_timeout_seconds == 600
         recovered._sleep = AsyncMock()
         dispatch_calls: list[dict[str, object]] = []
 
@@ -405,6 +417,11 @@ class TestCrashRestartRestoresRetryPolicy:
         assert recovered._lateral_escalation_enabled is True
         assert recovered._parked_retry_backoff_seconds == 1234.5
         assert recovered._ac_retry_attempts == 5
+        # Round-11 finding #2: the execution-semantic trio too — the restored
+        # level runs under the ORIGINAL run's effort/verify-gate semantics.
+        assert recovered._reasoning_effort == "xhigh"
+        assert recovered._run_verify_commands is False
+        assert recovered._verify_command_timeout_seconds == 77
         # The parked AC's durable history was consulted and honored: exactly
         # ONE dispatch through the resumed-ladder re-entry (post-budget, max
         # strength, parked cadence slept first) — never a fresh retry budget.
@@ -834,6 +851,128 @@ class TestCrashRestartRestoresRetryPolicyLegacyAndMalformed:
         assert executor._lateral_escalation_enabled is True
         assert executor._parked_retry_backoff_seconds == before_backoff
         assert executor._ac_retry_attempts == before_attempts
+
+
+class TestCrashRestartRestoresExecutionSemanticFields:
+    """Round-11 finding #2 (BLOCKING): round 9's #4 fix added
+    ``reasoning_effort``, ``run_verify_commands``, and
+    ``verify_command_timeout_seconds`` to the RUNNER-level durable
+    retry-policy contract (session-resume path) because the
+    ladder/attestation state machine depends on them — but the
+    CHECKPOINT-level RC3 restore was never updated to match, so a
+    crash-restart recovering through the executor's own checkpoint could
+    execute the restored level under DIFFERENT effort/verify-gate semantics
+    than the original run. The checkpoint now persists and restores the
+    trio with the same validation rules as the runner contract."""
+
+    @staticmethod
+    def _executor(**overrides: object) -> ParallelACExecutor:
+        return ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            **overrides,  # type: ignore[arg-type]
+        )
+
+    _VALID_LEGACY = {
+        "lateral_escalation_enabled": True,
+        "parked_retry_backoff_seconds": 45.0,
+        "ac_retry_attempts": 3,
+    }
+
+    def test_original_semantics_win_over_current_config(self) -> None:
+        """A checkpoint carrying a DIFFERENT effort/verify-gate trio than
+        the current process config must restore the ORIGINAL values."""
+        executor = self._executor(
+            reasoning_effort="low",
+            run_verify_commands=True,
+            verify_command_timeout_seconds=600,
+        )
+        executor._restore_checkpoint_retry_policy(
+            {
+                **self._VALID_LEGACY,
+                "reasoning_effort": "xhigh",
+                "run_verify_commands": False,
+                "verify_command_timeout_seconds": 77,
+            }
+        )
+        assert executor._reasoning_effort == "xhigh"
+        assert executor._run_verify_commands is False
+        assert executor._verify_command_timeout_seconds == 77
+        assert executor._lateral_escalation_enabled is True
+        assert executor._parked_retry_backoff_seconds == 45.0
+        assert executor._ac_retry_attempts == 3
+
+    def test_dormant_effort_none_is_restored_over_configured_effort(self) -> None:
+        """``None`` is a legitimate persisted value (dormant effort axis) and
+        must override a currently-configured effort — distinguishable from a
+        merely ABSENT key."""
+        executor = self._executor(reasoning_effort="high")
+        executor._restore_checkpoint_retry_policy(
+            {
+                **self._VALID_LEGACY,
+                "reasoning_effort": None,
+                "run_verify_commands": True,
+                "verify_command_timeout_seconds": 600,
+            }
+        )
+        assert executor._reasoning_effort is None
+
+    def test_legacy_trio_policy_migrates_new_fields_from_current_config(self) -> None:
+        """A checkpoint written before this fix carries only the legacy three
+        fields: restore those, and keep the CURRENT config's values for the
+        absent trio (one-time migration, mirroring the policy-is-None
+        posture) — never treat the absence as corruption."""
+        executor = self._executor(
+            reasoning_effort="medium",
+            run_verify_commands=False,
+            verify_command_timeout_seconds=120,
+        )
+        executor._restore_checkpoint_retry_policy(dict(self._VALID_LEGACY))
+        assert executor._lateral_escalation_enabled is True
+        assert executor._parked_retry_backoff_seconds == 45.0
+        assert executor._ac_retry_attempts == 3
+        assert executor._reasoning_effort == "medium"
+        assert executor._run_verify_commands is False
+        assert executor._verify_command_timeout_seconds == 120
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            {"reasoning_effort": "ultra"},
+            {"reasoning_effort": ["low"]},
+            {"run_verify_commands": "yes"},
+            {"verify_command_timeout_seconds": 0},
+            {"verify_command_timeout_seconds": True},
+            {"verify_command_timeout_seconds": 60.0},
+        ],
+    )
+    def test_malformed_new_field_fails_closed(self, corruption: dict[str, object]) -> None:
+        """A PRESENT-but-malformed value in any of the trio takes the whole
+        policy down the established fail-closed branch: escalation gates
+        forced open (durable history will be honored), current config's
+        validated values kept for everything that could not be restored."""
+        executor = self._executor(
+            reasoning_effort="high",
+            run_verify_commands=True,
+            verify_command_timeout_seconds=600,
+        )
+        executor._restore_checkpoint_retry_policy(
+            {
+                "lateral_escalation_enabled": False,
+                "parked_retry_backoff_seconds": 45.0,
+                "ac_retry_attempts": 3,
+                "reasoning_effort": "low",
+                "run_verify_commands": False,
+                "verify_command_timeout_seconds": 30,
+                **corruption,
+            }
+        )
+        assert executor._lateral_escalation_enabled is True
+        assert executor._reasoning_effort == "high"
+        assert executor._run_verify_commands is True
+        assert executor._verify_command_timeout_seconds == 600
 
 
 class TestRunnerAdoptsRecoveredExecutionId:
