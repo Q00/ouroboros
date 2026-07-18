@@ -3076,8 +3076,6 @@ class TestDeferredWriteFirstAttemptIsImmediate:
     async def test_cancellation_is_logged_not_silent(self) -> None:
         import asyncio
 
-        import structlog.testing
-
         executor = _make_executor_with_active_ladder()
         started = asyncio.Event()
 
@@ -3086,24 +3084,27 @@ class TestDeferredWriteFirstAttemptIsImmediate:
             await asyncio.Event().wait()  # pragma: no cover - cancelled mid-wait
             return True
 
-        executor._schedule_deferred_durable_write(
-            write=hanging_write, on_persisted=None, log_key="test.deferred"
-        )
-        (task,) = executor._deferred_durable_write_tasks
-        with structlog.testing.capture_logs() as captured:
+        # Patch the module logger directly: ``structlog.testing.capture_logs``
+        # is unreliable under full-suite runs where another suite has already
+        # configured structlog with cached loggers.
+        with patch("ouroboros.orchestrator.parallel_executor.log") as mock_log:
+            executor._schedule_deferred_durable_write(
+                write=hanging_write, on_persisted=None, log_key="test.deferred"
+            )
+            (task,) = executor._deferred_durable_write_tasks
             await started.wait()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
         cancelled_logs = [
-            entry
-            for entry in captured
-            if entry["event"] == "test.deferred.deferred_write_cancelled"
+            call
+            for call in mock_log.warning.call_args_list
+            if call.args and call.args[0] == "test.deferred.deferred_write_cancelled"
         ]
         assert cancelled_logs, "cancellation must be loud, never silent"
-        assert cancelled_logs[0]["attempts_remaining"] > 0
-        assert "stale" in cancelled_logs[0]["detail"]
+        assert cancelled_logs[0].kwargs["attempts_remaining"] > 0
+        assert "stale" in cancelled_logs[0].kwargs["detail"]
 
 
 class TestDeferredWritesDrainAtRunCompletion:
@@ -3139,8 +3140,6 @@ class TestDeferredWritesDrainAtRunCompletion:
     async def test_drain_cancels_stalled_writes_after_bounded_timeout(self) -> None:
         import asyncio
 
-        import structlog.testing
-
         executor = _make_executor_with_active_ladder()
         started = asyncio.Event()
 
@@ -3149,17 +3148,20 @@ class TestDeferredWritesDrainAtRunCompletion:
             await asyncio.Event().wait()  # pragma: no cover - cancelled mid-wait
             return True
 
-        executor._schedule_deferred_durable_write(
-            write=hanging_write, on_persisted=None, log_key="test.deferred"
-        )
+        # Patch the module logger directly: ``structlog.testing.capture_logs``
+        # is unreliable under full-suite runs where another suite has already
+        # configured structlog with cached loggers.
         with (
             patch(
                 "ouroboros.orchestrator.parallel_executor"
                 "._DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS",
                 0.05,
             ),
-            structlog.testing.capture_logs() as captured,
+            patch("ouroboros.orchestrator.parallel_executor.log") as mock_log,
         ):
+            executor._schedule_deferred_durable_write(
+                write=hanging_write, on_persisted=None, log_key="test.deferred"
+            )
             await executor._drain_deferred_durable_writes()
 
         assert started.is_set()
@@ -3167,7 +3169,10 @@ class TestDeferredWritesDrainAtRunCompletion:
         assert not executor._deferred_durable_write_tasks
         # The drain's explicit cancel routed through the loop's own loud
         # cancellation handler.
-        assert any(entry["event"] == "test.deferred.deferred_write_cancelled" for entry in captured)
+        assert any(
+            call.args and call.args[0] == "test.deferred.deferred_write_cancelled"
+            for call in mock_log.warning.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_drain_is_a_noop_with_no_pending_writes(self) -> None:
