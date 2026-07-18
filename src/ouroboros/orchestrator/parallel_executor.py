@@ -801,6 +801,39 @@ def _decomposition_attestation_from_event_data(
     if not isinstance(reason, str):
         reason = ""
 
+    # Round-6 fix: cross-validate the payload against the only shapes
+    # ``attest_decomposition`` ever produces, and against the independently
+    # serialized ``trustworthy`` boolean ``to_event_data`` always writes.
+    # ``DecompositionAttestation.trustworthy`` is COMPUTED from ``verdict``,
+    # so a payload whose ``verdict`` string was corrupted to "trustworthy"
+    # while ``trustworthy``/``failed_axis``/``reason`` still describe a
+    # failure would otherwise reconstruct into a spuriously-trustworthy
+    # attestation and silently authorize the cheap-tier discount. Any
+    # inconsistency fails closed (``None`` == "no attestation recorded").
+    trustworthy_raw = data.get("trustworthy")
+    if not isinstance(trustworthy_raw, bool):
+        return None
+    if trustworthy_raw is not (verdict is DecompositionTrustVerdict.TRUSTWORTHY):
+        return None
+    if verdict is DecompositionTrustVerdict.TRUSTWORTHY:
+        # A trustworthy verdict never carries a failure attribution.
+        if failed_axis is not None or failed_sibling_id is not None:
+            return None
+    else:
+        # UNTRUSTWORTHY and INDETERMINATE always attribute a failed axis,
+        # and only SIBLING_GATE ever names a specific sibling.
+        if failed_axis is None:
+            return None
+        if failed_sibling_id is not None and failed_axis is not DecompositionTrustAxis.SIBLING_GATE:
+            return None
+        # An evaluated sibling-gate FAILURE always names the failing sibling.
+        if (
+            verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+            and failed_axis is DecompositionTrustAxis.SIBLING_GATE
+            and failed_sibling_id is None
+        ):
+            return None
+
     return DecompositionAttestation(
         node_id=node_id,
         verdict=verdict,

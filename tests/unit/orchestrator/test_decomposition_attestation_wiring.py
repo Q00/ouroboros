@@ -1345,6 +1345,195 @@ class TestDecompositionAttestationFailsClosedOnMalformedEventData:
         assert all(flag is False for flag in captured_trust_flags)
 
 
+class TestAttestationEventDataCrossValidation:
+    """Round-6 Finding #5 (BLOCKING): ``_decomposition_attestation_from_event_data``
+    ignored the independently-serialized ``trustworthy`` boolean and never
+    checked that the reconstructed (verdict, failed_axis, failed_sibling_id)
+    combination is one ``attest_decomposition`` can actually produce.
+    ``DecompositionAttestation.trustworthy`` is COMPUTED from ``verdict``, so
+    corrupting JUST the verdict string to "trustworthy" while the rest of the
+    payload still described a failure reconstructed a spuriously-trustworthy
+    attestation and silently authorized the cheap-tier discount."""
+
+    @staticmethod
+    def _reconstruct(data: dict[str, object]):
+        from ouroboros.orchestrator.parallel_executor import (
+            _decomposition_attestation_from_event_data,
+        )
+
+        return _decomposition_attestation_from_event_data(data)
+
+    def test_corrupted_verdict_with_failure_payload_fails_closed(self) -> None:
+        """The exact scenario the review found: verdict corrupted to
+        "trustworthy" while trustworthy/failed_axis/reason still describe a
+        parent-gate failure. Must return None, not a trustworthy object."""
+        attestation = self._reconstruct(
+            {
+                "node_id": "n1",
+                "verdict": "trustworthy",
+                "trustworthy": False,
+                "failed_axis": "parent_gate",
+                "failed_sibling_id": None,
+                "reason": "parent verify gate failed after decomposition",
+            }
+        )
+        assert attestation is None
+
+    def test_trustworthy_verdict_with_failed_axis_fails_closed(self) -> None:
+        """Even when the serialized boolean AGREES with the corrupted verdict,
+        a trustworthy verdict carrying a failure attribution is a shape
+        ``attest_decomposition`` never produces."""
+        assert (
+            self._reconstruct(
+                {
+                    "node_id": "n1",
+                    "verdict": "trustworthy",
+                    "trustworthy": True,
+                    "failed_axis": "parent_gate",
+                    "failed_sibling_id": None,
+                    "reason": "corrupted",
+                }
+            )
+            is None
+        )
+
+    def test_untrustworthy_verdict_with_trustworthy_true_fails_closed(self) -> None:
+        assert (
+            self._reconstruct(
+                {
+                    "node_id": "n1",
+                    "verdict": "untrustworthy",
+                    "trustworthy": True,
+                    "failed_axis": "parent_gate",
+                    "failed_sibling_id": None,
+                    "reason": "corrupted",
+                }
+            )
+            is None
+        )
+
+    def test_non_trustworthy_verdict_without_failed_axis_fails_closed(self) -> None:
+        for verdict in ("untrustworthy", "indeterminate"):
+            assert (
+                self._reconstruct(
+                    {
+                        "node_id": "n1",
+                        "verdict": verdict,
+                        "trustworthy": False,
+                        "failed_axis": None,
+                        "failed_sibling_id": None,
+                        "reason": "corrupted",
+                    }
+                )
+                is None
+            )
+
+    def test_sibling_attribution_on_parent_gate_fails_closed(self) -> None:
+        """Only SIBLING_GATE ever names a specific sibling."""
+        assert (
+            self._reconstruct(
+                {
+                    "node_id": "n1",
+                    "verdict": "untrustworthy",
+                    "trustworthy": False,
+                    "failed_axis": "parent_gate",
+                    "failed_sibling_id": "child-2",
+                    "reason": "corrupted",
+                }
+            )
+            is None
+        )
+
+    def test_untrustworthy_sibling_gate_without_sibling_id_fails_closed(self) -> None:
+        """An evaluated sibling-gate FAILURE always names the failing sibling."""
+        assert (
+            self._reconstruct(
+                {
+                    "node_id": "n1",
+                    "verdict": "untrustworthy",
+                    "trustworthy": False,
+                    "failed_axis": "sibling_gate",
+                    "failed_sibling_id": None,
+                    "reason": "corrupted",
+                }
+            )
+            is None
+        )
+
+    def test_missing_or_non_bool_trustworthy_fails_closed(self) -> None:
+        """``to_event_data`` ALWAYS writes the boolean; its absence or a
+        wrong type is corruption, not a legitimate older shape."""
+        base = {
+            "node_id": "n1",
+            "verdict": "trustworthy",
+            "failed_axis": None,
+            "failed_sibling_id": None,
+            "reason": "ok",
+        }
+        assert self._reconstruct(dict(base)) is None
+        assert self._reconstruct({**base, "trustworthy": "true"}) is None
+
+    def test_every_legitimate_attestation_shape_round_trips(self) -> None:
+        """Negative control: every shape ``attest_decomposition`` actually
+        produces must survive to_event_data -> reconstruction unchanged, so
+        the new validation never rejects a legitimately-recorded verdict."""
+        from ouroboros.harness.decomposition_attestation import (
+            ParentVerifyOutcome,
+            attest_decomposition,
+        )
+
+        passing_sibling = SiblingVerifyOutcome(
+            sibling_id="c1", has_verify_command=True, passed=True
+        )
+        cases = [
+            # UNTRUSTWORTHY / SIBLING_GATE (failing sibling attributed)
+            attest_decomposition(
+                node_id="n1",
+                siblings=(
+                    SiblingVerifyOutcome(
+                        sibling_id="c1", has_verify_command=True, passed=False, reason="boom"
+                    ),
+                ),
+                parent=ParentVerifyOutcome(has_verify_command=True, passed=True),
+            ),
+            # UNTRUSTWORTHY / PARENT_GATE
+            attest_decomposition(
+                node_id="n2",
+                siblings=(passing_sibling,),
+                parent=ParentVerifyOutcome(has_verify_command=True, passed=False, reason="gap"),
+            ),
+            # INDETERMINATE / SIBLING_GATE, no sibling recorded
+            attest_decomposition(
+                node_id="n3",
+                siblings=(),
+                parent=ParentVerifyOutcome(has_verify_command=True, passed=True),
+            ),
+            # INDETERMINATE / SIBLING_GATE, indeterminate sibling attributed
+            attest_decomposition(
+                node_id="n4",
+                siblings=(
+                    SiblingVerifyOutcome(sibling_id="c1", has_verify_command=False, passed=None),
+                ),
+                parent=ParentVerifyOutcome(has_verify_command=True, passed=True),
+            ),
+            # INDETERMINATE / PARENT_GATE
+            attest_decomposition(
+                node_id="n5",
+                siblings=(passing_sibling,),
+                parent=ParentVerifyOutcome(has_verify_command=False, passed=None),
+            ),
+            # TRUSTWORTHY
+            attest_decomposition(
+                node_id="n6",
+                siblings=(passing_sibling,),
+                parent=ParentVerifyOutcome(has_verify_command=True, passed=True),
+            ),
+        ]
+        for original in cases:
+            reconstructed = self._reconstruct(dict(original.to_event_data()))
+            assert reconstructed == original, original
+
+
 class TestAttestationWriteFailureFailsClosed:
     """Round-5 Finding #4 (BLOCKING): a lost ``decomposition_attested`` write
     replays as silence, and silence reads as "never attested" — which
