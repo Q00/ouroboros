@@ -2474,7 +2474,9 @@ class TestResumeRestoresPersistedRetryAttempt:
 
         assert outcome is not None and outcome.success is True
         progressed_mock = executor._event_emitter.emit_lateral_escalation_progressed
-        emitted_attempts = [call.kwargs["retry_attempt"] for call in progressed_mock.await_args_list]
+        emitted_attempts = [
+            call.kwargs["retry_attempt"] for call in progressed_mock.await_args_list
+        ]
         # Entered at attempt 2 (budget spent): the two ladder redispatches
         # ran as attempts 3 and 4, and each preceding event recorded exactly
         # the attempt its redispatch would run under.
@@ -2729,9 +2731,7 @@ class TestResolvedWriteExhaustionRetriesInBackground:
             side_effect=[False, False, False, True]
         )
 
-        await executor._resolve_escalation_success(
-            ac_idx=0, execution_id="exec-1", session_id="s1"
-        )
+        await executor._resolve_escalation_success(ac_idx=0, execution_id="exec-1", session_id="s1")
 
         # The foreground call returned (a genuine success is never held
         # hostage) but the in-memory state was NOT silently cleared: the
@@ -2760,9 +2760,7 @@ class TestResolvedWriteExhaustionRetriesInBackground:
         )
         executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=False)
 
-        await executor._resolve_escalation_success(
-            ac_idx=0, execution_id="exec-1", session_id="s1"
-        )
+        await executor._resolve_escalation_success(ac_idx=0, execution_id="exec-1", session_id="s1")
         await asyncio.gather(*executor._deferred_durable_write_tasks)
 
         # Bounded give-up: the in-memory state stays "escalating" (the
@@ -2788,9 +2786,7 @@ class TestResolvedWriteExhaustionRetriesInBackground:
         )
         executor._event_emitter.emit_ac_parked_resolved = AsyncMock(return_value=True)
 
-        await executor._resolve_escalation_success(
-            ac_idx=0, execution_id="exec-1", session_id="s1"
-        )
+        await executor._resolve_escalation_success(ac_idx=0, execution_id="exec-1", session_id="s1")
 
         assert 0 not in executor._lateral_escalation_states
         assert not executor._deferred_durable_write_tasks

@@ -3038,9 +3038,7 @@ class ParallelACExecutor:
                 if persisted and (
                     self._decomposition_attestations.get(node_identity.node_id) is sentinel
                 ):
-                    self._decomposition_attestations[node_identity.node_id] = (
-                        computed_attestation
-                    )
+                    self._decomposition_attestations[node_identity.node_id] = computed_attestation
                 return persisted
 
             self._schedule_deferred_durable_write(
