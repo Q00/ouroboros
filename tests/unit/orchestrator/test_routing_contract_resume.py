@@ -219,6 +219,81 @@ def test_present_malformed_resume_contract_fails_closed() -> None:
         )
 
 
+def test_resume_restores_persisted_retry_policy() -> None:
+    """Fix 5 (BLOCKING, PR #1648 review): lateral_escalation_enabled and
+    parked_retry_backoff_seconds affect termination/retry semantics, so a
+    resumed run must keep the policy it STARTED with rather than picking up
+    whatever the current config now resolves to."""
+    original = _runner()
+    original._lateral_escalation_enabled = True
+    original._parked_retry_backoff_seconds = 900.0
+    persisted = original._build_execution_contract()
+    assert persisted["retry_policy"] == {
+        "lateral_escalation_enabled": True,
+        "parked_retry_backoff_seconds": 900.0,
+    }
+
+    resumed = _runner()
+    # Sanity: the fresh runner's own config-resolved defaults differ from the
+    # persisted policy, so a passing assertion below proves restoration
+    # actually happened rather than coincidentally matching a shared default.
+    assert resumed._lateral_escalation_enabled is False
+    assert resumed._parked_retry_backoff_seconds != 900.0
+
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is False
+    assert resumed._lateral_escalation_enabled is True
+    assert resumed._parked_retry_backoff_seconds == 900.0
+
+
+def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
+    """A contract persisted before this field existed has no ``retry_policy``
+    key at all. Missing is treated as a one-time legacy migration (mirrors
+    ``execution_preferences``): the CURRENT config's resolved policy is kept
+    for this resume, and the contract is flagged for re-persisting so every
+    later resume restores THIS exact policy instead of drifting again."""
+    original = _runner()
+    persisted = original._build_execution_contract()
+    del persisted["retry_policy"]
+
+    resumed = _runner()
+    resumed._lateral_escalation_enabled = True  # current config for THIS process
+    resumed._parked_retry_backoff_seconds = 42.0
+
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    assert resumed._lateral_escalation_enabled is True
+    assert resumed._parked_retry_backoff_seconds == 42.0
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["retry_policy"] == {
+        "lateral_escalation_enabled": True,
+        "parked_retry_backoff_seconds": 42.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "malformed_retry_policy",
+    [
+        {"lateral_escalation_enabled": True},  # missing parked_retry_backoff_seconds
+        {"lateral_escalation_enabled": "yes", "parked_retry_backoff_seconds": 300.0},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": "300"},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": -5.0},
+        {"lateral_escalation_enabled": True, "parked_retry_backoff_seconds": True},
+        "not-a-mapping",
+    ],
+)
+def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:
+    original = _runner()
+    persisted = original._build_execution_contract()
+    persisted["retry_policy"] = malformed_retry_policy
+
+    resumed = _runner()
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_empty_observed_runtime_identity_is_rejected() -> None:
     original = _runner()
     persisted = original._build_execution_contract(seed=_seed())

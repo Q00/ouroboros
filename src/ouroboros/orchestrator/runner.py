@@ -1900,6 +1900,38 @@ class OrchestratorRunner:
         mode = value.get("mode")
         return set(value) == {"observed", "mode"} and isinstance(mode, str) and bool(mode.strip())
 
+    def _retry_policy_contract(self) -> dict[str, Any]:
+        """Return the resolved retry/termination-semantics policy for this run.
+
+        ``lateral_escalation_enabled``/``parked_retry_backoff_seconds`` change
+        how a stuck root AC's ordinary retry budget exhaustion is handled
+        (give up as FAILED today's default, vs. never give up under the
+        lateral-persona escalation ladder). That is termination semantics,
+        exactly the kind of config the durable execution contract exists to
+        pin — a resumed run must keep the policy it STARTED with, not
+        silently pick up whatever the current config file now says.
+        """
+        return {
+            "lateral_escalation_enabled": self._lateral_escalation_enabled,
+            "parked_retry_backoff_seconds": self._parked_retry_backoff_seconds,
+        }
+
+    @staticmethod
+    def _valid_retry_policy_contract(value: object) -> bool:
+        if not isinstance(value, Mapping) or set(value) != {
+            "lateral_escalation_enabled",
+            "parked_retry_backoff_seconds",
+        }:
+            return False
+        enabled = value.get("lateral_escalation_enabled")
+        backoff = value.get("parked_retry_backoff_seconds")
+        return (
+            isinstance(enabled, bool)
+            and isinstance(backoff, (int, float))
+            and not isinstance(backoff, bool)
+            and backoff >= 0
+        )
+
     def _guidance_root(self, guidance_ids: tuple[str, ...]) -> Path:
         """Return the project root used for declared execution guidance."""
         effective_cwd = self._effective_cwd()
@@ -2043,6 +2075,7 @@ class OrchestratorRunner:
             "resume": {
                 "workspace": self._resume_workspace_identity(),
             },
+            "retry_policy": self._retry_policy_contract(),
         }
 
     async def _emit_run_configuration_resolved(
@@ -2316,6 +2349,7 @@ class OrchestratorRunner:
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        raw_retry_policy = raw_contract.get("retry_policy")
         if (
             not isinstance(raw_proof, Mapping)
             or not isinstance(raw_routing, Mapping)
@@ -2324,6 +2358,18 @@ class OrchestratorRunner:
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
                 details={"missing": "frugality_proof, model_routing, or resume"},
+            )
+        # ``retry_policy`` predates a legacy contract as ``None`` — a genuine
+        # one-time migration, exactly like ``execution_preferences`` below —
+        # but ANY present value must be well-formed or resume is blocked
+        # (fail-closed): a resumed run must keep the termination-semantics
+        # policy it started with, never silently fall back to whatever the
+        # current config file now says.
+        retry_policy_migrated = raw_retry_policy is None
+        if not retry_policy_migrated and not self._valid_retry_policy_contract(raw_retry_policy):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "retry_policy"},
             )
 
         self._restore_guidance_contract(raw_contract)
@@ -2535,6 +2581,15 @@ class OrchestratorRunner:
                     "hint": ("Pin the original runtime model/profile, or start a new session."),
                 },
             )
+        if not retry_policy_migrated and isinstance(raw_retry_policy, Mapping):
+            # A well-formed persisted policy overrides whatever __init__ just
+            # resolved from the CURRENT config — a resumed run keeps the
+            # termination semantics it started with, not the config's latest
+            # value, exactly like the restored model router below.
+            self._lateral_escalation_enabled = bool(raw_retry_policy["lateral_escalation_enabled"])
+            self._parked_retry_backoff_seconds = float(
+                raw_retry_policy["parked_retry_backoff_seconds"]
+            )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
@@ -2549,10 +2604,13 @@ class OrchestratorRunner:
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
         self._execution_contract = dict(raw_contract)
-        if preferences_migrated:
-            self._execution_contract["execution_preferences"] = (
-                persisted_preferences.to_contract_data()
-            )
+        if preferences_migrated or retry_policy_migrated:
+            if preferences_migrated:
+                self._execution_contract["execution_preferences"] = (
+                    persisted_preferences.to_contract_data()
+                )
+            if retry_policy_migrated:
+                self._execution_contract["retry_policy"] = self._retry_policy_contract()
             return True
         return False
 
