@@ -2558,6 +2558,37 @@ class ParallelACExecutor:
                     investment_spec=investment_spec,
                     decomposition_trustworthy=child_decomposition_trustworthy,
                     semantic_ac_key=semantic_ac_key,
+                    # Fix 1 (round 2): forward the PARENT's own success
+                    # contract to every child dispatch. Without this,
+                    # ``ac_spec`` was always None for a live decomposed
+                    # child, so ``_execute_atomic_ac`` could never run that
+                    # child's own verify gate, and
+                    # ``result.verify_gate_outcome`` stayed None forever --
+                    # making ``_attest_decomposition_round``'s sibling axis
+                    # permanently INDETERMINATE for every real decomposition
+                    # round (only hand-built unit-test results could ever
+                    # populate it). There is no separate per-child verify
+                    # contract anywhere in this codebase (the decomposer
+                    # only proposes free-text ``verification_hint``, not a
+                    # runnable command), so each child inherits the
+                    # parent's contract verbatim, scoped to "does the AC's
+                    # contract already hold after this child's own slice" --
+                    # the same gate-anchored oracle every other AC
+                    # success/failure decision reuses. This is
+                    # intentionally conservative: a multi-child split only
+                    # earns TRUSTWORTHY when the contract holds again after
+                    # EVERY child, not just the last one, matching this
+                    # whole module's fail-closed bias (see
+                    # ``decomposition_attestation.py``). A child's own
+                    # dispatch success can be gated by this recheck
+                    # (mirroring top-level atomic ACs), but that never
+                    # leaves the overall decomposed AC's final acceptance
+                    # incorrect: the outer ``_apply_verify_gate`` call
+                    # independently re-derives success/failure from the
+                    # SAME contract re-run after all children finish, so a
+                    # spurious mid-round gate failure on an earlier child is
+                    # corrected by that final, authoritative check.
+                    ac_spec=ac_spec,
                 )
             except BaseException as exc:
                 if isinstance(exc, anyio.get_cancelled_exc_class()):
@@ -3104,14 +3135,22 @@ class ParallelACExecutor:
                 call's stall retries) is spent — so the alternate harness never
                 pre-empts the configured same-runtime retries. The batch layer
                 sets it; direct/sub-AC callers default to ``True``.
-            ac_spec: The top-level AC's structured spec, when it carries a success
-                contract, so the atomic leaf prompt can surface it. Only the batch
-                layer passes it for top-level ACs; sub-AC recursion leaves it
-                ``None`` (a decomposed child has no spec-level contract of its own).
+            ac_spec: The root AC's structured spec, when it carries a success
+                contract, so the atomic leaf prompt can surface it. The batch
+                layer passes it for top-level ACs; decomposition recursion
+                (``_execute_decomposition_children``) now forwards the SAME
+                root spec to every child dispatch too (Fix 1, round 2), so a
+                live decomposed child can run its own verify gate and populate
+                ``result.verify_gate_outcome`` -- the gate-anchored decomposition
+                attestation (``_attest_decomposition_round``) reads that field
+                off every sibling and is otherwise permanently unable to reach
+                a non-INDETERMINATE verdict. There is no separate per-child
+                verify contract in this codebase, so a child's "own" gate is
+                the parent's contract re-checked after that child's slice.
             investment_spec: The top-level AC's investment authority. Recursive
                 children inherit it because they jointly discharge the parent AC.
-                This is separate from ``ac_spec`` so the parent's success contract
-                is not copied into child prompts.
+                This is tracked separately from ``ac_spec`` because it governs a
+                different concern (spend authority, not the success contract).
             decomposition_trustworthy: Explicit deterministic trust for this unit's
                 decomposition. Defaults fail closed; current live decomposition has
                 no trusted producer.

@@ -144,6 +144,13 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         call.kwargs["investment_spec"] is investment
         for call in executor._execute_atomic_ac.await_args_list
     )
+    # Fix 1 (round 2, BLOCKING): the root AC's own success contract is now
+    # threaded down through every depth of decomposition recursion (not left
+    # ``None`` for sub-ACs) so a live decomposed child can run its own verify
+    # gate and populate ``result.verify_gate_outcome`` -- otherwise the
+    # gate-anchored decomposition attestation can never reach a real,
+    # non-INDETERMINATE verdict for any live decomposition round.
     assert all(
-        call.kwargs["ac_spec"] is None for call in executor._execute_atomic_ac.await_args_list
+        call.kwargs["ac_spec"] is parent_spec
+        for call in executor._execute_atomic_ac.await_args_list
     )

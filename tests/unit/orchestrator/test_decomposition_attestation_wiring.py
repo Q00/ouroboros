@@ -413,3 +413,154 @@ class TestExecuteDecompositionChildrenWiring:
         assert decision.trustworthy is True  # the fresh decision itself looked fine...
         assert captured_trust_flags  # ...but every child was dispatched with:
         assert all(flag is False for flag in captured_trust_flags)  # trust withheld
+
+
+class TestLiveDecompositionAttestationEndToEnd:
+    """Fix 1 (round 2, BLOCKING): reproduction + fix proof for the live-dispatch
+    gap. Every OTHER test in this module hand-constructs ``ACExecutionResult``
+    objects or mocks ``_execute_single_ac`` outright, which is exactly how the
+    round-2 bug hid: those tests can never fail even when a genuinely live
+    decomposed child can never populate its own ``verify_gate_outcome``. This
+    test dispatches every child through the REAL ``_execute_single_ac`` ->
+    ``_execute_atomic_ac`` code path (a stub *runtime adapter* is the only
+    double -- nothing inside the orchestrator itself is mocked) to prove a
+    live child can now reach a real, non-INDETERMINATE verdict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_live_decomposed_children_reach_trustworthy_verdict(self, tmp_path) -> None:
+        from datetime import UTC, datetime
+
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _FinalMessageRuntime,
+            _make_replaying_event_store,
+        )
+
+        # The parent AC's contract is a pure filesystem check the workspace
+        # already satisfies -- deliberately side-effect-free (no shell
+        # command) so this test proves the wiring itself rather than relying
+        # on the stub runtime performing real file writes.
+        (tmp_path / "out.txt").write_text("done", encoding="utf-8")
+
+        event_store, _appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "[TASK_COMPLETE]",
+            native_session_id="live-decomp-child",
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+        executor._emit_workflow_progress = AsyncMock()
+        executor._emit_level_started = AsyncMock()
+        executor._emit_level_completed = AsyncMock()
+        executor._emit_subtask_event = AsyncMock()
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-live", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id, child_count=2)
+        ac_spec = AcceptanceCriterionSpec(description="parent AC", expected_artifacts=("out.txt",))
+
+        result = await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-live",
+            level_contexts=None,
+            retry_attempt=0,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=ac_spec,
+        )
+
+        # Every sibling was genuinely dispatched through _execute_atomic_ac
+        # (no mocking of _execute_single_ac) and populated its OWN
+        # verify_gate_outcome from the real filesystem oracle -- this is the
+        # exact field that was always None for a live child before the fix.
+        assert len(result.sub_results) == 2
+        for sub_result in result.sub_results:
+            assert sub_result.verify_gate_outcome is not None
+            assert sub_result.verify_gate_outcome.passed is True
+
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.TRUSTWORTHY
+        assert result.decomposition_attestation.trustworthy is True
+
+    @pytest.mark.asyncio
+    async def test_live_decomposed_child_missing_artifact_is_untrustworthy_not_indeterminate(
+        self, tmp_path
+    ) -> None:
+        """The negative case: when the real filesystem oracle genuinely fails
+        for a live child (the artifact is missing), the round must resolve to
+        UNTRUSTWORTHY -- backed by a real evaluated gate -- not silently stay
+        INDETERMINATE as it did for every live round before this fix."""
+        from datetime import UTC, datetime
+
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _FinalMessageRuntime,
+            _make_replaying_event_store,
+        )
+
+        # Deliberately do NOT create out.txt: the contract is unmet.
+        event_store, _appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "[TASK_COMPLETE]",
+            native_session_id="live-decomp-child-missing",
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+        executor._emit_workflow_progress = AsyncMock()
+        executor._emit_level_started = AsyncMock()
+        executor._emit_level_completed = AsyncMock()
+        executor._emit_subtask_event = AsyncMock()
+        executor._event_emitter.emit_decomposition_attested = AsyncMock()
+
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-live-2", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id, child_count=2)
+        ac_spec = AcceptanceCriterionSpec(description="parent AC", expected_artifacts=("out.txt",))
+
+        result = await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-live-2",
+            level_contexts=None,
+            retry_attempt=0,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=ac_spec,
+        )
+
+        assert result.sub_results[0].verify_gate_outcome is not None
+        assert result.sub_results[0].verify_gate_outcome.passed is False
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.verdict is DecompositionTrustVerdict.UNTRUSTWORTHY
+        assert result.decomposition_attestation.trustworthy is False
