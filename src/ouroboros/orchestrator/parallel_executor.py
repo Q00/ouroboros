@@ -3245,7 +3245,7 @@ class ParallelACExecutor:
                     or (total_acs is not None and ac_index >= total_acs)
                     or ac_index in seen_ac_indices
                     or not isinstance(raw_ac.get("ac_content"), str)
-                    or not isinstance(raw_ac.get("success"), bool)
+                    or raw_ac.get("success") is not True
                     or not isinstance(tools_used, list | tuple)
                     or any(not isinstance(tool, str) for tool in tools_used)
                     or not isinstance(files_modified, list | tuple)
@@ -3451,6 +3451,33 @@ class ParallelACExecutor:
             )
             if contexts_malformed is not None:
                 return contexts_malformed
+            if normalized_statuses is not None:
+                context_level_by_ac = {
+                    raw_ac["ac_index"]: raw_context["level_number"]
+                    for raw_context in state["level_contexts"]
+                    for raw_ac in raw_context["completed_acs"]
+                }
+                completed_status_indices = {
+                    index for index, status in normalized_statuses.items() if status == "completed"
+                }
+                if set(context_level_by_ac) != completed_status_indices:
+                    return "level_contexts ACs do not match completed ac_statuses"
+
+                if isinstance(raw_stages, list):
+                    expected_level_by_ac: dict[int, int] = {}
+                    for stage_position, raw_stage in enumerate(raw_stages):
+                        if not isinstance(raw_stage, Mapping):
+                            continue
+                        raw_ac_indices = raw_stage.get("ac_indices")
+                        if not isinstance(raw_ac_indices, list):
+                            continue
+                        for raw_ac_index in raw_ac_indices:
+                            if isinstance(raw_ac_index, int) and not isinstance(raw_ac_index, bool):
+                                expected_level_by_ac[raw_ac_index] = stage_position + 1
+                    for completed_ac_index, context_level in context_level_by_ac.items():
+                        expected_level = expected_level_by_ac.get(completed_ac_index)
+                        if expected_level is not None and context_level != expected_level:
+                            return "level_contexts AC is attached to the wrong execution plan stage"
         return None
 
     @classmethod
@@ -4701,11 +4728,29 @@ class ParallelACExecutor:
                             for summary in context.completed_acs
                         }
                         recovered_success_contexts: dict[int, ACContextSummary] = {}
-                        missing_success_contexts: set[int] = set()
+                        missing_success_contexts = {
+                            retry_ac_idx
+                            for retry_ac_idx, prior_status in ac_statuses.items()
+                            if prior_status == "completed"
+                            and retry_ac_idx not in existing_context_indices
+                        }
                         for retry_ac_idx, finalized in finalized_outcomes.items():
                             prior_status = ac_statuses.get(retry_ac_idx, "pending")
                             if prior_status in ("completed", "failed"):
                                 ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
+                                if prior_status == "completed":
+                                    if not finalized.success:
+                                        raise CheckpointUnreadableError(
+                                            "Checkpoint marks an AC completed but its latest "
+                                            "durable finalized outcome is a failure "
+                                            f"(AC {retry_ac_idx + 1})."
+                                        )
+                                    if retry_ac_idx in missing_success_contexts:
+                                        if finalized.context_summary is not None:
+                                            recovered_success_contexts[retry_ac_idx] = (
+                                                finalized.context_summary
+                                            )
+                                            missing_success_contexts.discard(retry_ac_idx)
                                 continue
                             if finalized.success:
                                 ac_statuses[retry_ac_idx] = "completed"

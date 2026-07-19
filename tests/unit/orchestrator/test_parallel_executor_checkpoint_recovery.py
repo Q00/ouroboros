@@ -1466,6 +1466,7 @@ class TestMalformedCheckpointProgressFailsClosed:
             {"completed_count": 0},
             {"completed_levels": 3},
             {"plan_total_stages": 3},
+            {"level_contexts": []},
         ],
         ids=[
             "string_completed_levels",
@@ -1482,6 +1483,7 @@ class TestMalformedCheckpointProgressFailsClosed:
             "completed_count_status_mismatch",
             "completed_levels_exceeds_plan",
             "plan_stage_count_mismatch",
+            "completed_context_missing",
         ],
     )
     @pytest.mark.asyncio
@@ -1528,16 +1530,80 @@ class TestMalformedCheckpointProgressFailsClosed:
         assert reloaded.is_ok
         assert reloaded.value.state == broken_state
 
+    @pytest.mark.asyncio
+    async def test_legacy_missing_completed_context_blocks_downstream_resume(
+        self, tmp_path: Path
+    ) -> None:
+        """Absent legacy context cannot silently resume dependent work."""
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed = self._two_ac_seed()
+        ckpt_path = tmp_path / "checkpoints"
+        await self._crash_after_level_one(ckpt_path, seed)
+
+        store = CheckpointStore(base_path=ckpt_path)
+        saved = store.load(seed.metadata.seed_id)
+        assert saved.is_ok
+        legacy_state = dict(saved.value.state)
+        legacy_state.pop("level_contexts")
+        assert store.save(
+            CheckpointData.create(
+                seed_id=seed.metadata.seed_id,
+                phase="parallel_execution",
+                state=legacy_state,
+            )
+        ).is_ok
+
+        events = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+        await events.initialize()
+        resumed = _executor(
+            event_store=events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        resumed._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(CheckpointUnreadableError, match="lacks the AC context"):
+            await resumed.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._two_stage_plan(),
+            )
+
+        await events.close()
+        resumed._run_batch_with_verify_and_retry.assert_not_awaited()
+
     def test_progress_validation_accepts_the_saved_shape(self, tmp_path: Path) -> None:
         """Control: the exact state a real save writes must validate clean
         (a genuine resume keeps working), including absent legacy fields."""
+        plan = self._two_stage_plan()
         state = {
             "execution_id": "exec-original",
             "completed_levels": 1,
+            "plan_total_stages": 2,
+            "execution_plan": ParallelACExecutor._serialize_execution_plan(plan),
             "ac_statuses": {"0": "completed", "1": "pending"},
             "failed_indices": [],
             "completed_count": 1,
-            "level_contexts": [],
+            "level_contexts": [
+                {
+                    "level_number": 1,
+                    "completed_acs": [
+                        {
+                            "ac_index": 0,
+                            "ac_content": "Parent work",
+                            "success": True,
+                            "tools_used": [],
+                            "files_modified": [],
+                            "key_output": "done",
+                            "public_api": "",
+                        }
+                    ],
+                    "coordinator_review": None,
+                }
+            ],
         }
         cp = SimpleNamespace(state=state)
         assert ParallelACExecutor._checkpoint_progress_malformed(cp, total_acs=2) is None
@@ -1584,6 +1650,29 @@ class TestMalformedCheckpointProgressFailsClosed:
             ({"completed_count": 0}, "does not match completed"),
             ({"completed_levels": 3}, "exceeds plan_total_stages"),
             ({"plan_total_stages": 3}, "does not match execution_plan.stages"),
+            ({"level_contexts": []}, "do not match completed"),
+            (
+                {
+                    "level_contexts": [
+                        {
+                            "level_number": 2,
+                            "completed_acs": [
+                                {
+                                    "ac_index": 0,
+                                    "ac_content": "Parent work",
+                                    "success": True,
+                                    "tools_used": [],
+                                    "files_modified": [],
+                                    "key_output": "done",
+                                    "public_api": "",
+                                }
+                            ],
+                            "coordinator_review": None,
+                        }
+                    ]
+                },
+                "wrong execution plan stage",
+            ),
         ],
     )
     def test_progress_validation_rejects_relational_corruption(
@@ -1594,15 +1683,27 @@ class TestMalformedCheckpointProgressFailsClosed:
         state: dict[str, object] = {
             "completed_levels": 1,
             "plan_total_stages": 2,
-            "execution_plan": {
-                "version": 1,
-                "nodes": [],
-                "stages": [{"index": 0}, {"index": 1}],
-            },
+            "execution_plan": ParallelACExecutor._serialize_execution_plan(self._two_stage_plan()),
             "ac_statuses": {"0": "completed", "1": "pending"},
             "failed_indices": [],
             "completed_count": 1,
-            "level_contexts": [],
+            "level_contexts": [
+                {
+                    "level_number": 1,
+                    "completed_acs": [
+                        {
+                            "ac_index": 0,
+                            "ac_content": "Parent work",
+                            "success": True,
+                            "tools_used": [],
+                            "files_modified": [],
+                            "key_output": "done",
+                            "public_api": "",
+                        }
+                    ],
+                    "coordinator_review": None,
+                }
+            ],
         }
         state.update(state_update)
         detail = ParallelACExecutor._checkpoint_progress_malformed(
