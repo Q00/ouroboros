@@ -2343,7 +2343,12 @@ class ParallelACExecutor:
         }
 
     @staticmethod
-    def _checkpoint_dispatch_contract_malformed(cp: Any) -> str | None:
+    def _checkpoint_dispatch_contract_malformed(
+        cp: Any,
+        *,
+        total_acs: int | None = None,
+        plan_total_stages: int | None = None,
+    ) -> str | None:
         state = cp.state
         if not isinstance(state, Mapping):
             return f"checkpoint state is not a mapping: {type(state).__name__}"
@@ -2454,7 +2459,10 @@ class ParallelACExecutor:
         if (
             not isinstance(external_indices, list)
             or any(
-                isinstance(ac_index, bool) or not isinstance(ac_index, int) or ac_index < 0
+                isinstance(ac_index, bool)
+                or not isinstance(ac_index, int)
+                or ac_index < 0
+                or (total_acs is not None and ac_index >= total_acs)
                 for ac_index in external_indices
             )
             or external_indices != sorted(set(external_indices))
@@ -2464,8 +2472,8 @@ class ParallelACExecutor:
         if (
             context_error := ParallelACExecutor._checkpoint_level_contexts_malformed(
                 reconciled_contexts,
-                total_acs=None,
-                plan_total_stages=None,
+                total_acs=total_acs,
+                plan_total_stages=plan_total_stages,
             )
         ) is not None:
             return f"dispatch_contract.reconciled_level_contexts is invalid: {context_error}"
@@ -4952,7 +4960,11 @@ class ParallelACExecutor:
                             "whose side effects may already exist."
                         )
                     elif cp.phase == "parallel_execution" and (
-                        dispatch_malformed := self._checkpoint_dispatch_contract_malformed(cp)
+                        dispatch_malformed := self._checkpoint_dispatch_contract_malformed(
+                            cp,
+                            total_acs=total_acs,
+                            plan_total_stages=total_levels,
+                        )
                     ):
                         log.error(
                             "parallel_executor.recovery.dispatch_contract_malformed",

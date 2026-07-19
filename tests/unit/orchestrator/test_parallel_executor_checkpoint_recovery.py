@@ -3637,6 +3637,53 @@ class TestCheckpointDispatchContract:
         return seed, ckpt_path, saved.value.to_dict()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("corruption", ["external_index", "reconciled_index"])
+    async def test_dispatch_contract_rejects_out_of_range_ac_identity(
+        self,
+        tmp_path: Path,
+        corruption: str,
+    ) -> None:
+        from copy import deepcopy
+
+        seed, ckpt_path, _ = await self._crash_after_first_stage(
+            tmp_path,
+            tools=["Read"],
+        )
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        state = deepcopy(saved.value.state)
+        dispatch = state["dispatch_contract"]
+        if corruption == "external_index":
+            dispatch["externally_satisfied_ac_indices"] = [2]
+        else:
+            dispatch["reconciled_level_contexts"] = [
+                {
+                    "level_number": 1,
+                    "completed_acs": [
+                        {
+                            "ac_index": 2,
+                            "ac_content": "foreign AC",
+                            "success": True,
+                            "tools_used": [],
+                            "files_modified": [],
+                            "key_output": "",
+                            "public_api": "",
+                        }
+                    ],
+                    "coordinator_review": None,
+                }
+            ]
+
+        detail = ParallelACExecutor._checkpoint_dispatch_contract_malformed(
+            SimpleNamespace(state=state),
+            total_acs=2,
+            plan_total_stages=2,
+        )
+
+        assert detail is not None
+        assert "invalid" in detail
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("drift", ["tools", "description", "schema", "prompt"])
     async def test_dispatch_authority_drift_is_rejected_before_dispatch(
         self, tmp_path: Path, drift: str
