@@ -23,6 +23,7 @@ from ouroboros.core.seed import (
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.ac_execution_capsule import (
+    AC_EXECUTION_CAPSULE_VERSION,
     ACExecutionCapsule,
     ACExecutionCapsuleManifest,
     compile_ac_execution_capsule,
@@ -4515,7 +4516,7 @@ class TestParallelACExecutor:
         ]
         assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_3"
         assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_3_attempt_1"
-        assert resume_handle.metadata["ac_capsule_version"] == 1
+        assert resume_handle.metadata["ac_capsule_version"] == AC_EXECUTION_CAPSULE_VERSION
         assert resume_handle.metadata["ac_capsule_fingerprint"].startswith("sha256:")
         assert resume_handle.metadata["ac_session_origin"] == "fresh"
         assert (

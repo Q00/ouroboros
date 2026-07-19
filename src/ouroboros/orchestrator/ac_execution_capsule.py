@@ -8,7 +8,7 @@ event ledger, and verify-gate records.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import hashlib
@@ -20,8 +20,9 @@ from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.execution_runtime_scope import ACRuntimeIdentity
 from ouroboros.orchestrator.level_context import LevelContext
 
-AC_EXECUTION_CAPSULE_VERSION = 1
+AC_EXECUTION_CAPSULE_VERSION = 2
 DEFAULT_AC_CONTEXT_BUDGET_CHARS = 12_000
+MAX_AC_CONTEXT_REFERENCES = 256
 _MAX_REFERENCE_LOCATOR_CHARS = 2_048
 _MAX_REFERENCE_HINT_CHARS = 240
 
@@ -77,7 +78,6 @@ class ACContextReferenceKind(StrEnum):
     DEPENDENCY = "dependency"
     ARTIFACT = "artifact"
     GATE = "gate"
-    INDEX = "index"
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +280,8 @@ class ACExecutionCapsuleManifest:
     ac_content_digest: str
     success_contract_digest: str
     context_references: tuple[ACContextReferenceManifest, ...]
+    omitted_context_count: int
+    omitted_context_digest: str | None
     context_budget_chars: int
     fresh_session_required: bool = True
     version: int = AC_EXECUTION_CAPSULE_VERSION
@@ -314,6 +316,19 @@ class ACExecutionCapsuleManifest:
             or self.context_budget_chars <= 0
         ):
             raise ValueError("capsule manifest context budget is invalid")
+        if (
+            not isinstance(self.omitted_context_count, int)
+            or isinstance(self.omitted_context_count, bool)
+            or self.omitted_context_count < 0
+        ):
+            raise ValueError("capsule manifest omitted context count is invalid")
+        if self.omitted_context_count:
+            _validate_sha256_digest(
+                self.omitted_context_digest,
+                field="capsule manifest omitted context digest",
+            )
+        elif self.omitted_context_digest is not None:
+            raise ValueError("capsule manifest omitted context digest is unexpected")
         if self.fresh_session_required is not True:
             raise ValueError("capsule manifest must require a fresh session")
         if not self.context_references:
@@ -350,6 +365,8 @@ class ACExecutionCapsuleManifest:
             "context_references": [
                 reference.to_contract_data() for reference in self.context_references
             ],
+            "omitted_context_count": self.omitted_context_count,
+            "omitted_context_digest": self.omitted_context_digest,
             "context_budget_chars": self.context_budget_chars,
             "fresh_session_required": self.fresh_session_required,
         }
@@ -372,6 +389,8 @@ class ACExecutionCapsuleManifest:
             "ac_content_digest",
             "success_contract_digest",
             "context_references",
+            "omitted_context_count",
+            "omitted_context_digest",
             "context_budget_chars",
             "fresh_session_required",
         }
@@ -416,6 +435,8 @@ class ACExecutionCapsuleManifest:
             context_references=tuple(
                 ACContextReferenceManifest.from_contract_data(reference) for reference in references
             ),
+            omitted_context_count=raw.get("omitted_context_count"),  # type: ignore[arg-type]
+            omitted_context_digest=raw.get("omitted_context_digest"),  # type: ignore[arg-type]
             context_budget_chars=raw.get("context_budget_chars"),  # type: ignore[arg-type]
             fresh_session_required=raw.get("fresh_session_required"),  # type: ignore[arg-type]
         )
@@ -439,6 +460,8 @@ class ACExecutionCapsule:
     ac_content: str
     success_contract: ACSuccessContract
     context_references: tuple[ACContextReference, ...]
+    omitted_context_count: int
+    omitted_context_digest: str | None
     context_budget_chars: int
     fresh_session_required: bool = True
     version: int = AC_EXECUTION_CAPSULE_VERSION
@@ -480,6 +503,19 @@ class ACExecutionCapsule:
             or self.context_budget_chars <= 0
         ):
             raise ValueError("capsule context budget is invalid")
+        if (
+            not isinstance(self.omitted_context_count, int)
+            or isinstance(self.omitted_context_count, bool)
+            or self.omitted_context_count < 0
+        ):
+            raise ValueError("capsule omitted context count is invalid")
+        if self.omitted_context_count:
+            _validate_sha256_digest(
+                self.omitted_context_digest,
+                field="capsule omitted context digest",
+            )
+        elif self.omitted_context_digest is not None:
+            raise ValueError("capsule omitted context digest is unexpected")
         if self.fresh_session_required is not True:
             raise ValueError("an AC execution capsule must require a fresh session")
         if not os.path.isabs(self.workspace) or os.path.realpath(self.workspace) != self.workspace:
@@ -514,6 +550,8 @@ class ACExecutionCapsule:
                 ACContextReferenceManifest.from_reference(reference)
                 for reference in self.context_references
             ),
+            omitted_context_count=self.omitted_context_count,
+            omitted_context_digest=self.omitted_context_digest,
             context_budget_chars=self.context_budget_chars,
             fresh_session_required=self.fresh_session_required,
         )
@@ -523,10 +561,11 @@ class ACExecutionCapsule:
         return self.manifest.fingerprint
 
     def to_prompt_reference_block(self) -> str:
-        """Render the small external-memory index given to the provider driver."""
+        """Render the bounded external-memory frontier given to the provider driver."""
         return _render_prompt_reference_block(
             self.context_references,
             fingerprint=self.fingerprint,
+            omitted_context_count=self.omitted_context_count,
         )
 
 
@@ -534,6 +573,7 @@ def _render_prompt_reference_block(
     references: Sequence[ACContextReference],
     *,
     fingerprint: str,
+    omitted_context_count: int = 0,
 ) -> str:
     """Render a reference-only provider block with a fixed-size fingerprint."""
     lines = [
@@ -547,46 +587,33 @@ def _render_prompt_reference_block(
     for reference in references:
         hint = f" — {reference.hint}" if reference.hint else ""
         lines.append(f"- {reference.kind.value}: {reference.locator}{hint}")
+    if omitted_context_count:
+        lines.append(
+            f"- bounded-retrieval: {omitted_context_count} optional references omitted; "
+            "the workspace and Seed remain authoritative"
+        )
     return "\n".join(lines)
 
 
 def _bounded_context_references(
     *,
     required: Sequence[ACContextReference],
-    optional: Sequence[ACContextReference],
-    execution_id: str,
+    optional: Iterable[ACContextReference],
     context_budget_chars: int,
-) -> tuple[ACContextReference, ...]:
-    """Fit deterministic references and summarize overflow as one index page."""
+) -> tuple[tuple[ACContextReference, ...], int, str | None]:
+    """Select a bounded reference frontier and attest what was omitted.
+
+    Omitted references are never represented as a page unless a real resolver
+    exists. The capsule instead records a rolling digest and count, while the
+    provider sees an explicit bounded-retrieval notice. A hard reference cap
+    bounds compiler work independently of adversarial Seed/dependency size.
+    """
     placeholder_fingerprint = "sha256:" + "0" * 64
-    all_references = tuple(required) + tuple(optional)
-    if (
-        len(
-            _render_prompt_reference_block(
-                all_references,
-                fingerprint=placeholder_fingerprint,
-            )
-        )
-        <= context_budget_chars
-    ):
-        return all_references
-
-    def _index_reference(omitted: Sequence[ACContextReference]) -> ACContextReference:
-        return ACContextReference(
-            kind=ACContextReferenceKind.INDEX,
-            locator=f"execution:{execution_id}:context-index",
-            digest=_sha256_text(
-                _canonical_json([reference.to_contract_data() for reference in omitted])
-            ),
-            hint=f"{len(omitted)} additional references; page from the event ledger",
-        )
-
     selected = list(required)
-    placeholder_index = _index_reference(optional)
     if (
         len(
             _render_prompt_reference_block(
-                (*selected, placeholder_index),
+                selected,
                 fingerprint=placeholder_fingerprint,
             )
         )
@@ -594,35 +621,44 @@ def _bounded_context_references(
     ):
         raise ValueError("capsule context budget cannot fit required references")
 
-    selected_optional_count = 0
+    omitted_count = 0
+    omitted_hasher = hashlib.sha256()
+    reference_count = len(selected)
     for reference in optional:
-        candidate = (*selected, reference, placeholder_index)
-        if (
+        reference_count += 1
+        if reference_count > MAX_AC_CONTEXT_REFERENCES:
+            raise ValueError(
+                f"capsule context reference limit exceeded ({MAX_AC_CONTEXT_REFERENCES})"
+            )
+        candidate = (*selected, reference)
+        fits_with_omission_notice = (
             len(
                 _render_prompt_reference_block(
                     candidate,
                     fingerprint=placeholder_fingerprint,
+                    omitted_context_count=MAX_AC_CONTEXT_REFERENCES,
                 )
             )
-            > context_budget_chars
-        ):
-            break
-        selected.append(reference)
-        selected_optional_count += 1
+            <= context_budget_chars
+        )
+        if omitted_count == 0 and fits_with_omission_notice:
+            selected.append(reference)
+            continue
+        omitted_count += 1
+        omitted_hasher.update(_canonical_json(reference.to_contract_data()).encode("utf-8"))
+        omitted_hasher.update(b"\n")
 
-    omitted = tuple(optional[selected_optional_count:])
-    if omitted:
-        selected.append(_index_reference(omitted))
-    return tuple(selected)
+    omitted_digest = "sha256:" + omitted_hasher.hexdigest() if omitted_count else None
+    return tuple(selected), omitted_count, omitted_digest
 
 
 def _dependency_references(
     execution_id: str,
     level_contexts: Sequence[LevelContext],
-) -> list[ACContextReference]:
-    references: list[ACContextReference] = []
-    for context in level_contexts:
-        for summary in context.completed_acs:
+) -> Iterator[ACContextReference]:
+    """Yield the newest accepted dependencies first for bounded retrieval."""
+    for context in reversed(level_contexts):
+        for summary in reversed(context.completed_acs):
             if not summary.success:
                 continue
             payload = {
@@ -634,15 +670,12 @@ def _dependency_references(
                 "key_output": summary.key_output,
                 "public_api": summary.public_api,
             }
-            references.append(
-                ACContextReference(
-                    kind=ACContextReferenceKind.DEPENDENCY,
-                    locator=f"execution:{execution_id}:ac:{summary.ac_index + 1}",
-                    digest=_sha256_text(_canonical_json(payload)),
-                    hint=f"accepted dependency from level {context.level_number + 1}",
-                )
+            yield ACContextReference(
+                kind=ACContextReferenceKind.DEPENDENCY,
+                locator=f"execution:{execution_id}:ac:{summary.ac_index + 1}",
+                digest=_sha256_text(_canonical_json(payload)),
+                hint=f"accepted dependency from level {context.level_number + 1}",
             )
-    return references
 
 
 def compile_ac_execution_capsule(
@@ -676,15 +709,16 @@ def compile_ac_execution_capsule(
             hint="goal and semantic AC authority",
         ),
     ]
-    optional_references = _dependency_references(execution_id, level_contexts)
-    optional_references.extend(
-        ACContextReference(
-            kind=ACContextReferenceKind.ARTIFACT,
-            locator=f"workspace:{path}",
-            hint="seed-authored expected artifact",
-        )
-        for path in success_contract.expected_artifacts
-    )
+
+    def _optional_references() -> Iterator[ACContextReference]:
+        for path in success_contract.expected_artifacts:
+            yield ACContextReference(
+                kind=ACContextReferenceKind.ARTIFACT,
+                locator=f"workspace:{path}",
+                hint="seed-authored expected artifact",
+            )
+        yield from _dependency_references(execution_id, level_contexts)
+
     if success_contract.has_success_contract:
         required_references.append(
             ACContextReference(
@@ -694,10 +728,9 @@ def compile_ac_execution_capsule(
                 hint="authoritative acceptance contract",
             )
         )
-    references = _bounded_context_references(
+    references, omitted_context_count, omitted_context_digest = _bounded_context_references(
         required=required_references,
-        optional=optional_references,
-        execution_id=execution_id,
+        optional=_optional_references(),
         context_budget_chars=context_budget_chars,
     )
     return ACExecutionCapsule(
@@ -715,6 +748,8 @@ def compile_ac_execution_capsule(
         ac_content=ac_content,
         success_contract=success_contract,
         context_references=references,
+        omitted_context_count=omitted_context_count,
+        omitted_context_digest=omitted_context_digest,
         context_budget_chars=context_budget_chars,
     )
 

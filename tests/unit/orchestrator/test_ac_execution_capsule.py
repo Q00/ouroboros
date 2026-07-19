@@ -9,6 +9,8 @@ import pytest
 
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator.ac_execution_capsule import (
+    AC_EXECUTION_CAPSULE_VERSION,
+    MAX_AC_CONTEXT_REFERENCES,
     ACContextReference,
     ACContextReferenceKind,
     ACExecutionCapsuleManifest,
@@ -70,8 +72,8 @@ def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
         ACContextReferenceKind.WORKSPACE,
         ACContextReferenceKind.SEED,
         ACContextReferenceKind.GATE,
-        ACContextReferenceKind.DEPENDENCY,
         ACContextReferenceKind.ARTIFACT,
+        ACContextReferenceKind.DEPENDENCY,
     ]
 
 
@@ -118,7 +120,7 @@ def test_capsule_references_dependency_without_copying_its_output(tmp_path) -> N
     assert "fresh provider context" in rendered
 
 
-def test_capsule_pages_reference_overflow_within_context_budget(tmp_path) -> None:
+def test_capsule_attests_reference_omission_within_context_budget(tmp_path) -> None:
     identity = build_ac_runtime_identity(
         0,
         execution_context_id="execution-budget",
@@ -131,7 +133,7 @@ def test_capsule_pages_reference_overflow_within_context_budget(tmp_path) -> Non
             success=True,
             files_modified=(f"src/dependency_{index}.py",),
         )
-        for index in range(500)
+        for index in range(100)
     )
     capsule = compile_ac_execution_capsule(
         runtime_identity=identity,
@@ -150,11 +152,43 @@ def test_capsule_pages_reference_overflow_within_context_budget(tmp_path) -> Non
     )
 
     assert len(capsule.to_prompt_reference_block()) <= 1_000
-    assert ACContextReferenceKind.INDEX in {
-        reference.kind for reference in capsule.context_references
-    }
+    assert capsule.omitted_context_count > 0
+    assert capsule.omitted_context_digest is not None
+    assert "bounded-retrieval" in capsule.to_prompt_reference_block()
+    assert "page from the event ledger" not in capsule.to_prompt_reference_block()
     assert len(capsule.context_references) < 20
     assert len(json.dumps(capsule.manifest.to_contract_data())) < 10_000
+    assert capsule.version == AC_EXECUTION_CAPSULE_VERSION
+
+
+def test_capsule_rejects_unbounded_reference_work(tmp_path) -> None:
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-reference-limit",
+        retry_attempt=0,
+    )
+    summaries = tuple(
+        ACContextSummary(
+            ac_index=index,
+            ac_content=f"Dependency {index}",
+            success=True,
+        )
+        for index in range(MAX_AC_CONTEXT_REFERENCES + 1)
+    )
+
+    with pytest.raises(ValueError, match="context reference limit exceeded"):
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-reference-limit",
+            semantic_ac_key="semantic-key",
+            workspace=str(tmp_path.resolve()),
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Implement the bounded AC",
+            ac_spec=None,
+            level_contexts=(LevelContext(level_number=0, completed_acs=summaries),),
+            context_budget_chars=1_000,
+        )
 
 
 def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None:

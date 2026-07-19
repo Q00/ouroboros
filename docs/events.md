@@ -115,6 +115,11 @@ digests, not a provider transcript or copies of free-form Seed/prompt/workspace
 text. Recovery strictly parses and re-fingerprints the manifest before a native
 runtime handle may resume the same AC attempt.
 
+When the prompt budget cannot include every optional reference, the manifest
+also records `omitted_context_count` and a rolling `omitted_context_digest`.
+This is an auditable bounded-retrieval fact, not a claim that a page resolver
+already exists.
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.

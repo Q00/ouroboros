@@ -79,7 +79,7 @@ Every AC receives a compact **AC Capsule**:
 - dependency/gate/artifact references;
 - a small deterministic project map and verify commands;
 - model, effort, retry, and isolation policy;
-- a context-page budget.
+- a bounded context-reference budget.
 
 The capsule contains references, not copies. Large sources remain in the
 workspace, event ledger, specs, diffs, docs, and test output. The model can ask
@@ -94,6 +94,12 @@ for bounded **Context Pages** such as:
 Each page is bounded, provenance-carrying, content-hashed, and disposable. A
 page may be produced deterministically or by a read-only **Probe**. Probe output
 is advisory context, never acceptance evidence by itself.
+
+The initial Capsule vertical slice does not pretend that a page exists before a
+resolver exists. It selects a newest-first bounded reference frontier and records
+the count plus rolling digest of any omitted optional references. The provider is
+told that retrieval was bounded; no synthetic `context-index` locator is emitted.
+Actual page locators become legal only with step 3's durable resolver.
 
 ### 4. Run — shed context at AC boundaries
 
@@ -306,4 +312,3 @@ Ouroboros-injected context. It is merely unmeasured for token-triggered shedding
 The first PR should land only steps 1 and 2 as a complete vertical slice. The
 remaining steps form a stack; none should be hidden inside a single giant runtime
 rewrite.
-
