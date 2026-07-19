@@ -5095,6 +5095,105 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         assert recovered[0].recovery_exhausted is True
 
     @pytest.mark.asyncio
+    async def test_recovery_exhausted_cannot_close_same_attempt_success(self) -> None:
+        """A failure closure cannot overwrite an authoritative success marker."""
+        from ouroboros.events.base import BaseEvent
+
+        event_store = AsyncMock()
+        event_store.replay.return_value = [
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-original",
+                data={
+                    "execution_id": "exec-original",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 2,
+                    "success": True,
+                    "outcome": "succeeded",
+                    "is_decomposed": False,
+                    "forced_frontier_routing": False,
+                    "context_summary": None,
+                },
+            ),
+            BaseEvent(
+                type="execution.ac.recovery_exhausted",
+                aggregate_type="execution",
+                aggregate_id="exec-original",
+                data={
+                    "schema_version": 1,
+                    "execution_id": "exec-original",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "semantic_ac_key": "ac-key",
+                    "retry_attempt": 2,
+                    "configured_retry_attempts": 2,
+                    "retry_termination_reason": "budget_exhausted",
+                    "alternate_redispatch_status": "not_attempted",
+                    "last_failure_class": "unknown",
+                    "success": False,
+                },
+            ),
+        ]
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            ac_retry_attempts=2,
+        )
+
+        recovered = await executor._reconstruct_finalized_outcomes(
+            execution_id="exec-original",
+            total_acs=1,
+        )
+
+        assert recovered is None
+
+    @pytest.mark.asyncio
+    async def test_orphan_recovery_exhausted_marker_fails_closed(self) -> None:
+        """A closure without its exact finalized failure is not authoritative."""
+        from ouroboros.events.base import BaseEvent
+
+        event_store = AsyncMock()
+        event_store.replay.return_value = [
+            BaseEvent(
+                type="execution.ac.recovery_exhausted",
+                aggregate_type="execution",
+                aggregate_id="exec-original",
+                data={
+                    "schema_version": 1,
+                    "execution_id": "exec-original",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "semantic_ac_key": "ac-key",
+                    "retry_attempt": 2,
+                    "configured_retry_attempts": 2,
+                    "retry_termination_reason": "budget_exhausted",
+                    "alternate_redispatch_status": "not_attempted",
+                    "last_failure_class": "unknown",
+                    "success": False,
+                },
+            )
+        ]
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            ac_retry_attempts=2,
+        )
+
+        recovered = await executor._reconstruct_finalized_outcomes(
+            execution_id="exec-original",
+            total_acs=1,
+        )
+
+        assert recovered is None
+
+    @pytest.mark.asyncio
     async def test_retry_consumption_reconstructed_from_finalized_markers(
         self, tmp_path: Path
     ) -> None:

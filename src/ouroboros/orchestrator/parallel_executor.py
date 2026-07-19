@@ -4121,7 +4121,8 @@ class ParallelACExecutor:
             return None
 
         latest: dict[int, _RecoveredFinalizedOutcome] = {}
-        exhausted_attempts: set[tuple[int, int]] = set()
+        finalized_attempts: dict[tuple[int, int], _RecoveredFinalizedOutcome] = {}
+        exhausted_attempts: dict[tuple[int, int], dict[str, Any]] = {}
         for event in events:
             event_type = getattr(event, "type", None)
             if event_type not in {
@@ -4153,7 +4154,11 @@ class ParallelACExecutor:
                     is not None
                 ):
                     return None
-                exhausted_attempts.add((ac_idx, attempt))
+                attempt_key = (ac_idx, attempt)
+                previous_closure = exhausted_attempts.get(attempt_key)
+                if previous_closure is not None and previous_closure != data:
+                    return None
+                exhausted_attempts[attempt_key] = dict(data)
                 continue
             success = data.get("success")
             raw_outcome = data.get("outcome")
@@ -4206,8 +4211,9 @@ class ParallelACExecutor:
                 forced_frontier_routing=forced_frontier_routing,
                 context_summary=context_summary,
             )
-            previous = latest.get(ac_idx)
-            if previous is not None and attempt == previous.retry_attempt:
+            attempt_key = (ac_idx, attempt)
+            previous_attempt = finalized_attempts.get(attempt_key)
+            if previous_attempt is not None:
                 # Durable retries and mixed-version writers can append the same
                 # attempt more than once. Core outcome fields must agree; no log
                 # ordering can make a success and failure for one attempt both
@@ -4221,22 +4227,28 @@ class ParallelACExecutor:
                     candidate.is_decomposed,
                     candidate.forced_frontier_routing,
                 ) != (
-                    previous.success,
-                    previous.outcome,
-                    previous.is_decomposed,
-                    previous.forced_frontier_routing,
+                    previous_attempt.success,
+                    previous_attempt.outcome,
+                    previous_attempt.is_decomposed,
+                    previous_attempt.forced_frontier_routing,
                 ):
                     return None
                 if (
                     candidate.context_summary is not None
-                    and previous.context_summary is not None
-                    and candidate.context_summary != previous.context_summary
+                    and previous_attempt.context_summary is not None
+                    and candidate.context_summary != previous_attempt.context_summary
                 ):
                     return None
+            finalized_attempts[attempt_key] = candidate
+
+            previous = latest.get(ac_idx)
+            if previous is None or attempt >= previous.retry_attempt:
                 latest[ac_idx] = candidate
-                continue
-            if previous is None or attempt > previous.retry_attempt:
-                latest[ac_idx] = candidate
+
+        for attempt_key in exhausted_attempts:
+            finalized = finalized_attempts.get(attempt_key)
+            if finalized is None or finalized.success:
+                return None
 
         for ac_idx, recovered in tuple(latest.items()):
             if (ac_idx, recovered.retry_attempt) in exhausted_attempts:
