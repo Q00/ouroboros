@@ -37,6 +37,12 @@
   <a href="#from-wonder-to-ontology">Philosophy</a>
 </p>
 
+<p align="center">
+  <video src="https://github.com/Q00/ouroboros/releases/download/media-assets/ouroboros-hero.mp4" controls muted autoplay loop playsinline width="820"></video>
+  <br/>
+  <sub><em>One line &mdash; <code>ooo interview</code> &mdash; fans out a team of specialist agents that turn a vague idea into a verified spec.</em></sub>
+</p>
+
 **Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, and Zcode.**
 
 Ouroboros is an **Agent OS** for AI coding: a local-first runtime layer that

@@ -37,6 +37,12 @@
   <a href="#从-wonder-到本体论">理念</a>
 </p>
 
+<p align="center">
+  <video src="https://github.com/Q00/ouroboros/releases/download/media-assets/ouroboros-hero.mp4" controls muted autoplay loop playsinline width="820"></video>
+  <br/>
+  <sub><em>一行命令 &mdash; <code>ooo interview</code> &mdash; 便展开一支专家智能体团队，把模糊的想法变成一份经过验证的规约。</em></sub>
+</p>
+
 **把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes 变成一份经过验证、可运行的代码库。**
 
 Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把非确定性的 agent 工作转换成一份可重放、可观测、受策略约束的执行契约。它用一套结构化的、规约优先的工作流取代东拼西凑的 prompt：访谈、定型、执行、评估、演化。

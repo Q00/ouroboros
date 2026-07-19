@@ -36,6 +36,12 @@
   <a href="#아홉-개의-사고">에이전트</a>
 </p>
 
+<p align="center">
+  <video src="https://github.com/Q00/ouroboros/releases/download/media-assets/ouroboros-hero.mp4" controls muted autoplay loop playsinline width="820"></video>
+  <br/>
+  <sub><em>단 한 줄 &mdash; <code>ooo interview</code> &mdash; 이 막연한 아이디어를 검증된 명세로 바꾸는 전문 에이전트 팀을 펼쳐냅니다.</em></sub>
+</p>
+
 > *AI는 무엇이든 만들 수 있다. 어려운 건 무엇을 만들어야 하는지 아는 것이다.*
 
 Ouroboros는 **명세 우선 AI 개발 시스템**입니다. 이 시스템은 소크라테스식 질문법과 온톨로지 분석을 적용하여, 단 한 줄의 코드도 작성하기 전에 사용자의 숨겨진 가정을 드러냅니다.
