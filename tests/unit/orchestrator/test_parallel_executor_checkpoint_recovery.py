@@ -4901,6 +4901,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -4952,6 +4953,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -4995,6 +4997,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -5033,6 +5036,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is not None
@@ -5048,6 +5052,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
             {"configured_retry_attempts": 99},
             {"retry_termination_reason": "unknown_reason"},
             {"alternate_redispatch_status": "succeeded"},
+            {"semantic_ac_key": "foreign-semantic-key"},
             {
                 "retry_attempt": 0,
                 "retry_termination_reason": "budget_exhausted",
@@ -5110,6 +5115,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -5167,6 +5173,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is not None
@@ -5227,6 +5234,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -5268,6 +5276,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -5339,6 +5348,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -5405,6 +5415,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None
@@ -5456,6 +5467,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         recovered = await executor._reconstruct_finalized_outcomes(
             execution_id="exec-original",
             total_acs=1,
+            expected_semantic_ac_keys={0: "ac-key"},
         )
 
         assert recovered is None

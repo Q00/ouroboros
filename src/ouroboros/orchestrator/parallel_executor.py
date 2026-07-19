@@ -4159,7 +4159,11 @@ class ParallelACExecutor:
         return None
 
     async def _reconstruct_finalized_outcomes(
-        self, *, execution_id: str, total_acs: int
+        self,
+        *,
+        execution_id: str,
+        total_acs: int,
+        expected_semantic_ac_keys: Mapping[int, str],
     ) -> dict[int, _RecoveredFinalizedOutcome] | None:
         """Replay the latest post-verify outcome for every root AC.
 
@@ -4173,6 +4177,10 @@ class ParallelACExecutor:
         """
         events = await self._replay_with_retry("execution", execution_id)
         if events is None:
+            return None
+        if set(expected_semantic_ac_keys) != set(range(total_acs)) or any(
+            not isinstance(key, str) or not key for key in expected_semantic_ac_keys.values()
+        ):
             return None
 
         latest: dict[int, _RecoveredFinalizedOutcome] = {}
@@ -4207,6 +4215,7 @@ class ParallelACExecutor:
                         configured_retry_attempts=self._ac_retry_attempts,
                     )
                     is not None
+                    or data.get("semantic_ac_key") != expected_semantic_ac_keys[ac_idx]
                 ):
                     return None
                 attempt_key = (ac_idx, attempt)
@@ -5329,7 +5338,14 @@ class ParallelACExecutor:
                         if restored_contexts is not None:
                             level_contexts = restored_contexts
                         finalized_outcomes = await self._reconstruct_finalized_outcomes(
-                            execution_id=execution_id, total_acs=total_acs
+                            execution_id=execution_id,
+                            total_acs=total_acs,
+                            expected_semantic_ac_keys={
+                                ac_index: (
+                                    criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+                                )
+                                for ac_index, criterion in enumerate(seed.acceptance_criteria)
+                            },
                         )
                         if finalized_outcomes is None:
                             raise CheckpointUnreadableError(
