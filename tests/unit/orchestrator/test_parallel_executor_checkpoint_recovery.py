@@ -43,6 +43,7 @@ from ouroboros.orchestrator.dependency_analyzer import (
     StagedExecutionPlan,
 )
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.model_routing import ModelRouter, serialize_model_router
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
@@ -717,7 +718,7 @@ class TestFirstLevelCrashLeavesRecoverableCheckpoint:
         saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert saved.is_ok
         state = saved.value.state
-        assert state["checkpoint_contract_version"] == 1
+        assert state["checkpoint_contract_version"] == 2
         assert state["execution_id"] == "exec-original"
         assert state["completed_levels"] == 0
         assert state["execution_plan"] == run1._serialize_execution_plan(_plan())
@@ -1613,6 +1614,67 @@ class TestMalformedCheckpointProgressFailsClosed:
         # Integer keys (in-process relaunch, no JSON round-trip) are valid.
         cp_int_keys = SimpleNamespace(state={"ac_statuses": {0: "completed"}})
         assert ParallelACExecutor._checkpoint_progress_malformed(cp_int_keys) is None
+
+    def test_progress_validation_accepts_external_completion_without_context(self) -> None:
+        plan = self._two_stage_plan()
+        state = {
+            "completed_levels": 1,
+            "plan_total_stages": 2,
+            "execution_plan": ParallelACExecutor._serialize_execution_plan(plan),
+            "dispatch_contract": {
+                "externally_satisfied_ac_indices": [0],
+                "reconciled_level_contexts": [],
+            },
+            "ac_statuses": {"0": "completed", "1": "pending"},
+            "failed_indices": [],
+            "completed_count": 1,
+            "level_contexts": [],
+        }
+
+        assert (
+            ParallelACExecutor._checkpoint_progress_malformed(
+                SimpleNamespace(state=state), total_acs=2
+            )
+            is None
+        )
+
+    def test_progress_validation_accepts_reconciled_context_for_pending_ac(self) -> None:
+        plan = self._two_stage_plan()
+        reconciled_context = {
+            "level_number": 1,
+            "completed_acs": [
+                {
+                    "ac_index": 0,
+                    "ac_content": "Parent work from prior attempt",
+                    "success": True,
+                    "tools_used": ["Edit"],
+                    "files_modified": ["shared.py"],
+                    "key_output": "workspace reconciled",
+                    "public_api": "",
+                }
+            ],
+            "coordinator_review": None,
+        }
+        state = {
+            "completed_levels": 0,
+            "plan_total_stages": 2,
+            "execution_plan": ParallelACExecutor._serialize_execution_plan(plan),
+            "dispatch_contract": {
+                "externally_satisfied_ac_indices": [],
+                "reconciled_level_contexts": [reconciled_context],
+            },
+            "ac_statuses": {"0": "pending", "1": "pending"},
+            "failed_indices": [],
+            "completed_count": 0,
+            "level_contexts": [reconciled_context],
+        }
+
+        assert (
+            ParallelACExecutor._checkpoint_progress_malformed(
+                SimpleNamespace(state=state), total_acs=2
+            )
+            is None
+        )
 
     @pytest.mark.parametrize(
         ("state", "expected_fragment"),
@@ -3787,6 +3849,90 @@ class TestCheckpointDispatchContract:
         assert dispatched == [[1]]
         assert result.externally_satisfied_count == 1
         assert result.all_succeeded
+
+    @pytest.mark.asyncio
+    async def test_mixed_external_and_executed_stage_writes_valid_progress(
+        self, tmp_path: Path
+    ) -> None:
+        seed = self._seed()
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Prepare workspace"),
+                ACNode(index=1, content="Apply change"),
+            ),
+            stages=(ExecutionStage(index=0, ac_indices=(0, 1)),),
+        )
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        executor._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=1, ac_content="Apply change", success=True)]
+        )
+
+        result = await executor.execute_parallel(
+            seed,
+            session_id="session-mixed-external",
+            execution_id="exec-mixed-external",
+            tools=["Read"],
+            system_prompt="direct-v1",
+            execution_plan=plan,
+            externally_satisfied_acs={0: {"reason": "already present"}},
+        )
+
+        assert result.all_succeeded
+        saved = store.load(seed.metadata.seed_id)
+        assert saved.is_ok
+        state = saved.value.state
+        assert state["dispatch_contract"]["externally_satisfied_ac_indices"] == [0]
+        assert [
+            summary["ac_index"]
+            for context in state["level_contexts"]
+            for summary in context["completed_acs"]
+        ] == [1]
+        assert ParallelACExecutor._checkpoint_progress_malformed(saved.value, total_acs=2) is None
+
+    @pytest.mark.asyncio
+    async def test_reconciled_run_start_anchor_is_valid_with_pending_status(
+        self, tmp_path: Path
+    ) -> None:
+        seed = _seed("Reconciled run-start anchor")
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        executor._run_batch_with_verify_and_retry = AsyncMock(
+            side_effect=RuntimeError("crash before first stage completes")
+        )
+        handoff = LevelContext(
+            level_number=1,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=0,
+                    ac_content="Parent work from prior attempt",
+                    success=True,
+                    tools_used=("Edit",),
+                    files_modified=("shared.py",),
+                    key_output="workspace reconciled",
+                ),
+            ),
+        )
+
+        with pytest.raises(BaseException, match="crash before first stage|unhandled errors"):
+            await executor.execute_parallel(
+                seed,
+                session_id="session-reconciled-anchor",
+                execution_id="exec-reconciled-anchor",
+                tools=["Read"],
+                system_prompt="direct-v1",
+                execution_plan=_plan(),
+                reconciled_level_contexts=[handoff],
+            )
+
+        saved = store.load(seed.metadata.seed_id)
+        assert saved.is_ok
+        state = saved.value.state
+        assert state["ac_statuses"] == {"0": "pending"}
+        assert state["dispatch_contract"]["reconciled_level_contexts"] == state["level_contexts"]
+        assert ParallelACExecutor._checkpoint_progress_malformed(saved.value, total_acs=1) is None
 
     @pytest.mark.asyncio
     async def test_rebuildable_prompt_contract_rebuilds_after_recovery(

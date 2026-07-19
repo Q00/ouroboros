@@ -1154,7 +1154,8 @@ def _pid_alive(pid: int) -> bool:
 #: out (the refusal error says so). Same-host owners use the precise PID
 #: probe instead and never consult this window.
 _CHECKPOINT_OWNER_FRESHNESS = timedelta(minutes=15)
-_EXECUTION_CHECKPOINT_CONTRACT_VERSION = 1
+_EXECUTION_CHECKPOINT_CONTRACT_VERSION = 2
+_CHECKPOINT_DISPATCH_CONTRACT_VERSION = 2
 
 
 class ParallelACExecutor:
@@ -2228,6 +2229,45 @@ class ParallelACExecutor:
             normalized[ac_index] = dict(metadata)
         return normalized
 
+    @classmethod
+    def _normalize_reconciled_level_contexts(
+        cls,
+        raw: list[LevelContext] | None,
+        *,
+        total_acs: int,
+        total_levels: int,
+    ) -> list[LevelContext]:
+        """Canonicalize caller-provided prompt handoff before checkpointing.
+
+        Failed summaries never reach ``LevelContext.to_prompt_text`` and are
+        therefore not dispatch authority.  Strip them while preserving the
+        coordinator review, then validate the exact serialized handoff shape
+        that recovery will persist and restore.
+        """
+        contexts: list[LevelContext] = []
+        for position, context in enumerate(raw or []):
+            if not isinstance(context, LevelContext):
+                msg = f"reconciled_level_contexts[{position}] is not a LevelContext"
+                raise ValueError(msg)
+            contexts.append(
+                replace(
+                    context,
+                    completed_acs=tuple(
+                        summary for summary in context.completed_acs if summary.success
+                    ),
+                )
+            )
+        serialized = serialize_level_contexts(contexts)
+        malformed = cls._checkpoint_level_contexts_malformed(
+            serialized,
+            total_acs=total_acs,
+            plan_total_stages=total_levels,
+        )
+        if malformed is not None:
+            msg = f"reconciled_level_contexts is invalid: {malformed}"
+            raise ValueError(msg)
+        return contexts
+
     @staticmethod
     def _runtime_capabilities_contract(adapter: object) -> dict[str, Any] | None:
         capabilities = getattr(adapter, "capabilities", None)
@@ -2259,6 +2299,7 @@ class ParallelACExecutor:
         system_prompt: str,
         system_prompt_builder: Callable[..., str] | None,
         externally_satisfied_ac_indices: tuple[int, ...] = (),
+        reconciled_level_contexts: list[LevelContext] | None = None,
     ) -> dict[str, Any]:
         """Canonicalize the actual dispatch authority used by this run.
 
@@ -2275,7 +2316,7 @@ class ParallelACExecutor:
         permission_mode = getattr(self._adapter, "permission_mode", None)
         constructor_model = getattr(self._adapter, "_model", None)
         return {
-            "version": 1,
+            "version": _CHECKPOINT_DISPATCH_CONTRACT_VERSION,
             "workspace": workspace_identity,
             "runtime": {
                 "backend": runtime_backend if isinstance(runtime_backend, str) else None,
@@ -2288,6 +2329,7 @@ class ParallelACExecutor:
             "model_routing": serialize_model_router(self._model_router),
             "execution_profile": serialize_execution_profile(self._execution_profile),
             "externally_satisfied_ac_indices": list(externally_satisfied_ac_indices),
+            "reconciled_level_contexts": serialize_level_contexts(reconciled_level_contexts or []),
             "tools": list(tools),
             "tool_catalog": {
                 "present": tool_catalog is not None,
@@ -2315,13 +2357,18 @@ class ParallelACExecutor:
             "model_routing",
             "execution_profile",
             "externally_satisfied_ac_indices",
+            "reconciled_level_contexts",
             "tools",
             "tool_catalog",
             "system_prompt",
         }:
             return "dispatch_contract has an invalid top-level shape"
-        if raw.get("version") != 1:
-            return f"dispatch_contract version is not 1: {raw.get('version')!r}"
+        if raw.get("version") != _CHECKPOINT_DISPATCH_CONTRACT_VERSION:
+            return (
+                "dispatch_contract version is unsupported: "
+                f"{raw.get('version')!r} "
+                f"(expected {_CHECKPOINT_DISPATCH_CONTRACT_VERSION})"
+            )
         raw_workspace = raw.get("workspace")
         if (
             not isinstance(raw_workspace, str)
@@ -2413,6 +2460,15 @@ class ParallelACExecutor:
             or external_indices != sorted(set(external_indices))
         ):
             return "dispatch_contract.externally_satisfied_ac_indices is invalid"
+        reconciled_contexts = raw.get("reconciled_level_contexts")
+        if (
+            context_error := ParallelACExecutor._checkpoint_level_contexts_malformed(
+                reconciled_contexts,
+                total_acs=None,
+                plan_total_stages=None,
+            )
+        ) is not None:
+            return f"dispatch_contract.reconciled_level_contexts is invalid: {context_error}"
         raw_tools = raw.get("tools")
         if not isinstance(raw_tools, list) or any(not isinstance(tool, str) for tool in raw_tools):
             return "dispatch_contract.tools is not a list of strings"
@@ -2462,6 +2518,7 @@ class ParallelACExecutor:
         system_prompt: str,
         system_prompt_builder: Callable[..., str] | None,
         externally_satisfied_ac_indices: tuple[int, ...] = (),
+        reconciled_level_contexts: list[LevelContext] | None = None,
     ) -> str | None:
         saved = cp.state.get("dispatch_contract")
         current = self._build_checkpoint_dispatch_contract(
@@ -2470,6 +2527,7 @@ class ParallelACExecutor:
             system_prompt=system_prompt,
             system_prompt_builder=system_prompt_builder,
             externally_satisfied_ac_indices=externally_satisfied_ac_indices,
+            reconciled_level_contexts=reconciled_level_contexts,
         )
         # Router/profile are restorable versioned contracts.  Their dispatch
         # snapshots must agree with the checkpoint's semantic groups, while
@@ -2477,17 +2535,20 @@ class ParallelACExecutor:
         if isinstance(saved, Mapping):
             current["model_routing"] = cp.state.get("model_routing")
             current["execution_profile"] = cp.state.get("execution_profile")
-            # The interrupted run's caller-controlled skip set is restored on
-            # adoption below. Compare every other live authority axis here,
-            # but do not let a restart silently replace that durable set.
+            # The interrupted run's caller-controlled skip set and reconciled
+            # prompt handoff are restored on adoption below. Compare every
+            # other live authority axis here, but do not let a restart silently
+            # replace either durable input.
             current["externally_satisfied_ac_indices"] = saved.get(
                 "externally_satisfied_ac_indices"
             )
+            current["reconciled_level_contexts"] = saved.get("reconciled_level_contexts")
         if saved == current:
             return None
         return (
             "the current workspace, runtime authority, tools, canonical tool catalog, "
-            "or direct system-prompt identity differs from the interrupted run"
+            "reconciled prompt handoff, or direct system-prompt identity differs from "
+            "the interrupted run"
         )
 
     @staticmethod
@@ -3634,6 +3695,28 @@ class ParallelACExecutor:
             if contexts_malformed is not None:
                 return contexts_malformed
             if normalized_statuses is not None:
+                raw_dispatch = state.get("dispatch_contract")
+                external_indices: set[int] = set()
+                reconciled_indices: set[int] = set()
+                if isinstance(raw_dispatch, Mapping):
+                    raw_external = raw_dispatch.get("externally_satisfied_ac_indices", [])
+                    if isinstance(raw_external, list | tuple):
+                        external_indices = {
+                            ac_index
+                            for ac_index in raw_external
+                            if isinstance(ac_index, int) and not isinstance(ac_index, bool)
+                        }
+                    raw_reconciled = raw_dispatch.get("reconciled_level_contexts", [])
+                    if isinstance(raw_reconciled, list | tuple):
+                        reconciled_indices = {
+                            raw_ac["ac_index"]
+                            for raw_context in raw_reconciled
+                            if isinstance(raw_context, Mapping)
+                            for raw_ac in raw_context.get("completed_acs", [])
+                            if isinstance(raw_ac, Mapping)
+                            and isinstance(raw_ac.get("ac_index"), int)
+                            and not isinstance(raw_ac.get("ac_index"), bool)
+                        }
                 context_level_by_ac = {
                     raw_ac["ac_index"]: raw_context["level_number"]
                     for raw_context in state["level_contexts"]
@@ -3642,8 +3725,11 @@ class ParallelACExecutor:
                 completed_status_indices = {
                     index for index, status in normalized_statuses.items() if status == "completed"
                 }
-                if set(context_level_by_ac) != completed_status_indices:
-                    return "level_contexts ACs do not match completed ac_statuses"
+                context_indices = set(context_level_by_ac)
+                missing_context = completed_status_indices - context_indices - external_indices
+                unexpected_context = context_indices - completed_status_indices - reconciled_indices
+                if missing_context or unexpected_context:
+                    return "level_contexts ACs do not match completed/external/reconciled progress"
 
                 if isinstance(raw_stages, list):
                     expected_level_by_ac: dict[int, int] = {}
@@ -3657,6 +3743,8 @@ class ParallelACExecutor:
                             if isinstance(raw_ac_index, int) and not isinstance(raw_ac_index, bool):
                                 expected_level_by_ac[raw_ac_index] = stage_position + 1
                     for completed_ac_index, context_level in context_level_by_ac.items():
+                        if completed_ac_index in reconciled_indices:
+                            continue
                         expected_level = expected_level_by_ac.get(completed_ac_index)
                         if expected_level is not None and context_level != expected_level:
                             return "level_contexts AC is attached to the wrong execution plan stage"
@@ -3878,6 +3966,26 @@ class ParallelACExecutor:
                     *existing.completed_acs,
                     *(summary for summary in summaries if summary.ac_index not in existing_indices),
                 ),
+            )
+        return [by_level[level_number] for level_number in sorted(by_level)]
+
+    @staticmethod
+    def _merge_level_context(
+        level_contexts: list[LevelContext],
+        incoming: LevelContext,
+    ) -> list[LevelContext]:
+        """Merge a new stage handoff with an existing reconciled stage context."""
+        by_level = {context.level_number: context for context in level_contexts}
+        existing = by_level.get(incoming.level_number)
+        if existing is None:
+            by_level[incoming.level_number] = incoming
+        else:
+            summaries = {summary.ac_index: summary for summary in existing.completed_acs}
+            summaries.update({summary.ac_index: summary for summary in incoming.completed_acs})
+            by_level[incoming.level_number] = LevelContext(
+                level_number=incoming.level_number,
+                completed_acs=tuple(summaries[index] for index in sorted(summaries)),
+                coordinator_review=(incoming.coordinator_review or existing.coordinator_review),
             )
         return [by_level[level_number] for level_number in sorted(by_level)]
 
@@ -4507,10 +4615,13 @@ class ParallelACExecutor:
         failed_indices: set[int] = set()
         blocked_indices: set[int] = set()
         stage_results: list[ParallelExecutionStageResult] = []
-        level_contexts = list(reconciled_level_contexts or [])
-
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
+        level_contexts = self._normalize_reconciled_level_contexts(
+            reconciled_level_contexts,
+            total_acs=total_acs,
+            total_levels=total_levels,
+        )
         external_completed = self._normalize_externally_satisfied_acs(
             externally_satisfied_acs,
             total_acs=total_acs,
@@ -4525,6 +4636,7 @@ class ParallelACExecutor:
             system_prompt=system_prompt,
             system_prompt_builder=system_prompt_builder,
             externally_satisfied_ac_indices=tuple(sorted(external_completed)),
+            reconciled_level_contexts=level_contexts,
         )
 
         # Track AC statuses for TUI updates
@@ -4557,6 +4669,9 @@ class ParallelACExecutor:
             pre_recovery_result_count = len(all_results)
             pre_recovery_decomposition_decisions = dict(self._decomposition_decisions)
             pre_recovery_execution_profile = self._execution_profile
+            pre_recovery_level_contexts = list(level_contexts)
+            pre_recovery_external_completed = dict(external_completed)
+            pre_recovery_dispatch_contract = dict(dispatch_contract)
             try:
                 seed_id = self._checkpoint_seed_id(seed, session_id)
                 cp = await self._load_checkpoint_for_recovery(seed_id)
@@ -4737,6 +4852,7 @@ class ParallelACExecutor:
                             system_prompt=system_prompt,
                             system_prompt_builder=system_prompt_builder,
                             externally_satisfied_ac_indices=tuple(sorted(external_completed)),
+                            reconciled_level_contexts=level_contexts,
                         )
                     ):
                         log.error(
@@ -5211,7 +5327,9 @@ class ParallelACExecutor:
                 self._ordinary_finalized_resume_results.clear()
                 completed_count = 0
                 execution_id = pre_recovery_execution_id
-                level_contexts = list(reconciled_level_contexts or [])
+                level_contexts = pre_recovery_level_contexts
+                external_completed = pre_recovery_external_completed
+                dispatch_contract = pre_recovery_dispatch_contract
                 del all_results[pre_recovery_result_count:]
                 self._decomposition_decisions.clear()
                 self._decomposition_decisions.update(pre_recovery_decomposition_decisions)
@@ -5750,7 +5868,7 @@ class ParallelACExecutor:
                     level_ac_data = [
                         (r.ac_index, r.ac_content, r.success, r.messages, r.final_message)
                         for r in stage_ac_results
-                        if r.ac_index in executable
+                        if r.ac_index in executable and r.success
                     ]
                     # workspace_root is required: fall back through
                     # adapter working directory, then process cwd. Never None.
@@ -5807,7 +5925,7 @@ class ParallelACExecutor:
                             f"{len(review.warnings_for_next_level)} warning(s)[/green]"
                         )
 
-                    level_contexts.append(level_ctx)
+                    level_contexts = self._merge_level_context(level_contexts, level_ctx)
                 stage_results.append(stage_result)
 
                 # RC3: Save checkpoint after each level completion.
