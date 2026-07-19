@@ -5490,6 +5490,63 @@ class OrchestratorRunner:
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         force_sequential_levels: bool = False,
     ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Hold the seed lease through the complete runner lifecycle.
+
+        The executor owns recovery, the run-start anchor, and AC dispatch,
+        but the runner owns the terminal event and terminal checkpoint
+        deletion that make the checkpoint non-resumable. Releasing the lease
+        when ``ParallelACExecutor.execute_parallel`` returns leaves a window
+        where a second invocation can adopt the completed checkpoint before
+        those runner-owned writes land. Claim the shared execution lease here
+        and tell the nested executor not to claim it again.
+        """
+        from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+
+        if self._checkpoint_store is None:
+            return await self._execute_parallel_impl(
+                seed=seed,
+                exec_id=exec_id,
+                tracker=tracker,
+                merged_tools=merged_tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                start_time=start_time,
+                externally_satisfied_acs=externally_satisfied_acs,
+                force_sequential_levels=force_sequential_levels,
+                checkpoint_execution_lease_held=False,
+            )
+
+        checkpoint_seed_id = ParallelACExecutor._checkpoint_seed_id(seed, tracker.session_id)
+        with ParallelACExecutor._claim_checkpoint_execution_lease(
+            self._checkpoint_store,
+            checkpoint_seed_id,
+        ):
+            return await self._execute_parallel_impl(
+                seed=seed,
+                exec_id=exec_id,
+                tracker=tracker,
+                merged_tools=merged_tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                start_time=start_time,
+                externally_satisfied_acs=externally_satisfied_acs,
+                force_sequential_levels=force_sequential_levels,
+                checkpoint_execution_lease_held=True,
+            )
+
+    async def _execute_parallel_impl(
+        self,
+        seed: Seed,
+        exec_id: str,
+        tracker: Any,
+        merged_tools: list[str],
+        tool_catalog: SessionToolCatalog,
+        system_prompt: str,
+        start_time: datetime,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        force_sequential_levels: bool = False,
+        checkpoint_execution_lease_held: bool = False,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
         Analyzes AC dependencies using LLM, then executes independent ACs
@@ -5654,6 +5711,7 @@ class OrchestratorRunner:
             # below).
             context_pack_enabled=self._context_pack_enabled,
             prompt_guidance_contract=self._guidance_contract(self._ensure_new_run_guidance()),
+            checkpoint_execution_lease_held=checkpoint_execution_lease_held,
         )
 
         # Check for cancellation before starting parallel execution

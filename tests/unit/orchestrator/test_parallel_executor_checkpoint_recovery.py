@@ -3408,6 +3408,17 @@ class TestInProcessConcurrentSeedExecutionRefused:
     must be released on EVERY exit path so the seed is never permanently
     walled off."""
 
+    def test_lease_preserves_blocking_io_errors_from_execution_body(self, tmp_path: Path) -> None:
+        """Only lease acquisition conflicts map to concurrent execution."""
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+
+        with pytest.raises(BlockingIOError, match="dispatch body failed"):
+            with ParallelACExecutor._claim_checkpoint_execution_lease(store, "body-error"):
+                raise BlockingIOError("dispatch body failed")
+
+        assert "body-error" not in ParallelACExecutor._ACTIVE_SEED_LEASES
+
     @pytest.mark.asyncio
     async def test_second_concurrent_invocation_refused_first_completes(
         self, tmp_path: Path

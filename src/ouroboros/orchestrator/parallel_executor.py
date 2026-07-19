@@ -28,7 +28,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -1209,6 +1209,38 @@ class ParallelACExecutor:
         if cls._ACTIVE_SEED_LEASES.get(seed_id) == token:
             del cls._ACTIVE_SEED_LEASES[seed_id]
 
+    @classmethod
+    @contextlib.contextmanager
+    def _claim_checkpoint_execution_lease(
+        cls,
+        checkpoint_store: Any,
+        seed_id: str,
+    ) -> Iterator[None]:
+        """Claim both process-local and filesystem execution rights.
+
+        The runner uses this boundary to keep the lease through terminal
+        event persistence and terminal checkpoint deletion. Direct executor
+        callers use the same boundary around their executor lifecycle.
+        """
+        token = cls._acquire_seed_execution_lease(seed_id)
+        filesystem_lease = contextlib.ExitStack()
+        try:
+            try:
+                filesystem_lease.enter_context(checkpoint_store.execution_lease(seed_id))
+            except BlockingIOError as exc:
+                raise ConcurrentSeedExecutionError(
+                    f"Another process is already executing seed '{seed_id}'. "
+                    "Checkpoint recovery and the run-start claim must be atomic; "
+                    "wait for the active run to finish (or cancel it) before "
+                    "launching this seed again."
+                ) from exc
+            yield
+        finally:
+            try:
+                filesystem_lease.close()
+            finally:
+                cls._release_seed_execution_lease(seed_id, token)
+
     def __init__(
         self,
         adapter: AgentRuntime,
@@ -1236,6 +1268,7 @@ class ParallelACExecutor:
         lateral_escalation_enabled: bool = False,
         context_pack_enabled: bool | None = None,
         prompt_guidance_contract: Mapping[str, Any] | None = None,
+        checkpoint_execution_lease_held: bool = False,
     ):
         """Initialize executor.
 
@@ -1301,6 +1334,12 @@ class ParallelACExecutor:
                 runner's prompt builder, whose ``_restore_guidance_contract``
                 machinery re-resolves and identity-checks it (fail-closed on
                 changed guidance, exactly like ``resume_session``).
+            checkpoint_execution_lease_held: Internal runner/executor
+                contract. ``True`` means the runner already owns both the
+                process-local and filesystem seed leases and will retain them
+                through terminal event persistence and checkpoint deletion.
+                Direct callers leave this ``False`` so the executor claims
+                and releases the same lease itself.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -1372,6 +1411,7 @@ class ParallelACExecutor:
             safe_emit_event=self._safe_emit_event,
         )
         self._checkpoint_store = checkpoint_store
+        self._checkpoint_execution_lease_held = checkpoint_execution_lease_held
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
         # Gate-anchored decomposition trust attestation (Task 1, RLM thesis
         # hardening): the LATEST attestation computed for a finished
@@ -4804,25 +4844,16 @@ class ParallelACExecutor:
         design (a shape the session layer explicitly supports), and there
         is no shared seed-keyed durable object for the lease to protect.
         """
-        lease_seed_id: str | None = None
-        lease_token: str | None = None
-        process_lease_stack = contextlib.ExitStack()
-        if self._checkpoint_store:
+        lease_stack = contextlib.ExitStack()
+        if self._checkpoint_store and not self._checkpoint_execution_lease_held:
             lease_seed_id = self._checkpoint_seed_id(seed, session_id)
-            lease_token = self._acquire_seed_execution_lease(lease_seed_id)
+            lease_stack.enter_context(
+                self._claim_checkpoint_execution_lease(
+                    self._checkpoint_store,
+                    lease_seed_id,
+                )
+            )
         try:
-            if self._checkpoint_store and lease_seed_id is not None:
-                try:
-                    process_lease_stack.enter_context(
-                        self._checkpoint_store.execution_lease(lease_seed_id)
-                    )
-                except BlockingIOError as exc:
-                    raise ConcurrentSeedExecutionError(
-                        f"Another process is already executing seed '{lease_seed_id}'. "
-                        "Checkpoint recovery and the run-start claim must be atomic; "
-                        "wait for the active run to finish (or cancel it) before "
-                        "launching this seed again."
-                    ) from exc
             return await self._execute_parallel_impl(
                 seed,
                 session_id=session_id,
@@ -4844,11 +4875,7 @@ class ParallelACExecutor:
                 # attestation/escalation events from its last dispatch.
                 await self._drain_deferred_durable_writes()
             finally:
-                try:
-                    process_lease_stack.close()
-                finally:
-                    if lease_seed_id is not None and lease_token is not None:
-                        self._release_seed_execution_lease(lease_seed_id, lease_token)
+                lease_stack.close()
 
     async def _execute_parallel_impl(
         self,

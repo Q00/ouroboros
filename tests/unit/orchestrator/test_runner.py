@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +38,12 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionResult,
+    ConcurrentSeedExecutionError,
+    ParallelACExecutor,
+    ParallelExecutionResult,
+)
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runner import (
     OrchestratorError,
@@ -48,6 +55,7 @@ from ouroboros.orchestrator.runner import (
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+from ouroboros.persistence.checkpoint import CheckpointStore
 
 
 def _task_workspace() -> TaskWorkspace:
@@ -2828,6 +2836,148 @@ class TestOrchestratorRunner:
         assert execution_plan.execution_levels == dependency_graph.execution_levels
         assert execution_plan.total_stages == 2
         assert kwargs["session_id"] == tracker.session_id
+
+    @pytest.mark.asyncio
+    async def test_execute_parallel_holds_seed_lease_through_terminal_checkpoint_delete(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        """A completed checkpoint cannot be adopted before terminal cleanup."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        checkpoint_path = tmp_path / "checkpoints"
+        checkpoint_store = CheckpointStore(base_path=checkpoint_path)
+        checkpoint_store.initialize()
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            checkpoint_store=checkpoint_store,
+        )
+        contender = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            checkpoint_store=CheckpointStore(base_path=checkpoint_path),
+        )
+        tracker = SessionTracker.create("exec-first", sample_seed.metadata.seed_id)
+        contender_tracker = SessionTracker.create("exec-second", sample_seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=ac)
+                for index, ac in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=(tuple(range(len(sample_seed.acceptance_criteria))),),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=tuple(
+                ACExecutionResult(
+                    ac_index=index,
+                    ac_content=ac,
+                    success=True,
+                    final_message="done",
+                )
+                for index, ac in enumerate(sample_seed.acceptance_criteria)
+            ),
+            success_count=len(sample_seed.acceptance_criteria),
+            failure_count=0,
+            total_messages=len(sample_seed.acceptance_criteria),
+        )
+        terminal_started = asyncio.Event()
+        allow_terminal = asyncio.Event()
+        original_append = mock_event_store.append
+
+        async def _append(event: BaseEvent) -> None:
+            if event.type == "execution.terminal" and event.aggregate_id == "exec-first":
+                terminal_started.set()
+                await allow_terminal.wait()
+            await original_append(event)
+
+        captured_init: list[dict[str, Any]] = []
+        original_init = ParallelACExecutor.__init__
+        original_delete = checkpoint_store.delete
+        delete_observed: list[str] = []
+
+        def _capture_init(executor: ParallelACExecutor, *args: Any, **kwargs: Any) -> None:
+            captured_init.append(dict(kwargs))
+            original_init(executor, *args, **kwargs)
+
+        def _delete_while_leased(seed_id: str) -> Any:
+            assert seed_id in ParallelACExecutor._ACTIVE_SEED_LEASES
+            with pytest.raises(BlockingIOError):
+                with contender._checkpoint_store.execution_lease(seed_id):
+                    pass
+            delete_observed.append(seed_id)
+            return original_delete(seed_id)
+
+        mock_event_store.append = AsyncMock(side_effect=_append)
+        checkpoint_store.delete = MagicMock(side_effect=_delete_while_leased)  # type: ignore[method-assign]
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(contender, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch.object(
+                contender._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch.object(ParallelACExecutor, "__init__", new=_capture_init),
+            patch.object(
+                ParallelACExecutor,
+                "execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ),
+        ):
+            first_task = asyncio.create_task(
+                runner._execute_parallel(
+                    seed=sample_seed,
+                    exec_id="exec-first",
+                    tracker=tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=tracker.start_time,
+                )
+            )
+            await asyncio.wait_for(terminal_started.wait(), timeout=10)
+
+            seed_id = sample_seed.metadata.seed_id
+            assert seed_id in ParallelACExecutor._ACTIVE_SEED_LEASES
+            with pytest.raises(BlockingIOError):
+                with contender._checkpoint_store.execution_lease(seed_id):
+                    pass
+            with pytest.raises(ConcurrentSeedExecutionError):
+                await contender._execute_parallel(
+                    seed=sample_seed,
+                    exec_id="exec-second",
+                    tracker=contender_tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=contender_tracker.start_time,
+                )
+
+            allow_terminal.set()
+            result = await asyncio.wait_for(first_task, timeout=10)
+
+        assert result.is_ok
+        assert captured_init[0]["checkpoint_execution_lease_held"] is True
+        assert delete_observed == [sample_seed.metadata.seed_id]
+        assert sample_seed.metadata.seed_id not in ParallelACExecutor._ACTIVE_SEED_LEASES
+        with contender._checkpoint_store.execution_lease(sample_seed.metadata.seed_id):
+            pass
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_execution_profile_to_executor(
