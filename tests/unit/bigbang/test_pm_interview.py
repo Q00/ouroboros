@@ -100,22 +100,35 @@ class TestPMSteeringPromptBudget:
         engine._install_pm_steering()
         return engine
 
-    def test_default_cap_holds_with_steering_installed(self, tmp_path: Path) -> None:
+    def test_default_cap_keeps_contract_and_full_perspective_panel(self, tmp_path: Path) -> None:
+        """The default first-round PM prompt must hold the cap while the
+        PRD-contract steering and the inner perspective panel — with its
+        breadth/closure/seed-ready safeguards — coexist, both complete."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_default",
             initial_context="Build a task manager",
         )
         prompt = engine.inner._build_system_prompt(state)
-        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
-        assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        cap = InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        assert len(prompt) <= cap
         assert self._INNER_ROLE_MARKER in prompt
         assert self._INNER_JOB_MARKER in prompt
+        # The full panel text survives — not a mid-sentence fragment.
+        panel = engine.inner._build_perspective_panel_prompt(state)
+        assert panel and panel in prompt
+        assert "breadth recap" in prompt
+        assert "seed-ready" in prompt
+        # The steering policy survives shedding, paragraph-atomically.
+        flat = " ".join(prompt.split())
+        assert "contract between the PM and the developers" in flat
+        assert "no place in this contract" in flat
+        self._assert_steering_paragraphs_atomic(prompt, cap)
 
-    def test_caller_supplied_cap_keeps_full_steering_and_inner_prompt(self, tmp_path: Path) -> None:
-        """With a comfortable caller cap and a short context, the full
-        steering and the inner prompt coexist within the cap. (Long-context
-        shedding behavior has its own dedicated tests below.)"""
+    def test_caller_supplied_cap_keeps_contract_and_inner_prompt(self, tmp_path: Path) -> None:
+        """With a reduced caller cap and a short context, steering sheds its
+        supporting paragraphs but the contract policy and the complete inner
+        guidance still coexist within the cap."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_caller",
@@ -124,9 +137,13 @@ class TestPMSteeringPromptBudget:
         cap = 3_000
         prompt = engine.inner._build_system_prompt(state, max_chars=cap)
         assert len(prompt) <= cap
-        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
         assert self._INNER_ROLE_MARKER in prompt
         assert self._INNER_JOB_MARKER in prompt
+        panel = engine.inner._build_perspective_panel_prompt(state)
+        assert panel and panel in prompt
+        flat = " ".join(prompt.split())
+        assert "contract between the PM and the developers" in flat
+        self._assert_steering_paragraphs_atomic(prompt, cap)
 
     def test_saturated_history_minimum_budget_preserves_inner_prompt(self, tmp_path: Path) -> None:
         """A saturated history leaves only the minimum system budget; the

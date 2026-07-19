@@ -115,12 +115,14 @@ Respond ONLY with valid JSON in this exact format:
 
 
 # Static markers of inner-builder guidance that PM steering must never
-# evict: the answer-prefix legend and the brownfield intent hint. The
-# ambiguity snapshot is checked as its full text (built per state) because
-# it carries the "Weakest area" feedback the steering philosophy is meant
-# to govern — its heading surviving while the weakest-area lines are cut
-# would still defeat the policy. The inner header truncates from the end,
-# so a surviving later element implies everything before it is intact.
+# evict: the answer-prefix legend and the brownfield intent hint. Two more
+# guidance sections are checked as their full per-state text: the ambiguity
+# snapshot (it carries the "Weakest area" feedback the steering philosophy
+# is meant to govern) and the perspective panel (it carries the breadth /
+# closure / seed-ready safeguards). A heading or fragment surviving while
+# the tail is cut would still defeat the policy, so full-text checks are
+# required. The inner header truncates from the end, so a surviving later
+# element implies everything before it is intact.
 _INNER_GUIDANCE_STATIC_MARKERS = (
     "[from-research]",
     "not on discovering what exists.",
@@ -584,17 +586,20 @@ class PMInterviewEngine:
 
             # Guidance the unconstrained inner build retains must also
             # survive the steered build; steering yields otherwise. The
-            # ambiguity snapshot is required as its full text so the
-            # "Weakest area" lines survive, not just the heading.
+            # ambiguity snapshot and the perspective panel are required as
+            # their full text so the "Weakest area" lines and the panel's
+            # breadth/closure/seed-ready safeguards survive — not just a
+            # heading or a mid-sentence fragment.
             base_full = original_build(
                 state,
                 initial_context=initial_context,
                 max_chars=cap,
             )
             snapshot_text = self.inner._build_ambiguity_snapshot_prompt(state)
+            panel_text = self.inner._build_perspective_panel_prompt(state)
             required_markers = [
                 marker
-                for marker in (*_INNER_GUIDANCE_STATIC_MARKERS, snapshot_text)
+                for marker in (*_INNER_GUIDANCE_STATIC_MARKERS, snapshot_text, panel_text)
                 if marker and marker in base_full
             ]
 
