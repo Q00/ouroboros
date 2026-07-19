@@ -169,6 +169,7 @@ def test_restored_handle_must_match_capsule_fingerprint(tmp_path) -> None:
     handle = RuntimeHandle(
         backend="claude",
         native_session_id="same-attempt-session",
+        cwd=str(tmp_path.resolve()),
         metadata={"ac_capsule_fingerprint": "sha256:" + "0" * 64},
     )
 
@@ -177,6 +178,46 @@ def test_restored_handle_must_match_capsule_fingerprint(tmp_path) -> None:
             capsule,
             handle,
             restored_same_attempt=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("handle_changes", "expected_backend", "expected_approval_mode", "message"),
+    [
+        ({"cwd": "/tmp/other-workspace"}, "codex_cli", "acceptEdits", "workspace"),
+        ({"backend": "claude"}, "codex_cli", "acceptEdits", "backend"),
+        (
+            {"approval_mode": "bypassPermissions"},
+            "codex_cli",
+            "acceptEdits",
+            "approval mode",
+        ),
+    ],
+)
+def test_restored_handle_must_match_runtime_authority(
+    tmp_path,
+    handle_changes: dict[str, object],
+    expected_backend: str,
+    expected_approval_mode: str,
+    message: str,
+) -> None:
+    capsule = _capsule(tmp_path)
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        native_session_id="same-attempt-session",
+        cwd=str(tmp_path.resolve()),
+        approval_mode="acceptEdits",
+        metadata={"ac_capsule_fingerprint": capsule.fingerprint},
+    )
+    handle = replace(handle, **handle_changes)
+
+    with pytest.raises(ValueError, match=message):
+        bind_capsule_to_runtime_handle(
+            capsule,
+            handle,
+            restored_same_attempt=True,
+            expected_backend=expected_backend,
+            expected_approval_mode=expected_approval_mode,
         )
 
 

@@ -614,6 +614,8 @@ def bind_capsule_to_runtime_handle(
     runtime_handle: RuntimeHandle | None,
     *,
     restored_same_attempt: bool,
+    expected_backend: str | None = None,
+    expected_approval_mode: str | None = None,
 ) -> RuntimeHandle | None:
     """Bind a provider handle to exactly one AC capsule.
 
@@ -633,6 +635,19 @@ def bind_capsule_to_runtime_handle(
     )
     if not restored_same_attempt and any(continuity_values):
         raise ValueError("a fresh AC capsule cannot inherit provider session continuity")
+    if restored_same_attempt:
+        if not runtime_handle.cwd:
+            raise ValueError("a resumed runtime handle must declare its workspace")
+        restored_workspace = os.path.realpath(os.path.expanduser(runtime_handle.cwd))
+        if restored_workspace != capsule.workspace:
+            raise ValueError("runtime handle workspace disagrees with the AC capsule")
+        if expected_backend is not None and runtime_handle.backend != expected_backend:
+            raise ValueError("runtime handle backend disagrees with the AC capsule authority")
+        if (
+            expected_approval_mode is not None
+            and runtime_handle.approval_mode != expected_approval_mode
+        ):
+            raise ValueError("runtime handle approval mode disagrees with the AC capsule authority")
     existing_fingerprint = runtime_handle.metadata.get("ac_capsule_fingerprint")
     if existing_fingerprint is not None and existing_fingerprint != capsule.fingerprint:
         raise ValueError("runtime handle is bound to a different AC capsule")

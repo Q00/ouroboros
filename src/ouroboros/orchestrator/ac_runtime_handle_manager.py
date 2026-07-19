@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import os
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -325,6 +326,30 @@ class ACRuntimeHandleManager:
                 )
         return normalized_handle
 
+    def _validate_resumable_handle_authority(
+        self,
+        runtime_handle: RuntimeHandle,
+        *,
+        expected_workspace: str | None,
+    ) -> None:
+        """Reject provider continuity from a different runtime authority."""
+        if not self._is_resumable_runtime_handle(runtime_handle):
+            return
+        runtime_backend = getattr(self._adapter, "runtime_backend", None)
+        if isinstance(runtime_backend, str) and runtime_backend:
+            if runtime_handle.backend != runtime_backend:
+                raise ValueError("persisted runtime handle backend authority changed")
+        permission_mode = getattr(self._adapter, "permission_mode", None)
+        if isinstance(permission_mode, str) and permission_mode:
+            if runtime_handle.approval_mode != permission_mode:
+                raise ValueError("persisted runtime handle permission authority changed")
+        if expected_workspace is not None:
+            if not runtime_handle.cwd:
+                raise ValueError("persisted runtime handle workspace authority is missing")
+            observed_workspace = os.path.realpath(os.path.expanduser(runtime_handle.cwd))
+            if observed_workspace != expected_workspace:
+                raise ValueError("persisted runtime handle workspace authority changed")
+
     def _build_ac_runtime_handle(
         self,
         ac_index: int,
@@ -430,6 +455,7 @@ class ACRuntimeHandleManager:
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
         expected_capsule_fingerprint: str | None = None,
+        expected_capsule_workspace: str | None = None,
     ) -> RuntimeHandle | None:
         """Load the latest reusable AC-scoped runtime handle from execution events."""
         runtime_identity = self._resolve_ac_runtime_identity(
@@ -442,6 +468,11 @@ class ACRuntimeHandleManager:
             retry_attempt=retry_attempt,
         )
         cached_runtime_handle = self.runtime_handles.get(runtime_identity.cache_key)
+        if cached_runtime_handle is not None and expected_capsule_fingerprint is not None:
+            self._validate_resumable_handle_authority(
+                cached_runtime_handle,
+                expected_workspace=expected_capsule_workspace,
+            )
         cached_handle = self._normalize_ac_runtime_handle(
             cached_runtime_handle,
             runtime_scope=runtime_identity.runtime_scope,
@@ -569,6 +600,10 @@ class ACRuntimeHandleManager:
                 if runtime_handle is None:
                     continue
                 if expected_capsule_fingerprint is not None:
+                    self._validate_resumable_handle_authority(
+                        runtime_handle,
+                        expected_workspace=expected_capsule_workspace,
+                    )
                     runtime_fingerprint = runtime_handle.metadata.get("ac_capsule_fingerprint")
                     runtime_attempt_id = runtime_handle.metadata.get("session_attempt_id")
                     if runtime_fingerprint not in {None, expected_capsule_fingerprint}:

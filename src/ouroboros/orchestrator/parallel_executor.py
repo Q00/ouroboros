@@ -1856,6 +1856,7 @@ class ParallelACExecutor:
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
         expected_capsule_fingerprint: str | None = None,
+        expected_capsule_workspace: str | None = None,
     ) -> RuntimeHandle | None:
         return await self._ac_runtime_handle_manager._load_persisted_ac_runtime_handle(
             ac_index,
@@ -1866,6 +1867,7 @@ class ParallelACExecutor:
             node_identity=node_identity,
             retry_attempt=retry_attempt,
             expected_capsule_fingerprint=expected_capsule_fingerprint,
+            expected_capsule_workspace=expected_capsule_workspace,
         )
 
     def _remember_ac_runtime_handle(
@@ -9027,8 +9029,16 @@ Respond with either ATOMIC or the structured JSON object only.
             node_identity=node_identity,
             retry_attempt=retry_attempt,
             expected_capsule_fingerprint=capsule.fingerprint,
+            expected_capsule_workspace=capsule.workspace,
         )
         if persisted_runtime_handle is not None:
+            persisted_runtime_handle = bind_capsule_to_runtime_handle(
+                capsule,
+                persisted_runtime_handle,
+                restored_same_attempt=True,
+                expected_backend=getattr(self._adapter, "runtime_backend", None),
+                expected_approval_mode=getattr(self._adapter, "permission_mode", None),
+            )
             self._remember_ac_runtime_handle(
                 ac_index,
                 persisted_runtime_handle,
@@ -9053,6 +9063,8 @@ Respond with either ATOMIC or the structured JSON object only.
             capsule,
             runtime_handle,
             restored_same_attempt=persisted_runtime_handle is not None,
+            expected_backend=getattr(self._adapter, "runtime_backend", None),
+            expected_approval_mode=getattr(self._adapter, "permission_mode", None),
         )
         await self._event_emitter.emit_ac_capsule_compiled(
             runtime_identity=runtime_identity,

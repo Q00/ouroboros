@@ -4735,6 +4735,60 @@ class TestParallelACExecutor:
         assert compiled_event.data["session_origin"] == "fresh"
 
     @pytest.mark.asyncio
+    async def test_capsule_resume_rejects_foreign_workspace_handle(self) -> None:
+        """A matching fingerprint cannot authorize continuity from another checkout."""
+        runtime_identity, capsule = _compile_test_capsule(
+            ac_index=0,
+            ac_content="Implement the AC",
+            session_id="session-capsule-foreign-workspace",
+            seed_goal="Ship",
+        )
+        foreign_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="foreign-workspace-session",
+            cwd="/tmp/foreign-project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_fingerprint": capsule.fingerprint,
+            },
+        )
+        event_store = AsyncMock()
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, capsule),
+            BaseEvent(
+                type="execution.session.started",
+                aggregate_type="execution",
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "runtime": foreign_handle.to_dict(),
+                },
+            ),
+        ]
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        with pytest.raises(ValueError, match="workspace authority changed"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-capsule-foreign-workspace",
+                retry_attempt=0,
+                expected_capsule_fingerprint=capsule.fingerprint,
+                expected_capsule_workspace=capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
     async def test_atomic_ac_refuses_dispatch_when_capsule_replay_is_unreadable(self) -> None:
         """A fresh dispatch cannot guess that no authority-bearing capsule exists."""
 
