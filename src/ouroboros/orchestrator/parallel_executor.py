@@ -4261,6 +4261,20 @@ class ParallelACExecutor:
             if closure_attempt is not None and attempt > closure_attempt:
                 return None
 
+        successful_attempt_by_ac: dict[int, int] = {}
+        for (ac_idx, attempt), finalized in finalized_attempts.items():
+            if not finalized.success:
+                continue
+            previous_success_attempt = successful_attempt_by_ac.get(ac_idx)
+            if previous_success_attempt is not None and previous_success_attempt != attempt:
+                return None
+            successful_attempt_by_ac[ac_idx] = attempt
+
+        for ac_idx, attempt in finalized_attempts:
+            successful_attempt = successful_attempt_by_ac.get(ac_idx)
+            if successful_attempt is not None and attempt > successful_attempt:
+                return None
+
         for ac_idx, recovered in tuple(latest.items()):
             if (ac_idx, recovered.retry_attempt) in exhausted_attempts:
                 latest[ac_idx] = replace(recovered, recovery_exhausted=True)
