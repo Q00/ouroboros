@@ -167,7 +167,7 @@ class TestPMSteeringPromptBudget:
         """Invariant resolution reads through the agent loader on every call
         — an operator prompt reload (loader cache cleared, new prompt text)
         is reflected immediately, with no stale parity metadata."""
-        from ouroboros.bigbang.pm_interview import _current_inner_base_prompt_sections
+        from ouroboros.bigbang.inner_guidance import _current_inner_base_prompt_sections
 
         engine = self._steered_engine(tmp_path)
         before = _current_inner_base_prompt_sections(engine.inner)
@@ -233,12 +233,12 @@ class TestPMSteeringPromptBudget:
     def test_fit_prefers_the_contract_paragraph_over_earlier_paragraphs(self) -> None:
         """When the budget fits only one paragraph, the PRD-contract
         paragraph wins even though it is not first in document order."""
-        from ouroboros.bigbang.pm_interview import (
-            _PM_CONTRACT_MARKER,
-            _fit_steering_paragraphs,
-        )
+        from ouroboros.bigbang.inner_guidance import fit_steering_paragraphs
+        from ouroboros.bigbang.pm_interview import _PM_CONTRACT_MARKER
 
-        block = _fit_steering_paragraphs(_PM_SYSTEM_PROMPT_PREFIX, budget=300)
+        block = fit_steering_paragraphs(
+            _PM_SYSTEM_PROMPT_PREFIX, budget=300, shed_last_marker=_PM_CONTRACT_MARKER
+        )
         assert block
         assert _PM_CONTRACT_MARKER in block
         assert "You are a Product Requirements interviewer" not in block
@@ -306,6 +306,66 @@ class TestPMSteeringPromptBudget:
         )
         prompt = engine.inner._build_system_prompt(state, max_chars=200)
         assert len(prompt) <= 200
+
+    @staticmethod
+    def _saturated_state(interview_id: str, initial_context: str) -> InterviewState:
+        """A state whose history saturates the serialized prompt budget."""
+        state = InterviewState(interview_id=interview_id, initial_context=initial_context)
+        for number in range(1, 25):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=number,
+                    question=f"Q{number} " + "q" * 280,
+                    user_response=f"A{number} " + "a" * 580,
+                )
+            )
+        return state
+
+    @pytest.mark.asyncio
+    async def test_saturated_run_path_never_evicts_retained_initial_context(
+        self, tmp_path: Path
+    ) -> None:
+        """Through the real ask_next_question history-budget path, a long
+        initial context retained by the unwrapped baseline must survive the
+        steered build — steering sheds before the user's own requirements
+        text is cut."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        engine._install_pm_steering()
+        context = ("C" * 1_600) + "TAIL_MARKER"
+        state = self._saturated_state("t_saturation_ctx", context)
+
+        result = await engine.inner.ask_next_question(state)
+        assert result.is_ok
+
+        messages = adapter.complete.call_args.args[0]
+        system_prompt = messages[0].content
+        assert len(system_prompt) <= engine.inner._MAX_SYSTEM_PROMPT_CHARS
+        expected_context = engine.inner._initial_context_for_system_prompt(context)
+        assert expected_context in system_prompt
+        assert "TAIL_MARKER" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_saturated_run_path_keeps_answer_prefix_legend_whole(
+        self, tmp_path: Path
+    ) -> None:
+        """The answer-prefix legend must survive as its complete final line,
+        never truncated mid-line to a bare "[from-research]:" fragment."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        engine._install_pm_steering()
+        state = self._saturated_state("t_saturation_legend", "C" * 849)
+
+        result = await engine.inner.ask_next_question(state)
+        assert result.is_ok
+
+        system_prompt = adapter.complete.call_args.args[0][0].content
+        assert len(system_prompt) <= engine.inner._MAX_SYSTEM_PROMPT_CHARS
+        if "[from-research]" in system_prompt:
+            assert (
+                "- [from-research]: Externally researched information "
+                "(API docs, pricing, compatibility)." in system_prompt
+            )
 
     @staticmethod
     def _ambiguity_breakdown() -> dict[str, dict[str, object]]:
