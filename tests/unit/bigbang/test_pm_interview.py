@@ -55,6 +55,24 @@ class TestPMUncertaintyGuidance:
         assert "decide_later_items" in _EXTRACTION_SYSTEM_PROMPT
 
 
+class TestPMExtractionSuccessCriteriaBoundary:
+    """Regression coverage for the extraction-stage PRD contract (#1665)."""
+
+    def test_extraction_keeps_post_launch_outcomes_out_of_success_criteria(self) -> None:
+        """Extraction limits success criteria to delivered behavior and policy."""
+        prompt = " ".join(_EXTRACTION_SYSTEM_PROMPT.split())
+
+        assert (
+            "success_criteria field must contain only acceptance criteria for "
+            "delivered-feature behavior and product policy"
+        ) in prompt
+        assert "post-launch outcome mentions found in the transcript" in prompt
+        assert (
+            "assumptions or decide_later_items instead of promoting them to success_criteria"
+            in prompt
+        )
+
+
 def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:
     """Create a mock completion response."""
     return CompletionResponse(

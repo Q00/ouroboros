@@ -90,6 +90,10 @@ turn uncertain, stakeholder-dependent, or unknown answers into confirmed
 requirements. Put tentative claims in assumptions and unresolved choices in
 decide_later_items.
 
+The success_criteria field must contain only acceptance criteria for delivered-feature
+behavior and product policy; put post-launch outcome mentions found in the transcript
+in assumptions or decide_later_items instead of promoting them to success_criteria.
+
 Respond ONLY with valid JSON in this exact format:
 {
     "product_name": "Short product/feature name",
