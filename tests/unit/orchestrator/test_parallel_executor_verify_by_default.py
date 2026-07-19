@@ -272,18 +272,21 @@ async def test_verify_gate_times_out_hung_command(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: Any) -> None:
-    """Provisional leaf proof events cannot outlive a seed-level rejection."""
+    """Every verify-gated dispatch is finalized, including atomic fallback."""
     executor = _make_executor(working_directory=str(tmp_path), ac_retry_attempts=0)
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 1"))
+    force_atomic_flags: list[bool] = []
 
-    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        force_atomic = bool(kwargs.get("force_atomic_execution", False))
+        force_atomic_flags.append(force_atomic)
         return [
             ACExecutionResult(
                 ac_index=0,
                 ac_content="ac",
                 success=True,
-                retry_attempt=0,
-                is_decomposed=True,
+                retry_attempt=kwargs["ac_retry_attempts"][0],
+                is_decomposed=not force_atomic,
             )
         ]
 
@@ -306,18 +309,34 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
     assert results[0].success is False
     emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
     markers = [event for event in emitted if event.type == "execution.ac.outcome_finalized"]
-    assert len(markers) == 1
-    assert markers[0].data == {
-        "execution_id": "e",
-        "session_id": "s",
-        "root_ac_index": 0,
-        "ac_index": 0,
-        "retry_attempt": 0,
-        "success": False,
-        "outcome": "failed",
-        "is_decomposed": True,
-        "forced_frontier_routing": False,
-    }
+    assert force_atomic_flags == [False, True]
+    assert len(markers) == 2
+    assert [marker.data for marker in markers] == [
+        {
+            "execution_id": "e",
+            "session_id": "s",
+            "root_ac_index": 0,
+            "ac_index": 0,
+            "retry_attempt": 0,
+            "success": False,
+            "outcome": "failed",
+            "is_decomposed": True,
+            "forced_frontier_routing": False,
+            "context_summary": None,
+        },
+        {
+            "execution_id": "e",
+            "session_id": "s",
+            "root_ac_index": 0,
+            "ac_index": 0,
+            "retry_attempt": 1,
+            "success": False,
+            "outcome": "failed",
+            "is_decomposed": False,
+            "forced_frontier_routing": True,
+            "context_summary": None,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -712,9 +731,9 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
 
     ac_retry_attempts=3, threshold=2, identical failure class every attempt. The
     child ladder is frugal, frugal, standard, frontier (retry 0..3), so reaching
-    ``frontier`` requires a 4th dispatch at retry 3. The ladder-truth predicate
-    keeps dispatching while the next retry resolves to a stronger enforced model
-    and resumes early-stop only once the frontier ceiling is reached.
+    ``frontier`` requires a 4th child dispatch at retry 3. Once that decomposed
+    frontier attempt still fails, the root's separate atomic/frontier option is
+    spent exactly once as the 5th dispatch.
     """
     executor = _native_escalation_executor(tmp_path, ac_retry_attempts=3)
     router = executor._model_router
@@ -723,8 +742,9 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
     ac_retry_attempts = {0: 0}
     calls: list[list[int]] = []
     routed_tiers: list[str | None] = []
+    force_atomic_flags: list[bool] = []
 
-    def _decomposed_fail() -> ACExecutionResult:
+    def _decomposed_fail(retry_attempt: int) -> ACExecutionResult:
         # A decomposed parent whose children (routed one tier cheaper) failed:
         # the predicate requires both child status and a trusted split record.
         # Fix 2 (round 3): the early-stop probe now reads two dedicated trust
@@ -734,7 +754,7 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
         # (the CURRENT/latest gate-anchored verdict, consulted for the next
         # scheduled dispatch). Both must be populated as TRUSTWORTHY here so
         # this test still exercises the "trusted decomposed child" ladder.
-        base = _fail(0, "EVIDENCE_MISSING")
+        base = replace(_fail(0, "EVIDENCE_MISSING"), retry_attempt=retry_attempt)
         return replace(
             base,
             is_decomposed=True,
@@ -761,21 +781,32 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
         )
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        force_atomic = bool(kwargs.get("force_atomic_execution", False))
+        force_atomic_flags.append(force_atomic)
         calls.append(list(kwargs["batch_indices"]))
         routed_tiers.append(
             decide_model(
                 ParamSupport.NATIVE,
                 router=router,
-                is_decomposed_child=True,
-                decomposition_trustworthy=True,
+                is_decomposed_child=not force_atomic,
+                decomposition_trustworthy=not force_atomic,
                 retry_attempt=kwargs["ac_retry_attempts"][0],
+                suggested_tier=("frontier" if kwargs.get("force_frontier_routing") else None),
             ).tier
         )
-        return [_decomposed_fail()]
+        if force_atomic:
+            return [
+                replace(
+                    _fail(0, "EVIDENCE_MISSING"),
+                    retry_attempt=kwargs["ac_retry_attempts"][0],
+                    is_decomposed=False,
+                )
+            ]
+        return [_decomposed_fail(kwargs["ac_retry_attempts"][0])]
 
     executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
 
-    await executor._run_batch_with_verify_and_retry(
+    results = await executor._run_batch_with_verify_and_retry(
         seed=seed,
         batch_executable=[0],
         session_id="s",
@@ -788,10 +819,14 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
         execution_counters=None,
     )
 
-    # The child is re-dispatched through retry 3 so its ladder reaches the
-    # frontier ceiling despite the repeated failure class.
-    assert calls == [[0], [0], [0], [0]]
+    # The child reaches frontier on dispatch four, then the distinct atomic
+    # root option is spent once before final exhaustion.
+    assert calls == [[0], [0], [0], [0], [0]]
+    assert force_atomic_flags == [False, False, False, False, True]
+    assert routed_tiers[:4] == ["frugal", "frugal", "standard", "frontier"]
     assert routed_tiers[-1] == "frontier"
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].is_decomposed is False
 
 
 @pytest.mark.asyncio
