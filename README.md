@@ -38,7 +38,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/Q00/ouroboros/releases/download/media-assets/ouroboros-hero.mp4" controls muted autoplay loop playsinline width="820"></video>
+  <img src="./docs/images/ouroboros-hero.gif" width="820" alt="ooo interview fanning out specialist agents">
   <br/>
   <sub><em>One line &mdash; <code>ooo interview</code> &mdash; fans out a team of specialist agents that turn a vague idea into a verified spec.</em></sub>
 </p>

@@ -37,7 +37,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/Q00/ouroboros/releases/download/media-assets/ouroboros-hero.mp4" controls muted autoplay loop playsinline width="820"></video>
+  <img src="./docs/images/ouroboros-hero.gif" width="820" alt="ooo interview로 전문 에이전트들이 펼쳐지는 모습">
   <br/>
   <sub><em>단 한 줄 &mdash; <code>ooo interview</code> &mdash; 이 막연한 아이디어를 검증된 명세로 바꾸는 전문 에이전트 팀을 펼쳐냅니다.</em></sub>
 </p>

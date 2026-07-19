@@ -38,7 +38,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/Q00/ouroboros/releases/download/media-assets/ouroboros-hero.mp4" controls muted autoplay loop playsinline width="820"></video>
+  <img src="./docs/images/ouroboros-hero.gif" width="820" alt="ooo interview 展开专家智能体团队">
   <br/>
   <sub><em>一行命令 &mdash; <code>ooo interview</code> &mdash; 便展开一支专家智能体团队，把模糊的想法变成一份经过验证的规约。</em></sub>
 </p>
