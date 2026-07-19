@@ -44,8 +44,13 @@ def _build_success_contract_block(
     pack carry a *per-AC* contract), so a worker was never told the exact
     verify_command / expected_artifacts / output_assertion the harness will grade
     it against. When the AC's spec carries a contract, surface it verbatim so the
-    worker runs and reports the same evidence the verify gate checks. Contract-less
-    ACs return ``""`` — the prompt stays byte-identical to before.
+    worker knows the exact bar it will be graded against. Contract-less ACs return
+    ``""`` — the prompt stays byte-identical to before.
+
+    The worker is explicitly told NOT to run ``verify_command`` itself: the
+    orchestrator's verify gate is the single authoritative, durably-recorded
+    execution, and a compliant worker running a (possibly non-idempotent) command
+    would double-execute it — the first run outside the single-shot oracle.
     """
     contract = spec if isinstance(spec, ACSuccessContract) else ACSuccessContract.from_ac_spec(spec)
     if not contract.has_success_contract:
@@ -53,8 +58,9 @@ def _build_success_contract_block(
     lines = ["SUCCESS CONTRACT for this AC:"]
     if contract.verify_command:
         lines.append(
-            f"- Run locally before completion: {contract.verify_command}. "
-            "The verify gate re-runs it and records authoritative evidence."
+            f"- The harness verify gate will run and grade (authoritatively): "
+            f"{contract.verify_command}. Do NOT run this command yourself — make "
+            "your changes so it will pass when the gate runs it once."
         )
     if contract.expected_artifacts:
         lines.append(

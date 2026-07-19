@@ -1350,10 +1350,13 @@ def test_capsule_authority_binds_session_signal_hub_presence() -> None:
     assert _scope(with_hub=True) != _scope(with_hub=False)
 
 
-def test_bound_verify_gate_outcome_caps_and_rejects_oversized() -> None:
-    """R5 blocker #6: verify outcomes are bounded before persistence."""
+def test_bound_verify_gate_outcome_caps_and_fits_within_byte_budget() -> None:
+    """R5/R10: verify outcomes are count-, length-, and BYTE-bounded before persist."""
+    import json as _json
+
     from ouroboros.orchestrator.execution_event_emitter import (
         _MAX_VERIFY_MISSING_ARTIFACTS,
+        _MAX_VERIFY_OUTCOME_BYTES,
         bound_verify_gate_outcome,
     )
 
@@ -1368,18 +1371,22 @@ def test_bound_verify_gate_outcome_caps_and_rejects_oversized() -> None:
     assert len(bounded["missing_artifacts"]) == _MAX_VERIFY_MISSING_ARTIFACTS
     assert bounded["missing_artifacts_omitted"] == 1000 - _MAX_VERIFY_MISSING_ARTIFACTS
 
-    # Even after count/length caps, pathological 4-byte-per-char content can blow
-    # the hard UTF-8 byte cap; such a payload is rejected outright.
-    with pytest.raises(ValueError, match="size bound"):
-        bound_verify_gate_outcome(
-            {
-                "passed": True,
-                "reason": None,
-                "output_tail": "",
-                # "𐍈" is 4 UTF-8 bytes: 64 entries × 512 chars × 4 bytes ≈ 128 KiB.
-                "missing_artifacts": ["𐍈" * 512 for _ in range(_MAX_VERIFY_MISSING_ARTIFACTS)],
-            }
-        )
+    # R10 blocker #3: pathological 4-byte-per-char content is FITTED (trailing
+    # entries dropped, omission recorded), never raised — a valid contract must
+    # always be able to persist an outcome (the intent is already durable).
+    fitted = bound_verify_gate_outcome(
+        {
+            "passed": True,
+            "reason": None,
+            "output_tail": "",
+            # "𐍈" is 4 UTF-8 bytes: 64 entries × 512 chars × 4 bytes ≈ 128 KiB.
+            "missing_artifacts": ["𐍈" * 512 for _ in range(_MAX_VERIFY_MISSING_ARTIFACTS)],
+        }
+    )
+    assert fitted["passed"] is True
+    assert fitted["missing_artifacts_omitted"] > 0
+    encoded_bytes = len(_json.dumps(fitted, ensure_ascii=False).encode("utf-8"))
+    assert encoded_bytes <= _MAX_VERIFY_OUTCOME_BYTES
 
 
 def test_bound_verify_gate_outcome_rejects_type_coercion() -> None:
@@ -1494,6 +1501,39 @@ def test_runtime_executable_identity_resolves_bare_name_relative_path_against_ch
     id_false = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(ws_false))
     assert id_true["executable"]["realpath"] == _os.path.realpath(str(ws_true / "bin" / "probe"))
     assert id_false["executable"]["realpath"] == _os.path.realpath(str(ws_false / "bin" / "probe"))
+    assert id_true != id_false
+
+
+def test_runtime_executable_identity_anchors_empty_path_component_to_child_cwd(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """R10 blocker #2: an EMPTY PATH component is child-cwd-relative, not orchestrator.
+
+    ``PATH=""`` means the child's current directory; two workspaces each with a
+    local ``probe`` binary must produce different identity, not both ``unresolved``.
+    """
+    import os as _os
+    import stat
+
+    def _make_ws(name: str, target: str) -> Any:
+        ws = tmp_path / name
+        ws.mkdir()
+        script = ws / "probe"
+        script.write_text(f"#!/bin/sh\nexec {target}\n")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return ws
+
+    ws_true = _make_ws("etrue", "/bin/true")
+    ws_false = _make_ws("efalse", "/bin/false")
+
+    class _Runtime:
+        _cli_path = "probe"
+
+    monkeypatch.setenv("PATH", "")  # empty → child current directory
+    id_true = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(ws_true))
+    id_false = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(ws_false))
+    assert id_true["executable"]["realpath"] == _os.path.realpath(str(ws_true / "probe"))
+    assert id_false["executable"]["realpath"] == _os.path.realpath(str(ws_false / "probe"))
     assert id_true != id_false
 
 
@@ -14688,9 +14728,13 @@ class TestParallelACExecutor:
         assert event_store.append.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_completed_verify_outcome_rejects_oversized_durable_projection(self) -> None:
-        """Verify command output cannot amplify the durable completion stream."""
-        event_store = AsyncMock()
+    async def test_completed_verify_outcome_is_byte_bounded_before_persist(self) -> None:
+        """R10: an oversized verify output is BOUNDED (not rejected) so the
+        completion always persists and stays re-parseable on recovery."""
+        from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
+        from ouroboros.orchestrator.execution_event_emitter import _MAX_VERIFY_OUTCOME_BYTES
+
+        event_store, appended = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=MagicMock(),
             event_store=event_store,
@@ -14703,24 +14747,33 @@ class TestParallelACExecutor:
             retry_attempt=0,
         )
 
-        with pytest.raises(ValueError, match="verify outcome exceeds the size limit"):
-            await executor._emit_ac_runtime_event(
-                event_type="execution.session.completed",
-                runtime_identity=runtime_identity,
-                ac_content="Bound the durable verify outcome",
-                runtime_handle=None,
-                execution_id="exec_oversized_verify_outcome",
-                session_id="server-oversized",
-                result_summary="[TASK_COMPLETE]",
-                success=True,
-                verify_gate_outcome=_VerifyGateOutcome(
-                    passed=True,
-                    reason=None,
-                    output_tail="x" * 65_536,
-                ),
-            )
+        await executor._emit_ac_runtime_event(
+            event_type="execution.session.completed",
+            runtime_identity=runtime_identity,
+            ac_content="Bound the durable verify outcome",
+            runtime_handle=None,
+            execution_id="exec_oversized_verify_outcome",
+            session_id="server-oversized",
+            result_summary="[TASK_COMPLETE]",
+            success=True,
+            verify_gate_outcome=_VerifyGateOutcome(
+                passed=True,
+                reason=None,
+                output_tail="x" * 65_536,
+            ),
+        )
 
-        event_store.append.assert_not_awaited()
+        completed = next(e for e in appended if e.type == "execution.session.completed")
+        outcome = completed.data["verify_gate_outcome"]
+        # Output was truncated to fit; the event re-parses within the byte cap.
+        assert len(outcome["output_tail"]) < 65_536
+        assert ACRuntimeHandleManager._parse_verify_gate_outcome(outcome) is not None
+        import json as _json
+
+        assert (
+            len(_json.dumps(outcome, ensure_ascii=False).encode("utf-8"))
+            <= _MAX_VERIFY_OUTCOME_BYTES
+        )
 
     @pytest.mark.asyncio
     async def test_restarted_executor_loads_persisted_runtime_handle_for_same_attempt(self) -> None:

@@ -1389,10 +1389,15 @@ class TestSuccessContractBlock:
         )
         block = _build_success_contract_block(spec)
         assert block.startswith("SUCCESS CONTRACT for this AC:")
+        # R10 blocker #1: the worker is told the gate runs it, and NOT to run it
+        # itself — otherwise a compliant worker would double-execute a possibly
+        # non-idempotent command (the first run outside the single-shot oracle).
         assert (
-            "- Run locally before completion: make build. "
-            "The verify gate re-runs it and records authoritative evidence." in block
+            "- The harness verify gate will run and grade (authoritatively): make build. "
+            "Do NOT run this command yourself — make your changes so it will pass "
+            "when the gate runs it once." in block
         )
+        assert "Run locally before completion" not in block
         assert (
             "- Expected artifacts: dist/app, dist/app.map — ensure they exist in the workspace"
             in block
@@ -1402,9 +1407,7 @@ class TestSuccessContractBlock:
     def test_partial_contract_only_renders_present_fields(self) -> None:
         spec = AcceptanceCriterionSpec(description="verify only", verify_command="pytest -q")
         block = _build_success_contract_block(spec)
-        assert (
-            "- Run locally before completion: pytest -q. "
-            "The verify gate re-runs it and records authoritative evidence." in block
-        )
+        assert "Do NOT run this command yourself" in block
+        assert "Run locally before completion" not in block
         assert "Expected artifacts" not in block
         assert "Expected output" not in block

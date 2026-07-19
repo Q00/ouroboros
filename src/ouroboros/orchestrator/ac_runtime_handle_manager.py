@@ -55,6 +55,9 @@ _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _AC_ATTEMPT_DISPATCHED_EVENT = "execution.ac.attempt.dispatched"
 _AC_REUSABLE_RUNTIME_EVENT_TYPES = _REUSABLE_RUNTIME_EVENT_TYPES | {_AC_ATTEMPT_DISPATCHED_EVENT}
 _VERIFY_GATE_OUTCOME_KEYS = frozenset({"passed", "reason", "output_tail", "missing_artifacts"})
+# The byte-bounding writer records this counter when it drops trailing artifacts
+# to fit the size cap; accept it on replay without treating it as a shape error.
+_VERIFY_GATE_OUTCOME_OPTIONAL_KEYS = frozenset({"missing_artifacts_omitted"})
 # 64 KiB measured in UTF-8 bytes (the persisted/replayed size), not Unicode code
 # points — a multi-byte outcome must be bounded by its actual encoded size.
 _MAX_VERIFY_GATE_OUTCOME_BYTES = 65_536
@@ -230,7 +233,12 @@ class ACRuntimeHandleManager:
         """Parse the bounded exact-shape verify result used for crash recovery."""
         if value is None:
             return None
-        if not isinstance(value, Mapping) or set(value) != _VERIFY_GATE_OUTCOME_KEYS:
+        if not isinstance(value, Mapping):
+            raise ValueError("durable completed AC verify outcome has an invalid shape")
+        keys = set(value)
+        if not keys >= _VERIFY_GATE_OUTCOME_KEYS or (
+            keys - _VERIFY_GATE_OUTCOME_KEYS - _VERIFY_GATE_OUTCOME_OPTIONAL_KEYS
+        ):
             raise ValueError("durable completed AC verify outcome has an invalid shape")
         passed = value.get("passed")
         reason = value.get("reason")

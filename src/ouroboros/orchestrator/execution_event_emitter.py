@@ -97,18 +97,46 @@ def bound_verify_gate_outcome(outcome: Mapping[str, Any]) -> dict[str, Any]:
         item[:_MAX_VERIFY_MISSING_ARTIFACT_CHARS]
         for item in list(raw_missing)[:_MAX_VERIFY_MISSING_ARTIFACTS]
     ]
+    bounded_reason = reason[:_MAX_VERIFY_TEXT_CHARS] if reason is not None else None
+    bounded_output = output_tail[:_MAX_VERIFY_TEXT_CHARS]
+
+    def _byte_size(payload: dict[str, Any]) -> int:
+        return len(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+    # Bound by ENCODED SIZE, not code points: a valid contract can carry many
+    # multi-byte artifact paths, so char-only truncation could still overflow the
+    # byte cap. Fit the payload by DROPPING trailing artifacts (recording the
+    # omission) rather than raising — the intent is already durable, so a raise
+    # here would make an accepted contract permanently unrecoverable. Free-text
+    # fields are already char-capped well under the byte cap, so a base outcome
+    # with no artifacts always fits.
+    prior_and_char_dropped = (len(raw_missing) - len(bounded_missing)) + prior_omitted
+    base: dict[str, Any] = {
+        "passed": passed,
+        "reason": bounded_reason,
+        "output_tail": bounded_output,
+        "missing_artifacts": [],
+        # Reserve room for the counter so adding it later cannot overflow.
+        "missing_artifacts_omitted": prior_and_char_dropped + len(bounded_missing),
+    }
+    used = _byte_size(base)
+    included: list[str] = []
+    for entry in bounded_missing:
+        entry_bytes = len(json.dumps(entry, ensure_ascii=False).encode("utf-8")) + 1
+        if used + entry_bytes > _MAX_VERIFY_OUTCOME_BYTES:
+            break
+        included.append(entry)
+        used += entry_bytes
+
+    total_omitted = prior_and_char_dropped + (len(bounded_missing) - len(included))
     result: dict[str, Any] = {
         "passed": passed,
-        "reason": reason[:_MAX_VERIFY_TEXT_CHARS] if reason is not None else None,
-        "output_tail": output_tail[:_MAX_VERIFY_TEXT_CHARS],
-        "missing_artifacts": bounded_missing,
+        "reason": bounded_reason,
+        "output_tail": bounded_output,
+        "missing_artifacts": included,
     }
-    total_omitted = (len(raw_missing) - len(bounded_missing)) + prior_omitted
     if total_omitted > 0:
         result["missing_artifacts_omitted"] = total_omitted
-    encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
-    if len(encoded.encode("utf-8")) > _MAX_VERIFY_OUTCOME_BYTES:
-        raise ValueError("verify outcome exceeds the durable size bound")
     return result
 
 

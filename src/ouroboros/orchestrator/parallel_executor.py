@@ -2124,12 +2124,17 @@ class ParallelACExecutor:
             success=success,
             error=error,
             verify_gate_outcome=(
-                {
-                    "passed": verify_gate_outcome.passed,
-                    "reason": verify_gate_outcome.reason,
-                    "output_tail": verify_gate_outcome.output_tail,
-                    "missing_artifacts": list(verify_gate_outcome.missing_artifacts),
-                }
+                # Byte-bounded so the completed-lifecycle outcome always fits the
+                # durable size cap (and can therefore be re-parsed on recovery),
+                # exactly like the verify.outcome event.
+                bound_verify_gate_outcome(
+                    {
+                        "passed": verify_gate_outcome.passed,
+                        "reason": verify_gate_outcome.reason,
+                        "output_tail": verify_gate_outcome.output_tail,
+                        "missing_artifacts": list(verify_gate_outcome.missing_artifacts),
+                    }
+                )
                 if verify_gate_outcome is not None
                 else None
             ),
@@ -2631,8 +2636,14 @@ class ParallelACExecutor:
                 # ``unresolved`` because it does not exist under the orchestrator.
                 search_path = os.environ.get("PATH", os.defpath)
                 if cwd is not None:
+                    # A relative OR EMPTY PATH component is resolved by the child
+                    # against its cwd (POSIX: an empty component means the current
+                    # directory), so anchor both to the child cwd — only an
+                    # absolute component is left as-is. Leaving empty components
+                    # unanchored let ``PATH=""`` collapse distinct workspace-local
+                    # binaries to the same ``unresolved`` identity.
                     search_path = os.pathsep.join(
-                        entry if not entry or os.path.isabs(entry) else os.path.join(cwd, entry)
+                        entry if os.path.isabs(entry) else os.path.join(cwd, entry)
                         for entry in search_path.split(os.pathsep)
                     )
                 which = shutil.which(expanded, path=search_path)
