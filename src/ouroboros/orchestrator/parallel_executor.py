@@ -287,6 +287,7 @@ from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatchState,
 )
 from ouroboros.orchestrator.level_context import (
+    ACContextSummary,
     LevelContext,
     deserialize_level_contexts,
     extract_level_context,
@@ -728,6 +729,10 @@ _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS = 48
 # the full multi-hour parked-cadence budget.
 _DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS = 10.0
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
+_DURABLE_CONTEXT_MAX_AC_CONTENT_CHARS = 2000
+_DURABLE_CONTEXT_MAX_TOOL_NAMES = 64
+_DURABLE_CONTEXT_MAX_FILE_PATHS = 128
+_DURABLE_CONTEXT_MAX_ITEM_CHARS = 1024
 
 
 @dataclass(frozen=True)
@@ -750,6 +755,7 @@ class _RecoveredFinalizedOutcome:
     is_decomposed: bool = False
     recovery_exhausted: bool = False
     forced_frontier_routing: bool = False
+    context_summary: ACContextSummary | None = None
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -3490,6 +3496,160 @@ class ParallelACExecutor:
                 return reason
         return None
 
+    def _durable_ac_context_summary(
+        self,
+        result: ACExecutionResult,
+    ) -> dict[str, Any] | None:
+        """Build a bounded downstream handoff for a finalized success."""
+        if not result.success:
+            return None
+        workspace_root = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        try:
+            level_context = extract_level_context(
+                [
+                    (
+                        result.ac_index,
+                        result.ac_content,
+                        result.success,
+                        result.messages,
+                        result.final_message,
+                    )
+                ],
+                0,
+                workspace_root=workspace_root,
+            )
+        except Exception as exc:
+            # The finalized outcome itself remains correctness-bearing even
+            # when an unusual runtime message cannot be summarized. Persist
+            # an explicit context omission; recovery will refuse to cross it
+            # when unfinished downstream stages require the handoff.
+            log.warning(
+                "parallel_executor.ac.context_summary_unavailable",
+                ac_index=result.ac_index,
+                error=str(exc),
+            )
+            return None
+        if not level_context.completed_acs:
+            return None
+        summary = level_context.completed_acs[0]
+
+        def _bounded_items(values: tuple[str, ...], limit: int) -> list[str]:
+            return [value[:_DURABLE_CONTEXT_MAX_ITEM_CHARS] for value in values[:limit]]
+
+        return {
+            "version": 1,
+            "ac_index": summary.ac_index,
+            "ac_content": summary.ac_content[:_DURABLE_CONTEXT_MAX_AC_CONTENT_CHARS],
+            "success": summary.success,
+            "tools_used": _bounded_items(summary.tools_used, _DURABLE_CONTEXT_MAX_TOOL_NAMES),
+            "files_modified": _bounded_items(
+                summary.files_modified,
+                _DURABLE_CONTEXT_MAX_FILE_PATHS,
+            ),
+            "key_output": summary.key_output,
+            "public_api": summary.public_api,
+        }
+
+    @staticmethod
+    def _deserialize_durable_ac_context_summary(
+        raw_summary: object,
+        *,
+        expected_ac_index: int,
+    ) -> tuple[bool, ACContextSummary | None]:
+        """Return ``(valid, summary)``; ``None`` is a valid legacy omission."""
+        if raw_summary is None:
+            return True, None
+        if not isinstance(raw_summary, Mapping) or set(raw_summary) != {
+            "version",
+            "ac_index",
+            "ac_content",
+            "success",
+            "tools_used",
+            "files_modified",
+            "key_output",
+            "public_api",
+        }:
+            return False, None
+        ac_index = raw_summary.get("ac_index")
+        ac_content = raw_summary.get("ac_content")
+        tools_used = raw_summary.get("tools_used")
+        files_modified = raw_summary.get("files_modified")
+        key_output = raw_summary.get("key_output")
+        public_api = raw_summary.get("public_api")
+        if (
+            raw_summary.get("version") != 1
+            or ac_index != expected_ac_index
+            or isinstance(ac_index, bool)
+            or not isinstance(ac_content, str)
+            or len(ac_content) > _DURABLE_CONTEXT_MAX_AC_CONTENT_CHARS
+            or raw_summary.get("success") is not True
+            or not isinstance(tools_used, list | tuple)
+            or len(tools_used) > _DURABLE_CONTEXT_MAX_TOOL_NAMES
+            or any(
+                not isinstance(tool, str) or len(tool) > _DURABLE_CONTEXT_MAX_ITEM_CHARS
+                for tool in tools_used
+            )
+            or not isinstance(files_modified, list | tuple)
+            or len(files_modified) > _DURABLE_CONTEXT_MAX_FILE_PATHS
+            or any(
+                not isinstance(path, str) or len(path) > _DURABLE_CONTEXT_MAX_ITEM_CHARS
+                for path in files_modified
+            )
+            or not isinstance(key_output, str)
+            or len(key_output) > 200
+            or not isinstance(public_api, str)
+            or len(public_api) > 500
+        ):
+            return False, None
+        return (
+            True,
+            ACContextSummary(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                success=True,
+                tools_used=tuple(tools_used),
+                files_modified=tuple(files_modified),
+                key_output=key_output,
+                public_api=public_api,
+            ),
+        )
+
+    @staticmethod
+    def _merge_recovered_success_contexts(
+        level_contexts: list[LevelContext],
+        execution_plan: StagedExecutionPlan,
+        recovered_contexts: Mapping[int, ACContextSummary],
+    ) -> list[LevelContext]:
+        """Place event-recovered summaries back into their original stages."""
+        if not recovered_contexts:
+            return level_contexts
+        by_level = {context.level_number: context for context in level_contexts}
+        for stage_position, stage in enumerate(execution_plan.stages):
+            summaries = [
+                recovered_contexts[ac_index]
+                for ac_index in stage.ac_indices
+                if ac_index in recovered_contexts
+            ]
+            if not summaries:
+                continue
+            level_number = stage_position + 1
+            existing = by_level.get(level_number)
+            if existing is None:
+                by_level[level_number] = LevelContext(
+                    level_number=level_number,
+                    completed_acs=tuple(summaries),
+                )
+                continue
+            existing_indices = {summary.ac_index for summary in existing.completed_acs}
+            by_level[level_number] = replace(
+                existing,
+                completed_acs=(
+                    *existing.completed_acs,
+                    *(summary for summary in summaries if summary.ac_index not in existing_indices),
+                ),
+            )
+        return [by_level[level_number] for level_number in sorted(by_level)]
+
     async def _reconstruct_finalized_outcomes(
         self, *, execution_id: str, total_acs: int
     ) -> dict[int, _RecoveredFinalizedOutcome] | None:
@@ -3550,6 +3710,12 @@ class ParallelACExecutor:
                 )
             except ValueError:
                 continue
+            context_valid, context_summary = self._deserialize_durable_ac_context_summary(
+                data.get("context_summary"),
+                expected_ac_index=ac_idx,
+            )
+            if not context_valid:
+                return None
             previous = latest.get(ac_idx)
             if previous is None or attempt >= previous.retry_attempt:
                 latest[ac_idx] = _RecoveredFinalizedOutcome(
@@ -3558,6 +3724,7 @@ class ParallelACExecutor:
                     outcome=outcome,
                     is_decomposed=is_decomposed,
                     forced_frontier_routing=forced_frontier_routing,
+                    context_summary=context_summary,
                 )
 
         for ac_idx, recovered in tuple(latest.items()):
@@ -4516,6 +4683,13 @@ class ParallelACExecutor:
                                 "state cannot be determined."
                             )
                         self._ordinary_finalized_resume_results.clear()
+                        existing_context_indices = {
+                            summary.ac_index
+                            for context in level_contexts
+                            for summary in context.completed_acs
+                        }
+                        recovered_success_contexts: dict[int, ACContextSummary] = {}
+                        missing_success_contexts: set[int] = set()
                         for retry_ac_idx, finalized in finalized_outcomes.items():
                             prior_status = ac_statuses.get(retry_ac_idx, "pending")
                             if prior_status in ("completed", "failed"):
@@ -4525,6 +4699,13 @@ class ParallelACExecutor:
                                 ac_statuses[retry_ac_idx] = "completed"
                                 ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
                                 completed_count += 1
+                                if retry_ac_idx not in existing_context_indices:
+                                    if finalized.context_summary is None:
+                                        missing_success_contexts.add(retry_ac_idx)
+                                    else:
+                                        recovered_success_contexts[retry_ac_idx] = (
+                                            finalized.context_summary
+                                        )
                             elif finalized.recovery_exhausted:
                                 ac_statuses[retry_ac_idx] = "failed"
                                 ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
@@ -4553,6 +4734,33 @@ class ParallelACExecutor:
                                 )
                             else:
                                 ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt + 1
+
+                        stage_position_by_ac = {
+                            ac_index: stage_position
+                            for stage_position, stage in enumerate(execution_plan.stages)
+                            for ac_index in self._get_stage_ac_indices(stage)
+                        }
+                        for missing_ac_index in sorted(missing_success_contexts):
+                            success_stage = stage_position_by_ac[missing_ac_index]
+                            downstream_unresolved = any(
+                                ac_statuses.get(downstream_ac_index) not in ("completed", "failed")
+                                for downstream_stage in execution_plan.stages[success_stage + 1 :]
+                                for downstream_ac_index in self._get_stage_ac_indices(
+                                    downstream_stage
+                                )
+                            )
+                            if downstream_unresolved:
+                                raise CheckpointUnreadableError(
+                                    "A durably finalized success lacks the AC context "
+                                    "required by unfinished downstream stages "
+                                    f"(AC {missing_ac_index + 1}). Refusing to resume "
+                                    "without its files/tools/output handoff."
+                                )
+                        level_contexts = self._merge_recovered_success_contexts(
+                            level_contexts,
+                            execution_plan,
+                            recovered_success_contexts,
+                        )
 
                         checkpoint_resolved = {
                             idx: status
@@ -9165,6 +9373,8 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         from ouroboros.events.base import BaseEvent
 
+        context_summary = self._durable_ac_context_summary(result)
+
         async def _emit_marker() -> bool:
             return await self._safe_emit_event(
                 BaseEvent(
@@ -9181,6 +9391,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         "outcome": result.outcome.value if result.outcome is not None else None,
                         "is_decomposed": result.is_decomposed,
                         "forced_frontier_routing": result.forced_frontier_routing,
+                        "context_summary": context_summary,
                     },
                 )
             )

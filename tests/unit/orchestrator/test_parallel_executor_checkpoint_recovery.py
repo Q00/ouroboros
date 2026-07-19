@@ -4386,6 +4386,199 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         assert "Restored durably finalized failure" in (by_index[1].error or "")
 
 
+class TestFinalizedSuccessContextRecovery:
+    """A success recovered from events must retain its downstream handoff."""
+
+    @staticmethod
+    def _seed_and_plan() -> tuple[Seed, StagedExecutionPlan]:
+        seed = Seed(
+            goal="Recover finalized success context",
+            constraints=(),
+            acceptance_criteria=("Prepare", "Implement API", "Verify integration"),
+            ontology_schema=OntologySchema(name="ContextRecovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Prepare"),
+                ACNode(index=1, content="Implement API", depends_on=(0,)),
+                ACNode(index=2, content="Verify integration", depends_on=(1,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+                ExecutionStage(index=2, ac_indices=(2,), depends_on_stages=(1,)),
+            ),
+        )
+        return seed, plan
+
+    async def _crash_after_second_success(
+        self,
+        tmp_path: Path,
+        *,
+        append_legacy_marker: bool,
+    ) -> tuple[Seed, StagedExecutionPlan, Path, Path]:
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.adapter import AgentMessage
+
+        seed, plan = self._seed_and_plan()
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+        modified_file = tmp_path / "service.py"
+        modified_file.write_text("def durable_api() -> str:\n    return 'ok'\n")
+        events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await events.initialize()
+        run1 = _executor(
+            event_store=events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            task_cwd=str(tmp_path),
+        )
+        real_level_completed = run1._emit_level_completed
+
+        async def _crash_before_second_stage_checkpoint(**kwargs: object) -> None:
+            await real_level_completed(**kwargs)  # type: ignore[arg-type]
+            if kwargs.get("level") == 2:
+                raise RuntimeError("crash after finalized success before context checkpoint")
+
+        run1._emit_level_completed = _crash_before_second_stage_checkpoint  # type: ignore[method-assign]
+        run1._execute_ac_batch = AsyncMock(
+            side_effect=[
+                [ACExecutionResult(ac_index=0, ac_content="Prepare", success=True)],
+                [
+                    ACExecutionResult(
+                        ac_index=1,
+                        ac_content="Implement API",
+                        success=True,
+                        messages=(
+                            AgentMessage(
+                                type="tool",
+                                content="edited",
+                                tool_name="Edit",
+                                data={"tool_input": {"file_path": str(modified_file)}},
+                            ),
+                            AgentMessage(
+                                type="tool",
+                                content="tested",
+                                tool_name="Bash",
+                            ),
+                        ),
+                        final_message="Implemented durable_api and verified it.",
+                    )
+                ],
+            ]
+        )
+        with pytest.raises(BaseException, match="context checkpoint|unhandled errors"):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+
+        if append_legacy_marker:
+            await events.append(
+                BaseEvent(
+                    type="execution.ac.outcome_finalized",
+                    aggregate_type="execution",
+                    aggregate_id="exec-original",
+                    data={
+                        "execution_id": "exec-original",
+                        "session_id": "session-original",
+                        "root_ac_index": 1,
+                        "ac_index": 1,
+                        "retry_attempt": 0,
+                        "success": True,
+                        "outcome": "succeeded",
+                        "is_decomposed": False,
+                        "forced_frontier_routing": False,
+                        # Pre-context-summary event shape.
+                    },
+                )
+            )
+        await events.close()
+        return seed, plan, db_path, ckpt_path
+
+    @pytest.mark.asyncio
+    async def test_recovered_success_context_is_injected_into_downstream_stage(
+        self, tmp_path: Path
+    ) -> None:
+        seed, plan, db_path, ckpt_path = await self._crash_after_second_success(
+            tmp_path,
+            append_legacy_marker=False,
+        )
+        events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await events.initialize()
+        run2 = _executor(
+            event_store=events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            task_cwd=str(tmp_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _finish_downstream(**kwargs: object) -> list[ACExecutionResult]:
+            captured["level_contexts"] = kwargs["level_contexts"]
+            return [
+                ACExecutionResult(
+                    ac_index=2,
+                    ac_content="Verify integration",
+                    success=True,
+                )
+            ]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish_downstream)
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+        await events.close()
+
+        contexts = captured["level_contexts"]
+        assert isinstance(contexts, list)
+        summaries = [summary for context in contexts for summary in context.completed_acs]
+        recovered = next(summary for summary in summaries if summary.ac_index == 1)
+        assert recovered.tools_used == ("Bash", "Edit")
+        assert recovered.files_modified == (str(tmp_path / "service.py"),)
+        assert recovered.key_output == "Implemented durable_api and verified it."
+        assert "def durable_api" in recovered.public_api
+        assert result.all_succeeded
+        assert result.execution_id == "exec-original"
+
+    @pytest.mark.asyncio
+    async def test_legacy_success_without_context_blocks_unfinished_downstream(
+        self, tmp_path: Path
+    ) -> None:
+        seed, plan, db_path, ckpt_path = await self._crash_after_second_success(
+            tmp_path,
+            append_legacy_marker=True,
+        )
+        events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await events.initialize()
+        run2 = _executor(
+            event_store=events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            task_cwd=str(tmp_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(CheckpointUnreadableError, match="lacks the AC context"):
+            await run2.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        await events.close()
+        run2._run_batch_with_verify_and_retry.assert_not_awaited()
+
+
 class TestRunnerAuditRecordsRestoredExecutionSettings:
     """Round-16 finding #4 (BLOCKING): RC3 recovery restores the original
     run's execution-semantic settings INSIDE the executor (rounds 9-15),
