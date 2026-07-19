@@ -5206,6 +5206,7 @@ class ParallelACExecutor:
                             retry_ac_idx
                             for retry_ac_idx, prior_status in ac_statuses.items()
                             if prior_status == "completed"
+                            and retry_ac_idx not in satisfied_externally_indices
                             and retry_ac_idx not in existing_context_indices
                         }
                         for retry_ac_idx, finalized in finalized_outcomes.items():
@@ -8579,7 +8580,15 @@ Respond with either ATOMIC or the structured JSON object only.
         enforceable = getattr(capabilities, "enforceable_reasoning_efforts", None)
         if enforceable is None:
             return DEFAULT_EFFORT_CEILING
-        return next((level for level in reversed(EFFORT_LADDER) if level in enforceable), None)
+        # ``EFFORT_LADDER`` is the portable retry vocabulary and deliberately
+        # stops at ``xhigh``. Claude also exposes a native ``max`` level; when
+        # the live runtime declares it enforceable, forced-frontier dispatch
+        # and terminal detection must agree that ``max`` is above ``xhigh``.
+        runtime_ceiling_order = (*EFFORT_LADDER, "max")
+        return next(
+            (level for level in reversed(runtime_ceiling_order) if level in enforceable),
+            None,
+        )
 
     async def _execute_atomic_ac(
         self,
@@ -8619,9 +8628,10 @@ Respond with either ATOMIC or the structured JSON object only.
         (``EFFORT_RAISE_RETRY_THRESHOLD``), so a low/medium-base AC could
         cycle the whole persona ladder without ever actually dispatching at
         max effort. When set, an ACTIVE effort axis dispatches at
-        ``DEFAULT_EFFORT_CEILING`` (investment cheapening suspended — the
-        ladder's premise is maximum strength) and an ACTIVE model axis is
-        anchored at ``DEFAULT_TIER_CEILING``; a dormant axis (no base
+        the strongest level the runtime capability contract can enforce
+        (investment cheapening suspended — the ladder's premise is maximum
+        strength) and an ACTIVE model axis is anchored at
+        ``DEFAULT_TIER_CEILING``; a dormant axis (no base
         effort / no router) stays dormant, preserving the
         no-escalation-dial-configured opt-out.
 

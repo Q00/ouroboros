@@ -3895,6 +3895,153 @@ class TestCheckpointDispatchContract:
         assert ParallelACExecutor._checkpoint_progress_malformed(saved.value, total_acs=2) is None
 
     @pytest.mark.asyncio
+    async def test_mixed_external_checkpoint_resumes_only_downstream_work(
+        self, tmp_path: Path
+    ) -> None:
+        seed = Seed(
+            goal="Resume mixed external progress",
+            constraints=(),
+            acceptance_criteria=("External setup", "Executed setup", "Downstream work"),
+            ontology_schema=OntologySchema(name="ExternalResume", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="External setup"),
+                ACNode(index=1, content="Executed setup"),
+                ACNode(index=2, content="Downstream work", depends_on=(0, 1)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0, 1)),
+                ExecutionStage(index=1, ac_indices=(2,), depends_on_stages=(0,)),
+            ),
+        )
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        original = _executor(event_store=AsyncMock(), checkpoint_store=store)
+
+        async def _crash_downstream(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [1]:
+                return [
+                    ACExecutionResult(ac_index=1, ac_content="Executed setup", success=True)
+                ]
+            raise RuntimeError("crash after mixed stage checkpoint")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crash_downstream)
+        with pytest.raises(BaseException, match="mixed stage checkpoint|unhandled errors"):
+            await original.execute_parallel(
+                seed,
+                session_id="session-mixed-original",
+                execution_id="exec-mixed-original",
+                tools=["Read"],
+                system_prompt="direct-v1",
+                execution_plan=plan,
+                externally_satisfied_acs={0: {"reason": "already present"}},
+            )
+
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _finish_downstream(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [
+                ACExecutionResult(ac_index=2, ac_content="Downstream work", success=True)
+            ]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish_downstream)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-mixed-restarted",
+            execution_id="exec-mixed-restarted",
+            tools=["Read"],
+            system_prompt="direct-v1",
+            execution_plan=plan,
+            externally_satisfied_acs={},
+        )
+
+        assert dispatched == [[2]]
+        assert result.externally_satisfied_count == 1
+        assert result.results[0].outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
+        assert result.all_succeeded
+
+    @pytest.mark.asyncio
+    async def test_mixed_external_stage_resumes_downstream_without_external_context(
+        self, tmp_path: Path
+    ) -> None:
+        seed = Seed(
+            goal="Resume after mixed external stage",
+            constraints=(),
+            acceptance_criteria=("Already present", "Prepare", "Apply"),
+            ontology_schema=OntologySchema(name="MixedResume", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Already present"),
+                ACNode(index=1, content="Prepare"),
+                ACNode(index=2, content="Apply", depends_on=(0, 1)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0, 1)),
+                ExecutionStage(index=1, ac_indices=(2,), depends_on_stages=(0,)),
+            ),
+        )
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        original = _executor(event_store=AsyncMock(), checkpoint_store=store)
+
+        async def _crash_downstream(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [1]:
+                return [ACExecutionResult(ac_index=1, ac_content="Prepare", success=True)]
+            raise RuntimeError("crash before downstream stage completes")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crash_downstream)
+        with pytest.raises(BaseException, match="downstream stage|unhandled errors"):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=["Read"],
+                system_prompt="direct-v1",
+                execution_plan=plan,
+                externally_satisfied_acs={0: {"reason": "already present"}},
+            )
+
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _finish(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [ACExecutionResult(ac_index=2, ac_content="Apply", success=True)]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=["Read"],
+            system_prompt="direct-v1",
+            execution_plan=plan,
+            externally_satisfied_acs={},
+        )
+
+        assert dispatched == [[2]]
+        assert result.externally_satisfied_count == 1
+        assert result.all_succeeded
+
+    @pytest.mark.asyncio
     async def test_reconciled_run_start_anchor_is_valid_with_pending_status(
         self, tmp_path: Path
     ) -> None:
