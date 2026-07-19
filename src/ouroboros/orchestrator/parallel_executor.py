@@ -2447,6 +2447,152 @@ class ParallelACExecutor:
                 error=str(e),
             )
 
+    def _save_execution_checkpoint(
+        self,
+        *,
+        seed: Seed,
+        session_id: str,
+        execution_id: str,
+        completed_levels: int,
+        ac_statuses: dict[int, str],
+        failed_indices: set[int],
+        completed_count: int,
+        level_contexts: list[LevelContext],
+        checkpoint_point: str,
+    ) -> None:
+        """Persist the RC3 execution checkpoint in its one canonical shape.
+
+        Called from two points with the SAME state layout: once at run
+        start BEFORE the first AC dispatch (round-13 finding #1, BLOCKING —
+        checkpoints used to exist only after a level completed, so a crash
+        DURING the first level left ZERO durable record of the run's
+        ``execution_id``/retry-policy/router/dispatch semantics; the
+        restart minted a fresh execution_id, could not find the original
+        run's durable ladder/escalation events, and silently started over,
+        losing any escalation progress from that first level), and again
+        after every level completion (the original RC3 cadence, which
+        simply overwrites this same checkpoint with updated progress).
+
+        Best-effort by design, exactly like the historical per-level save:
+        a failed write is logged loudly but never fails the run itself.
+        """
+        if not self._checkpoint_store:
+            return
+        try:
+            from ouroboros.persistence.checkpoint import CheckpointData
+
+            seed_id = self._checkpoint_seed_id(seed, session_id)
+            checkpoint = CheckpointData.create(
+                seed_id=seed_id,
+                phase="parallel_execution",
+                state={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "completed_levels": completed_levels,
+                    "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                    "failed_indices": sorted(failed_indices),
+                    "completed_count": completed_count,
+                    "level_contexts": serialize_level_contexts(level_contexts),
+                    "decomposition_decisions": {
+                        node_id: record.to_dict()
+                        for node_id, record in self._decomposition_decisions.items()
+                    },
+                    # Round-9 finding #2 (BLOCKING): the retry/
+                    # termination policy this run STARTED with.
+                    # A crash-restart constructs a fresh executor
+                    # from whatever the config file says at
+                    # restart time; the recovery block restores
+                    # this persisted policy instead, so a
+                    # parked/mid-ladder AC keeps the original
+                    # run's escalation guarantee even when the
+                    # current config disagrees (mirrors the
+                    # runner's durable retry_policy contract for
+                    # resume_session).
+                    "retry_policy": {
+                        "lateral_escalation_enabled": (self._lateral_escalation_enabled),
+                        "parked_retry_backoff_seconds": (self._parked_retry_backoff_seconds),
+                        "ac_retry_attempts": self._ac_retry_attempts,
+                        # Round-11 finding #2 (BLOCKING): the
+                        # round-9 #4 execution-semantic trio the
+                        # runner-level durable contract already
+                        # pins for session-resume must also ride
+                        # the RC3 checkpoint, so a crash-restart
+                        # recovering through THIS mechanism keeps
+                        # the effort/verify-gate semantics the
+                        # run started with (see
+                        # ``_restore_checkpoint_retry_policy``).
+                        "reasoning_effort": self._reasoning_effort,
+                        "run_verify_commands": self._run_verify_commands,
+                        "verify_command_timeout_seconds": (self._verify_command_timeout_seconds),
+                    },
+                    # Round-12 finding #2 (BLOCKING): the resolved
+                    # model-routing contract this run STARTED
+                    # with, in the SAME versioned shape the
+                    # runner's durable execution contract already
+                    # persists for session-resume (see
+                    # ``_restore_checkpoint_model_router``).
+                    "model_routing": serialize_model_router(self._model_router),
+                    # Round-12 finding #2 (BLOCKING): the
+                    # remaining constructor-injected scalars that
+                    # change what a run dispatches or how it
+                    # accepts work (see
+                    # ``_restore_checkpoint_execution_semantics``).
+                    "execution_semantics": {
+                        "decomposition_mode": self._decomposition_mode,
+                        "max_decomposition_depth": (self._max_decomposition_depth),
+                        "fat_harness_mode": self._fat_harness_mode,
+                        "cross_harness_redispatch_enabled": (
+                            self._cross_harness_redispatch_enabled
+                        ),
+                        "shadow_replay_enabled": self._shadow_replay_enabled,
+                    },
+                    # Round-12 finding #3 (BLOCKING): ownership
+                    # marker for the liveness gate
+                    # (``_checkpoint_owner_conflict``) — which
+                    # process wrote this checkpoint and when, in
+                    # the pid/host/heartbeat convention
+                    # ``core.worktree``'s task lock established.
+                    # ``written_at`` refreshes on every save,
+                    # giving cross-host readers a coarse
+                    # heartbeat; same-host readers probe the pid
+                    # directly.
+                    "owner": {
+                        "pid": os.getpid(),
+                        "host": socket.gethostname(),
+                        "written_at": datetime.now(UTC).isoformat(),
+                    },
+                },
+            )
+            save_result = self._checkpoint_store.save(checkpoint)
+            if hasattr(save_result, "is_ok") and save_result.is_ok:
+                log.info(
+                    "parallel_executor.checkpoint.saved",
+                    checkpoint_point=checkpoint_point,
+                    completed_levels=completed_levels,
+                    seed_id=seed_id,
+                )
+            else:
+                err_msg = (
+                    str(save_result.error) if hasattr(save_result, "error") else "unknown error"
+                )
+                log.warning(
+                    "parallel_executor.checkpoint.save_failed",
+                    checkpoint_point=checkpoint_point,
+                    completed_levels=completed_levels,
+                    seed_id=seed_id,
+                    error=err_msg,
+                )
+                self._console.print(
+                    f"  [yellow]Checkpoint save failed ({checkpoint_point}): {err_msg}[/yellow]"
+                )
+        except Exception as e:
+            log.warning(
+                "parallel_executor.checkpoint.save_failed",
+                checkpoint_point=checkpoint_point,
+                completed_levels=completed_levels,
+                error=str(e),
+            )
+
     async def _execute_ac_batch(
         self,
         *,
@@ -2910,6 +3056,33 @@ class ParallelACExecutor:
             "total_levels": total_levels,
         }
 
+        # Round-13 finding #1 (BLOCKING): persist the run's identity BEFORE
+        # the first AC dispatch, not only after each level completes. The
+        # per-level cadence alone left a first-level hole: a crash before
+        # ANY level finished had never written a checkpoint, so the restart
+        # had zero durable record of the original ``execution_id`` or the
+        # policy/router/dispatch semantics rounds 9-12 so carefully restore
+        # — none of that recovery machinery could activate, a fresh
+        # execution_id was minted, the original run's durable
+        # ladder/escalation events (keyed by the ORIGINAL execution_id)
+        # became unreachable, and any escalation progress from that first
+        # level was silently lost. This save reuses the exact per-level
+        # checkpoint shape with the current progress (none, for a fresh
+        # run; the restored progress, for a recovery — which also
+        # refreshes the round-12 ownership marker to THIS process). The
+        # level loop keeps overwriting it as levels complete.
+        self._save_execution_checkpoint(
+            seed=seed,
+            session_id=session_id,
+            execution_id=execution_id,
+            completed_levels=resume_from_level,
+            ac_statuses=ac_statuses,
+            failed_indices=failed_indices,
+            completed_count=completed_count,
+            level_contexts=level_contexts,
+            checkpoint_point="run_start",
+        )
+
         # Execute groups sequentially, but ACs within each group in parallel.
         # The resilient progress emitter runs as a sibling background task
         # and is automatically cancelled when the execution loop finishes.
@@ -3334,127 +3507,17 @@ class ParallelACExecutor:
                 stage_results.append(stage_result)
 
                 # RC3: Save checkpoint after each level completion
-                if self._checkpoint_store:
-                    try:
-                        from ouroboros.persistence.checkpoint import CheckpointData
-
-                        seed_id = self._checkpoint_seed_id(seed, session_id)
-                        checkpoint = CheckpointData.create(
-                            seed_id=seed_id,
-                            phase="parallel_execution",
-                            state={
-                                "session_id": session_id,
-                                "execution_id": execution_id,
-                                "completed_levels": level_idx + 1,
-                                "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
-                                "failed_indices": sorted(failed_indices),
-                                "completed_count": completed_count,
-                                "level_contexts": serialize_level_contexts(level_contexts),
-                                "decomposition_decisions": {
-                                    node_id: record.to_dict()
-                                    for node_id, record in self._decomposition_decisions.items()
-                                },
-                                # Round-9 finding #2 (BLOCKING): the retry/
-                                # termination policy this run STARTED with.
-                                # A crash-restart constructs a fresh executor
-                                # from whatever the config file says at
-                                # restart time; the recovery block restores
-                                # this persisted policy instead, so a
-                                # parked/mid-ladder AC keeps the original
-                                # run's escalation guarantee even when the
-                                # current config disagrees (mirrors the
-                                # runner's durable retry_policy contract for
-                                # resume_session).
-                                "retry_policy": {
-                                    "lateral_escalation_enabled": (
-                                        self._lateral_escalation_enabled
-                                    ),
-                                    "parked_retry_backoff_seconds": (
-                                        self._parked_retry_backoff_seconds
-                                    ),
-                                    "ac_retry_attempts": self._ac_retry_attempts,
-                                    # Round-11 finding #2 (BLOCKING): the
-                                    # round-9 #4 execution-semantic trio the
-                                    # runner-level durable contract already
-                                    # pins for session-resume must also ride
-                                    # the RC3 checkpoint, so a crash-restart
-                                    # recovering through THIS mechanism keeps
-                                    # the effort/verify-gate semantics the
-                                    # run started with (see
-                                    # ``_restore_checkpoint_retry_policy``).
-                                    "reasoning_effort": self._reasoning_effort,
-                                    "run_verify_commands": self._run_verify_commands,
-                                    "verify_command_timeout_seconds": (
-                                        self._verify_command_timeout_seconds
-                                    ),
-                                },
-                                # Round-12 finding #2 (BLOCKING): the resolved
-                                # model-routing contract this run STARTED
-                                # with, in the SAME versioned shape the
-                                # runner's durable execution contract already
-                                # persists for session-resume (see
-                                # ``_restore_checkpoint_model_router``).
-                                "model_routing": serialize_model_router(self._model_router),
-                                # Round-12 finding #2 (BLOCKING): the
-                                # remaining constructor-injected scalars that
-                                # change what a run dispatches or how it
-                                # accepts work (see
-                                # ``_restore_checkpoint_execution_semantics``).
-                                "execution_semantics": {
-                                    "decomposition_mode": self._decomposition_mode,
-                                    "max_decomposition_depth": (self._max_decomposition_depth),
-                                    "fat_harness_mode": self._fat_harness_mode,
-                                    "cross_harness_redispatch_enabled": (
-                                        self._cross_harness_redispatch_enabled
-                                    ),
-                                    "shadow_replay_enabled": self._shadow_replay_enabled,
-                                },
-                                # Round-12 finding #3 (BLOCKING): ownership
-                                # marker for the liveness gate
-                                # (``_checkpoint_owner_conflict``) — which
-                                # process wrote this checkpoint and when, in
-                                # the pid/host/heartbeat convention
-                                # ``core.worktree``'s task lock established.
-                                # ``written_at`` refreshes on every level
-                                # save, giving cross-host readers a coarse
-                                # heartbeat; same-host readers probe the pid
-                                # directly.
-                                "owner": {
-                                    "pid": os.getpid(),
-                                    "host": socket.gethostname(),
-                                    "written_at": datetime.now(UTC).isoformat(),
-                                },
-                            },
-                        )
-                        save_result = self._checkpoint_store.save(checkpoint)
-                        if hasattr(save_result, "is_ok") and save_result.is_ok:
-                            log.info(
-                                "parallel_executor.checkpoint.saved",
-                                level=level_num,
-                                seed_id=seed_id,
-                            )
-                        else:
-                            err_msg = (
-                                str(save_result.error)
-                                if hasattr(save_result, "error")
-                                else "unknown error"
-                            )
-                            log.warning(
-                                "parallel_executor.checkpoint.save_failed",
-                                level=level_num,
-                                seed_id=seed_id,
-                                error=err_msg,
-                            )
-                            self._console.print(
-                                f"  [yellow]Checkpoint save failed for level "
-                                f"{level_num}: {err_msg}[/yellow]"
-                            )
-                    except Exception as e:
-                        log.warning(
-                            "parallel_executor.checkpoint.save_failed",
-                            level=level_num,
-                            error=str(e),
-                        )
+                self._save_execution_checkpoint(
+                    seed=seed,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    completed_levels=level_idx + 1,
+                    ac_statuses=ac_statuses,
+                    failed_indices=failed_indices,
+                    completed_count=completed_count,
+                    level_contexts=level_contexts,
+                    checkpoint_point=f"level_{level_num}_completed",
+                )
 
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()

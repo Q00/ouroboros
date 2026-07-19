@@ -643,6 +643,111 @@ class TestStaleCheckpointFromFinishedRunNeverResumed:
         await run2_events.close()
 
 
+class TestFirstLevelCrashLeavesRecoverableCheckpoint:
+    """Round-13 finding #1 (BLOCKING): checkpoints were only written AFTER
+    a level completed, so a crash DURING the first level (before any level
+    had ever finished) left ZERO durable record of the run — the restart
+    minted a fresh execution_id, could not find the original run's durable
+    ladder/escalation events (keyed by the ORIGINAL execution_id), and none
+    of rounds 9-12's recovery machinery could activate. A minimal
+    run-identity checkpoint (same shape as the per-level one, zero
+    progress) must now exist from BEFORE the first AC dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_crash_during_first_level_leaves_recoverable_identity(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact scenario: crash during the FIRST level,
+        before any level-completion checkpoint would normally be written.
+        A checkpoint must nonetheless exist (execution_id + the
+        policy/contract fields), and a subsequent recovery must find and
+        restore it instead of starting completely fresh."""
+        seed = _seed("First-level crash leaves recoverable identity")
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Run 1: crashes DURING level 1 — no level ever completed.
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = CheckpointStore(base_path=ckpt_path)
+        run1_ckpt.initialize()
+        run1 = _executor(
+            event_store=run1_events,
+            checkpoint_store=run1_ckpt,
+            lateral_escalation_enabled=True,
+            parked_retry_backoff_seconds=123.0,
+        )
+        run1._run_batch_with_verify_and_retry = AsyncMock(
+            side_effect=RuntimeError("simulated crash during the first level")
+        )
+        with pytest.raises(BaseException):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+        await run1_events.close()
+
+        # The run-identity checkpoint exists despite zero completed levels,
+        # carrying the execution_id and every policy/contract group the
+        # recovery block restores.
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        state = saved.value.state
+        assert state["execution_id"] == "exec-original"
+        assert state["completed_levels"] == 0
+        assert state["retry_policy"]["lateral_escalation_enabled"] is True
+        assert state["retry_policy"]["parked_retry_backoff_seconds"] == 123.0
+        assert "reasoning_effort" in state["retry_policy"]
+        assert "run_verify_commands" in state["retry_policy"]
+        assert "verify_command_timeout_seconds" in state["retry_policy"]
+        assert "model_routing" in state
+        assert state["execution_semantics"]["cross_harness_redispatch_enabled"] is False
+        assert "decomposition_mode" in state["execution_semantics"]
+        assert state["owner"]["pid"] == os.getpid()
+
+        # --- Run 2: crash-restart. Recovery must locate the original
+        # execution_id and the retry policy the run STARTED with (current
+        # config now says escalation is DISABLED — the persisted policy
+        # must win, per round 9 #2), then dispatch level 1 from scratch.
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            lateral_escalation_enabled=False,
+        )
+        captured: dict[str, object] = {}
+
+        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-restart",
+            execution_id="exec-restart",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+
+        # Not a completely fresh start: the ORIGINAL execution_id was
+        # restored (so ladder/attestation loaders read the original
+        # aggregate) and the original run's escalation policy survived the
+        # restart's contrary config.
+        assert captured["batch_executable"] == [0]
+        assert captured["execution_id"] == "exec-original"
+        assert result.execution_id == "exec-original"
+        assert run2._lateral_escalation_enabled is True
+        await run2_events.close()
+
+
 class TestIndeterminateReplayWithCompletedCheckpoint:
     """Round-13 finding #2 (BLOCKING): the terminal-staleness gate's
     indeterminate-replay tiebreaker ("a surviving checkpoint is itself
