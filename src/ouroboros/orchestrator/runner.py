@@ -715,6 +715,16 @@ class OrchestratorRunner:
         self._task_workspace = task_workspace
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
+        # Round-15 finding #5 (BLOCKING): resolve the EFFECTIVE fan-out
+        # worker count ONCE, here — the same "one consistent source"
+        # convention ``self._reasoning_effort`` follows — so the value the
+        # durable retry-policy contract fingerprints is BY CONSTRUCTION the
+        # value execution consumes (the round-3 lesson: the fingerprinted
+        # value must never diverge from the executed value). Re-resolving
+        # at dispatch time could pick up a config/env edit made after the
+        # contract was persisted. Restored wholesale on resume, like every
+        # other retry-policy field.
+        self._effective_parallel_workers = self._plan_parallel_workers()
         self._fat_harness_mode = fat_harness_mode
         self._session_signal_hub = session_signal_hub
         self._execution_preferences_override_explicit = (
@@ -2021,6 +2031,22 @@ class OrchestratorRunner:
         is pinned as the RESOLVED bool (env request AND strict
         authorization), because that resolved value — not its inputs — is
         what execution consumes.
+        Round-15 finding #5 (BLOCKING): ``effective_parallel_workers`` joins,
+        reversing round 14's "performance, not semantics" exclusion. The
+        dispatch model gives every AC in a level the SAME working directory
+        (``task_cwd`` — no per-AC worktree isolation), bounded only by the
+        executor's semaphore, and the coordinator's file-conflict review
+        exists precisely because concurrent ACs genuinely write overlapping
+        files. Sequential execution (1 worker) lets each AC observe its
+        siblings' COMPLETED effects; concurrent execution interleaves
+        mutations mid-flight — observably different workspace states, so
+        different actual outcomes are possible, not just different
+        wall-clock. Two runs differing only in worker count therefore must
+        not share a fingerprint cohort, and a crash-restart must not
+        silently adopt the current process's concurrency. Pinned as the
+        RESOLVED effective count (requested workers capped by backend
+        limits, resolved once in ``__init__``), because that resolved value
+        — not its inputs — is what execution consumes.
         """
         return {
             "lateral_escalation_enabled": self._lateral_escalation_enabled,
@@ -2035,6 +2061,7 @@ class OrchestratorRunner:
             "max_decomposition_depth": self._max_decomposition_depth,
             "fat_harness_mode": self._fat_harness_mode,
             "shadow_replay_enabled": self._shadow_replay_enabled,
+            "effective_parallel_workers": self._effective_parallel_workers,
         }
 
     @staticmethod
@@ -2052,7 +2079,15 @@ class OrchestratorRunner:
             "max_decomposition_depth",
             "fat_harness_mode",
             "shadow_replay_enabled",
+            "effective_parallel_workers",
         }:
+            return False
+        # Round-15 finding #5: mirrors the resolution pipeline's own floor
+        # (``plan_fan_out_concurrency`` clamps to >= 1) — rejected, not
+        # silently clamped, when below it (the round-3 accept-then-clamp
+        # lesson).
+        workers = value.get("effective_parallel_workers")
+        if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
             return False
         # Round-14 finding #2: the new fields mirror their own construction
         # contracts exactly, like every field above. ``fat_harness_mode`` and
@@ -2890,6 +2925,12 @@ class OrchestratorRunner:
             # still silently re-resolved them from the current process.
             self._max_decomposition_depth = int(raw_retry_policy["max_decomposition_depth"])
             self._fat_harness_mode = bool(raw_retry_policy["fat_harness_mode"])
+            # Round-15 finding #5 (BLOCKING): restore the RESOLVED fan-out
+            # the run started with — concurrency over the shared workspace
+            # is execution semantics (interleaved sibling writes), not just
+            # wall-clock, so a resume must not silently adopt the current
+            # process's worker count.
+            self._effective_parallel_workers = int(raw_retry_policy["effective_parallel_workers"])
         self._execution_preferences = persisted_preferences
         if not retry_policy_migrated and isinstance(raw_retry_policy, Mapping):
             # Round-14 finding #2: the persisted RESOLVED shadow-replay bool
@@ -5196,7 +5237,10 @@ class OrchestratorRunner:
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).
-        effective_workers = self._plan_parallel_workers()
+        # Round-15 finding #5: consume the value resolved once in __init__
+        # (and restored by resume) — never re-resolve here, so the executed
+        # concurrency always equals the fingerprinted/persisted one.
+        effective_workers = self._effective_parallel_workers
         if effective_workers < self._max_parallel_workers:
             self._console.print(
                 f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "

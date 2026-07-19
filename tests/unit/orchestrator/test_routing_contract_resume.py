@@ -246,6 +246,9 @@ def test_resume_restores_persisted_retry_policy() -> None:
     original._max_decomposition_depth = 9
     original._fat_harness_mode = True
     original._shadow_replay_enabled = True
+    # Round-15 finding #5: shared-workspace concurrency joins the contract
+    # for the same reason (interleaved sibling writes are semantics).
+    original._effective_parallel_workers = 7
     persisted = original._build_execution_contract()
     assert persisted["retry_policy"] == {
         "lateral_escalation_enabled": True,
@@ -260,6 +263,7 @@ def test_resume_restores_persisted_retry_policy() -> None:
         "max_decomposition_depth": 9,
         "fat_harness_mode": True,
         "shadow_replay_enabled": True,
+        "effective_parallel_workers": 7,
     }
 
     resumed = _runner()
@@ -281,6 +285,7 @@ def test_resume_restores_persisted_retry_policy() -> None:
     resumed._max_decomposition_depth = 1
     resumed._fat_harness_mode = False
     resumed._shadow_replay_enabled = False
+    resumed._effective_parallel_workers = 1
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -301,6 +306,9 @@ def test_resume_restores_persisted_retry_policy() -> None:
     # Restored wholesale — NOT re-derived from this process's env request,
     # which (unset here) would have resolved False.
     assert resumed._shadow_replay_enabled is True
+    # Round-15 finding #5: the resumed run keeps the shared-workspace
+    # concurrency it STARTED with, not this process's re-resolved value.
+    assert resumed._effective_parallel_workers == 7
 
 
 def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
@@ -335,6 +343,7 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     resumed._context_pack_enabled = True
     resumed._max_decomposition_depth = 3
     resumed._fat_harness_mode = True
+    resumed._effective_parallel_workers = 3
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -358,11 +367,14 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         # A migrated legacy contract keeps the recomputed (env-and-strict
         # derived) value; without strict authorization this is always False.
         "shadow_replay_enabled": False,
+        # A migrated legacy contract keeps the current process's resolved
+        # fan-out (set explicitly above for determinism).
+        "effective_parallel_workers": 3,
     }
 
 
 def _full_retry_policy(**overrides: object) -> dict[str, object]:
-    """A well-formed twelve-field policy, with targeted per-test corruption."""
+    """A well-formed thirteen-field policy, with targeted per-test corruption."""
     policy: dict[str, object] = {
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 300.0,
@@ -376,6 +388,7 @@ def _full_retry_policy(**overrides: object) -> dict[str, object]:
         "max_decomposition_depth": 2,
         "fat_harness_mode": False,
         "shadow_replay_enabled": False,
+        "effective_parallel_workers": 3,
     }
     policy.update(overrides)
     return policy
@@ -478,6 +491,15 @@ def _full_retry_policy(**overrides: object) -> dict[str, object]:
         _full_retry_policy(shadow_replay_enabled="on"),
         _full_retry_policy(shadow_replay_enabled=None),
         _full_retry_policy(shadow_replay_enabled=0),
+        # Round-15 finding #5: the resolved fan-out mirrors
+        # ``plan_fan_out_concurrency``'s own >= 1 floor — rejected, not
+        # clamped, below it.
+        _full_retry_policy(effective_parallel_workers="3"),
+        _full_retry_policy(effective_parallel_workers=0),
+        _full_retry_policy(effective_parallel_workers=-1),
+        _full_retry_policy(effective_parallel_workers=True),
+        _full_retry_policy(effective_parallel_workers=2.5),
+        _full_retry_policy(effective_parallel_workers=None),
     ],
 )
 def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:

@@ -1307,6 +1307,12 @@ class ParallelACExecutor:
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=task_cwd,
         )
+        # Round-15 finding #5 (BLOCKING): the resolved concurrency is
+        # execution semantics on a SHARED workspace (interleaved sibling
+        # writes vs strictly sequential effects), so it rides the RC3
+        # checkpoint's ``execution_semantics`` and is restored — semaphore
+        # rebuilt — on crash-restart recovery.
+        self._max_concurrent = max_concurrent
         self._semaphore = anyio.Semaphore(max_concurrent)
         self._ac_runtime_handle_manager = ACRuntimeHandleManager(
             adapter,
@@ -2243,6 +2249,12 @@ class ParallelACExecutor:
           callers) restores nothing, like an absent key; only a concrete
           bool is adopted, and only over the current value, so the
           crash-restart's rebuilt prompt uses the ORIGINAL run's setting.
+        - ``max_concurrent`` (round-15 #5) — the shared-workspace fan-out
+          the run dispatched under. Concurrency changes SEMANTICS here, not
+          just wall-clock: every AC in a level shares one working
+          directory, so sequential vs interleaved sibling writes are
+          observably different workspace states. Restoring it also rebuilds
+          ``self._semaphore`` before any dispatch.
 
         Conventions mirror ``_restore_checkpoint_retry_policy`` exactly:
         ``None`` (checkpoint predates the field) keeps the current
@@ -2262,12 +2274,16 @@ class ParallelACExecutor:
             cross_present = "cross_harness_redispatch_enabled" in raw_semantics
             shadow_present = "shadow_replay_enabled" in raw_semantics
             cpack_present = "context_pack_enabled" in raw_semantics
+            # Round-15 finding #5: the shared-workspace concurrency the run
+            # actually dispatched under.
+            workers_present = "max_concurrent" in raw_semantics
             mode = raw_semantics.get("decomposition_mode")
             depth = raw_semantics.get("max_decomposition_depth")
             fat = raw_semantics.get("fat_harness_mode")
             cross = raw_semantics.get("cross_harness_redispatch_enabled")
             shadow = raw_semantics.get("shadow_replay_enabled")
             cpack = raw_semantics.get("context_pack_enabled")
+            workers = raw_semantics.get("max_concurrent")
             if (
                 (not mode_present or mode in self._DECOMPOSITION_MODES)
                 and (
@@ -2280,6 +2296,10 @@ class ParallelACExecutor:
                 # ``None`` is a legitimate persisted value here (a run whose
                 # runner never resolved the flag), not corruption.
                 and (not cpack_present or cpack is None or isinstance(cpack, bool))
+                and (
+                    not workers_present
+                    or (isinstance(workers, int) and not isinstance(workers, bool) and workers >= 1)
+                )
             ):
                 if (
                     (mode_present and mode != self._decomposition_mode)
@@ -2292,6 +2312,7 @@ class ParallelACExecutor:
                         and isinstance(cpack, bool)
                         and cpack != self._context_pack_enabled
                     )
+                    or (workers_present and workers != self._max_concurrent)
                 ):
                     log.info(
                         "parallel_executor.recovery.execution_semantics_restored",
@@ -2316,6 +2337,8 @@ class ParallelACExecutor:
                         current_shadow_replay_enabled=self._shadow_replay_enabled,
                         checkpoint_context_pack_enabled=(cpack if cpack_present else "<absent>"),
                         current_context_pack_enabled=self._context_pack_enabled,
+                        checkpoint_max_concurrent=(workers if workers_present else "<absent>"),
+                        current_max_concurrent=self._max_concurrent,
                     )
                 # The isinstance re-checks are guaranteed true by the block
                 # above; they only re-narrow types for mypy.
@@ -2336,6 +2359,14 @@ class ParallelACExecutor:
                     self._shadow_replay_enabled = shadow
                 if cpack_present and isinstance(cpack, bool):
                     self._context_pack_enabled = cpack
+                if workers_present and isinstance(workers, int):
+                    self._max_concurrent = workers
+                    # ``__init__`` built the semaphore from the CURRENT
+                    # process's construction value; rebuild it BEFORE any
+                    # dispatch so the recovered run actually executes at the
+                    # original run's concurrency (safe here: recovery runs
+                    # before the first AC acquires it).
+                    self._semaphore = anyio.Semaphore(workers)
                 return
         log.error(
             "parallel_executor.recovery.execution_semantics_malformed",
@@ -2882,6 +2913,9 @@ class ParallelACExecutor:
                             self._cross_harness_redispatch_enabled
                         ),
                         "shadow_replay_enabled": self._shadow_replay_enabled,
+                        # Round-15 finding #5 (BLOCKING): the concurrency the
+                        # run's shared-workspace dispatch actually ran under.
+                        "max_concurrent": self._max_concurrent,
                         # Round-14 finding #3 (BLOCKING): the worker-prompt
                         # semantic the runner pinned for this run. Restored
                         # BEFORE the crash-restart's system prompt is

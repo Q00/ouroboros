@@ -1887,6 +1887,9 @@ class TestCrashRestartRestoresModelRouterAndExecutionSemantics:
             # Round-14 finding #3: ``None`` — this direct-constructed
             # executor was never given the runner's pinned flag.
             "context_pack_enabled": None,
+            # Round-15 finding #5: the shared-workspace concurrency the run
+            # dispatched under (this executor's construction default).
+            "max_concurrent": 3,
         }
 
         # --- Restart under DIFFERENT construction args: another router
@@ -1904,6 +1907,10 @@ class TestCrashRestartRestoresModelRouterAndExecutionSemantics:
                 base_tier="frontier",
                 escalation_retry_threshold=2,
             ),
+            # Round-15 finding #5: the restart's construction concurrency
+            # differs from the crashed run's — recovery must restore the
+            # original.
+            max_concurrent=1,
         )
         captured: dict[str, object] = {}
 
@@ -1935,7 +1942,72 @@ class TestCrashRestartRestoresModelRouterAndExecutionSemantics:
         assert recovered._max_decomposition_depth == 1
         assert recovered._fat_harness_mode is True
         assert recovered._shadow_replay_enabled is True
+        # Round-15 finding #5: the ORIGINAL run's shared-workspace
+        # concurrency was restored over the restart's construction value,
+        # and the live semaphore was rebuilt to match it.
+        assert recovered._max_concurrent == 3
+        assert recovered._semaphore.value == 3
         await recovered_events.close()
+
+    def test_checkpointed_concurrency_restored_and_semaphore_rebuilt(self) -> None:
+        """Round-15 finding #5 (BLOCKING): concurrency over the shared
+        workspace is execution semantics (sequential sibling effects vs
+        interleaved mid-flight writes), so a crash-restart must adopt the
+        checkpointed run's ``max_concurrent`` — and rebuild the dispatch
+        semaphore, which ``__init__`` sized from the CURRENT process's
+        construction value."""
+        executor = self._unit_executor(max_concurrent=2)
+        executor._restore_checkpoint_execution_semantics(
+            {
+                "decomposition_mode": "preflight",
+                "max_decomposition_depth": 2,
+                "fat_harness_mode": False,
+                "cross_harness_redispatch_enabled": False,
+                "shadow_replay_enabled": False,
+                "context_pack_enabled": None,
+                "max_concurrent": 5,
+            }
+        )
+        assert executor._max_concurrent == 5
+        assert executor._semaphore.value == 5
+
+    def test_legacy_semantics_without_concurrency_keep_current_value(self) -> None:
+        """One-time migration: a checkpoint predating the field keeps the
+        current construction value (and the original semaphore)."""
+        executor = self._unit_executor(max_concurrent=2)
+        original_semaphore = executor._semaphore
+        executor._restore_checkpoint_execution_semantics(
+            {
+                "decomposition_mode": "preflight",
+                "max_decomposition_depth": 2,
+                "fat_harness_mode": False,
+                "cross_harness_redispatch_enabled": False,
+                "shadow_replay_enabled": False,
+                "context_pack_enabled": None,
+            }
+        )
+        assert executor._max_concurrent == 2
+        assert executor._semaphore is original_semaphore
+
+    @pytest.mark.parametrize("corrupt_workers", ["3", 0, -1, True, 2.5, None])
+    def test_malformed_concurrency_fails_closed(self, corrupt_workers: object) -> None:
+        """Present-but-malformed takes the whole mapping down the
+        established fail-closed branch: nothing adopted, escalation gate
+        forced open."""
+        executor = self._unit_executor(max_concurrent=2)
+        executor._restore_checkpoint_execution_semantics(
+            {
+                "decomposition_mode": "preflight",
+                "max_decomposition_depth": 2,
+                "fat_harness_mode": False,
+                "cross_harness_redispatch_enabled": False,
+                "shadow_replay_enabled": False,
+                "context_pack_enabled": None,
+                "max_concurrent": corrupt_workers,
+            }
+        )
+        assert executor._max_concurrent == 2
+        assert executor._lateral_escalation_enabled is True
 
     def _unit_executor(self, **overrides: object) -> ParallelACExecutor:
         return ParallelACExecutor(
