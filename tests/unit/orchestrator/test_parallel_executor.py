@@ -27,6 +27,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACExecutionCapsuleManifest,
     compile_ac_execution_capsule,
 )
+from ouroboros.orchestrator.ac_runtime_handle_manager import AmbiguousACExecutionError
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -4679,6 +4680,70 @@ class TestParallelACExecutor:
                 ac_index=0,
                 ac_content="Implement the AC",
                 session_id="session-capsule-failure",
+                tools=["Read", "Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert runtime.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_refuses_fresh_dispatch_after_unresumable_tool_effect(self) -> None:
+        """A crash after a tool effect cannot be recovered by duplicating the attempt."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Apply one non-idempotent migration",
+            session_id="session-capsule-effect",
+            seed_goal="Ship",
+        )
+        appended_events.extend(
+            [
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
+                BaseEvent(
+                    type="execution.tool.completed",
+                    aggregate_type="execution",
+                    aggregate_id=runtime_identity.session_scope_id,
+                    data={
+                        **runtime_identity.to_metadata(),
+                        "tool_name": "Bash",
+                        "tool_result_text": "migration applied",
+                    },
+                ),
+            ]
+        )
+
+        with pytest.raises(
+            AmbiguousACExecutionError,
+            match="recorded tool effects without a reusable runtime handle",
+        ):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Apply one non-idempotent migration",
+                session_id="session-capsule-effect",
                 tools=["Read", "Edit"],
                 system_prompt="system",
                 seed_goal="Ship",

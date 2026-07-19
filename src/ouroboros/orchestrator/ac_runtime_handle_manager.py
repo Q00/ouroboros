@@ -49,6 +49,16 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
+_AC_EFFECT_EVENT_TYPES = frozenset(
+    {
+        "execution.tool.started",
+        "execution.tool.completed",
+    }
+)
+
+
+class AmbiguousACExecutionError(RuntimeError):
+    """A prior AC attempt may have external effects but cannot be resumed safely."""
 
 
 class ACRuntimeHandleManager:
@@ -564,6 +574,15 @@ class ACRuntimeHandleManager:
                 self.runtime_handles.pop(runtime_identity.cache_key, None)
                 cached_handle = None
 
+            unresolved_effect_event = any(
+                event.type in _AC_EFFECT_EVENT_TYPES
+                and self._event_matches_ac_runtime_identity(
+                    event.data if isinstance(event.data, dict) else {},
+                    runtime_identity,
+                )
+                for event in events
+            )
+
             for event in reversed(events):
                 event_data = event.data if isinstance(event.data, dict) else {}
                 if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
@@ -632,6 +651,12 @@ class ACRuntimeHandleManager:
 
                 self.runtime_handles[runtime_identity.cache_key] = runtime_handle
                 return runtime_handle
+
+            if unresolved_effect_event:
+                raise AmbiguousACExecutionError(
+                    "AC attempt recorded tool effects without a reusable runtime handle; "
+                    "refusing fresh redispatch because non-idempotent effects may duplicate"
+                )
 
         return None
 
