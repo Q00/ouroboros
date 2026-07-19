@@ -99,18 +99,38 @@ class TestPMSteeringPromptBudget:
         engine._install_pm_steering()
         return engine
 
-    def test_default_cap_keeps_contract_and_full_perspective_panel(self, tmp_path: Path) -> None:
-        """The default first-round PM prompt must hold the cap while the
-        PRD-contract steering and the inner perspective panel — with its
-        breadth/closure/seed-ready safeguards — coexist, both complete."""
+    def test_budget_extension_reserved_on_inner_instance(self, tmp_path: Path) -> None:
+        """Installing steering widens the PM-owned inner instance's budgets
+        by exactly the steering length — idempotently, and without touching
+        the InterviewEngine class defaults used by dev interviews."""
+        engine = self._steered_engine(tmp_path)
+        extension = len(_PM_SYSTEM_PROMPT_PREFIX) + 2
+        engine._install_pm_steering()  # second install must not stack
+        assert (
+            InterviewEngine._MAX_SYSTEM_PROMPT_CHARS + extension
+            == engine.inner._MAX_SYSTEM_PROMPT_CHARS
+        )
+        assert (
+            InterviewEngine._MIN_SYSTEM_PROMPT_CHARS + extension
+            == engine.inner._MIN_SYSTEM_PROMPT_CHARS
+        )
+        assert InterviewEngine._MAX_SYSTEM_PROMPT_CHARS == 3500
+        assert InterviewEngine._MIN_SYSTEM_PROMPT_CHARS == 1200
+
+    def test_default_cap_keeps_full_steering_and_full_perspective_panel(
+        self, tmp_path: Path
+    ) -> None:
+        """On the default path the steering rides inside its reserved budget
+        extension: the full prefix, the complete perspective panel, and the
+        contract policy coexist within the widened cap."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_default",
             initial_context="Build a task manager",
         )
         prompt = engine.inner._build_system_prompt(state)
-        cap = InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
-        assert len(prompt) <= cap
+        assert len(prompt) <= engine.inner._MAX_SYSTEM_PROMPT_CHARS
+        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
         assert self._INNER_ROLE_MARKER in prompt
         assert self._INNER_JOB_MARKER in prompt
         # The full panel text survives — not a mid-sentence fragment.
@@ -118,11 +138,50 @@ class TestPMSteeringPromptBudget:
         assert panel and panel in prompt
         assert "breadth recap" in prompt
         assert "seed-ready" in prompt
-        # The steering policy survives shedding, paragraph-atomically.
         flat = " ".join(prompt.split())
         assert "contract between the PM and the developers" in flat
         assert "no place in this contract" in flat
-        self._assert_steering_paragraphs_atomic(prompt, cap)
+
+    def test_normal_path_inner_build_matches_designed_dev_build(self, tmp_path: Path) -> None:
+        """Zero displacement: the inner portion of the steered prompt is
+        byte-identical to what an unwrapped engine produces at its designed
+        budget — the interview layer loses nothing to steering."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_identity",
+            initial_context="Build a task manager",
+            ambiguity_score=0.55,
+            ambiguity_breakdown=self._ambiguity_breakdown(),
+        )
+        prompt = engine.inner._build_system_prompt(state)
+        steering_block = _PM_SYSTEM_PROMPT_PREFIX + "\n\n"
+        assert prompt.startswith(steering_block)
+        dev_build = engine._original_build_system_prompt(
+            state, max_chars=InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        )
+        assert prompt[len(steering_block) :] == dev_build
+
+    def test_base_prompt_sections_follow_agent_loader(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Invariant resolution reads through the agent loader on every call
+        — an operator prompt reload (loader cache cleared, new prompt text)
+        is reflected immediately, with no stale parity metadata."""
+        from ouroboros.bigbang.pm_interview import _current_inner_base_prompt_sections
+
+        engine = self._steered_engine(tmp_path)
+        before = _current_inner_base_prompt_sections(engine.inner)
+        operator_prompt = (
+            "# Custom Interviewer\n\nintro\n"
+            "\n## OPERATOR CRITICAL BOUNDARY\n- Never fabricate telemetry.\n"
+        )
+        monkeypatch.setattr(
+            "ouroboros.agents.loader.load_agent_prompt",
+            lambda _name: operator_prompt,
+        )
+        after = _current_inner_base_prompt_sections(engine.inner)
+        assert any("OPERATOR CRITICAL BOUNDARY" in section for section in after)
+        assert after != before
 
     def test_caller_supplied_cap_keeps_parity_with_unwrapped_guidance(self, tmp_path: Path) -> None:
         """With a reduced caller cap, whatever guidance the unwrapped build
@@ -267,9 +326,9 @@ class TestPMSteeringPromptBudget:
         self, tmp_path: Path
     ) -> None:
         """A max-length initial context plus an ambiguity breakdown is a
-        normal runtime state; the steering must shed itself before evicting
-        the answer-prefix legend or the "Weakest area" snapshot feedback it
-        exists to govern."""
+        normal runtime state; the full steering rides in its reserved
+        extension while the answer-prefix legend and the "Weakest area"
+        snapshot feedback it exists to govern stay intact."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_long_ctx_snapshot",
@@ -278,13 +337,13 @@ class TestPMSteeringPromptBudget:
             ambiguity_breakdown=self._ambiguity_breakdown(),
         )
         prompt = engine.inner._build_system_prompt(state)
-        assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        assert len(prompt) <= engine.inner._MAX_SYSTEM_PROMPT_CHARS
+        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
         # The full snapshot text survives — not just its heading.
         snapshot = engine.inner._build_ambiguity_snapshot_prompt(state)
         assert snapshot and snapshot in prompt
         assert "Weakest area" in prompt
         assert "[from-research]" in prompt
-        self._assert_steering_paragraphs_atomic(prompt, InterviewEngine._MAX_SYSTEM_PROMPT_CHARS)
 
     def test_steering_sheds_supporting_paragraphs_before_the_contract(self, tmp_path: Path) -> None:
         """When only part of the steering fits, the PRD-contract paragraph —
@@ -301,12 +360,12 @@ class TestPMSteeringPromptBudget:
         assert "contract between the PM and the developers" in flat
         assert "no place in this contract" in flat
 
-    def test_brownfield_long_context_sheds_steering_entirely_before_inner_guidance(
+    def test_brownfield_long_context_keeps_full_steering_and_inner_guidance(
         self, tmp_path: Path
     ) -> None:
-        """When even the contract paragraph cannot coexist with the inner
-        guidance, steering yields entirely and the wrapped prompt keeps
-        parity with the unwrapped build."""
+        """Brownfield saturation — previously the worst case, where steering
+        shed entirely — now keeps the full steering in its reserved extension
+        alongside the intact inner guidance."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_brownfield_long",
@@ -316,7 +375,8 @@ class TestPMSteeringPromptBudget:
             ambiguity_breakdown=self._ambiguity_breakdown(),
         )
         prompt = engine.inner._build_system_prompt(state)
-        assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        assert len(prompt) <= engine.inner._MAX_SYSTEM_PROMPT_CHARS
+        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
         snapshot = engine.inner._build_ambiguity_snapshot_prompt(state)
         assert snapshot and snapshot in prompt
         assert "[from-research]" in prompt

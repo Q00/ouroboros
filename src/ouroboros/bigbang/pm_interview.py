@@ -17,8 +17,8 @@ questions for classification and collects PM-specific metadata.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-import functools
 import json
 from pathlib import Path
 import re
@@ -70,8 +70,8 @@ PM_UNCERTAINTY_GUIDANCE = (
 _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
 _PM_SYSTEM_PROMPT_PREFIX = f"""\
 You are a Product Requirements interviewer helping a PM define their product.
-Assume the resulting product requirements document will drive all downstream work through AI workflows, so elicit decisions precise enough for autonomous planning, implementation, and verification.
-If a product question is not settled, preserve that uncertainty explicitly instead of inventing certainty; capture assumptions and decide-later items as first-class PM output.
+The PRD will drive autonomous AI planning, implementation, and verification
+downstream — elicit decisions precise enough for that.
 
 A PRD is a contract between the PM and the developers: success criteria are the
 behavior and policy the PM must observe in the delivered feature to accept it
@@ -112,36 +112,47 @@ Respond ONLY with valid JSON in this exact format:
 """
 
 
-# Static markers of inner-builder guidance that PM steering must never
-# evict: the answer-prefix legend and the brownfield intent hint. Two more
-# guidance sections are checked as their full per-state text: the ambiguity
-# snapshot (it carries the "Weakest area" feedback the steering philosophy
-# is meant to govern) and the perspective panel (it carries the breadth /
-# closure / seed-ready safeguards). A heading or fragment surviving while
-# the tail is cut would still defeat the policy, so full-text checks are
-# required. The inner header truncates from the end, so a surviving later
-# element implies everything before it is intact.
-_INNER_GUIDANCE_STATIC_MARKERS = (
-    "[from-research]",
-    "not on discovering what exists.",
-)
-
 # Identifies the PRD-contract paragraph — the policy #1663 exists to
 # enforce. It is shed last so tight budgets drop the supporting paragraphs
 # before the policy itself.
 _PM_CONTRACT_MARKER = "contract between the PM and the developers"
 
 
-@functools.lru_cache(maxsize=1)
-def _inner_base_prompt_sections() -> tuple[str, ...]:
-    """Sections of the inner interviewer base prompts, for parity checks.
+@dataclass(frozen=True)
+class InnerGuidanceInvariant:
+    """One piece of inner-interviewer guidance PM steering must never evict.
+
+    The interview layer always has priority over PM steering: whatever an
+    unwrapped inner build retains completely must also survive the steered
+    build completely. Each invariant resolves to the marker texts to check
+    for the current engine and state — resolution happens on every build so
+    guidance always reflects the currently loaded prompts (operator prompt
+    reloads via ``agents.loader.clear_cache()`` are picked up immediately;
+    there is deliberately no cache at this layer).
+
+    Attributes:
+        name: Stable identifier for logging and tests.
+        why: What interview behavior the guidance carries.
+        resolve: Returns the full marker texts for (inner, state); empty
+            strings are ignored. Full text matters — a heading or fragment
+            surviving while its tail is cut would still defeat the policy.
+    """
+
+    name: str
+    why: str
+    resolve: Callable[[InterviewEngine, InterviewState], tuple[str, ...]]
+
+
+def _current_inner_base_prompt_sections(_inner: InterviewEngine) -> tuple[str, ...]:
+    """Sections of the inner interviewer base prompts, resolved per call.
 
     The inner builder truncates its base prompt from the end, so every
     ``##`` section the unconstrained build retains completely must also
-    survive the steered build completely (a section head without its tail
-    means the boundary rules were cut mid-text). Sections are collected
-    from both base prompt variants; the parity filter against the actual
-    unconstrained build decides which apply at runtime.
+    survive the steered build completely. Sections are collected from both
+    base prompt variants; the parity filter against the actual unconstrained
+    build decides which apply at runtime. Reads go through the agent loader
+    (which owns caching and its ``clear_cache()`` invalidation), so operator
+    prompt reloads are honored.
     """
     from ouroboros.agents.loader import load_agent_prompt
     from ouroboros.bigbang.interview import _TOOLLESS_INTERVIEW_BASE_PROMPT
@@ -155,6 +166,54 @@ def _inner_base_prompt_sections() -> tuple[str, ...]:
     for text in texts:
         sections.extend(s for s in re.split(r"(?=\n## )", text) if s.strip())
     return tuple(sections)
+
+
+INNER_GUIDANCE_INVARIANTS: tuple[InnerGuidanceInvariant, ...] = (
+    InnerGuidanceInvariant(
+        name="answer-prefix-legend",
+        why="Interpretation contract for [from-code]/[from-user]/[from-research] answers",
+        resolve=lambda _inner, _state: ("[from-research]",),
+    ),
+    InnerGuidanceInvariant(
+        name="brownfield-intent-hint",
+        why="Keeps brownfield questions on intent and decisions, not code discovery",
+        resolve=lambda _inner, _state: ("not on discovering what exists.",),
+    ),
+    InnerGuidanceInvariant(
+        name="ambiguity-snapshot",
+        why='Carries the "Weakest area" feedback the steering philosophy governs',
+        resolve=lambda inner, state: (inner._build_ambiguity_snapshot_prompt(state),),
+    ),
+    InnerGuidanceInvariant(
+        name="perspective-panel",
+        why="Breadth-recap / closure-mode / seed-ready interview safeguards",
+        resolve=lambda inner, state: (inner._build_perspective_panel_prompt(state),),
+    ),
+    InnerGuidanceInvariant(
+        name="base-prompt-sections",
+        why="Interviewer role and context boundary rules (never promise implementation)",
+        resolve=lambda inner, _state: _current_inner_base_prompt_sections(inner),
+    ),
+)
+
+
+def _required_guidance(
+    inner: InterviewEngine,
+    state: InterviewState,
+    baseline: str,
+) -> list[str]:
+    """Marker texts the steered build must preserve for this round.
+
+    An invariant applies only when the unwrapped ``baseline`` build retains
+    its full text — guidance the inner engine itself trims under the same
+    budget is not the steering's debt.
+    """
+    return [
+        text
+        for invariant in INNER_GUIDANCE_INVARIANTS
+        for text in invariant.resolve(inner, state)
+        if text and text in baseline
+    ]
 
 
 def _shed_one_paragraph(block: str) -> str:
@@ -569,31 +628,33 @@ class PMInterviewEngine:
         Idempotent — if already installed, replaces previous wrapper to prevent
         stacking across multiple start/resume calls on the same engine instance.
 
-        The wrapper preserves the inner engine's prompt-budget contract: the
-        steering prefix is charged against the caller-supplied ``max_chars``
-        (or the engine's default system-prompt cap) instead of being prepended
-        on top of an already-capped prompt, so the combined prompt never
-        exceeds the budget the caller computed against the serialized-prompt
-        safety ceiling.
+        Budget-extension contract: the PM-owned inner instance gets its
+        system-prompt budgets widened by exactly the steering length (instance
+        attributes only — ``interview.py`` and dev-interview instances are
+        untouched). ``ask_next_question`` therefore computes budgets and trims
+        history against the widened numbers, the wire ceiling
+        (``_MAX_TOTAL_PROMPT_CHARS``) stays enforced by the inner engine
+        itself, and on the normal path the steering rides entirely inside the
+        reserved extension: the inner build keeps the engine's *designed*
+        budget, byte-identical to what a dev interview would produce.
 
-        Under tight caps the steering yields, never the inner prompt: the
-        inner builder is guaranteed its minimum system-prompt allocation
-        first, because it carries the engine's operating instructions (role,
-        one-question rule, round, initial context, ambiguity snapshot).
-        Steering is philosophy — safe to shed when a saturated history
-        leaves only the minimum budget. Shedding is paragraph-atomic: a
-        steering paragraph is either included whole or dropped, never cut
-        mid-sentence, so a reduced budget can narrow the policy but never
-        garble or invert it.
-
-        The minimum reserve alone is not sufficient — a long initial context
-        plus an ambiguity snapshot can need more than the minimum, and the
-        snapshot carries the "Weakest area" feedback this steering exists to
-        govern. So after fitting, steering paragraphs are shed one by one
-        until the inner guidance markers that survive an unconstrained build
-        also survive the steered build (or no steering remains).
+        The interview layer always has priority. When a caller supplies a cap
+        smaller than designed-budget-plus-extension (tests, wire pressure in
+        the history-decline zone), steering falls back to fit-and-shed:
+        paragraphs are included atomically (contract paragraph first, shed
+        last) and dropped one by one until every ``INNER_GUIDANCE_INVARIANTS``
+        marker retained by the unwrapped baseline build also survives the
+        steered build — or no steering remains.
         """
         self._pm_steering = getattr(self, "_pm_steering", _PM_SYSTEM_PROMPT_PREFIX)
+
+        # Reserve the steering extension on the PM-owned inner instance.
+        # Derived from the class attributes (not current instance values) so
+        # repeated installs never stack the extension.
+        inner_cls = type(self.inner)
+        extension = len(self._pm_steering) + 2  # steering + "\n\n" separator
+        self.inner._MAX_SYSTEM_PROMPT_CHARS = inner_cls._MAX_SYSTEM_PROMPT_CHARS + extension
+        self.inner._MIN_SYSTEM_PROMPT_CHARS = inner_cls._MIN_SYSTEM_PROMPT_CHARS + extension
 
         # Store the original (unwrapped) build method on first install
         if not hasattr(self, "_original_build_system_prompt"):
@@ -607,38 +668,48 @@ class PMInterviewEngine:
             max_chars: int | None = None,
         ) -> str:
             cap = max_chars or self.inner._MAX_SYSTEM_PROMPT_CHARS
-            inner_reserve = min(cap, self.inner._MIN_SYSTEM_PROMPT_CHARS)
-            steering_block = _fit_steering_paragraphs(
-                self._pm_steering,
-                budget=max(0, cap - inner_reserve),
-            )
+            steering_block = self._pm_steering + "\n\n"
+            inner_budget = cap - len(steering_block)
+            # The unwrapped comparison point is the engine's designed budget,
+            # never the widened cap — the extension is earmarked for steering
+            # and must not raise the bar the inner build is held to.
+            baseline_cap = min(inner_cls._MAX_SYSTEM_PROMPT_CHARS, cap)
 
-            # Guidance the unconstrained inner build retains must also
-            # survive the steered build; steering yields otherwise. The
-            # ambiguity snapshot, the perspective panel, and each base
-            # prompt section (role/context boundaries etc.) are required as
-            # their full text so the "Weakest area" lines, the panel's
-            # breadth/closure/seed-ready safeguards, and the interviewer
-            # boundary rules survive — not just a heading or a mid-sentence
-            # fragment.
-            base_full = original_build(
+            if inner_budget >= baseline_cap:
+                # Normal path: steering fits entirely inside the reserved
+                # extension; the inner build keeps its designed budget and
+                # nothing is displaced.
+                base = original_build(
+                    state,
+                    initial_context=initial_context,
+                    max_chars=inner_budget,
+                )
+                return steering_block + base
+
+            baseline = original_build(
                 state,
                 initial_context=initial_context,
-                max_chars=cap,
+                max_chars=baseline_cap,
             )
-            snapshot_text = self.inner._build_ambiguity_snapshot_prompt(state)
-            panel_text = self.inner._build_perspective_panel_prompt(state)
-            required_markers = [
-                marker
-                for marker in (
-                    *_INNER_GUIDANCE_STATIC_MARKERS,
-                    *_inner_base_prompt_sections(),
-                    snapshot_text,
-                    panel_text,
-                )
-                if marker and marker in base_full
-            ]
+            required_markers = _required_guidance(self.inner, state, baseline)
 
+            if inner_budget >= inner_cls._MIN_SYSTEM_PROMPT_CHARS:
+                base = original_build(
+                    state,
+                    initial_context=initial_context,
+                    max_chars=inner_budget,
+                )
+                if all(m in base for m in required_markers):
+                    return steering_block + base
+
+            # Tight path (caller-supplied small cap or history-decline
+            # pressure): interview layer first — fit steering atomically,
+            # then shed paragraphs until every invariant the unwrapped
+            # baseline retains survives the steered build.
+            steering_block = _fit_steering_paragraphs(
+                self._pm_steering,
+                budget=max(0, cap - min(cap, inner_cls._MIN_SYSTEM_PROMPT_CHARS)),
+            )
             while True:
                 # Never pass 0 down: the inner builder treats falsy max_chars
                 # as "use the default cap", which would blow the budget again.
@@ -650,7 +721,7 @@ class PMInterviewEngine:
                         max_chars=inner_budget,
                     )
                     if steering_block
-                    else base_full
+                    else baseline
                 )
                 if not steering_block or all(m in base for m in required_markers):
                     # Hard cap as final safety net (degenerate tiny-cap case).

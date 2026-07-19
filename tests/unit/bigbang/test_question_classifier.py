@@ -66,6 +66,18 @@ class TestClassificationPromptPostLaunchBoundary:
         assert "KPI targets" in decide_later
         assert "adoption goals" in decide_later
         assert "observation windows" in decide_later
+        # The rationale generalizes beyond the enumerated examples (#1664).
+        assert "real-world usage data" in decide_later
+
+    def test_classifier_prompt_states_the_prd_contract_philosophy(self) -> None:
+        """The classifier gets the "why" above its category list, not just
+        reworded bullets (idea ported from #1664)."""
+        flat = " ".join(_CLASSIFICATION_SYSTEM_PROMPT.split())
+        assert "contract between the PM and the developers" in flat
+        assert "not part of this contract" in flat
+        assert flat.index("contract between the PM and the developers") < flat.index(
+            "## Categories"
+        )
 
 
 # ──────────────────────────────────────────────────────────────
