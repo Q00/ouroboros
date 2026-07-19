@@ -127,6 +127,37 @@ async def test_model_failure_keeps_existing_recovery_without_decomposition() -> 
 
 
 @pytest.mark.asyncio
+async def test_infra_fatal_failure_never_calls_bounce_classifier() -> None:
+    executor = _executor()
+    infra_fatal = ACExecutionResult(
+        ac_index=0,
+        ac_content="Parent work",
+        success=False,
+        error="runtime authentication failed",
+        infra_fatal=True,
+    )
+    executor._execute_atomic_ac = AsyncMock(return_value=infra_fatal)
+    executor._try_decompose_ac = AsyncMock()
+    executor._request_bounce_classification = AsyncMock()
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Parent work",
+        session_id="session-infra-fatal",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="goal",
+        execution_id="exec-infra-fatal",
+    )
+
+    assert result.infra_fatal is True
+    assert result.error == infra_fatal.error
+    executor._try_decompose_ac.assert_not_awaited()
+    executor._request_bounce_classification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_abandoned_stall_runs_bounce_recovery_without_losing_semantic_key() -> None:
     executor = _executor()
     executor._execute_atomic_ac = AsyncMock(

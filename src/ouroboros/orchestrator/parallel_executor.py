@@ -6533,7 +6533,10 @@ class ParallelACExecutor:
         investment_spec: InvestmentSpec | None = None,
     ) -> tuple[ACExecutionResult | None, DecompositionDecisionRecord | None]:
         """Run cause-matched bounce recovery before alternate-harness fallback."""
-        if self._decomposition_mode != "bounce_only" or result.success:
+        # Infra-fatal means the runtime itself failed.  It is neither evidence
+        # that the AC is too large nor an input for semantic recovery, so it
+        # must bypass the classifier and every decomposition side effect.
+        if self._decomposition_mode != "bounce_only" or result.success or result.infra_fatal:
             return None, None
         previous = self._decomposition_decisions.get(node_identity.node_id)
         if previous is not None and previous.source is DecompositionSource.BOUNCE:
