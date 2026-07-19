@@ -8970,21 +8970,49 @@ Respond with either ATOMIC or the structured JSON object only.
                     reason=ambiguity_reason,
                 )
 
-            if not await _emit_ambiguity_signal():
+            # Round-15 finding #3 (BLOCKING): this write's entire purpose is
+            # to be operator-visible BEFORE the possibly-duplicating
+            # redispatch — a deferred BACKGROUND retry ("eventually
+            # consistent") cannot serve that purpose. The old code scheduled
+            # one and then proceeded to the redispatch anyway: if the write
+            # had not landed, the operator had NO durable signal to act on
+            # during the cadence window, defeating round 11's inspect/cancel
+            # design outright. Retry the write SYNCHRONOUSLY instead, at the
+            # same parked cadence this path already holds before the
+            # redispatch: the AC is HELD — never surfaced FAILED (the
+            # mandate forbids that while escalation remains), and never
+            # redispatched — until the warning is durably visible or the
+            # run is cancelled. This reuses the exact revert-and-hold shape
+            # the ladder's ``progressed``/``parked`` writes established
+            # (round-5 finding #4): each hold cycle awaits the injectable
+            # sleep, so operator cancellation interrupts it like every other
+            # parked-cadence loop, and every cycle is loud on both the log
+            # and the console. In the common case (the write lands
+            # immediately) nothing changes, and the cadence sleep below then
+            # starts the operator window from the moment the signal became
+            # visible.
+            hold_cycles = 0
+            while not await _emit_ambiguity_signal():
+                hold_cycles += 1
                 log.error(
                     "parallel_executor.lateral_escalation.ambiguity_signal_write_failed",
                     ac_idx=ac_idx,
                     execution_id=execution_id,
                     node_id=ambiguity_node_id,
+                    hold_cycles=hold_cycles,
+                    detail=(
+                        "holding this AC (no redispatch) until the "
+                        "ambiguous-completion warning is durably visible to "
+                        "the operator or the run is cancelled"
+                    ),
                 )
-                self._schedule_deferred_durable_write(
-                    write=_emit_ambiguity_signal,
-                    on_persisted=None,
-                    log_key="parallel_executor.lateral_escalation.ambiguity_signal",
-                    ac_idx=ac_idx,
-                    execution_id=execution_id,
-                    node_id=ambiguity_node_id,
+                self._console.print(
+                    f"  [red]AC {ac_idx + 1}: could not durably record the "
+                    "ambiguous-completion warning; holding this AC (no "
+                    "redispatch) and retrying the write at the parked "
+                    f"cadence (cycle {hold_cycles})[/red]"
                 )
+                await self._sleep(self._parked_retry_backoff_seconds)
         synthetic_prior = ACExecutionResult(
             ac_index=ac_idx,
             ac_content=ac_content,

@@ -6,6 +6,7 @@ always mocked — this suite never actually sleeps or dispatches a real agent.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3232,6 +3233,112 @@ class TestAmbiguousCompletionResumeIsLoudAndDelayed:
             and event.data.get("node_id") == node_id
             for event in events
         )
+
+    @pytest.mark.asyncio
+    async def test_failed_ambiguity_signal_holds_ac_and_never_redispatches(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Round-15 finding #3 (BLOCKING), the review's exact probe: the
+        ambiguity-signal write fails on EVERY attempt (immediate and every
+        synchronous retry). The old code scheduled a background retry and
+        redispatched anyway — the review observed one AC dispatch with NO
+        durable operator signal. The redispatch must now NOT proceed: the
+        AC is held at the parked cadence — loud, never surfaced FAILED,
+        interruptible by run cancellation — while the write keeps being
+        re-attempted synchronously."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(self._seed_in_flight_progressed(node_id))
+        executor = TestResumeReentersLadderAtRestoredPhase._cold_start_executor(memory_event_store)
+        executor._event_emitter.emit_ac_parked_for_operator = AsyncMock(return_value=False)
+        executor._execute_ac_batch = AsyncMock()
+
+        hold_sleeps = 0
+
+        async def _cancelled_after_three_holds(_seconds: float) -> None:
+            nonlocal hold_sleeps
+            hold_sleeps += 1
+            if hold_sleeps >= 3:
+                # The only exit the hold allows besides the write landing:
+                # the run being cancelled (operator interrupt), which every
+                # parked-cadence loop in this file honors through its sleep.
+                raise asyncio.CancelledError
+
+        executor._sleep = AsyncMock(side_effect=_cancelled_after_three_holds)
+
+        with pytest.raises(asyncio.CancelledError):
+            await executor._run_batch_with_verify_and_retry(
+                seed=_make_seed(),
+                batch_executable=[0],
+                session_id="s1",
+                execution_id="exec-1",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="",
+                level_contexts=[],
+                ac_retry_attempts={0: 0},
+                execution_counters=None,
+            )
+
+        # The possibly-duplicating redispatch never ran while the warning
+        # was not durably visible.
+        executor._execute_ac_batch.assert_not_called()
+        # The hold synchronously re-attempted the write once per cycle — not
+        # a single fire-and-forget attempt handed to a background queue.
+        assert executor._event_emitter.emit_ac_parked_for_operator.await_count == 3
+        # And nothing durable claims the signal landed.
+        events = await memory_event_store.replay("execution", "exec-1")
+        assert not any(event.type == "execution.ac.parked_for_operator" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_ambiguity_signal_write_recovery_unblocks_the_held_redispatch(
+        self, memory_event_store: EventStore
+    ) -> None:
+        """Once a synchronous retry finally lands the signal, the held AC
+        proceeds: cadence window AFTER the signal became visible, then
+        exactly one redispatch — never abandoned, never surfaced FAILED."""
+        node_id = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0).node_id
+        await memory_event_store.append(self._seed_in_flight_progressed(node_id))
+        executor = TestResumeReentersLadderAtRestoredPhase._cold_start_executor(memory_event_store)
+
+        order: list[str] = []
+        emit_outcomes = [False, False, True]
+
+        async def _flaky_emit(**_kwargs: object) -> bool:
+            order.append("emit")
+            return emit_outcomes.pop(0)
+
+        executor._event_emitter.emit_ac_parked_for_operator = AsyncMock(side_effect=_flaky_emit)
+
+        async def _record_sleep(_seconds: float) -> None:
+            order.append("sleep")
+
+        executor._sleep = AsyncMock(side_effect=_record_sleep)
+
+        async def _dispatch(**_kwargs: object) -> list[ACExecutionResult]:
+            order.append("dispatch")
+            return [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=_dispatch)
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        # Two failed attempts each held a full parked cadence; the third
+        # landed; the operator window (cadence sleep) then ran AFTER the
+        # signal became visible; only then did the single redispatch run.
+        assert order == ["emit", "sleep", "emit", "sleep", "emit", "sleep", "dispatch"]
 
 
 class TestResumeRestoresPersistedRetryAttempt:
