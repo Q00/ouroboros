@@ -2610,21 +2610,92 @@ class ParallelACExecutor:
 
     @staticmethod
     def _seed_semantic_fingerprint(seed: Any) -> str:
-        """A stable hash of the Seed's SEMANTIC content (round-15 finding #1).
+        """A stable hash of the Seed's SEMANTIC content (round-15 finding #1;
+        widened to the full semantic surface by round-16 finding #2).
 
         ``seed_id`` is a random uuid minted at Seed creation — it names an
-        object, not its content, so a Seed whose goal/AC content was edited
-        keeps the same ``seed_id`` and would silently adopt the pre-edit
-        run's checkpoint. This fingerprint captures what the checkpointed
-        progress was actually progress OF: the goal text plus each AC's
-        semantic identity (``derive_semantic_ac_key`` — the codebase's
-        existing per-AC content digest, which already excludes volatile
-        metadata/session identity), in order. The execution-plan structure
-        is deliberately EXCLUDED: the plan is re-derived by LLM dependency
-        analysis on every launch, so its grouping can legitimately differ
-        across a genuine crash-restart of identical content — including it
-        would discard genuine resumes (re-opening the round-9 #2 lost-
-        escalation regression) without any content having changed.
+        object, not its content, so a Seed whose content was edited keeps
+        the same ``seed_id`` and would silently adopt the pre-edit run's
+        checkpoint. This fingerprint captures what the checkpointed
+        progress was actually progress OF.
+
+        Round-16 finding #2 (BLOCKING): the round-15 ``v1`` scheme hashed
+        ONLY the goal text plus each AC's ``derive_semantic_ac_key`` — so a
+        checkpoint saved under one set of ``constraints`` / ``task_type`` /
+        ``brownfield_context`` / ``ontology_schema`` / evaluation-exit
+        contracts / plugin extra fields / per-AC ``investment`` values was
+        silently adopted by a resume where those values had MATERIALLY
+        changed (several change prompts or routing), letting old progress
+        skip work under semantics that no longer match what is about to
+        execute. ``v2`` therefore hashes the Seed's ENTIRE semantic
+        surface: every field that shapes prompts, routing, verification,
+        or evaluation. All of these are frozen into the immutable Seed and
+        re-supplied verbatim by a genuine crash-restart of the same seed,
+        so none can legitimately differ across a real resume.
+
+        Still deliberately EXCLUDED:
+        - ``metadata`` (``SeedMetadata``) — volatile object identity, not
+          content: the random ``seed_id`` itself, ``created_at``,
+          ``ambiguity_score``, interview/lineage ids, generation
+          provenance. The same exclusion ``derive_semantic_ac_key``
+          documents for per-AC volatile metadata.
+        - The execution-plan structure — the plan is re-derived by LLM
+          dependency analysis on every launch, so its grouping can
+          legitimately differ across a genuine crash-restart of identical
+          content; including it would discard genuine resumes (re-opening
+          the round-9 #2 lost-escalation regression) without any content
+          having changed.
+        """
+        criteria = getattr(seed, "acceptance_criteria", ()) or ()
+
+        def _component(value: Any) -> Any:
+            dump = getattr(value, "model_dump", None)
+            return dump(mode="json") if callable(dump) else value
+
+        payload = json.dumps(
+            {
+                "goal": str(getattr(seed, "goal", "")),
+                "task_type": str(getattr(seed, "task_type", "")),
+                "constraints": [str(c) for c in (getattr(seed, "constraints", ()) or ())],
+                "acceptance_criteria": [
+                    {
+                        "key": derive_semantic_ac_key(c),
+                        "investment": _component(getattr(c, "investment", None)),
+                    }
+                    for c in criteria
+                ],
+                "brownfield_context": _component(getattr(seed, "brownfield_context", None)),
+                "ontology_schema": _component(getattr(seed, "ontology_schema", None)),
+                "evaluation_principles": [
+                    _component(p) for p in (getattr(seed, "evaluation_principles", ()) or ())
+                ],
+                "exit_conditions": [
+                    _component(c) for c in (getattr(seed, "exit_conditions", ()) or ())
+                ],
+                # Plugin-owned structured handoff data (Seed extra fields):
+                # validated JSON/YAML-serializable at Seed construction.
+                "plugin_extra": dict(getattr(seed, "model_extra", None) or {}),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            # Real Seed components are JSON-native after ``model_dump``;
+            # ``default=str`` only guards non-Seed test doubles from
+            # turning a fingerprint computation into a crash.
+            default=str,
+        ).encode("utf-8")
+        return f"v2:{hashlib.sha256(payload).hexdigest()}"
+
+    @staticmethod
+    def _seed_semantic_fingerprint_v1(seed: Any) -> str:
+        """The round-15 ``v1`` fingerprint scheme (goal + per-AC keys).
+
+        Kept ONLY to verify checkpoints saved before the round-16 #2
+        widening: a ``v1:``-prefixed saved fingerprint is compared against
+        this same-scheme recomputation (strictly stronger than the
+        absent-fingerprint adopt posture), while every new save writes
+        ``v2``. One-time migration, mirroring the convention every other
+        restored field follows.
         """
         criteria = getattr(seed, "acceptance_criteria", ()) or ()
         payload = json.dumps(
@@ -2659,6 +2730,10 @@ class ParallelACExecutor:
           direction; discarding merely re-runs and re-verifies, loudly.
         - Present and mismatched: refuse adoption (the round-10 staleness
           treatment — discard, run fresh, loud operator warning).
+        - Round-16 finding #2: a ``v1:`` fingerprint (saved before the
+          scheme widened to the full semantic surface) is verified against
+          the same ``v1`` recomputation — a one-time migration that is
+          strictly stronger than the absent-fingerprint adopt posture.
         """
         saved = cp.state.get("seed_fingerprint")
         if saved is None:
@@ -2671,14 +2746,18 @@ class ParallelACExecutor:
                 ),
             )
             return None
-        if not isinstance(saved, str) or not saved.startswith("v1:"):
+        if not isinstance(saved, str) or not saved.startswith(("v1:", "v2:")):
             return (
                 f"checkpoint carries a malformed seed content fingerprint "
                 f"({saved!r}); it cannot be verified against the current "
                 "Seed, and adopting unverifiable progress risks a silent "
                 "false success"
             )
-        current = self._seed_semantic_fingerprint(seed)
+        current = (
+            self._seed_semantic_fingerprint_v1(seed)
+            if saved.startswith("v1:")
+            else self._seed_semantic_fingerprint(seed)
+        )
         if saved != current:
             return (
                 "checkpoint was saved for a Seed whose goal/acceptance-"

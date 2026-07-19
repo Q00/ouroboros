@@ -26,7 +26,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    BrownfieldContext,
+    EvaluationPrinciple,
+    ExitCondition,
+    InvestmentSpec,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.orchestrator.dependency_analyzer import (
     ACNode,
     DependencyGraph,
@@ -1199,6 +1208,220 @@ class TestCheckpointAdoptionValidatesSeedContent:
         await run2_events.close()
         run2._run_batch_with_verify_and_retry.assert_called_once()
         assert result.execution_id == "exec-b"
+
+
+def _rich_seed(**overrides: object) -> Seed:
+    """A Seed populating EVERY semantic-surface field the v2 fingerprint
+    must cover, under a fixed seed_id so only content distinguishes it."""
+    fields: dict[str, object] = {
+        "goal": "Ship feature A",
+        "task_type": "code",
+        "constraints": ("Python 3.12+", "No external database"),
+        "acceptance_criteria": (
+            AcceptanceCriterionSpec(
+                description="Implement feature A",
+                investment=InvestmentSpec(difficulty="low", stakes="low"),
+            ),
+        ),
+        "brownfield_context": BrownfieldContext(
+            project_type="brownfield",
+            existing_patterns=("repository pattern",),
+        ),
+        "ontology_schema": OntologySchema(name="Checkpoint", description="Test schema"),
+        "evaluation_principles": (
+            EvaluationPrinciple(name="completeness", description="All requirements met"),
+        ),
+        "exit_conditions": (
+            ExitCondition(name="done", description="All ACs pass", criteria="100% pass"),
+        ),
+        "metadata": SeedMetadata(ambiguity_score=0.05, seed_id="seed_shared_id"),
+        "plugin_handoff": {"queue": "alpha"},
+    }
+    fields.update(overrides)
+    return Seed(**fields)  # type: ignore[arg-type]
+
+
+class TestSeedFingerprintCoversFullSemanticSurface:
+    """Round-16 finding #2 (BLOCKING): the round-15 fingerprint hashed ONLY
+    goal + per-AC semantic keys, so a checkpoint saved under one set of
+    ``constraints``/``task_type``/``brownfield_context``/``ontology_schema``/
+    evaluation-exit contracts/plugin fields/per-AC ``investment`` values was
+    silently adopted by a resume where those values had materially changed
+    (several change prompts or routing) — old progress skipped work under
+    semantics that no longer match what was about to execute. The v2
+    fingerprint must diverge for each of those fields, stay identical for a
+    genuine resume, and keep verifying legacy v1 checkpoints against the v1
+    scheme (one-time migration posture)."""
+
+    @pytest.mark.parametrize(
+        ("field", "changed"),
+        [
+            ("constraints", ("Rust only",)),
+            ("task_type", "research"),
+            (
+                "brownfield_context",
+                BrownfieldContext(project_type="greenfield"),
+            ),
+            (
+                "ontology_schema",
+                OntologySchema(name="Checkpoint", description="A different conceptual lens"),
+            ),
+            (
+                "evaluation_principles",
+                (EvaluationPrinciple(name="completeness", description="All met", weight=0.2),),
+            ),
+            (
+                "exit_conditions",
+                (ExitCondition(name="done", description="Different exit", criteria="new bar"),),
+            ),
+            (
+                "acceptance_criteria",
+                (
+                    AcceptanceCriterionSpec(
+                        description="Implement feature A",
+                        investment=InvestmentSpec(difficulty="high", stakes="high"),
+                    ),
+                ),
+            ),
+            ("plugin_handoff", {"queue": "beta"}),
+        ],
+    )
+    def test_material_change_diverges_fingerprint(self, field: str, changed: object) -> None:
+        """Each of the review's cited fields must invalidate the checkpoint
+        when it changes under the same seed_id."""
+        base = ParallelACExecutor._seed_semantic_fingerprint(_rich_seed())
+        mutated = ParallelACExecutor._seed_semantic_fingerprint(_rich_seed(**{field: changed}))
+        assert base != mutated, f"fingerprint ignored a material change to {field!r}"
+
+    def test_identical_content_matches_and_volatile_metadata_is_excluded(self) -> None:
+        """A genuine resume re-supplies identical content — possibly under
+        regenerated volatile metadata — and must keep matching."""
+        base = ParallelACExecutor._seed_semantic_fingerprint(_rich_seed())
+        assert base == ParallelACExecutor._seed_semantic_fingerprint(_rich_seed())
+        remetadata = _rich_seed(
+            metadata=SeedMetadata(
+                ambiguity_score=0.19,
+                seed_id="seed_other_id",
+                interview_id="interview-42",
+            )
+        )
+        assert base == ParallelACExecutor._seed_semantic_fingerprint(remetadata)
+
+    @pytest.mark.asyncio
+    async def test_changed_constraints_same_seed_id_is_not_silently_adopted(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end: checkpoint saved under constraints A, resume with
+        materially different constraints under the SAME seed_id and the
+        SAME goal/AC text — the pre-fix fingerprint matched and adopted the
+        stale progress wholesale; now the checkpoint must be discarded and
+        the work actually dispatched."""
+        seed_a = _rich_seed()
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        run1 = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        run1._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[
+                ACExecutionResult(ac_index=0, ac_content="Implement feature A", success=True)
+            ]
+        )
+        await run1.execute_parallel(
+            seed_a,
+            session_id="session-a",
+            execution_id="exec-a",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed_a),
+        )
+        assert CheckpointStore(base_path=ckpt_path).load("seed_shared_id").is_ok
+
+        seed_b = _rich_seed(constraints=("Rust only",))
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            dispatched.append(list(kwargs["batch_executable"]))  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=0, ac_content="Implement feature A", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
+        result = await run2.execute_parallel(
+            seed_b,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed_b),
+        )
+        await run2_events.close()
+
+        # The changed-constraints run actually dispatched — no silent
+        # "already done" skip off the other constraint set's progress.
+        assert dispatched == [[0]]
+        assert all(r.final_message != "[Restored from checkpoint]" for r in result.results)
+        assert result.execution_id == "exec-b"
+
+    @pytest.mark.asyncio
+    async def test_v1_fingerprint_checkpoint_still_adopts_matching_content(
+        self, tmp_path: Path
+    ) -> None:
+        """One-time migration: a checkpoint saved under the round-15 v1
+        scheme must stay resumable when its v1 recomputation matches — the
+        same posture legacy fingerprint-less checkpoints keep."""
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed = _rich_seed()
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        run1 = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        run1._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[
+                ACExecutionResult(ac_index=0, ac_content="Implement feature A", success=True)
+            ]
+        )
+        await run1.execute_parallel(
+            seed,
+            session_id="session-a",
+            execution_id="exec-a",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed),
+        )
+        v1_state = dict(store.load("seed_shared_id").value.state)
+        assert str(v1_state["seed_fingerprint"]).startswith("v2:")
+        v1_state["seed_fingerprint"] = ParallelACExecutor._seed_semantic_fingerprint_v1(seed)
+        assert store.save(
+            CheckpointData.create(
+                seed_id="seed_shared_id", phase="parallel_execution", state=v1_state
+            )
+        ).is_ok
+
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed),
+        )
+        await run2_events.close()
+        run2._run_batch_with_verify_and_retry.assert_not_called()
+        assert result.execution_id == "exec-a"
 
 
 class TestIndeterminateReplayWithCompletedCheckpoint:
