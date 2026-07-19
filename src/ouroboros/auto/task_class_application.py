@@ -2,9 +2,10 @@
 
 The Socratic interview standardizes the ledger; :mod:`domain_inference`
 (L1-b) classifies the ledger into a single :class:`TaskClass`; this
-module wires that class's default acceptance-criteria template into an
-otherwise empty :class:`ouroboros.core.seed.Seed` contract. Existing Seed
-criteria remain authoritative and are never broadened with class defaults.
+module wires that class's default acceptance-criteria template into a
+:class:`ouroboros.core.seed.Seed`. The guarded Auto pipeline caller invokes it
+only for an empty contract, so existing pipeline Seed criteria remain
+unmodified.
 
 The helper is intentionally split out from the inference module so:
 
