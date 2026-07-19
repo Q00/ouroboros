@@ -139,7 +139,7 @@ or is premature and should be deferred to a later stage.
 
 **PLANNING** — PM can answer directly:
 - Business goals, user needs, market context
-- Success metrics, KPIs, acceptance criteria
+- Acceptance criteria — what the delivered behavior and policy must satisfy
 - Priority, timeline, budget constraints
 - User stories, personas, workflows
 - Scope decisions (in/out), feature prioritization
@@ -156,6 +156,9 @@ or is premature and should be deferred to a later stage.
 **DECIDE_LATER** — Premature or unknowable at this stage:
 - Questions whose answer depends on decisions not yet made
 - Future-phase concerns (post-MVP optimization, scaling details)
+- Post-launch outcome measurement (conversion uplift, KPI targets, adoption \
+goals, observation windows) — these depend on data that will not exist until \
+after release
 - Questions requiring user research or data that doesn't exist yet
 - Speculative trade-offs that can't be resolved without prototyping
 - Cross-cutting concerns that will become clearer as other requirements solidify
