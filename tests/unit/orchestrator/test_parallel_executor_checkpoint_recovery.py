@@ -1875,7 +1875,9 @@ class TestMalformedCheckpointSemanticsFailsClosed:
         assert reloaded.value.state == broken_state
 
     @pytest.mark.asyncio
-    async def test_unversioned_checkpoint_is_rejected_without_dispatch(self, tmp_path: Path) -> None:
+    async def test_unversioned_checkpoint_is_rejected_without_dispatch(
+        self, tmp_path: Path
+    ) -> None:
         from ouroboros.persistence.checkpoint import CheckpointData
 
         seed = self._seed_factory()
@@ -1989,9 +1991,7 @@ class TestMalformedCheckpointSemanticsFailsClosed:
             "prompt_guidance",
         ],
     )
-    def test_semantics_validation_rejects_missing_versioned_group(
-        self, missing_group: str
-    ) -> None:
+    def test_semantics_validation_rejects_missing_versioned_group(self, missing_group: str) -> None:
         state = self._valid_semantics_state()
         state.pop(missing_group)
         detail = ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state=state))
