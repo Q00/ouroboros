@@ -77,7 +77,6 @@ class TestPMSuccessCriteriaBoundary:
     def test_steering_excludes_post_launch_outcomes_from_the_contract(self) -> None:
         prefix = self._flattened_prefix()
         assert "Post-launch outcomes" in prefix
-        assert "not obligations the developers can deliver on" in prefix
         assert "no place in this contract" in prefix
 
 
@@ -125,10 +124,10 @@ class TestPMSteeringPromptBudget:
         assert "no place in this contract" in flat
         self._assert_steering_paragraphs_atomic(prompt, cap)
 
-    def test_caller_supplied_cap_keeps_contract_and_inner_prompt(self, tmp_path: Path) -> None:
-        """With a reduced caller cap and a short context, steering sheds its
-        supporting paragraphs but the contract policy and the complete inner
-        guidance still coexist within the cap."""
+    def test_caller_supplied_cap_keeps_parity_with_unwrapped_guidance(self, tmp_path: Path) -> None:
+        """With a reduced caller cap, whatever guidance the unwrapped build
+        retains completely must also survive the steered build — steering
+        yields entirely when there is no surplus above that guidance."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_caller",
@@ -136,14 +135,54 @@ class TestPMSteeringPromptBudget:
         )
         cap = 3_000
         prompt = engine.inner._build_system_prompt(state, max_chars=cap)
+        unwrapped = engine._original_build_system_prompt(state, max_chars=cap)
         assert len(prompt) <= cap
         assert self._INNER_ROLE_MARKER in prompt
         assert self._INNER_JOB_MARKER in prompt
         panel = engine.inner._build_perspective_panel_prompt(state)
         assert panel and panel in prompt
+        role_section = self._agent_prompt_section("## CRITICAL ROLE BOUNDARIES")
+        if role_section in unwrapped:
+            assert role_section in prompt
+        self._assert_steering_paragraphs_atomic(prompt, cap)
+
+    @staticmethod
+    def _agent_prompt_section(heading: str) -> str:
+        """Full text of one ``##`` section of the socratic base prompt."""
+        import re
+
+        from ouroboros.agents.loader import load_agent_prompt
+
+        sections = re.split(r"(?=\n## )", load_agent_prompt("socratic-interviewer"))
+        return next(s for s in sections if s.strip().startswith(heading))
+
+    def test_default_cap_keeps_interviewer_boundary_sections(self, tmp_path: Path) -> None:
+        """The base prompt's CRITICAL ROLE BOUNDARIES and CONTEXT BOUNDARIES
+        sections — retained completely by the unwrapped default-cap build —
+        must survive the steered build completely alongside the contract."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_boundaries",
+            initial_context="Build a task manager",
+        )
+        prompt = engine.inner._build_system_prompt(state)
+        assert self._agent_prompt_section("## CRITICAL ROLE BOUNDARIES") in prompt
+        assert self._agent_prompt_section("## CONTEXT BOUNDARIES") in prompt
         flat = " ".join(prompt.split())
         assert "contract between the PM and the developers" in flat
-        self._assert_steering_paragraphs_atomic(prompt, cap)
+
+    def test_fit_prefers_the_contract_paragraph_over_earlier_paragraphs(self) -> None:
+        """When the budget fits only one paragraph, the PRD-contract
+        paragraph wins even though it is not first in document order."""
+        from ouroboros.bigbang.pm_interview import (
+            _PM_CONTRACT_MARKER,
+            _fit_steering_paragraphs,
+        )
+
+        block = _fit_steering_paragraphs(_PM_SYSTEM_PROMPT_PREFIX, budget=300)
+        assert block
+        assert _PM_CONTRACT_MARKER in block
+        assert "You are a Product Requirements interviewer" not in block
 
     def test_saturated_history_minimum_budget_preserves_inner_prompt(self, tmp_path: Path) -> None:
         """A saturated history leaves only the minimum system budget; the

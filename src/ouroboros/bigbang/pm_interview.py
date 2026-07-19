@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+import functools
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import structlog
@@ -71,13 +73,9 @@ You are a Product Requirements interviewer helping a PM define their product.
 Assume the resulting product requirements document will drive all downstream work through AI workflows, so elicit decisions precise enough for autonomous planning, implementation, and verification.
 If a product question is not settled, preserve that uncertainty explicitly instead of inventing certainty; capture assumptions and decide-later items as first-class PM output.
 
-A PRD is a contract between the PM and the developers: it communicates the PM's
-intent and the policies the product must embody. Success criteria define what
-the delivered feature must satisfy for the PM to accept it as built — "this is
-what I had in my mind" — expressed in terms of behavior and policy. Post-launch
-outcomes (adoption, conversion, KPI movement) are the PM's own follow-up work,
-not obligations the developers can deliver on, so they have no place in this
-contract.
+A PRD is a contract between the PM and the developers: success criteria are the
+behavior and policy the PM must observe in the delivered feature to accept it
+as built. Post-launch outcomes have no place in this contract.
 
 Focus on: goal, user stories, constraints, success criteria, assumptions.
 
@@ -134,6 +132,31 @@ _INNER_GUIDANCE_STATIC_MARKERS = (
 _PM_CONTRACT_MARKER = "contract between the PM and the developers"
 
 
+@functools.lru_cache(maxsize=1)
+def _inner_base_prompt_sections() -> tuple[str, ...]:
+    """Sections of the inner interviewer base prompts, for parity checks.
+
+    The inner builder truncates its base prompt from the end, so every
+    ``##`` section the unconstrained build retains completely must also
+    survive the steered build completely (a section head without its tail
+    means the boundary rules were cut mid-text). Sections are collected
+    from both base prompt variants; the parity filter against the actual
+    unconstrained build decides which apply at runtime.
+    """
+    from ouroboros.agents.loader import load_agent_prompt
+    from ouroboros.bigbang.interview import _TOOLLESS_INTERVIEW_BASE_PROMPT
+
+    texts = [_TOOLLESS_INTERVIEW_BASE_PROMPT]
+    try:
+        texts.append(load_agent_prompt("socratic-interviewer"))
+    except Exception:  # noqa: BLE001 - agent file is optional at runtime
+        pass
+    sections: list[str] = []
+    for text in texts:
+        sections.extend(s for s in re.split(r"(?=\n## )", text) if s.strip())
+    return tuple(sections)
+
+
 def _shed_one_paragraph(block: str) -> str:
     """Drop the lowest-priority paragraph from a fitted steering block.
 
@@ -155,28 +178,34 @@ def _shed_one_paragraph(block: str) -> str:
 def _fit_steering_paragraphs(steering: str, budget: int) -> str:
     """Fit whole steering paragraphs into ``budget`` characters.
 
-    Paragraphs are included in document order and atomically: one that does
-    not fit (with its trailing ``"\\n\\n"`` separator) is dropped along with
-    everything after it, so a reduced budget can only narrow the steering
-    policy — never cut a sentence in half or strip the exclusion clause off
-    a paragraph and invert its meaning.
+    Paragraphs are included atomically: one that does not fit (with its
+    trailing ``"\\n\\n"`` separator) is skipped whole, so a reduced budget
+    can only narrow the steering policy — never cut a sentence in half or
+    strip the exclusion clause off a paragraph and invert its meaning.
 
-    Returns the fitted block ending with ``"\\n\\n"``, or ``""`` when not
-    even the first paragraph fits.
+    Selection follows the shedding priority, not document order: the
+    PRD-contract paragraph is placed first, then the remaining paragraphs
+    in document order as budget allows. The fitted paragraphs are emitted
+    in their original document order.
+
+    Returns the fitted block ending with ``"\\n\\n"``, or ``""`` when no
+    paragraph fits.
     """
+    paragraphs = [p for p in steering.split("\n\n") if p.strip()]
+    by_priority = sorted(
+        range(len(paragraphs)),
+        key=lambda i: (0 if _PM_CONTRACT_MARKER in paragraphs[i] else 1, i),
+    )
     fitted_len = 0
-    fitted: list[str] = []
-    for paragraph in steering.split("\n\n"):
-        if not paragraph.strip():
-            continue
-        cost = len(paragraph) + 2  # paragraph + "\n\n" separator
-        if fitted_len + cost > budget:
-            break
-        fitted.append(paragraph)
-        fitted_len += cost
-    if not fitted:
+    chosen: set[int] = set()
+    for index in by_priority:
+        cost = len(paragraphs[index]) + 2  # paragraph + "\n\n" separator
+        if fitted_len + cost <= budget:
+            chosen.add(index)
+            fitted_len += cost
+    if not chosen:
         return ""
-    return "\n\n".join(fitted) + "\n\n"
+    return "\n\n".join(paragraphs[i] for i in sorted(chosen)) + "\n\n"
 
 
 @dataclass
@@ -586,10 +615,12 @@ class PMInterviewEngine:
 
             # Guidance the unconstrained inner build retains must also
             # survive the steered build; steering yields otherwise. The
-            # ambiguity snapshot and the perspective panel are required as
-            # their full text so the "Weakest area" lines and the panel's
-            # breadth/closure/seed-ready safeguards survive — not just a
-            # heading or a mid-sentence fragment.
+            # ambiguity snapshot, the perspective panel, and each base
+            # prompt section (role/context boundaries etc.) are required as
+            # their full text so the "Weakest area" lines, the panel's
+            # breadth/closure/seed-ready safeguards, and the interviewer
+            # boundary rules survive — not just a heading or a mid-sentence
+            # fragment.
             base_full = original_build(
                 state,
                 initial_context=initial_context,
@@ -599,7 +630,12 @@ class PMInterviewEngine:
             panel_text = self.inner._build_perspective_panel_prompt(state)
             required_markers = [
                 marker
-                for marker in (*_INNER_GUIDANCE_STATIC_MARKERS, snapshot_text, panel_text)
+                for marker in (
+                    *_INNER_GUIDANCE_STATIC_MARKERS,
+                    *_inner_base_prompt_sections(),
+                    snapshot_text,
+                    panel_text,
+                )
                 if marker and marker in base_full
             ]
 
