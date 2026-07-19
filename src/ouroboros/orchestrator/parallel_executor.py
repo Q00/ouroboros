@@ -3241,6 +3241,37 @@ class ParallelACExecutor:
                 last_status = status
         return last_status in self._NON_RESUMABLE_TERMINAL_STATUSES
 
+    @staticmethod
+    def _checkpoint_owner_malformed(cp: Any) -> str | None:
+        """Return why a current-format checkpoint owner is invalid.
+
+        Every v2 writer emits the complete owner record. Missing or
+        unreadable ownership is therefore corruption, not a legacy migration
+        shape: adopting it would bypass the cross-host liveness safeguard.
+        """
+        state = getattr(cp, "state", None)
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        owner = state.get("owner")
+        if not isinstance(owner, Mapping):
+            return f"owner is not a mapping: {type(owner).__name__}"
+        host = owner.get("host")
+        if not isinstance(host, str) or not host.strip():
+            return f"owner.host is not a non-empty string: {host!r}"
+        pid = owner.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return f"owner.pid is not a positive integer: {pid!r}"
+        written_at = owner.get("written_at")
+        if not isinstance(written_at, str) or not written_at:
+            return f"owner.written_at is not a non-empty string: {written_at!r}"
+        try:
+            written = datetime.fromisoformat(written_at)
+        except ValueError:
+            return f"owner.written_at is not ISO-8601: {written_at!r}"
+        if written.tzinfo is None:
+            return "owner.written_at is missing timezone information"
+        return None
+
     def _checkpoint_owner_conflict(self, cp: Any) -> str | None:
         """Return a conflict description when the checkpoint's writer may
         still be ALIVE, else ``None`` (round-12 finding #3, BLOCKING).
@@ -3271,15 +3302,9 @@ class ParallelACExecutor:
           live run outlives the window undetected), and a genuine
           cross-host crash-restart inside the window only has to wait it
           out.
-        - No/legacy/malformed owner record -> ``None`` (adopt posture).
-          A checkpoint written before this fix must stay resumable (the
-          one-time-migration convention every other restored field
-          follows), and an unreadable marker must not permanently wall off
-          durable ladder history — the checkpoint's continued existence
-          plus the terminal-staleness gate remain the (weaker) evidence of
-          interruption, exactly the pre-fix posture. This mirrors
-          ``core.worktree._is_lock_stale`` treating unreadable timestamps
-          as stale/claimable.
+        Current-format callers validate the complete owner record through
+        :meth:`_checkpoint_owner_malformed` before reaching this probe.
+        The defensive ``None`` returns below are not an adoption policy.
         """
         owner = cp.state.get("owner")
         if not isinstance(owner, Mapping):
@@ -5026,6 +5051,26 @@ class ParallelACExecutor:
                             "Checkpoint format is unsupported: "
                             f"{version_malformed}. Refusing to infer missing "
                             "execution semantics."
+                        )
+                    elif cp.phase == "parallel_execution" and (
+                        owner_malformed := self._checkpoint_owner_malformed(cp)
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.checkpoint_owner_malformed",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=owner_malformed,
+                        )
+                        self._console.print(
+                            "[red]Refusing to start: this seed's current-format "
+                            "checkpoint has a missing or malformed owner record "
+                            f"({owner_malformed}). It was preserved for operator "
+                            "repair.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint owner record is malformed: "
+                            f"{owner_malformed}. Refusing to adopt uncertain "
+                            "execution ownership."
                         )
                     elif (
                         cp.phase == "parallel_execution"

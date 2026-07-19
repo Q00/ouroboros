@@ -3167,6 +3167,71 @@ class TestActiveCheckpointNeverSilentlyAdopted:
     convention), and recovery refuses — loudly, before any AC work — to
     adopt a non-terminal checkpoint whose owner appears alive."""
 
+    @pytest.mark.parametrize(
+        "owner",
+        [
+            None,
+            "not-a-mapping",
+            {},
+            {"pid": "12345", "host": "host", "written_at": datetime.now(UTC).isoformat()},
+            {"pid": 0, "host": "host", "written_at": datetime.now(UTC).isoformat()},
+            {"pid": 12345, "host": "", "written_at": datetime.now(UTC).isoformat()},
+            {"pid": 12345, "host": "host", "written_at": "not-a-timestamp"},
+            {"pid": 12345, "host": "host", "written_at": "2026-07-19T12:00:00"},
+        ],
+    )
+    def test_current_checkpoint_requires_complete_owner(self, owner: object) -> None:
+        cp = SimpleNamespace(state={"checkpoint_contract_version": 2, "owner": owner})
+        assert ParallelACExecutor._checkpoint_owner_malformed(cp) is not None
+
+    @pytest.mark.asyncio
+    async def test_missing_v2_owner_refuses_before_dispatch(self, tmp_path: Path) -> None:
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed = _seed("Missing v2 owner refuses adoption")
+        checkpoint_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=checkpoint_path)
+        store.initialize()
+        original = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        original._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+        await original.execute_parallel(
+            seed,
+            session_id="session-original",
+            execution_id="exec-original",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        saved = store.load(seed.metadata.seed_id)
+        assert saved.is_ok
+        malformed_state = dict(saved.value.state)
+        malformed_state.pop("owner")
+        assert store.save(
+            CheckpointData.create(
+                seed_id=seed.metadata.seed_id,
+                phase="parallel_execution",
+                state=malformed_state,
+            )
+        ).is_ok
+
+        contender = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=checkpoint_path),
+        )
+        contender._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointCorruptError, match="owner record is malformed"):
+            await contender.execute_parallel(
+                seed,
+                session_id="session-contender",
+                execution_id="exec-contender",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+        contender._run_batch_with_verify_and_retry.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_second_launch_refuses_live_owner_then_resumes_after_death(
         self, tmp_path: Path
