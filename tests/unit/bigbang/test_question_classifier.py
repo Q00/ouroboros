@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.bigbang.question_classifier import (
+    _CLASSIFICATION_SYSTEM_PROMPT,
     _DEFAULT_PLACEHOLDER,
     ClassificationResult,
     ClassifierOutputType,
@@ -290,6 +291,27 @@ class TestQuestionClassifierPassthrough:
         assert result.is_ok
         # The original question must be preserved exactly
         assert result.value.question_for_pm == planning_q
+
+
+class TestQuestionClassifierSuccessCriteriaBoundary:
+    """Regression coverage for post-launch KPI drift in PM interviews (#1663)."""
+
+    def test_delivered_feature_acceptance_criteria_are_planning(self) -> None:
+        """The planning category describes requirements observable at delivery."""
+        assert "Delivered-feature behavior, product policy, and acceptance criteria" in (
+            _CLASSIFICATION_SYSTEM_PROMPT
+        )
+        assert "Success metrics, KPIs, acceptance criteria" not in (_CLASSIFICATION_SYSTEM_PROMPT)
+
+    def test_post_launch_outcome_measurement_is_decide_later(self) -> None:
+        """The classifier routes outcome measurement through decide-later plumbing."""
+        planning_section, decide_later_section = _CLASSIFICATION_SYSTEM_PROMPT.split(
+            "**DECIDE_LATER**", maxsplit=1
+        )
+
+        assert "Post-launch outcome measurement" not in planning_section
+        assert "Post-launch outcome measurement" in decide_later_section
+        assert "real-world usage data" in decide_later_section
 
 
 class TestQuestionClassifierModelRouting:

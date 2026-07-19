@@ -135,11 +135,13 @@ Your job is to determine whether a question generated during a requirements inte
 is answerable by a Product Manager (PM), requires deep technical/development expertise,
 or is premature and should be deferred to a later stage.
 
+A PRD is the product specification a PM hands to developers: it communicates the PM's intent and the behavior and policies the delivered product must embody. Its success criteria describe what the PM can observe in the delivered feature to confirm that intent. Measuring adoption, conversion, KPI movement, or other post-launch outcomes is follow-up product work informed by real-world usage, not part of the implementation specification.
+
 ## Categories
 
 **PLANNING** — PM can answer directly:
 - Business goals, user needs, market context
-- Success metrics, KPIs, acceptance criteria
+- Delivered-feature behavior, product policy, and acceptance criteria
 - Priority, timeline, budget constraints
 - User stories, personas, workflows
 - Scope decisions (in/out), feature prioritization
@@ -157,6 +159,7 @@ or is premature and should be deferred to a later stage.
 - Questions whose answer depends on decisions not yet made
 - Future-phase concerns (post-MVP optimization, scaling details)
 - Questions requiring user research or data that doesn't exist yet
+- Post-launch outcome measurement that depends on real-world usage data
 - Speculative trade-offs that can't be resolved without prototyping
 - Cross-cutting concerns that will become clearer as other requirements solidify
 

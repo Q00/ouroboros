@@ -54,6 +54,17 @@ class TestPMUncertaintyGuidance:
         assert "confirmed" in _EXTRACTION_SYSTEM_PROMPT
         assert "decide_later_items" in _EXTRACTION_SYSTEM_PROMPT
 
+    def test_pm_interviewer_defines_success_as_delivered_product_observation(self) -> None:
+        """PM success criteria stay on the implementation specification boundary."""
+        assert "A PRD is the product specification a PM hands to developers" in (
+            _PM_SYSTEM_PROMPT_PREFIX
+        )
+        assert "behavior and policies the delivered product must embody" in (
+            _PM_SYSTEM_PROMPT_PREFIX
+        )
+        assert "what the PM can observe in the delivered feature" in (_PM_SYSTEM_PROMPT_PREFIX)
+        assert "post-launch outcomes" in _PM_SYSTEM_PROMPT_PREFIX
+
 
 def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:
     """Create a mock completion response."""
