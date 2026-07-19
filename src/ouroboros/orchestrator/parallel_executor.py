@@ -2767,6 +2767,99 @@ class ParallelACExecutor:
             )
         return None
 
+    # Every AC status value the executor ever records into a checkpoint's
+    # ``ac_statuses`` mapping. Anything else is corruption, not progress.
+    _CHECKPOINT_AC_STATUS_VALUES: ClassVar[frozenset[str]] = frozenset(
+        {"pending", "executing", "completed", "failed", "skipped"}
+    )
+
+    @staticmethod
+    def _checkpoint_index_value(value: object) -> int | None:
+        """Parse a checkpointed AC index (int, or the str a JSON round-trip
+        of a dict key produces); ``None`` when it is not an integer."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _checkpoint_progress_malformed(cls, cp: Any) -> str | None:
+        """Return a description of the FIRST malformed progress field in the
+        checkpoint, else ``None`` (round-16 finding #3, BLOCKING).
+
+        Recovery used to read fields out of ``cp.state`` and apply them to
+        local execution state INCREMENTALLY — ``execution_id`` reassigned
+        first, then ``ac_statuses``/``failed_indices`` entries converted
+        one at a time. A malformed LATER field (a type-mismatched
+        ``completed_levels``, a non-integer index key, ...) raised after
+        the EARLIER mutations had already happened, leaving recovery
+        partially applied when the generic "recovery failed, run fresh"
+        handler took over: the same torn-state class the round-16 #2
+        save-side snapshot fix closed, on the read/apply side.
+
+        This validates EVERY progress field the adoption branch consumes,
+        atomically and BEFORE any of it is applied. Any failure means the
+        checkpoint as a whole is corrupt and takes the established
+        fail-closed malformed-checkpoint path (discard as stale, run every
+        level fresh, loud operator warning) — never a crash, never a
+        partial application. Keys ABSENT from the state keep the adoption
+        branch's defaults (the legacy/forward-compat migration shape, the
+        same convention ``_restore_checkpoint_execution_semantics``
+        documents); only a PRESENT-but-malformed value fails validation.
+        """
+        state = cp.state
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        if "execution_id" in state:
+            saved_execution_id = state["execution_id"]
+            if saved_execution_id is not None and not (
+                isinstance(saved_execution_id, str) and saved_execution_id
+            ):
+                return f"execution_id is not a non-empty string: {saved_execution_id!r}"
+        if "completed_levels" in state:
+            completed_levels = state["completed_levels"]
+            if (
+                not isinstance(completed_levels, int)
+                or isinstance(completed_levels, bool)
+                or completed_levels < 0
+            ):
+                return f"completed_levels is not a non-negative integer: {completed_levels!r}"
+        if "ac_statuses" in state:
+            raw_statuses = state["ac_statuses"]
+            if not isinstance(raw_statuses, Mapping):
+                return f"ac_statuses is not a mapping: {raw_statuses!r}"
+            for key, status in raw_statuses.items():
+                if cls._checkpoint_index_value(key) is None:
+                    return f"ac_statuses key is not an integer AC index: {key!r}"
+                if status not in cls._CHECKPOINT_AC_STATUS_VALUES:
+                    return f"ac_statuses[{key!r}] is not a known AC status: {status!r}"
+        if "failed_indices" in state:
+            raw_failed = state["failed_indices"]
+            if not isinstance(raw_failed, list | tuple):
+                return f"failed_indices is not a list: {raw_failed!r}"
+            for entry in raw_failed:
+                if cls._checkpoint_index_value(entry) is None:
+                    return f"failed_indices entry is not an integer AC index: {entry!r}"
+        if "completed_count" in state:
+            completed_count = state["completed_count"]
+            if (
+                not isinstance(completed_count, int)
+                or isinstance(completed_count, bool)
+                or completed_count < 0
+            ):
+                return f"completed_count is not a non-negative integer: {completed_count!r}"
+        if "level_contexts" in state:
+            raw_contexts = state["level_contexts"]
+            if not isinstance(raw_contexts, list | tuple):
+                return f"level_contexts is not a list: {raw_contexts!r}"
+        return None
+
     def _discard_stale_checkpoint(
         self,
         seed_id: str,
@@ -3359,6 +3452,14 @@ class ParallelACExecutor:
 
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
+            # Round-16 finding #3: snapshot every piece of fresh-run local
+            # state the adoption branch may mutate, so the generic failure
+            # handler below can roll ALL of it back — recovery must either
+            # apply completely or leave the fresh-run posture untouched,
+            # never a torn mixture.
+            pre_recovery_execution_id = execution_id
+            pre_recovery_result_count = len(all_results)
+            pre_recovery_decomposition_decisions = dict(self._decomposition_decisions)
             try:
                 seed_id = self._checkpoint_seed_id(seed, session_id)
                 cp = await self._load_checkpoint_for_recovery(seed_id)
@@ -3452,6 +3553,48 @@ class ParallelACExecutor:
                                 "running all levels fresh instead.[/red]"
                             ),
                         )
+                    elif cp.phase == "parallel_execution" and (
+                        progress_malformed := self._checkpoint_progress_malformed(cp)
+                    ):
+                        # Round-16 finding #3 (BLOCKING): a hash-valid
+                        # checkpoint whose PROGRESS fields are type-mangled
+                        # (e.g. ``completed_levels`` persisted as the string
+                        # "1", a non-integer ``ac_statuses`` key) used to be
+                        # applied incrementally until a conversion raised —
+                        # by which point ``execution_id`` had already been
+                        # reassigned, leaving recovery partially applied.
+                        # Every progress field was just validated atomically
+                        # above; any failure means the checkpoint as a whole
+                        # is corrupt, so it takes the SAME fail-closed path
+                        # every other malformed-checkpoint shape takes:
+                        # discard as stale, run every level fresh, warn the
+                        # operator loudly. Nothing was applied yet, so there
+                        # is no partial state to unwind.
+                        log.error(
+                            "parallel_executor.recovery.progress_state_malformed",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=progress_malformed,
+                        )
+                        self._discard_stale_checkpoint(
+                            seed_id,
+                            saved_execution_id=cp.state.get("execution_id"),
+                            detail=(
+                                "checkpoint progress state is malformed and "
+                                "cannot be applied as a coherent whole "
+                                f"({progress_malformed}); adopting any part "
+                                "of it risks torn recovery state, so the "
+                                "checkpoint is treated as corrupt"
+                            ),
+                            console_message=(
+                                "[red]WARNING: found a checkpoint for this "
+                                "seed, but its recorded progress state is "
+                                "malformed/corrupt "
+                                f"({progress_malformed}). Refusing to adopt "
+                                "any of it — running all levels fresh "
+                                "instead.[/red]"
+                            ),
+                        )
                     elif cp.phase == "parallel_execution":
                         # Restore the ORIGINAL run's execution_id. A crash-
                         # restart run is created with a fresh execution_id,
@@ -3470,6 +3613,16 @@ class ParallelACExecutor:
                         # cancellation checks, signal-hub scoping, and
                         # progress events must keep following the LIVE
                         # session driving this recovery run.
+                        # Round-16 finding #3: every progress field was
+                        # validated atomically by the gate above, and the
+                        # one remaining raise-capable payload (the level
+                        # contexts) is parsed HERE, before any local
+                        # execution state is mutated — so nothing below can
+                        # leave recovery partially applied.
+                        saved_contexts = cp.state.get("level_contexts", [])
+                        restored_contexts = (
+                            deserialize_level_contexts(saved_contexts) if saved_contexts else None
+                        )
                         saved_execution_id = cp.state.get("execution_id")
                         if isinstance(saved_execution_id, str) and saved_execution_id:
                             execution_id = saved_execution_id
@@ -3543,10 +3696,10 @@ class ParallelACExecutor:
                                 "re-dispatched).[/yellow]"
                             )
                         # Restore level contexts so subsequent levels
-                        # have access to completed levels' output
-                        saved_contexts = cp.state.get("level_contexts", [])
-                        if saved_contexts:
-                            level_contexts = deserialize_level_contexts(saved_contexts)
+                        # have access to completed levels' output (parsed
+                        # up front, before any mutation — round-16 #3).
+                        if restored_contexts is not None:
+                            level_contexts = restored_contexts
                         raw_decisions = cp.state.get("decomposition_decisions", {})
                         if isinstance(raw_decisions, Mapping):
                             for raw_node_id, raw_record in raw_decisions.items():
@@ -3658,11 +3811,26 @@ class ParallelACExecutor:
                 # that never ran (the forbidden FAILED-without-dispatch
                 # shape) — reset every dispatch-gating field to its
                 # fresh-run value before proceeding.
+                #
+                # Round-16 finding #3: the reset must cover EVERYTHING the
+                # adoption branch mutates, not only the dispatch-gating
+                # fields — a half-restored ``execution_id`` in particular
+                # would run "fresh" work under the ORIGINAL run's durable
+                # aggregate (torn identity), and half-restored contexts/
+                # results/decomposition decisions would mix two runs'
+                # state. Roll all of it back to the pre-recovery snapshot.
                 resume_from_level = 0
                 checkpoint_resolved = {}
                 failed_indices.clear()
                 ac_statuses.update(dict.fromkeys(range(total_acs), "pending"))
                 completed_count = 0
+                execution_id = pre_recovery_execution_id
+                level_contexts = list(reconciled_level_contexts or [])
+                del all_results[pre_recovery_result_count:]
+                self._decomposition_decisions.clear()
+                self._decomposition_decisions.update(pre_recovery_decomposition_decisions)
+                recovery_adopted = False
+                restored_prompt_guidance = None
                 log.warning(
                     "parallel_executor.recovery.failed",
                     error=str(e),

@@ -1424,6 +1424,205 @@ class TestSeedFingerprintCoversFullSemanticSurface:
         assert result.execution_id == "exec-a"
 
 
+class TestMalformedCheckpointProgressFailsClosed:
+    """Round-16 finding #3 (BLOCKING): recovery used to apply checkpoint
+    progress fields to local execution state INCREMENTALLY — a hash-valid
+    checkpoint with a type-mangled field (the review's probe:
+    ``completed_levels="1"``, a string) partially restored the original
+    execution_id before a later conversion raised, leaving recovery torn
+    between two runs' identities. Every progress field must now be
+    validated atomically BEFORE any of it is applied; a malformed
+    checkpoint takes the established fail-closed path — discarded as
+    stale, all levels run fresh under the CALLER's identity, loud operator
+    warning — never a crash, never a partial application."""
+
+    @staticmethod
+    def _two_ac_seed() -> Seed:
+        return Seed(
+            goal="Malformed checkpoint progress",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+    @staticmethod
+    def _two_stage_plan() -> StagedExecutionPlan:
+        return StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+
+    async def _crash_after_level_one(self, ckpt_path: Path, seed: Seed) -> None:
+        """Run 1: level 1 completes (checkpoint saved under exec-original),
+        then the process dies during level 2 — a genuine crash shape whose
+        checkpoint would ordinarily be adopted."""
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        original = _executor(event_store=AsyncMock(), checkpoint_store=store)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            raise RuntimeError("simulated process crash during level 2")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException, match="simulated process crash|unhandled errors"):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._two_stage_plan(),
+            )
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["execution_id"] == "exec-original"
+        assert saved.value.state["completed_levels"] == 1
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            # The review's exact probe: a string where an int must be.
+            {"completed_levels": "1"},
+            # A non-integer AC index key AFTER valid entries: the pre-fix
+            # incremental apply raised mid-loop with execution_id already
+            # reassigned (the torn shape this class guards against).
+            {"ac_statuses": {"0": "completed", "not-an-int": "completed", "1": "pending"}},
+            # An unknown status value is corruption, not progress.
+            {"ac_statuses": {"0": "totally-bogus", "1": "pending"}},
+            # A non-integer failed index.
+            {"failed_indices": ["one"]},
+            # A type-mangled completed count.
+            {"completed_count": "2"},
+        ],
+        ids=[
+            "string_completed_levels",
+            "non_integer_ac_status_key",
+            "unknown_ac_status_value",
+            "non_integer_failed_index",
+            "string_completed_count",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_malformed_progress_runs_fresh_without_crash_or_torn_state(
+        self, tmp_path: Path, corruption: dict[str, object]
+    ) -> None:
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed = self._two_ac_seed()
+        ckpt_path = tmp_path / "checkpoints"
+        await self._crash_after_level_one(ckpt_path, seed)
+
+        store = CheckpointStore(base_path=ckpt_path)
+        broken_state = dict(store.load(seed.metadata.seed_id).value.state)
+        broken_state.update(corruption)
+        assert store.save(
+            CheckpointData.create(
+                seed_id=seed.metadata.seed_id,
+                phase="parallel_execution",
+                state=broken_state,
+            )
+        ).is_ok
+
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=str(seed.acceptance_criteria[idx]),
+                    success=True,
+                )
+                for idx in batch
+            ]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
+        # The recovery must NOT crash with an unhandled exception.
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=self._two_stage_plan(),
+        )
+        await run2_events.close()
+
+        # Fresh-run posture: EVERY level dispatched — no level skipped off
+        # corrupt progress, no AC synthesized as restored/failed.
+        assert dispatched == [[0], [1]]
+        assert result.all_succeeded
+        assert all(r.final_message != "[Restored from checkpoint]" for r in result.results)
+        # No partial application: the caller's identity was kept — a torn
+        # restore would have left the ORIGINAL run's execution_id behind.
+        assert result.execution_id == "exec-restarted"
+        # The corrupt checkpoint was discarded and re-keyed to the fresh
+        # run's durable identity.
+        reloaded = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert reloaded.is_ok
+        assert reloaded.value.state["execution_id"] == "exec-restarted"
+
+    def test_progress_validation_accepts_the_saved_shape(self, tmp_path: Path) -> None:
+        """Control: the exact state a real save writes must validate clean
+        (a genuine resume keeps working), including absent legacy fields."""
+        state = {
+            "execution_id": "exec-original",
+            "completed_levels": 1,
+            "ac_statuses": {"0": "completed", "1": "pending"},
+            "failed_indices": [],
+            "completed_count": 1,
+            "level_contexts": [],
+        }
+        cp = SimpleNamespace(state=state)
+        assert ParallelACExecutor._checkpoint_progress_malformed(cp) is None
+        # Legacy shape: progress keys absent entirely — adopt posture kept.
+        assert ParallelACExecutor._checkpoint_progress_malformed(SimpleNamespace(state={})) is None
+        # Integer keys (in-process relaunch, no JSON round-trip) are valid.
+        cp_int_keys = SimpleNamespace(state={"ac_statuses": {0: "completed"}})
+        assert ParallelACExecutor._checkpoint_progress_malformed(cp_int_keys) is None
+
+    @pytest.mark.parametrize(
+        ("state", "expected_fragment"),
+        [
+            ({"completed_levels": "1"}, "completed_levels"),
+            ({"completed_levels": True}, "completed_levels"),
+            ({"completed_levels": -1}, "completed_levels"),
+            ({"execution_id": 42}, "execution_id"),
+            ({"ac_statuses": ["completed"]}, "ac_statuses"),
+            ({"ac_statuses": {"x": "completed"}}, "ac_statuses"),
+            ({"ac_statuses": {"0": 7}}, "ac_statuses"),
+            ({"failed_indices": "0,1"}, "failed_indices"),
+            ({"failed_indices": [1.5]}, "failed_indices"),
+            ({"completed_count": None}, "completed_count"),
+            ({"level_contexts": "corrupt"}, "level_contexts"),
+        ],
+    )
+    def test_progress_validation_rejects_each_malformed_field(
+        self, state: dict[str, object], expected_fragment: str
+    ) -> None:
+        detail = ParallelACExecutor._checkpoint_progress_malformed(SimpleNamespace(state=state))
+        assert detail is not None
+        assert expected_fragment in detail
+
+
 class TestIndeterminateReplayWithCompletedCheckpoint:
     """Round-13 finding #2 (BLOCKING): the terminal-staleness gate's
     indeterminate-replay tiebreaker ("a surviving checkpoint is itself
