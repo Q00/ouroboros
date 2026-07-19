@@ -309,7 +309,13 @@ async def test_checkpoint_persists_and_restores_decision_by_stable_node_id() -> 
         stages=(ExecutionStage(index=0, ac_indices=(0,)),),
     )
     store = MagicMock()
-    store.load.return_value = SimpleNamespace(is_ok=False)
+    # Round-15 finding #2: a "no checkpoint" load must carry the real
+    # store's CONFIRMED-absent marker — a bare error is now treated as an
+    # indeterminate (degraded) read and refuses the launch fail-closed.
+    store.load.return_value = SimpleNamespace(
+        is_ok=False,
+        error=SimpleNamespace(details={"no_checkpoint_found": True}),
+    )
     store.save.return_value = SimpleNamespace(is_ok=True)
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
