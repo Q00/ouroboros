@@ -60,7 +60,21 @@ PY
 fi
 ```
 
-**If `ALREADY_COMPLETED` is true AND no `--force` flag:**
+Before honoring that completion marker, determine whether setup is ready. A
+previously completed welcome must never hide the setup gate from a user who
+chose **나중에** or whose setup was later removed:
+
+```bash
+if test -f "$HOME/.ouroboros/config.yaml" \
+  && grep -A8 '^orchestrator:' "$HOME/.ouroboros/config.yaml" | grep -q 'runtime_backend: claude' \
+  && grep -A8 '^llm:' "$HOME/.ouroboros/config.yaml" | grep -q 'backend: claude' \
+  && test -f "$HOME/.claude/mcp.json" \
+  && grep -q '"ouroboros"' "$HOME/.claude/mcp.json"; then
+  SETUP_READY="true"
+fi
+```
+
+**If `ALREADY_COMPLETED` is true, `SETUP_READY` is true, AND no `--force` flag:**
 
 Use **AskUserQuestion**:
 ```json
@@ -78,6 +92,9 @@ Use **AskUserQuestion**:
 ```
 - **Skip**: Mark as complete and exit
 - **Re-run welcome**: Continue to Step 1 below
+
+If the welcome was completed but `SETUP_READY` is not true, bypass this
+completion prompt and continue to the Setup Gate below.
 
 **If `--skip` flag present:**
 - Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
@@ -110,6 +127,60 @@ PY
   Run /ouroboros:welcome --force to re-run onboarding.
   ```
 - Exit
+
+---
+
+### Setup Gate: First Use
+
+Before showing the welcome banner, check whether Ouroboros has been prepared
+on this machine:
+
+```bash
+if test -f "$HOME/.ouroboros/config.yaml" \
+  && grep -A8 '^orchestrator:' "$HOME/.ouroboros/config.yaml" | grep -q 'runtime_backend: claude' \
+  && grep -A8 '^llm:' "$HOME/.ouroboros/config.yaml" | grep -q 'backend: claude' \
+  && test -f "$HOME/.claude/mcp.json" \
+  && grep -q '"ouroboros"' "$HOME/.claude/mcp.json"; then
+  echo "SETUP_READY"
+else
+  echo "SETUP_REQUIRED"
+fi
+```
+
+If setup is required, ask one concise question in the user's language. For a
+Korean conversation, use:
+
+```json
+{
+  "questions": [{
+    "question": "Ouroboros를 처음 사용하시네요. 시작하기 전에 실행 환경을 설정할까요?",
+    "header": "Ouroboros 시작하기",
+    "options": [
+      {
+        "label": "설정하고 시작하기 (권장)",
+        "description": "한 번만 설정하면 바로 사용할 수 있어요"
+      },
+      {
+        "label": "나중에",
+        "description": "지금은 기본 안내만 보고 나중에 설정할게요"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **설정하고 시작하기**: Follow `../setup/SKILL.md`. Do not ask the user
+  to copy a command when the current host can run it.
+- **나중에**: Continue with the welcome flow, but do not claim that MCP-only
+  execution features are ready.
+
+After successful setup, `../setup/SKILL.md` presents the model choice.
+Do not repeat it here; continue to Step 1 after the setup skill returns.
+
+Do not show this gate again once the Claude runtime, LLM backend, and MCP entry
+are ready. The normal settings UI remains available later through `ooo config`,
+so a model choice made now is never permanent.
 
 ---
 
@@ -164,32 +235,7 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ---
 
-### Step 3: MCP Check
-
-```bash
-cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
-```
-
-**If MCP_MISSING**, **AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?",
-    "header": "MCP Setup",
-    "options": [
-      { "label": "Set up now (Recommended)", "description": "Register MCP server (requires Python >= 3.12)" },
-      { "label": "Skip for now", "description": "Use basic features first (interview, seed, unstuck)" }
-    ],
-    "multiSelect": false
-  }]
-}
-```
-- **Set up now**: Read and execute `skills/setup/SKILL.md`, then return to Step 4
-- **Skip for now**: Continue to Step 4
-
----
-
-### Step 4: Quick Reference
+### Step 3: Quick Reference
 
 ```
 Available Commands:
@@ -208,7 +254,7 @@ Available Commands:
 
 ---
 
-### Step 5: First Action
+### Step 4: First Action
 
 **AskUserQuestion**:
 ```json
@@ -227,13 +273,13 @@ Available Commands:
 ```
 
 Based on choice:
-- **Start a project**: Ask "What do you want to build?" → execute `skills/interview/SKILL.md`
-- **Try the tutorial**: Execute `skills/tutorial/SKILL.md`
-- **Read the docs**: Execute `skills/help/SKILL.md`
+- **Start a project**: Ask "What do you want to build?" → execute `../interview/SKILL.md`
+- **Try the tutorial**: Execute `../tutorial/SKILL.md`
+- **Read the docs**: Execute `../help/SKILL.md`
 
 ---
 
-### Step 6: GitHub Star (Last Step)
+### Step 5: GitHub Star (Last Step)
 
 Check `gh` availability first:
 ```bash

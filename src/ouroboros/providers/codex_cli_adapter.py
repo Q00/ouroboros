@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 from typing import Any
 
@@ -48,6 +49,7 @@ from ouroboros.providers.profiles import resolve_completion_profile_result
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
+_CODEX_REASONING_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 
 # Codex shares the canonical transient core verbatim — its previous local copy
@@ -406,6 +408,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         output_schema_path: str | None,
         model: str | None,
         profile: str | None = None,
+        reasoning_effort: str | None = None,
         prompt: str | None = None,
     ) -> list[str]:
         """Build the `codex exec` command for a one-shot completion.
@@ -436,6 +439,9 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
 
         if output_schema_path:
             command.extend(["--output-schema", output_schema_path])
+
+        if reasoning_effort in _CODEX_REASONING_EFFORT_LEVELS:
+            command.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
 
         if profile and not self._codex_profile:
             command.extend(["--profile", profile])
@@ -584,6 +590,39 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         """Return whether the error mentions the OpenAI Responses API endpoint."""
         return _OPENAI_RESPONSES_ENDPOINT in message.lower()
 
+    @staticmethod
+    def _looks_like_codex_model_unavailable(message: str) -> bool:
+        """Recognize clear model-availability failures without guessing an update.
+
+        Account access, model retirement, and an outdated CLI can share this
+        symptom.  Callers must not turn this classification into an update
+        instruction without more evidence.
+        """
+        normalized = message.lower()
+        return "model" in normalized and any(
+            phrase in normalized
+            for phrase in (
+                "model not found",
+                "model unavailable",
+                "model is unavailable",
+                "unsupported model",
+                "unknown model",
+                "does not have access to model",
+            )
+        )
+
+    @staticmethod
+    def _codex_version(path: str) -> str | None:
+        """Return a CLI version without making model failures depend on diagnostics."""
+        try:
+            result = subprocess.run(
+                [path, "--version"], capture_output=True, text=True, timeout=2, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        version = (result.stdout or result.stderr).strip().splitlines()
+        return version[-1].strip() if result.returncode == 0 and version else None
+
     @classmethod
     def _codex_failure_details(
         cls,
@@ -593,6 +632,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         stderr: str,
         stdout_errors: list[str],
         message: str,
+        cli_path: str | None = None,
     ) -> dict[str, object]:
         """Build structured, non-secret details for a failed Codex CLI call."""
         details: dict[str, object] = {
@@ -618,6 +658,31 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                     ),
                 }
             )
+        elif cls._looks_like_codex_model_unavailable(message):
+            details.update(
+                {
+                    "failure_category": "codex_model_unavailable",
+                    "model_guidance": (
+                        "The requested model is not available in this Codex environment. "
+                        "Check the Codex App and CLI versions, then verify account access "
+                        "before changing the pinned model."
+                    ),
+                }
+            )
+            if cli_path:
+                cli_version = cls._codex_version(cli_path)
+                app_path = "/Applications/ChatGPT.app/Contents/Resources/codex"
+                app_version = cls._codex_version(app_path)
+                if cli_version and app_version:
+                    details["codex_app_version"] = app_version
+                    details["codex_cli_version"] = cli_version
+                    details["codex_app_cli_versions_match"] = app_version == cli_version
+                    if app_version != cli_version:
+                        details["model_guidance"] = (
+                            "The Codex App and the CLI used for this task report different "
+                            "versions. Update both Codex installations, then reopen Codex before "
+                            "retrying the pinned model."
+                        )
         return details
 
     def _fallback_content(self, stdout_lines: list[str], stderr: str) -> str:
@@ -863,6 +928,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             output_schema_path=str(schema_path) if schema_path else None,
             model=normalized_model,
             profile=resolved.backend_profile,
+            reasoning_effort=effective_config.reasoning_effort,
             prompt=prompt,
         )
 
@@ -946,6 +1012,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                             message=(stdout_errors[-1] if stdout_errors else None)
                             or content
                             or f"{self._display_name} exited with code {process.returncode}",
+                            cli_path=self._cli_path,
                         ),
                     )
                 )
@@ -1112,6 +1179,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                         message=(stdout_errors[-1] if stdout_errors else None)
                         or content
                         or f"{self._display_name} exited with code {process.returncode}",
+                        cli_path=self._cli_path,
                     ),
                 )
             )

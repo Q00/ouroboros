@@ -1021,6 +1021,7 @@ _INTERVIEW_EVENT_ERROR_DETAIL_KEYS = (
     "error_type",
     "session_id",
     "failure_category",
+    "model_guidance",
     "auth_plane",
     "openai_responses_endpoint_seen",
     "returncode",

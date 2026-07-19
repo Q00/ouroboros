@@ -6,9 +6,11 @@ from ouroboros.config_tui import fields
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS, Stage
 
 
-def test_stage_model_fields_cover_configurable_stage_models_only() -> None:
+def test_stage_model_fields_cover_all_configurable_stage_models() -> None:
     assert {stage.value for stage in fields.STAGE_MODEL_FIELDS} <= VALID_STAGE_KEYS
-    assert Stage.EXECUTE not in fields.STAGE_MODEL_FIELDS
+    execute_field = fields.STAGE_MODEL_FIELDS[Stage.EXECUTE]
+    assert execute_field.key == "execution.default_model"
+    assert execute_field.env_vars == ("OUROBOROS_EXECUTION_MODEL",)
 
 
 def test_stage_runtime_field_targets_runtime_profile() -> None:

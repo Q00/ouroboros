@@ -87,13 +87,40 @@ Ouroboros는 이 철학을 **Double Diamond** 구조로 풀어냅니다:
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
-**시작** — AI 코딩 에이전트를 열고 바로:
+**처음 사용** — AI 코딩 에이전트를 열고 입력하세요:
+
+```
+> ooo
+```
+
+한 번만 필요한 설정이 있다면, Ouroboros가 변경하기 전에 먼저 물어봅니다.
+설정이 끝나면 Codex는 현재 선택한 모델을 따르고, Claude Code는 권장 기본
+모델 설정으로 시작합니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델
+설정하기**를 선택하세요. 내 컴퓨터의 브라우저에 로컬 설정 화면이 열립니다.
+나중에 `ooo config`로 언제든 다시 바꿀 수 있습니다.
+
+**시작** — 이후 바로 작업할 수 있습니다:
 
 ```
 > ooo interview "I want to build a task management CLI"
 ```
 
 > Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI를 지원합니다. 설치 프로그램은 Claude Code, Codex CLI, Hermes CLI를 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. OpenCode, Kiro, GitHub Copilot CLI, Gemini CLI 또는 Pi CLI는 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
+
+<details>
+<summary><strong>Codex 플러그인 빠른 시작</strong></summary>
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+새 Codex 세션을 연 뒤 `ooo`를 입력하세요. 처음 사용할 때는 Ouroboros가
+변경하기 전에 실행 환경 설정을 제안합니다. 준비가 끝나면 Codex의 현재 기본
+모델을 따릅니다. 특정 단계의 모델을 고정하고 싶을 때만 **직접 모델 설정하기**를
+선택하세요.
+
+</details>
 
 <details>
 <summary><strong>Kiro CLI 빠른 시작</strong></summary>

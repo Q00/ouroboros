@@ -289,10 +289,6 @@ _runtime_to_extras() {
 # Preserves user choice across upgrades unless --reconfigure / --runtime is set.
 EXISTING_RUNTIME=""
 EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
-# Fresh install (no config yet) → the post-install settings-GUI offer
-# defaults to yes; upgrades default to no.
-FRESH_CONFIG=true
-[ -f "$EXISTING_CONFIG" ] && FRESH_CONFIG=false
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
@@ -713,25 +709,28 @@ if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
 _info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
-_say "${BOLD}Settings GUI — pick per-stage agents & models${RESET}"
+_say "${BOLD}Model settings — use your default model or configure one directly${RESET}"
 _info 'Inside your AI agent: > ooo config   (opens in your browser)'
 _info 'From this terminal:  ouroboros config   (full-screen TUI)'
 
-# 6. Optional first-run settings GUI (interactive installs only).
+# 6. Optional direct model settings (interactive installs only).
 # install.sh always runs in a real terminal when interactive, so the
 # full-screen Textual settings app can open right here. curl|bash pipe
 # installs skip this automatically ([ -t 0 ] is false).
 if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
-  if [ "$FRESH_CONFIG" = true ]; then
-    GUI_DEFAULT="y"
-    GUI_HINT="[Y/n]"
+  if [ "$RUNTIME" = "codex" ]; then
+    GUI_MESSAGE="Codex's current default model is ready to use. Configure a model directly now?"
   else
-    GUI_DEFAULT="n"
-    GUI_HINT="[y/N]"
+    GUI_MESSAGE="Your selected runtime's default model is ready to use. Configure a model directly now?"
   fi
+  # Most people should start with the runtime default. The settings UI is for
+  # deliberate model pins, so it must remain an opt-in rather than a fresh
+  # install speed bump.
+  GUI_DEFAULT="n"
+  GUI_HINT="[y/N]"
   _blank
-  _say "${BOLD}First-time setup: pick per-stage agents & models in the settings GUI?${RESET}"
-  _prompt "Open settings GUI now $GUI_HINT: "
+  _say "${BOLD}${GUI_MESSAGE}${RESET}"
+  _prompt "Open direct model settings $GUI_HINT: "
   read -r gui_choice
   case "${gui_choice:-$GUI_DEFAULT}" in
     y | Y | yes | YES)
@@ -752,7 +751,7 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       fi
       ;;
     *)
-      _info "Skipped. Open it anytime:"
+      _info "Using the runtime default model. You can change it anytime:"
       _info '  in your AI agent: > ooo config'
       _info '  in a terminal:    ouroboros config'
       ;;

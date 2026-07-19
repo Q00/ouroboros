@@ -339,8 +339,8 @@ class TestCodexCliRuntime:
         assert command.index("-C") < resume_index
         assert command[command.index("-C") + 1] == _EXPECTED_PROJECT_CWD
 
-    def test_build_command_uses_profile_for_runtime_session_role(self) -> None:
-        """Agent runtime sessions should resolve Codex profiles from session_role."""
+    def test_build_command_uses_effort_for_runtime_session_role(self) -> None:
+        """Agent runtime sessions should pass role effort without a Codex profile file."""
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -349,7 +349,7 @@ class TestCodexCliRuntime:
         config = OuroborosConfig(
             llm_profiles={
                 "standard": {
-                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                    "providers": {"codex": {"reasoning_effort": "medium"}},
                 },
             },
             llm_role_profiles={"agent_runtime_implementation": "standard"},
@@ -362,9 +362,36 @@ class TestCodexCliRuntime:
                 runtime_handle=runtime_handle,
             )
 
-        assert "--profile" in command
-        assert command[command.index("--profile") + 1] == "ouroboros-standard"
+        assert "--profile" not in command
+        assert "model_reasoning_effort=medium" in command
         assert "--model" not in command
+
+    def test_build_command_keeps_role_effort_with_explicit_model_pin(self) -> None:
+        """A stage model pin replaces only the role model, not its effort level."""
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"reasoning_effort": "high"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project", model="terra")
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert command[command.index("--model") + 1] == "terra"
+        assert "model_reasoning_effort=high" in command
+        assert "--profile" not in command
 
     def test_build_command_matches_codex_0134_unified_profile_v2_contract(self) -> None:
         """Codex 0.134 uses --profile to load ~/.codex/<name>.config.toml files."""
@@ -586,7 +613,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_explicit_model_wins_over_runtime_profile(self) -> None:
         """Explicit runtime model overrides keep existing --model behavior."""
-        runtime = CodexCliRuntime(cli_path="codex", model="gpt-5.5", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -602,6 +628,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", model="gpt-5.5", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -783,6 +810,78 @@ class TestCodexCliRuntime:
         assert messages[0].data["recoverable"] is True
         assert messages[0].data["recovery"]["kind"] == "resume_retry"
         assert messages[0].data["recovery"]["resume_session_id"] == "thread-123"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_surfaces_model_pin_version_guidance(self) -> None:
+        """Execute-stage model pins receive the same App/CLI mismatch guidance."""
+        runtime = CodexCliRuntime(cli_path="/usr/local/bin/codex", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            del command, kwargs
+            return _FakeProcess(
+                stdout_lines=[],
+                stderr_lines=["Codex: model not found"],
+                returncode=1,
+            )
+
+        versions = {
+            "/usr/local/bin/codex": "codex-cli 0.139.0",
+            "/Applications/ChatGPT.app/Contents/Resources/codex": "codex-cli 0.140.0",
+        }
+        with (
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch(
+                "ouroboros.providers.codex_cli_adapter.CodexCliLLMAdapter._codex_version",
+                side_effect=lambda path: versions.get(path),
+            ),
+        ):
+            messages = [message async for message in runtime.execute_task("run the task")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["failure_category"] == "codex_model_unavailable"
+        assert result.data["codex_app_cli_versions_match"] is False
+        assert "Update both Codex installations" in result.content
+
+    @pytest.mark.asyncio
+    async def test_execute_task_surfaces_model_guidance_from_turn_failed_event(self) -> None:
+        """JSONL turn failures must not bypass App/CLI mismatch diagnostics."""
+        runtime = CodexCliRuntime(cli_path="/usr/local/bin/codex", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            del command, kwargs
+            return _FakeProcess(
+                stdout_lines=[
+                    json.dumps({"type": "turn.failed", "error": {"message": "model not found"}})
+                ],
+                stderr_lines=[],
+                returncode=1,
+            )
+
+        versions = {
+            "/usr/local/bin/codex": "codex-cli 0.139.0",
+            "/Applications/ChatGPT.app/Contents/Resources/codex": "codex-cli 0.140.0",
+        }
+        with (
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch(
+                "ouroboros.providers.codex_cli_adapter.CodexCliLLMAdapter._codex_version",
+                side_effect=lambda path: versions.get(path),
+            ),
+        ):
+            messages = [message async for message in runtime.execute_task("run the task")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["failure_category"] == "codex_model_unavailable"
+        assert result.data["codex_app_cli_versions_match"] is False
+        assert "Update both Codex installations" in result.content
 
     @pytest.mark.asyncio
     async def test_execute_task_starts_codex_in_dedicated_process_session(self) -> None:

@@ -23,7 +23,7 @@ ooo config
 Pick the branch that matches where you (the agent) are running. The decisive
 question: **can the user open a browser pointed at this machine?**
 
-### Branch A — local harness (Claude Code / Codex on the user's own machine)
+### Branch A — local Claude Code session on the user's own machine
 
 1. Launch in the background (the command serves until stopped):
 

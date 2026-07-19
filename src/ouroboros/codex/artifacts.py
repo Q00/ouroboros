@@ -12,6 +12,7 @@ import shutil
 from typing import Literal
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.skills.artifacts import (
     SKILL_ENTRYPOINT,
     collect_skill_bundle_dirs,
@@ -372,9 +373,7 @@ def install_codex_rules(
     prune: bool = False,
 ) -> Path:
     """Install or refresh packaged Ouroboros rules into ``~/.codex/rules``."""
-    resolved_codex_dir = (
-        Path(codex_dir).expanduser() if codex_dir is not None else Path.home() / ".codex"
-    )
+    resolved_codex_dir = resolve_codex_home(codex_dir)
     target_root = resolved_codex_dir / "rules"
     _prepare_managed_install_root(target_root)
 
@@ -421,9 +420,7 @@ def install_codex_skills(
     prune: bool = False,
 ) -> tuple[Path, ...]:
     """Install or refresh packaged Ouroboros skills into ``~/.codex/skills/ouroboros-*``."""
-    resolved_codex_dir = (
-        Path(codex_dir).expanduser() if codex_dir is not None else Path.home() / ".codex"
-    )
+    resolved_codex_dir = resolve_codex_home(codex_dir)
     target_root = resolved_codex_dir / "skills"
     _prepare_managed_install_root(target_root)
 

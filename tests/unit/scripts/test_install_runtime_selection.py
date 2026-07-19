@@ -134,6 +134,16 @@ def test_install_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_fresh_install_keeps_direct_model_settings_optional() -> None:
+    """The installer should start with the runtime default instead of forcing pins."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "Codex's current default model is ready to use." in text
+    assert 'GUI_DEFAULT="n"' in text
+    assert "Open direct model settings" in text
+    assert "Using the runtime default model." in text
+
+
 def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None:
     config_dir = tmp_path / "home" / ".ouroboros"
     config_dir.mkdir(parents=True)

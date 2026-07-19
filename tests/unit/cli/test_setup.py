@@ -33,6 +33,23 @@ from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 class TestCodexSetup:
     """Tests for Codex-specific setup behavior."""
 
+    def test_detect_runtimes_uses_bundled_codex_app_cli_when_path_is_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex App-only users can complete setup without a PATH wrapper."""
+        app_cli = tmp_path / "ChatGPT.app" / "Contents" / "Resources" / "codex"
+        app_cli.parent.mkdir(parents=True)
+        app_cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        app_cli.chmod(0o755)
+
+        with (
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+            patch("ouroboros.cli.commands.setup._CODEX_APP_CLI_PATH", app_cli),
+        ):
+            detected = setup_cmd._detect_runtimes()
+
+        assert detected["codex"] == str(app_cli)
+
     def test_codex_profile_v2_detection_for_unified_profile_help(self) -> None:
         """Codex 0.134 uses --profile itself for profile-v2 files."""
         help_text = """
@@ -107,6 +124,22 @@ class TestCodexSetup:
             '"--llm-backend", "codex"]'
         ) in contents
         assert 'command = "uvx"' not in contents
+
+    def test_register_codex_mcp_server_uses_codex_home(self, tmp_path: Path, monkeypatch) -> None:
+        """Setup must register the MCP server where the active Codex CLI reads it."""
+        codex_home = tmp_path / "custom-codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+        ):
+            setup_cmd._register_codex_mcp_server()
+
+        assert (codex_home / "config.toml").is_file()
+        assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_register_codex_mcp_server_refreshes_stale_dev_module_entry(
         self, tmp_path: Path
@@ -397,6 +430,74 @@ class TestCodexSetup:
         assert "[profiles.ouroboros-frontier]" in contents
         assert 'model_reasoning_effort = "xhigh"' in contents
         assert 'model = "' not in contents
+
+    def test_retire_codex_default_profiles_removes_only_untouched_v2_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Per-run effort supersedes generated task anchors but not user edits."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        generated = codex_dir / "ouroboros-fast.config.toml"
+        generated.write_text(
+            setup_cmd._render_codex_profile_v2_file(
+                setup_cmd._CODEX_DEFAULT_PROFILE_SECTIONS["ouroboros-fast"]
+            ),
+            encoding="utf-8",
+        )
+        customized = codex_dir / "ouroboros-deep.config.toml"
+        customized.write_text('model = "custom-model"\n', encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._retire_codex_default_profiles()
+
+        assert not generated.exists()
+        assert customized.read_text(encoding="utf-8") == 'model = "custom-model"\n'
+
+    def test_migrates_untouched_legacy_profile_mapping_before_retiring_anchor(
+        self, tmp_path: Path
+    ) -> None:
+        """Existing setup users move config and generated anchor as one safe migration."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "ouroboros-fast.config.toml").write_text(
+            setup_cmd._render_codex_profile_v2_file(
+                setup_cmd._CODEX_DEFAULT_PROFILE_SECTIONS["ouroboros-fast"]
+            ),
+            encoding="utf-8",
+        )
+        config_dict = {
+            "llm_profiles": {"fast": {"providers": {"codex": {"profile": "ouroboros-fast"}}}}
+        }
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._migrate_legacy_codex_profile_mappings(config_dict) == ["fast"]
+            setup_cmd._retire_codex_default_profiles(
+                protected_profile_names=setup_cmd._referenced_legacy_codex_profiles(config_dict)
+            )
+
+        assert config_dict["llm_profiles"]["fast"]["providers"]["codex"] == {
+            "reasoning_effort": "low"
+        }
+        assert not (codex_dir / "ouroboros-fast.config.toml").exists()
+
+    def test_preserves_customized_legacy_profile_mapping_and_anchor(self, tmp_path: Path) -> None:
+        """A user model pin in a legacy anchor stays active after setup."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        anchor = codex_dir / "ouroboros-fast.config.toml"
+        anchor.write_text('model = "terra"\n', encoding="utf-8")
+        config_dict = {
+            "llm_profiles": {"fast": {"providers": {"codex": {"profile": "ouroboros-fast"}}}}
+        }
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._migrate_legacy_codex_profile_mappings(config_dict) == []
+            assert setup_cmd._referenced_legacy_codex_profiles(config_dict) == {"ouroboros-fast"}
+            setup_cmd._retire_codex_default_profiles(
+                protected_profile_names=setup_cmd._referenced_legacy_codex_profiles(config_dict)
+            )
+
+        assert anchor.read_text(encoding="utf-8") == 'model = "terra"\n'
 
     def test_register_codex_default_profiles_preserves_existing_profile(
         self,
@@ -841,7 +942,7 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server") as mock_register,
-            patch("ouroboros.cli.commands.setup._register_codex_default_profiles") as mock_profiles,
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles") as mock_retire,
             patch(
                 "ouroboros.cli.commands.setup._register_codex_worker_profile"
             ) as mock_worker_profile,
@@ -854,11 +955,12 @@ class TestCodexSetup:
         assert config_dict["orchestrator"]["runtime_backend"] == "codex"
         assert config_dict["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
         assert config_dict["llm"]["backend"] == "codex"
-        assert config_dict["llm_profiles"]["fast"]["providers"]["codex"]["profile"] == (
-            "ouroboros-fast"
+        assert (
+            config_dict["llm_profiles"]["fast"]["providers"]["codex"]["reasoning_effort"] == "low"
         )
-        assert config_dict["llm_profiles"]["frontier"]["providers"]["codex"]["profile"] == (
-            "ouroboros-frontier"
+        assert (
+            config_dict["llm_profiles"]["frontier"]["providers"]["codex"]["reasoning_effort"]
+            == "xhigh"
         )
         assert config_dict["llm_role_profiles"]["context_compression"] == "deep"
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
@@ -874,13 +976,13 @@ class TestCodexSetup:
         assert config_dict["llm_role_profiles"]["agent_runtime_evaluation"] == "deep"
         mock_install.assert_called_once_with()
         mock_register.assert_called_once_with(mode="auto")
-        mock_profiles.assert_called_once_with(codex_path="/usr/local/bin/codex")
+        mock_retire.assert_called_once_with(protected_profile_names=set())
         mock_worker_profile.assert_called_once_with(codex_path="/usr/local/bin/codex")
 
         info_messages = [call.args[0] for call in mock_info.call_args_list]
         assert any("Config saved to" in message for message in info_messages)
         assert any("Configure Ouroboros runtime" in message for message in info_messages)
-        assert any("Codex profile-v2 anchors" in message for message in info_messages)
+        assert any("profiles you manage yourself" in message for message in info_messages)
 
     def test_setup_codex_aborts_on_non_mapping_config(self, tmp_path: Path) -> None:
         """Malformed top-level config should not be rewritten by Codex setup."""
@@ -1089,7 +1191,7 @@ class TestCodexSetup:
         fast_profile = config_dict["llm_profiles"]["fast"]
         assert fast_profile["model"] == "anthropic/custom-fast"
         assert fast_profile["providers"]["anthropic"]["model"] == "claude-haiku"
-        assert fast_profile["providers"]["codex"]["profile"] == "ouroboros-fast"
+        assert fast_profile["providers"]["codex"]["reasoning_effort"] == "low"
         assert config_dict["llm_role_profiles"]["assertion_extraction"] == "fast"
 
     def test_setup_codex_preserves_existing_codex_model_profile_mapping(

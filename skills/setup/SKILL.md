@@ -403,6 +403,40 @@ Join the community:
 
 ---
 
+### Step 5.1: Model Choice (Claude Code)
+
+Before continuing to repository setup, give Claude Code users the same
+optional control over models without making it a requirement. Ask in the
+user's language; for Korean, use:
+
+```json
+{
+  "questions": [{
+    "question": "설정이 완료됐어요. 기본 모델 설정으로 바로 시작할 수 있고, 모델은 언제든 나중에 바꿀 수 있어요.",
+    "header": "모델 설정",
+    "options": [
+      {
+        "label": "바로 시작하기 (권장)",
+        "description": "기본 모델 설정으로 바로 작업을 시작해요"
+      },
+      {
+        "label": "직접 모델 설정하기",
+        "description": "단계별로 모델을 바꾸거나 목록에 없는 모델 ID를 입력해 고정해요"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **바로 시작하기**: Continue to Step 5.5.
+- **직접 모델 설정하기**: Read and follow `../config/SKILL.md`. In the
+  local Claude Code harness, it opens the same settings UI in the user's
+  browser at a temporary `localhost` address. They can reopen it any time with
+  `ooo config`; this choice never permanently locks a model.
+
+---
+
 ### Step 5.5: Brownfield Repository Scan
 
 Scan a root directory for existing git repositories and linked worktrees, then register them in the Ouroboros DB. This enables interviews to use brownfield context for existing projects.

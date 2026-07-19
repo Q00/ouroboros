@@ -36,6 +36,9 @@ ooo run
 
 > `ooo` commands are Claude Code skills. They only work inside an active Claude Code session.
 > `ooo setup` registers the MCP server globally (one-time) and optionally configures your project.
+> After setup, choose **Start now** to use the recommended model settings, or
+> **Directly configure models** to select a model for each pipeline stage. You
+> can reopen those settings any time with `ooo config`.
 
 ---
 
@@ -54,6 +57,29 @@ ouroboros setup
 
 # Run a seed spec
 ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
+```
+
+### Codex first use
+
+For the Codex plugin, add the marketplace and install Ouroboros:
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+Start a new Codex session and enter `ooo`. If setup has not run yet, Ouroboros
+offers to prepare the runtime before it changes anything. Once prepared, it
+uses Codex's current default model automatically. Choose **Directly configure
+models** only when you want to choose or pin a model for a pipeline stage; in
+Codex this opens the local settings UI in your browser at a temporary
+`localhost` address.
+
+For a standalone Codex CLI installation without the plugin, prepare the
+integration once:
+
+```bash
+ouroboros setup --runtime codex
 ```
 
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
@@ -202,7 +228,7 @@ runtime_controls:
   generation_no_progress_timeout_seconds: 14400  # 4h without material progress
 ```
 
-For Codex CLI, the recommended documented baseline is GPT-5.4 with medium reasoning effort. Put Ouroboros per-role overrides in `~/.ouroboros/config.yaml`, not in `~/.codex/config.toml`:
+For Codex CLI, leave the model on Codex's default unless you intentionally need a pin. `ouroboros config --web` and `ouroboros config` offer **Use Codex default model** for that choice; choose **Enter another model ID…** when you want to pin a stage to a model that is not listed. Ouroboros applies the task's reasoning effort per invocation. The equivalent `~/.ouroboros/config.yaml` model pins look like this:
 
 ```yaml
 # ~/.ouroboros/config.yaml
@@ -216,6 +242,9 @@ llm:
 
 clarification:
   default_model: gpt-5.4
+
+execution:
+  default_model: gpt-5.4  # omit, or choose Use Codex default model in config --web
 
 evaluation:
   semantic_model: gpt-5.4

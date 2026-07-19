@@ -171,9 +171,9 @@ def test_show_json_emits_machine_readable_effective_view(monkeypatch, tmp_path) 
         "agent": "codex",
         "inherited": False,
         "agent_installed": True,
-        "model": None,
-        "model_source": "not configurable",
-        "model_key": None,
+        "model": "backend default",
+        "model_source": "default",
+        "model_key": "execution.default_model",
     }
     assert payload["stages"]["interview"]["inherited"] is True
     assert payload["stages"]["interview"]["agent"] == "opencode"

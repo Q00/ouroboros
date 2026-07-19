@@ -31,6 +31,7 @@ from ouroboros.backends.capabilities import (
     get_backend_capability,
     runtime_backend_choices,
 )
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
 
 # Backends whose runnable model is the CLI's own configured default rather
@@ -319,7 +320,7 @@ def configured_default_model(backend: str) -> str | None:
         if capability.name == "codex":
             import tomllib
 
-            config_path = Path.home() / ".codex" / "config.toml"
+            config_path = resolve_codex_home() / "config.toml"
             if not config_path.exists():
                 return None
             data = tomllib.loads(config_path.read_text())

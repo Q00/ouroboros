@@ -14,6 +14,8 @@ import sys
 import pytest
 from textual.widgets import Input, OptionList, Select, Static
 
+from ouroboros.backends import runtime_backend_choices
+from ouroboros.backends.model_catalog import DEFAULT_MODEL_SENTINEL, uses_default_model_sentinel
 from ouroboros.config_tui import persistence
 from ouroboros.config_tui.app import (
     CUSTOM_SENTINEL,
@@ -135,6 +137,7 @@ async def test_custom_model_choice_reveals_input(app_env) -> None:
         await pilot.pause()
         custom = pilot.app.query_one(f"#stage-model-custom-{Stage.EVALUATE.value}", Input)
         assert not custom.has_class("hidden")
+        assert custom.placeholder == "e.g. terra"
 
 
 @pytest.mark.asyncio
@@ -292,7 +295,8 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
         await pilot.pause()
 
         assert "codex" in str(caption.render())
-        assert not list(pilot.app.query(f"#stage-model-{stage}").results(Select))
+        model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
+        assert model_select.value == "default"
 
 
 @pytest.mark.asyncio
@@ -405,7 +409,7 @@ async def test_search_modal_cancel_restores_previous_value(app_env, monkeypatch)
 @pytest.mark.asyncio
 async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
     """For sentinel backends the 'default' entry names the model it resolves
-    to (read from the CLI's own config), e.g. 'default — currently gpt-9-test'."""
+    to (read from the CLI's own config), e.g. 'Use Codex default model — configured: gpt-9-test'."""
     app = SettingsApp()
     async with app.run_test() as pilot:
         stage = Stage.INTERVIEW.value
@@ -413,8 +417,21 @@ async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
         await pilot.pause()
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         labels = {str(label) for label, _ in model_select._options}
-        assert any("default — currently gpt-9-test" in label for label in labels)
+        assert any("Use Codex default model — configured: gpt-9-test" in label for label in labels)
         assert model_select.value == "default"  # value stays the sentinel
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [backend for backend in runtime_backend_choices() if uses_default_model_sentinel(backend)],
+)
+def test_default_sentinel_describes_the_runtime_default_for_every_cli_backend(
+    app_env, backend: str
+) -> None:
+    """Every CLI-owned default describes the actual model-selection behavior."""
+    label = SettingsApp()._model_label(backend, DEFAULT_MODEL_SENTINEL)
+
+    assert label.startswith("Use ")
 
 
 @pytest.mark.asyncio
@@ -427,10 +444,46 @@ async def test_preset_button_stages_models_for_every_card(app_env) -> None:
         await pilot.pause()
         interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
         assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
-        assert not list(pilot.app.query(f"#stage-model-{Stage.EXECUTE.value}").results(Select))
+        execute_model = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert execute_model.value == "gpt-5-mini"  # codex frugal
         status = pilot.app.query_one("#status-bar", Static)
         assert "frugal" in str(status.render())
         assert "Save" in str(status.render())  # staged, not saved
+
+
+@pytest.mark.asyncio
+async def test_save_persists_execute_model_pin(app_env, monkeypatch) -> None:
+    """The web/TUI Execute card persists a deliberate model pin."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        model_select = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        model_select.value = "gpt-5-codex"
+        await pilot.pause()
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert captured["execution.default_model"] == "gpt-5-codex"
+
+
+@pytest.mark.asyncio
+async def test_execute_automatic_survives_runtime_change_without_creating_a_pin(
+    app_env, monkeypatch
+) -> None:
+    """Changing Execute's runtime never turns its default-model choice into a pin."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        pilot.app.query_one(f"#stage-runtime-{Stage.EXECUTE.value}", Select).value = "claude"
+        await pilot.pause()
+        model_select = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert model_select.value == "default"
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert "execution.default_model" not in captured
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,7 @@ from ouroboros.config.models import (
     ConsensusConfig,
     CredentialsConfig,
     EvaluationConfig,
+    ExecutionConfig,
     LLMConfig,
     OrchestratorConfig,
     OuroborosConfig,
@@ -2272,3 +2273,42 @@ class TestGetAgentReasoningEffort:
 
         with pytest.raises(pydantic.ValidationError):
             OrchestratorConfig(reasoning_effort="minimal")
+
+
+class TestGetExecutionModel:
+    """Execute model pins come from env first, then the persisted settings UI value."""
+
+    def test_env_model_overrides_persisted_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "env-model")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(execution=ExecutionConfig(default_model="saved-model")),
+        ):
+            assert get_execution_model() == "env-model"
+
+    def test_persisted_execute_model_is_used_when_env_is_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(execution=ExecutionConfig(default_model="gpt-5-codex")),
+        ):
+            assert get_execution_model() == "gpt-5-codex"
+
+    @pytest.mark.parametrize("value", (None, "", "default", "current"))
+    def test_automatic_execute_values_do_not_pin_a_model(
+        self, monkeypatch: pytest.MonkeyPatch, value: str | None
+    ) -> None:
+        from ouroboros.config.loader import get_execution_model
+
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(execution=ExecutionConfig(default_model=value)),
+        ):
+            assert get_execution_model() is None

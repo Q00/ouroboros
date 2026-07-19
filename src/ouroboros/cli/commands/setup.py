@@ -49,6 +49,7 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -182,6 +183,15 @@ def _detect_runtimes() -> dict[str, str | None]:
         path = shutil.which(name)
         runtimes[name] = path
 
+    # Codex App bundles this executable but does not always add it to the
+    # terminal PATH. Treat it as an available Codex runtime for App-only users.
+    if (
+        runtimes["codex"] is None
+        and _CODEX_APP_CLI_PATH.is_file()
+        and os.access(_CODEX_APP_CLI_PATH, os.X_OK)
+    ):
+        runtimes["codex"] = str(_CODEX_APP_CLI_PATH)
+
     # Gemini: prefer explicit-path config (env var / config.yaml) over PATH.
     try:
         from ouroboros.config import get_gemini_cli_path
@@ -299,6 +309,7 @@ _CODEX_MCP_COMMENT_LINES = (
 )
 
 CodexMcpMode = Literal["auto", "preserve", "stdio"]
+_CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
 _CODEX_DIRECT_MCP_ARGS = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]
 _CODEX_MODULE_MCP_ARGS = ["-m", "ouroboros", *_CODEX_DIRECT_MCP_ARGS]
@@ -324,22 +335,22 @@ _CODEX_DEFAULT_LLM_PROFILES: dict[str, dict[str, object]] = {
     "fast": {
         "max_turns": 1,
         "temperature": 0.2,
-        "providers": {"codex": {"profile": "ouroboros-fast"}},
+        "providers": {"codex": {"reasoning_effort": "low"}},
     },
     "standard": {
         "max_turns": 3,
         "temperature": 0.3,
-        "providers": {"codex": {"profile": "ouroboros-standard"}},
+        "providers": {"codex": {"reasoning_effort": "medium"}},
     },
     "deep": {
         "max_turns": 5,
         "temperature": 0.4,
-        "providers": {"codex": {"profile": "ouroboros-deep"}},
+        "providers": {"codex": {"reasoning_effort": "high"}},
     },
     "frontier": {
         "max_turns": 8,
         "temperature": 0.4,
-        "providers": {"codex": {"profile": "ouroboros-frontier"}},
+        "providers": {"codex": {"reasoning_effort": "xhigh"}},
     },
 }
 
@@ -724,7 +735,7 @@ def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
         print_info("Preserved Codex MCP config.")
         return
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():
@@ -930,11 +941,145 @@ def _warn_preserved_legacy_codex_profiles(codex_config: Path, profile_names: set
     )
 
 
+def _retire_codex_default_profiles(*, protected_profile_names: set[str] | None = None) -> None:
+    """Remove only untouched task-profile anchors superseded by per-run effort.
+
+    The task profiles used to contain nothing but a reasoning-effort setting.
+    That setting is now supplied with ``codex exec -c``.  Never remove a
+    profile whose parsed content differs from the generated default.
+    """
+    import tomllib
+
+    protected = protected_profile_names or set()
+    codex_dir = resolve_codex_home()
+    codex_config = codex_dir / "config.toml"
+    removed: list[str] = []
+    if codex_config.exists():
+        try:
+            raw = codex_config.read_text(encoding="utf-8")
+            parsed = tomllib.loads(raw)
+            profiles = parsed.get("profiles")
+            removable = {
+                name
+                for name, settings in _CODEX_DEFAULT_PROFILE_SECTIONS.items()
+                if name not in protected
+                if isinstance(profiles, dict) and profiles.get(name) == settings
+            }
+            if removable:
+                updated_raw, _ = _remove_codex_legacy_profile_sections(raw, removable)
+                codex_config.write_text(updated_raw, encoding="utf-8")
+                removed.extend(sorted(removable))
+        except (OSError, tomllib.TOMLDecodeError, ValueError):
+            pass
+
+    for name, settings in _CODEX_DEFAULT_PROFILE_SECTIONS.items():
+        if name in protected:
+            continue
+        profile_path = codex_dir / f"{name}.config.toml"
+        try:
+            if profile_path.read_text(encoding="utf-8") == _render_codex_profile_v2_file(settings):
+                profile_path.unlink()
+                removed.append(name)
+        except OSError:
+            continue
+
+    if removed:
+        print_info(
+            "Retired superseded Codex task profile anchors: " + ", ".join(sorted(set(removed)))
+        )
+
+
+def _legacy_codex_profile_is_customized(profile_name: str) -> bool:
+    """Return whether an old Ouroboros-owned Codex anchor was edited by its user."""
+    import tomllib
+
+    expected = _CODEX_DEFAULT_PROFILE_SECTIONS[profile_name]
+    codex_dir = resolve_codex_home()
+    codex_config = codex_dir / "config.toml"
+    if codex_config.exists():
+        try:
+            profiles = tomllib.loads(codex_config.read_text(encoding="utf-8")).get("profiles")
+        except (OSError, tomllib.TOMLDecodeError):
+            # A malformed file is not ours to reinterpret or modify.
+            return True
+        if isinstance(profiles, dict) and profile_name in profiles:
+            if profiles[profile_name] != expected:
+                return True
+
+    profile_path = codex_dir / f"{profile_name}.config.toml"
+    try:
+        if profile_path.exists() and profile_path.read_text(
+            encoding="utf-8"
+        ) != _render_codex_profile_v2_file(expected):
+            return True
+    except OSError:
+        return True
+    return False
+
+
+def _migrate_legacy_codex_profile_mappings(config_dict: dict) -> list[str]:
+    """Move untouched setup-owned profile references to per-call effort settings.
+
+    Earlier setup releases wrote both ``profile: ouroboros-*`` in config.yaml
+    and a matching native Codex profile anchor.  The two must migrate together:
+    removing only the anchor would leave existing users with a dangling
+    ``--profile`` reference.  A customized native anchor is deliberately left
+    intact because it may contain a model pin the user chose.
+    """
+    llm_profiles = config_dict.get("llm_profiles")
+    if not isinstance(llm_profiles, dict):
+        return []
+
+    migrated: list[str] = []
+    for task_profile, default in _CODEX_DEFAULT_LLM_PROFILES.items():
+        profile = llm_profiles.get(task_profile)
+        if not isinstance(profile, dict):
+            continue
+        providers = profile.get("providers")
+        if not isinstance(providers, dict):
+            continue
+        codex_provider = providers.get("codex")
+        if not isinstance(codex_provider, dict):
+            continue
+
+        native_name = f"ouroboros-{task_profile}"
+        if codex_provider.get("profile") != native_name:
+            continue
+        if "model" in codex_provider or "reasoning_effort" in codex_provider:
+            continue
+        if _legacy_codex_profile_is_customized(native_name):
+            continue
+
+        codex_provider.pop("profile")
+        codex_provider["reasoning_effort"] = default["providers"]["codex"]["reasoning_effort"]  # type: ignore[index]
+        migrated.append(task_profile)
+    return migrated
+
+
+def _referenced_legacy_codex_profiles(config_dict: dict) -> set[str]:
+    """Find old task anchors still intentionally referenced from config.yaml."""
+    llm_profiles = config_dict.get("llm_profiles")
+    if not isinstance(llm_profiles, dict):
+        return set()
+    known = set(_CODEX_DEFAULT_PROFILE_SECTIONS)
+    referenced: set[str] = set()
+    for profile in llm_profiles.values():
+        if not isinstance(profile, dict) or not isinstance(profile.get("providers"), dict):
+            continue
+        codex_provider = profile["providers"].get("codex")
+        if not isinstance(codex_provider, dict):
+            continue
+        profile_name = codex_provider.get("profile")
+        if isinstance(profile_name, str) and profile_name in known:
+            referenced.add(profile_name)
+    return referenced
+
+
 def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
@@ -1000,7 +1145,7 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
     """Register the managed Codex worker profile in ~/.codex/config.toml."""
     import tomllib
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():
@@ -1157,8 +1302,12 @@ def _install_codex_default_llm_profiles(
 
         default_codex = profile["providers"]["codex"]  # type: ignore[index]
         codex_provider = _ensure_profile_provider_mapping(existing_profile, "codex")
-        if "profile" not in codex_provider and "model" not in codex_provider:
-            codex_provider["profile"] = default_codex["profile"]  # type: ignore[index]
+        if (
+            "profile" not in codex_provider
+            and "model" not in codex_provider
+            and "reasoning_effort" not in codex_provider
+        ):
+            codex_provider["reasoning_effort"] = default_codex["reasoning_effort"]  # type: ignore[index]
             updated_profiles.append(name)
 
     added_role_profiles: list[str] = []
@@ -1175,7 +1324,7 @@ def _print_codex_config_guidance(config_path: Path) -> None:
     """Explain where Codex users should configure Ouroboros vs. Codex settings."""
     print_info(f"Configure Ouroboros runtime and per-role model overrides in {config_path}.")
     print_info(
-        "Use ~/.codex/config.toml for the Codex MCP/env hookup. Codex profile-v2 anchors live in ~/.codex/<profile>.config.toml on current Codex CLI releases."
+        f"Use {resolve_codex_home() / 'config.toml'} for the Codex MCP/env hookup and any profiles you manage yourself."
     )
 
 
@@ -1183,7 +1332,7 @@ def _install_codex_artifacts() -> None:
     """Install packaged Ouroboros rules and skills into ~/.codex/."""
     from ouroboros.codex import install_codex_artifacts
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = resolve_codex_home()
 
     try:
         result = install_codex_artifacts(codex_dir=codex_dir, prune=True)
@@ -1222,6 +1371,8 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict
         )
+        migrated_legacy_profiles = _migrate_legacy_codex_profile_mappings(config_dict)
+        protected_legacy_profiles = _referenced_legacy_codex_profiles(config_dict)
     except ValueError as exc:
         print_error(f"Invalid config.yaml structure: {exc}")
         print_info("Aborting Codex setup without rewriting config.yaml.")
@@ -1239,6 +1390,11 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
             "Added Codex provider mappings to existing Ouroboros LLM profiles: "
             f"{', '.join(updated_profiles)}"
         )
+    if migrated_legacy_profiles:
+        print_info(
+            "Migrated legacy Codex task profiles to per-run reasoning effort: "
+            + ", ".join(migrated_legacy_profiles)
+        )
     if added_role_profiles:
         print_info(
             f"Installed Ouroboros role profile defaults for {len(added_role_profiles)} roles."
@@ -1249,7 +1405,7 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
 
     # Register MCP server in Codex config (~/.codex/config.toml)
     _register_codex_mcp_server(mode=mcp_mode)
-    _register_codex_default_profiles(codex_path=codex_path)
+    _retire_codex_default_profiles(protected_profile_names=protected_legacy_profiles)
     _register_codex_worker_profile(codex_path=codex_path)
     _print_codex_config_guidance(config_path)
 
@@ -3328,7 +3484,7 @@ def refresh_artifacts() -> None:
 
     refreshed: list[str] = []
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = resolve_codex_home()
     if codex_dir.exists() or shutil.which("codex"):
         from ouroboros.codex import install_codex_artifacts
 

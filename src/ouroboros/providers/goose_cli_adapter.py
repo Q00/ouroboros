@@ -356,8 +356,11 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
         stderr: str,
         stdout_errors: list[str],
         message: str,
+        cli_path: str | None = None,
     ) -> dict[str, object]:
-        del message
+        # Keep this hook signature compatible with the shared Codex adapter.
+        # Goose intentionally does not inspect Codex App/CLI versions.
+        del message, cli_path
         return {
             "returncode": returncode,
             "session_id": session_id,

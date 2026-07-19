@@ -174,4 +174,35 @@ approval.
 - `ooo setup` → write Ouroboros config (`~/.ouroboros/config.yaml`) and register the MCP server
 - `ooo update` → upgrade Ouroboros to the latest PyPI version
 
+### First use in Codex
+
+When a user enters bare `ooo`, invoke the installed Ouroboros welcome skill and let its
+setup gate determine readiness. Do not treat the mere existence of
+`~/.ouroboros/config.yaml` as ready: Codex is ready only when the config names
+the Codex runtime and LLM backend and `~/.codex/config.toml` registers the
+Ouroboros MCP server. If it is not ready, do not assume the user knows what
+`setup`, MCP, or a runtime profile means. Ask one localized question instead:
+
+> Ouroboros를 처음 사용하시네요. 시작하기 전에 실행 환경을 설정할까요?
+
+Offer **설정하고 시작하기 (권장)** and **나중에**. If they choose setup, run
+`ouroboros setup --runtime codex`; when Ouroboros is available only through the
+Marketplace plugin, run `uvx --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex`
+instead. Do not make them copy the command.
+
+After it succeeds, explain that Codex's currently selected default model will
+be used and that the user can change that choice any time through `ooo config`.
+Then offer **바로 시작하기 (권장)** or **직접 모델 설정하기**. The
+latter runs `ouroboros config` (or
+`uvx --from 'ouroboros-ai[tui]' ouroboros config` for a Marketplace-plugin-only
+install): Codex cannot host a full-screen terminal UI in the conversation, so
+the same settings UI opens in the user's local browser at a temporary
+`localhost` URL. It is not an external website. The settings UI shows **Use
+Codex default model** and **Enter another model ID…** for users who want to pin
+a stage to a specific model.
+
+Never repeat this first-use prompt once all of those Codex readiness checks
+pass. If the user selected **나중에** or the setup was later removed, offer the
+setup gate again.
+
 If the request is clearly unrelated to Ouroboros, handle it normally.

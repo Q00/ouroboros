@@ -9,7 +9,6 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import inspect
-import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,7 +19,11 @@ import structlog
 import yaml
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_auto_evaluate_enabled, get_max_parallel_workers
+from ouroboros.config.loader import (
+    get_auto_evaluate_enabled,
+    get_execution_model,
+    get_max_parallel_workers,
+)
 from ouroboros.core.conductor import (
     ConductorDirective,
     validate_conductor_successor_authorization,
@@ -87,15 +90,14 @@ log = structlog.get_logger(__name__)
 def _resolve_execution_model(runtime_backend: str | None) -> str | None:
     """Resolve the model pin for agent-runtime execution tasks.
 
-    ``OUROBOROS_EXECUTION_MODEL`` is already honored by the MCP evolution
-    executor. Keep execute-seed and auto run-handoff aligned so CLI-backed
-    runtimes such as Pi can be smoke-tested against an explicitly authenticated
-    provider/model without changing their global defaults.
+    The one-off ``OUROBOROS_EXECUTION_MODEL`` override and persisted
+    ``execution.default_model`` setting use the same resolver across execute-
+    seed, auto handoff, and evolution. This keeps a deliberate model pin
+    consistent without changing a runtime's global default when unset.
     """
-    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    execution_model = get_execution_model()
     if execution_model is not None:
-        stripped = execution_model.strip()
-        return stripped or None
+        return execution_model
     if runtime_backend == "claude":
         return DEFAULT_SONNET_MODEL
     return None

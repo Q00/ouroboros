@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
+from ouroboros.config.loader import get_execution_model
 from ouroboros.core.seed import ac_text, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.events.io import new_call_id
@@ -1564,7 +1565,7 @@ def create_ouroboros_server(
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
     # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
-    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    execution_model = get_execution_model()
     if execution_model is None and execute_runtime_backend == "claude":
         execution_model = DEFAULT_SONNET_MODEL
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
@@ -1831,7 +1832,7 @@ def create_ouroboros_server(
 
         max_attempts = 3
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
-        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL")
+        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
             validation_model = DEFAULT_SONNET_MODEL
         validation_adapter = create_agent_runtime(

@@ -1,0 +1,36 @@
+{
+  "name": "ouroboros",
+  "version": "0.50.4",
+  "description": "Turn vague ideas into validated specifications and verified software.",
+  "author": {
+    "name": "Q00",
+    "email": "jqyu.lee@gmail.com",
+    "url": "https://github.com/Q00"
+  },
+  "homepage": "https://github.com/Q00/ouroboros",
+  "repository": "https://github.com/Q00/ouroboros",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "requirements",
+    "socratic",
+    "interview",
+    "evaluation"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Ouroboros",
+    "shortDescription": "Turn ideas into verified software.",
+    "longDescription": "Clarify requirements, create a validated specification, execute it, and verify the result.",
+    "developerName": "Q00",
+    "category": "Development",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://github.com/Q00/ouroboros",
+    "defaultPrompt": [
+      "Help me turn this product idea into a clear build plan.",
+      "Start an Ouroboros interview for my new project.",
+      "Open Ouroboros model settings."
+    ]
+  }
+}

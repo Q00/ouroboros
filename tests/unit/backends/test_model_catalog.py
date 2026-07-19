@@ -205,6 +205,15 @@ def test_configured_default_model_codex(monkeypatch, tmp_path) -> None:
     assert mc.configured_default_model("codex") == "gpt-9-codex"
 
 
+def test_configured_default_model_codex_uses_codex_home(monkeypatch, tmp_path) -> None:
+    codex_home = tmp_path / "custom-codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "gpt-9-codex-home"\n')
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert mc.configured_default_model("codex") == "gpt-9-codex-home"
+
+
 def test_configured_default_model_missing_file(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(mc.Path, "home", classmethod(lambda _cls: tmp_path))
     assert mc.configured_default_model("hermes") is None

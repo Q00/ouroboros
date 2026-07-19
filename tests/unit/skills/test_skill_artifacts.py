@@ -2,9 +2,101 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ouroboros.skills.artifacts import resolve_packaged_skills_dir
+
+
+def test_codex_plugin_manifest_exposes_the_shared_skills_and_mcp_server() -> None:
+    """The marketplace install must carry the first-use skills before setup runs."""
+    repo_root = Path(__file__).resolve().parents[3]
+    marketplace_path = repo_root / ".agents" / "plugins" / "marketplace.json"
+    marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+    manifest_path = repo_root / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert marketplace["name"] == "ouroboros"
+    assert marketplace["plugins"] == [
+        {
+            "name": "ouroboros",
+            "source": {"source": "local", "path": "."},
+            "policy": {"installation": "AVAILABLE"},
+            "category": "Developer Tools",
+        }
+    ]
+    assert manifest["name"] == "ouroboros"
+    assert manifest["skills"] == "./skills/"
+    assert manifest["mcpServers"] == "./.mcp.json"
+    assert manifest["interface"]["displayName"] == "Ouroboros"
+    assert (repo_root / ".mcp.json").is_file()
+    assert (repo_root / "skills" / "config" / "SKILL.md").is_file()
+    assert (repo_root / "skills" / "ooo" / "SKILL.md").is_file()
+    assert (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").is_file()
+
+
+def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> None:
+    """Codex and Claude package only the first-use wording for their own host."""
+    repo_root = Path(__file__).resolve().parents[3]
+    codex_required_phrases = (
+        "Setup Gate: First Use",
+        "CODEX_SETUP_REQUIRED",
+        "mcp_servers\\.ouroboros",
+        "ouroboros setup --runtime codex",
+        "uvx --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex",
+        "설정하고 시작하기",
+        "직접 모델 설정하기",
+        "모델은 언제든 나중에 바꿀 수 있어요",
+        "Use Codex default model",
+        "Enter another model ID",
+        "../config/SKILL.md",
+        "temporary `localhost` address",
+        "A previously completed welcome must never hide the setup gate",
+    )
+    codex_welcome = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+    for phrase in codex_required_phrases:
+        assert phrase in codex_welcome, f"Codex skills: missing first-use handoff `{phrase}`"
+
+    codex_entry = (repo_root / "skills" / "ooo" / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: ooo" in codex_entry
+    assert "../welcome/SKILL.md" in codex_entry
+
+    claude_welcome = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Setup Gate: First Use" in claude_welcome
+    assert "../setup/SKILL.md" in claude_welcome
+    assert "previously completed welcome must never hide the setup gate" in claude_welcome
+    assert "runtime_backend: claude" in claude_welcome
+    assert '"ouroboros"' in claude_welcome
+    assert "Codex" not in claude_welcome
+
+    claude_setup = (repo_root / ".claude-plugin" / "skills" / "setup" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    claude_config = (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Codex" not in claude_setup
+    assert "Codex" not in claude_config
+    assert "execution.default_model" in claude_config
+
+    codex_rules = (repo_root / "src" / "ouroboros" / "codex" / "ouroboros.md").read_text(
+        encoding="utf-8"
+    )
+    assert "### First use in Codex" in codex_rules
+    assert "직접 모델 설정하기" in codex_rules
+    assert "mere existence" in codex_rules
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        setup = (root / "setup" / "SKILL.md").read_text(encoding="utf-8")
+        assert "### Step 5.1: Model Choice (Claude Code)" in setup
+        assert "직접 모델 설정하기" in setup
+        assert "ooo config" in setup
+
+    assert "execution.default_model" in (repo_root / "skills" / "config" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_resolve_packaged_skills_dir_falls_back_to_repo_root_bundle_when_package_is_stub(

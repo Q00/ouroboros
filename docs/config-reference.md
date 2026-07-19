@@ -34,7 +34,7 @@ Complete reference for `~/.ouroboros/config.yaml` and all related environment va
 For Codex-backed Ouroboros workflows:
 
 - Put persistent Ouroboros role overrides in `~/.ouroboros/config.yaml`.
-- Use `~/.codex/config.toml` only for the Codex MCP registration. On current Codex CLI releases, profile anchors written by `ouroboros setup --runtime codex` live in `~/.codex/<profile>.config.toml`.
+- Use `ouroboros config --web` (or `ouroboros config` in a terminal) to select **Use Codex default model** for Codex's current default model, or choose **Enter another model ID…** to pin a model for each pipeline stage, including Execute. `~/.codex/config.toml` is for the Codex MCP registration and any user-managed native profiles.
 - The Codex-aware loader does **not** hardcode a mini model when these keys are left at their shipped defaults. It resolves Codex-backed lookups to Codex's `default` sentinel unless you set an explicit model string.
 - Use `llm_profiles` and `llm_role_profiles` when you want portable task profiles that can map to Codex CLI profiles or to ordinary model settings for other providers.
 
@@ -43,16 +43,17 @@ For Codex-backed Ouroboros workflows:
 | Role | `config.yaml` key |
 |------|-------------------|
 | Clarification / interview | `clarification.default_model` |
+| Agent execution | `execution.default_model` |
 | QA verdict | `llm.qa_model` |
 | Semantic evaluation | `evaluation.semantic_model` |
 | Consensus simple voting | `consensus.models` |
 | Consensus deliberative roles | `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model` |
 
-> **Recommended documented baseline:** use GPT-5.4 with medium reasoning effort in Codex CLI for standard work. `ouroboros setup --runtime codex` also creates cheaper fast defaults on GPT-5.4 Mini and deeper GPT-5.5 defaults for users whose ChatGPT plan exposes those models.
+> **Recommended baseline:** use **Use Codex default model**. Setup assigns each Ouroboros role a per-invocation reasoning effort (fast: low, standard: medium, deep: high, frontier: xhigh) without pinning a Codex model, so Codex's current default remains in control.
 
 ### Portable Task Profiles
 
-`llm_profiles` are top-level, provider-neutral task profiles. `llm_role_profiles` maps logical Ouroboros roles to those profiles. For Codex, a provider mapping can use `profile`, which is passed as `codex exec --profile <name>`. Role mappings route model/native-profile selection and CLI turn budgets while preserving each call site's tuned sampling and token settings; explicit per-request `profile` selection opts into the profile's full tuning envelope.
+`llm_profiles` are top-level, provider-neutral task profiles. `llm_role_profiles` maps logical Ouroboros roles to those profiles. For Codex, the built-in mappings use `reasoning_effort`, which is passed to `codex exec` for that call and does not change the user's global model. A user-managed provider `profile` remains supported and is passed as `codex exec --profile <name>`. Role mappings preserve each call site's tuned sampling and token settings.
 
 ```yaml
 llm_profiles:
@@ -61,7 +62,7 @@ llm_profiles:
     temperature: 0.2
     providers:
       codex:
-        profile: ouroboros-fast
+        reasoning_effort: low
       litellm:
         model: openrouter/openai/gpt-5.3-codex-spark
 
@@ -70,14 +71,14 @@ llm_profiles:
     temperature: 0.3
     providers:
       codex:
-        profile: ouroboros-standard
+        reasoning_effort: medium
 
   deep:
     max_turns: 5
     temperature: 0.4
     providers:
       codex:
-        profile: ouroboros-deep
+        reasoning_effort: high
       claude_code:
         model: claude-opus-4-6
       gemini:
@@ -92,7 +93,7 @@ llm_profiles:
     temperature: 0.4
     providers:
       codex:
-        profile: ouroboros-frontier
+        reasoning_effort: xhigh
 
 llm_role_profiles:
   ambiguity: deep
@@ -125,23 +126,7 @@ llm_role_profiles:
 
 Resolution order is: explicit request-level model pins, role mapping, profile provider mapping for the active backend, existing `*_model` field, then backend default behavior.
 
-For Codex, setup creates flat profile-v2 anchors as `~/.codex/<profile>.config.toml` files on current Codex CLI releases:
-
-```toml
-# ~/.codex/ouroboros-fast.config.toml
-model_reasoning_effort = "low"
-
-# ~/.codex/ouroboros-standard.config.toml
-model_reasoning_effort = "medium"
-
-# ~/.codex/ouroboros-deep.config.toml
-model_reasoning_effort = "high"
-
-# ~/.codex/ouroboros-frontier.config.toml
-model_reasoning_effort = "xhigh"
-```
-
-These are intentionally sparse, flat Codex profiles. Codex currently exposes a single `--profile <name>` selector; setup does not depend on unsupported profile-to-profile inheritance. Setup leaves `model` unset so the generated anchors inherit the user's local Codex default model instead of assuming account access to a specific frontier model. Add a `model = "..."` line to a profile file only when you want to pin a model that your account exposes. Older Codex CLI releases used `[profiles.ouroboros-*]` tables in `~/.codex/config.toml`; setup keeps that path only when the detected CLI still uses the legacy profile format.
+Codex setup applies those effort values with a per-invocation `model_reasoning_effort` override. It does not create or select an Ouroboros-owned Codex profile, so an App or CLI model change is automatically inherited. Existing user-created Codex profiles remain available when explicitly selected.
 
 If `~/.codex/config.toml` already contains a URL-based Ouroboros MCP server, setup preserves it instead of replacing it with a stdio command block:
 
@@ -256,10 +241,10 @@ Profile fields:
 | `max_tokens` | `int \| null` | Portable token limit override. |
 | `top_p` | `float \| null` | Portable nucleus sampling override. |
 | `max_turns` | `int \| null` | Portable CLI-agent turn budget where supported. |
-| `reasoning_effort` | `"low" \| "medium" \| "high" \| null` | Portable effort dial for providers with native reasoning-effort support. Ouroboros task profiles intentionally accept only `low`, `medium`, and `high`; backend-native profile files may expose additional provider-specific values such as Codex `xhigh`. |
+| `reasoning_effort` | `"low" \| "medium" \| "high" \| null` | Portable effort dial for providers with native reasoning-effort support. A provider-specific mapping may additionally use Codex `xhigh`. |
 | `providers` | `dict` | Backend-specific overrides keyed by `codex`, `claude_code`, `gemini`, `opencode`, `litellm`, or provider aliases such as `openrouter`. |
 
-Provider-specific fields use the same keys plus `profile`. `profile` is currently backend-native metadata; Codex maps it to `codex exec --profile <name>`, while non-Codex adapters ignore it unless they add native profile support later. Role-based resolution uses these profile fields for model/native-profile routing, `max_turns`, and `reasoning_effort`; it intentionally preserves request-level `temperature`, `max_tokens`, and `top_p` so existing task-specific tuning does not change just because a role was annotated. Explicit `CompletionConfig.profile` requests use the profile's full sampling/token envelope. `ouroboros setup --runtime codex` installs missing default profiles and role mappings but preserves existing profile definitions, existing Codex provider model pins, and skips role mappings where explicit legacy model overrides are already configured.
+Provider-specific fields use the same keys plus `profile`. `profile` is currently backend-native metadata; Codex maps it to `codex exec --profile <name>`, while non-Codex adapters ignore it unless they add native profile support later. Role-based resolution uses these profile fields for model/native-profile routing, `max_turns`, and `reasoning_effort`; it intentionally preserves request-level `temperature`, `max_tokens`, and `top_p` so existing task-specific tuning does not change just because a role was annotated. Explicit `CompletionConfig.profile` requests use the profile's full sampling/token envelope. `ouroboros setup --runtime codex` installs missing default role mappings and preserves existing profile definitions, existing Codex provider model pins, and skips role mappings where explicit legacy model overrides are already configured.
 
 Codex agent-runtime tasks also use these mappings. Runtime handles with `session_role: implementation`, `coordinator`, `interview`, or `evaluation` resolve through `agent_runtime_<session_role>`; tasks without a role fall back to `agent_runtime`. Explicit runtime models still win and are passed with `--model` instead of `--profile`.
 

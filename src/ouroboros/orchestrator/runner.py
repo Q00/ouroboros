@@ -709,7 +709,7 @@ class OrchestratorRunner:
         # Effort-first investment dial (RFC #1405): base level for the runner's own
         # direct execution paths (single-AC / resume), which call execute_task
         # without going through ParallelACExecutor. Resolved once; None ⇒ dormant.
-        from ouroboros.config import get_agent_reasoning_effort
+        from ouroboros.config import get_agent_reasoning_effort, get_execution_model
 
         self._reasoning_effort = get_agent_reasoning_effort()
         # Model-tier investment router (the frugality sibling of reasoning_effort),
@@ -724,11 +724,10 @@ class OrchestratorRunner:
             "false",
         }
         # An explicit user model pin disables routing (routing must never override
-        # it). The DEFAULT sonnet pin that execution_handlers/run.py pass to
-        # create_agent_runtime is a SHIPPED default, not a user pin — only the env
-        # var counts here.
-        _model_pin_env = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-        _model_pin = _model_pin_env.strip() or None if _model_pin_env else None
+        # it). The DEFAULT sonnet fallback that execution_handlers/run.py pass to
+        # create_agent_runtime is a shipped default, not a user pin; explicit
+        # environment or persisted Execute-stage pins both count here.
+        _model_pin = get_execution_model()
         # Resume normally restores the run's persisted resolved router. These are
         # the existing user-facing controls that explicitly request a different
         # contract for this invocation, so only they may replace it.

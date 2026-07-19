@@ -279,6 +279,12 @@ class TestLLMTaskProfileConfig:
         with pytest.raises(ValidationError):
             LLMProviderProfileConfig(max_turns=0)
 
+    def test_provider_profile_accepts_codex_native_xhigh_effort(self) -> None:
+        """Codex task profiles can use their native maximum effort level."""
+        profile = LLMProviderProfileConfig(reasoning_effort="xhigh")
+
+        assert profile.reasoning_effort == "xhigh"
+
 
 class TestExecutionConfig:
     """Test ExecutionConfig for Phase 2 settings."""
@@ -297,6 +303,7 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 5
         assert config.tui_autolaunch is True
         assert config.auto_evaluate is False
+        assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is False
 
@@ -307,6 +314,7 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
+        assert config.default_model is None
         assert config.decomposition_mode == "preflight"
         assert config.context_pack is True
 

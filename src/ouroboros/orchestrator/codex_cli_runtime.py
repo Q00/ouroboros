@@ -197,6 +197,7 @@ class CodexCliRuntime:
             (
                 self._resolved_fallback_model,
                 self._resolved_fallback_profile,
+                self._resolved_fallback_reasoning_effort,
             ) = self._resolve_runtime_codex_config_uncached(None)
             # Freeze both layers that can retarget a Codex command without
             # changing its visible --profile name: Ouroboros role/profile
@@ -212,6 +213,7 @@ class CodexCliRuntime:
             # depend on an unrelated Codex agent_runtime profile.
             self._resolved_fallback_model = None
             self._resolved_fallback_profile = None
+            self._resolved_fallback_reasoning_effort = None
             self._profile_resolution_fingerprint = None
             self._codex_config_fingerprint = None
         self._builtin_mcp_handlers: dict[str, Any] | None = None
@@ -656,11 +658,11 @@ class CodexCliRuntime:
     def _resolve_runtime_codex_config_uncached(
         self,
         runtime_handle: RuntimeHandle | None,
-    ) -> tuple[str | None, str | None]:
-        """Resolve model/profile settings directly from mutable config."""
+    ) -> tuple[str | None, str | None, str | None]:
+        """Resolve model/profile/effort settings directly from mutable config."""
         native_profile = self._codex_profile_from_metadata(runtime_handle)
         if native_profile:
-            return None, native_profile
+            return None, native_profile, None
 
         profile_name = self._runtime_profile_from_metadata(runtime_handle)
         role = None if profile_name else self._runtime_profile_role(runtime_handle)
@@ -668,15 +670,19 @@ class CodexCliRuntime:
             CompletionConfig(model="default", profile=profile_name, role=role),
             backend="codex",
         )
-        return resolved.config.model, resolved.backend_profile
+        return resolved.config.model, resolved.backend_profile, resolved.config.reasoning_effort
 
     def _resolve_runtime_codex_config(
         self,
         runtime_handle: RuntimeHandle | None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """Return frozen defaults unless the handle selects an explicit role/profile."""
         if runtime_handle is None:
-            return self._resolved_fallback_model, self._resolved_fallback_profile
+            return (
+                self._resolved_fallback_model,
+                self._resolved_fallback_profile,
+                self._resolved_fallback_reasoning_effort,
+            )
 
         metadata = runtime_handle.metadata
         has_explicit_selection = any(
@@ -691,7 +697,11 @@ class CodexCliRuntime:
         )
         normalized_kind = (runtime_handle.kind or "").strip().lower().replace("-", "_")
         if not has_explicit_selection and normalized_kind in {"", _RUNTIME_PROFILE_ROLE_PREFIX}:
-            return self._resolved_fallback_model, self._resolved_fallback_profile
+            return (
+                self._resolved_fallback_model,
+                self._resolved_fallback_profile,
+                self._resolved_fallback_reasoning_effort,
+            )
         self._assert_profile_resolution_config_unchanged()
         return self._resolve_runtime_codex_config_uncached(runtime_handle)
 
@@ -1234,6 +1244,18 @@ class CodexCliRuntime:
         self._assert_codex_config_files_unchanged()
         command = [self._cli_path, "exec"]
 
+        normalized_model = self._normalize_model(model or self._model)
+        runtime_model: str | None = None
+        runtime_profile: str | None = None
+        runtime_effort: str | None = None
+        # Always resolve the role selection so an explicit model pin still
+        # inherits its selected reasoning effort. The pin below suppresses the
+        # role's model/profile, but must not silently fall back to Codex's
+        # unrelated global effort setting.
+        runtime_model, runtime_profile, runtime_effort = self._resolve_runtime_codex_config(
+            runtime_handle
+        )
+
         # Codex accepts one active --profile. The backend runtime profile is
         # the worker-isolation boundary, so it owns that singular flag when
         # configured; role/task profile resolution may still contribute a
@@ -1257,18 +1279,17 @@ class CodexCliRuntime:
         # ENFORCED (not advised) by overriding ``model_reasoning_effort``. Only
         # a known-safe token is forwarded, so an unexpected value can never be
         # injected into the ``key=value`` override.
-        if reasoning_effort and reasoning_effort in _CODEX_REASONING_EFFORT_LEVELS:
-            command.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
+        effective_effort = reasoning_effort or runtime_effort
+        if effective_effort and effective_effort in _CODEX_REASONING_EFFORT_LEVELS:
+            command.extend(["-c", f"model_reasoning_effort={effective_effort}"])
 
         # Per-call model-tier override (RFC #1405 sibling) wins over the
         # constructor pin; ``model is None`` falls back to ``self._model`` so
         # existing call sites are byte-identical. Only when neither yields a model
         # do we consult the runtime profile below (unchanged fallback order).
-        normalized_model = self._normalize_model(model or self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
         else:
-            runtime_model, runtime_profile = self._resolve_runtime_codex_config(runtime_handle)
             if runtime_profile and not self._codex_profile:
                 command.extend(["--profile", runtime_profile])
             else:
@@ -1930,11 +1951,22 @@ class CodexCliRuntime:
                 f"{self._log_namespace}.turn_failed",
                 error=error_msg,
             )
+            error_data: dict[str, Any] = {"subtype": "error", "error_type": "TurnFailed"}
+            error_data.update(
+                self._codex_model_failure_data(
+                    returncode=1,
+                    message=error_msg,
+                    stderr_lines=[],
+                )
+            )
+            guidance = error_data.get("model_guidance")
+            if isinstance(guidance, str) and guidance and guidance not in error_msg:
+                error_msg = f"{error_msg}\n\n{guidance}"
             return [
                 AgentMessage(
                     type="result",
                     content=error_msg,
-                    data={"subtype": "error", "error_type": "TurnFailed"},
+                    data=error_data,
                     resume_handle=current_handle,
                 )
             ]
@@ -2018,6 +2050,42 @@ class CodexCliRuntime:
         """
         del attempted_resume_session_id, current_handle, returncode, final_message, stderr_lines
         return None
+
+    def _codex_model_failure_data(
+        self,
+        *,
+        returncode: int,
+        message: str,
+        stderr_lines: list[str],
+    ) -> dict[str, object]:
+        """Reuse Codex model diagnostics for Execute-stage runtime failures.
+
+        Other runtimes inherit this process loop, so scope the App/CLI version
+        probe to actual Codex executions only.
+        """
+        if self._runtime_backend != "codex":
+            return {}
+        from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+
+        details = CodexCliLLMAdapter._codex_failure_details(
+            returncode=returncode,
+            session_id=None,
+            stderr="\n".join(stderr_lines),
+            stdout_errors=[],
+            message=message,
+            cli_path=self._cli_path,
+        )
+        return {
+            key: details[key]
+            for key in (
+                "failure_category",
+                "model_guidance",
+                "codex_app_version",
+                "codex_cli_version",
+                "codex_app_cli_versions_match",
+            )
+            if key in details
+        }
 
     async def execute_task(
         self,
@@ -2397,6 +2465,15 @@ class CodexCliRuntime:
                 result_data["session_id"] = current_handle.native_session_id
             if returncode != 0:
                 result_data["error_type"] = self._runtime_error_type
+                model_failure_data = self._codex_model_failure_data(
+                    returncode=returncode,
+                    message="\n".join((final_message, *stderr_lines)),
+                    stderr_lines=stderr_lines,
+                )
+                result_data.update(model_failure_data)
+                guidance = model_failure_data.get("model_guidance")
+                if isinstance(guidance, str) and guidance and guidance not in final_message:
+                    final_message = f"{final_message}\n\n{guidance}"
                 if attempted_resume_session_id and not saw_runtime_event:
                     result_data.update(
                         self._build_resume_retry_metadata(attempted_resume_session_id)

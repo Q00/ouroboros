@@ -306,6 +306,33 @@ class TestCodexCliLLMAdapter:
         assert "--sandbox" in command
         assert "read-only" in command
 
+    def test_build_command_forwards_valid_reasoning_effort(self) -> None:
+        """Completion profiles retain their per-call Codex effort after setup migration."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            reasoning_effort="high",
+        )
+
+        assert "-c" in command
+        assert "model_reasoning_effort=high" in command
+
+    def test_build_command_rejects_unknown_reasoning_effort(self) -> None:
+        """Only Codex's allow-listed effort values reach its config override."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            reasoning_effort="drop-table",
+        )
+
+        assert not any("model_reasoning_effort" in arg for arg in command)
+
     def test_build_command_prefers_profile_over_model(self) -> None:
         """Codex task profiles use --profile and avoid a conflicting --model."""
         adapter = CodexCliLLMAdapter(cli_path="codex")
@@ -1078,6 +1105,53 @@ class TestCodexCliLLMAdapter:
         assert not cls._looks_like_codex_auth_failure(
             "codex CLI exited with code 1: model not found"
         )
+
+    def test_codex_failure_details_classifies_model_unavailable_without_update_claim(self) -> None:
+        """A missing model is actionable, but not proof that Codex is outdated."""
+        details = CodexCliLLMAdapter._codex_failure_details(
+            returncode=1,
+            session_id="thread_4",
+            stderr="",
+            stdout_errors=[],
+            message="Codex: model not found",
+        )
+
+        assert details["failure_category"] == "codex_model_unavailable"
+        assert "update" not in str(details["model_guidance"]).lower()
+
+        error = ProviderError(
+            "Codex: model not found",
+            provider="codex_cli",
+            details=details,
+        )
+        assert "codex_model_unavailable" in error.format_details()
+        assert "requested model is not available" in error.format_details().lower()
+
+    def test_codex_failure_details_reports_mismatched_app_and_cli_versions(self) -> None:
+        """A known version mismatch gives a specific, actionable retry path."""
+        versions = {
+            "/usr/local/bin/codex": "codex-cli 0.139.0",
+            "/Applications/ChatGPT.app/Contents/Resources/codex": "codex-cli 0.140.0",
+        }
+
+        with patch.object(
+            CodexCliLLMAdapter,
+            "_codex_version",
+            side_effect=lambda path: versions.get(path),
+        ):
+            details = CodexCliLLMAdapter._codex_failure_details(
+                returncode=1,
+                session_id="thread_5",
+                stderr="",
+                stdout_errors=[],
+                message="Codex: unsupported model",
+                cli_path="/usr/local/bin/codex",
+            )
+
+        assert details["codex_app_version"] == "codex-cli 0.140.0"
+        assert details["codex_cli_version"] == "codex-cli 0.139.0"
+        assert details["codex_app_cli_versions_match"] is False
+        assert "Update both Codex installations" in str(details["model_guidance"])
 
     @pytest.mark.asyncio
     async def test_complete_emits_tool_started_callbacks_from_json_events(self) -> None:
