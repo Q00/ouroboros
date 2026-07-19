@@ -307,7 +307,12 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
 )
-from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
+from ouroboros.orchestrator.profile_loader import (
+    ExecutionProfile,
+    SuggestedModelTier,
+    deserialize_execution_profile,
+    serialize_execution_profile,
+)
 from ouroboros.orchestrator.rate_limit import (
     RateLimitBackoff,
     RateLimitGate,
@@ -735,6 +740,18 @@ class _VerifyGateOutcome:
     missing_artifacts: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _RecoveredFinalizedOutcome:
+    """Latest authoritative post-verify outcome reconstructed on crash resume."""
+
+    retry_attempt: int
+    success: bool
+    outcome: ACExecutionOutcome
+    is_decomposed: bool = False
+    recovery_exhausted: bool = False
+    forced_frontier_routing: bool = False
+
+
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
     """Return the expected artifacts absent relative to ``cwd``.
 
@@ -1057,6 +1074,23 @@ class CheckpointUnreadableError(OuroborosError):
     """
 
 
+class CheckpointCorruptError(OuroborosError):
+    """A persisted checkpoint exists but cannot be safely interpreted.
+
+    Running fresh would duplicate work whose side effects may already have
+    landed, while deleting the checkpoint would destroy the only recovery
+    record.  Corruption therefore blocks the launch for operator repair.
+    """
+
+
+class CheckpointPlanMismatchError(OuroborosError):
+    """The re-derived execution plan differs from the interrupted run's plan."""
+
+
+class CheckpointPersistenceError(OuroborosError):
+    """The mandatory pre-dispatch recovery anchor could not be persisted."""
+
+
 class ConcurrentSeedExecutionError(OuroborosError):
     """Another invocation IN THIS PROCESS is already executing this seed.
 
@@ -1352,23 +1386,12 @@ class ParallelACExecutor:
         # final output says "the true durable state of X is uncertain"
         # instead of reporting an ordinary, fully-durable completion.
         self._unconfirmed_durable_write_descriptions: list[str] = []
-        # Round-15 finding #2 (BLOCKING): monotonic sequence numbers for RC3
-        # checkpoint saves. ``_checkpoint_save_seq`` counts save ATTEMPTS;
-        # ``_checkpoint_persisted_seq`` records the newest attempt that
-        # actually LANDED. The deferred retry of a failed pre-dispatch
-        # anchor save uses them to (a) stand down once any newer per-level
-        # save has landed (that checkpoint strictly supersedes the anchor)
-        # and (b) never overwrite a newer durable checkpoint with staler
-        # state. ``_latest_checkpoint_save_args`` keeps a point-in-time
-        # SNAPSHOT of the most recent save call's arguments (round-16
-        # finding #2: mutable collections are copied at attempt time, never
-        # stored as live references) so the deferred retry persists the
-        # freshest ATTEMPTED state — a state that genuinely existed at one
-        # moment — instead of a stale run-start snapshot or a torn mix of
-        # two different moments.
-        self._checkpoint_save_seq: int = 0
-        self._checkpoint_persisted_seq: int = 0
-        self._latest_checkpoint_save_args: dict[str, Any] | None = None
+        # Finalized ordinary failures that reached the configured retry cap
+        # after the last checkpoint but before the process crashed.  Their
+        # dispatch already completed, so recovery feeds the reconstructed
+        # result directly into terminal escalation/finalization instead of
+        # repeating non-idempotent work under a new attempt number.
+        self._ordinary_finalized_resume_results: dict[int, ACExecutionResult] = {}
         # Round-6 Finding #1: the ACTUAL in-flight dispatch-attempt number
         # durably recorded by the latest ``lateral_escalation_progressed``
         # event for each root AC, reconstructed alongside
@@ -2021,6 +2044,143 @@ class ParallelACExecutor:
         return tuple(ordered_indices)
 
     @staticmethod
+    def _serialize_execution_plan(execution_plan: StagedExecutionPlan) -> dict[str, Any]:
+        """Serialize the exact validated dependency/stage contract for resume."""
+        return {
+            "version": 1,
+            "nodes": [
+                {
+                    "index": node.index,
+                    "content": node.content,
+                    "depends_on": list(node.depends_on),
+                    "can_run_independently": node.can_run_independently,
+                    "requires_serial_stage": node.requires_serial_stage,
+                    "serialization_reasons": list(node.serialization_reasons),
+                }
+                for node in execution_plan.nodes
+            ],
+            "stages": [
+                {
+                    "index": stage.index,
+                    "ac_indices": list(stage.ac_indices),
+                    "depends_on_stages": list(stage.depends_on_stages),
+                }
+                for stage in execution_plan.stages
+            ],
+        }
+
+    @classmethod
+    def _checkpoint_plan_malformed(cls, cp: Any, *, total_acs: int) -> str | None:
+        """Validate the complete persisted plan before any progress is adopted."""
+        state = cp.state
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        if "execution_plan" not in state:
+            return "execution_plan contract is missing"
+        raw_plan = state.get("execution_plan")
+        if not isinstance(raw_plan, Mapping) or raw_plan.get("version") != 1:
+            return f"execution_plan is not a version-1 mapping: {raw_plan!r}"
+        if set(raw_plan) != {"version", "nodes", "stages"}:
+            return "execution_plan contains missing or unknown top-level fields"
+        raw_nodes = raw_plan.get("nodes")
+        raw_stages = raw_plan.get("stages")
+        if not isinstance(raw_nodes, list) or not isinstance(raw_stages, list):
+            return "execution_plan nodes/stages are not lists"
+
+        node_indices: set[int] = set()
+        for position, raw_node in enumerate(raw_nodes):
+            if not isinstance(raw_node, Mapping) or set(raw_node) != {
+                "index",
+                "content",
+                "depends_on",
+                "can_run_independently",
+                "requires_serial_stage",
+                "serialization_reasons",
+            }:
+                return f"execution_plan.nodes[{position}] has an invalid shape"
+            index = raw_node.get("index")
+            dependencies = raw_node.get("depends_on")
+            reasons = raw_node.get("serialization_reasons")
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index >= total_acs
+                or index in node_indices
+                or not isinstance(raw_node.get("content"), str)
+                or not isinstance(dependencies, list)
+                or any(
+                    not isinstance(dep, int)
+                    or isinstance(dep, bool)
+                    or dep < 0
+                    or dep >= total_acs
+                    or dep == index
+                    for dep in dependencies
+                )
+                or not isinstance(raw_node.get("can_run_independently"), bool)
+                or not isinstance(raw_node.get("requires_serial_stage"), bool)
+                or not isinstance(reasons, list)
+                or any(not isinstance(reason, str) for reason in reasons)
+            ):
+                return f"execution_plan.nodes[{position}] contains invalid values"
+            node_indices.add(index)
+        if node_indices != set(range(total_acs)):
+            return "execution_plan nodes do not cover every acceptance criterion exactly once"
+
+        planned_indices: set[int] = set()
+        for position, raw_stage in enumerate(raw_stages):
+            if not isinstance(raw_stage, Mapping) or set(raw_stage) != {
+                "index",
+                "ac_indices",
+                "depends_on_stages",
+            }:
+                return f"execution_plan.stages[{position}] has an invalid shape"
+            index = raw_stage.get("index")
+            ac_indices = raw_stage.get("ac_indices")
+            dependencies = raw_stage.get("depends_on_stages")
+            if (
+                index != position
+                or isinstance(index, bool)
+                or not isinstance(ac_indices, list)
+                or not ac_indices
+                or any(
+                    not isinstance(ac_idx, int)
+                    or isinstance(ac_idx, bool)
+                    or ac_idx not in node_indices
+                    or ac_idx in planned_indices
+                    for ac_idx in ac_indices
+                )
+                or not isinstance(dependencies, list)
+                or any(
+                    not isinstance(dep, int) or isinstance(dep, bool) or dep < 0 or dep >= position
+                    for dep in dependencies
+                )
+            ):
+                return f"execution_plan.stages[{position}] contains invalid values"
+            planned_indices.update(ac_indices)
+        if planned_indices != node_indices:
+            return "execution_plan stages do not cover every plan node exactly once"
+        return None
+
+    @classmethod
+    def _checkpoint_plan_mismatch(
+        cls,
+        cp: Any,
+        *,
+        execution_plan: StagedExecutionPlan,
+    ) -> str | None:
+        """Return a loud resume refusal when dependency analysis drifted."""
+        saved = cp.state.get("execution_plan")
+        current = cls._serialize_execution_plan(execution_plan)
+        if saved == current:
+            return None
+        return (
+            "the current dependency analysis produced a different execution "
+            "plan from the interrupted run; applying old AC outcomes to new "
+            "dependency edges/stages could reorder shared-workspace writes"
+        )
+
+    @staticmethod
     def _checkpoint_seed_id(seed: Seed, session_id: str) -> str:
         """Return the stable identifier used to key RC3 checkpoints.
 
@@ -2275,6 +2435,22 @@ class ParallelACExecutor:
                 current_routing_enabled=self._model_router is not None,
             )
         self._model_router = restored_router
+
+    @staticmethod
+    def _execution_profile_malformed(raw_profile: object) -> str | None:
+        recognized, _ = deserialize_execution_profile(raw_profile)
+        if not recognized:
+            return f"execution_profile is not a recognized resolved profile: {raw_profile!r}"
+        return None
+
+    def _restore_checkpoint_execution_profile(self, raw_profile: object) -> None:
+        """Restore the exact resolved profile without consulting current YAML."""
+        recognized, restored_profile = deserialize_execution_profile(raw_profile)
+        if not recognized:  # Defense in depth; the atomic pre-adoption gate owns this.
+            raise CheckpointCorruptError(
+                "Checkpoint execution_profile is malformed; operator repair is required."
+            )
+        self._execution_profile = restored_profile
 
     #: The closed vocabulary ``__init__`` accepts for ``decomposition_mode``.
     _DECOMPOSITION_MODES = frozenset({"preflight", "bounce_only", "off"})
@@ -2812,9 +2988,8 @@ class ParallelACExecutor:
         Postures, following the established conventions:
         - Absent fingerprint (legacy checkpoint): adopt — the one-time
           migration posture every other restored field follows.
-        - Present but malformed: fail closed — refuse adoption. Adopting on
-          an unverifiable fingerprint risks the silent-false-success
-          direction; discarding merely re-runs and re-verifies, loudly.
+        - Present but malformed: handled by the preceding corruption gate,
+          which preserves the checkpoint and blocks the launch.
         - Present and mismatched: refuse adoption (the round-10 staleness
           treatment — discard, run fresh, loud operator warning).
         - Round-16 finding #2: a ``v1:`` fingerprint (saved before the
@@ -2852,6 +3027,19 @@ class ParallelACExecutor:
                 "(same seed_id, different semantic content) — its recorded "
                 "progress describes work that is NOT this Seed's work"
             )
+        return None
+
+    @staticmethod
+    def _checkpoint_seed_fingerprint_malformed(cp: Any) -> str | None:
+        """Reject a present Seed identity that cannot be verified."""
+        state = cp.state
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        if "seed_fingerprint" not in state:
+            return None
+        saved = state.get("seed_fingerprint")
+        if not isinstance(saved, str) or not saved.startswith(("v1:", "v2:")):
+            return f"seed_fingerprint is malformed: {saved!r}"
         return None
 
     # Every AC status value the executor ever records into a checkpoint's
@@ -2917,6 +3105,14 @@ class ParallelACExecutor:
                 or completed_levels < 0
             ):
                 return f"completed_levels is not a non-negative integer: {completed_levels!r}"
+        if "plan_total_stages" in state:
+            plan_total_stages = state["plan_total_stages"]
+            if (
+                not isinstance(plan_total_stages, int)
+                or isinstance(plan_total_stages, bool)
+                or plan_total_stages < 0
+            ):
+                return f"plan_total_stages is not a non-negative integer: {plan_total_stages!r}"
         if "ac_statuses" in state:
             raw_statuses = state["ac_statuses"]
             if not isinstance(raw_statuses, Mapping):
@@ -2969,10 +3165,9 @@ class ParallelACExecutor:
         A type-mangled semantic payload came from the same writer/store
         as every other field, so it means the checkpoint as a whole
         cannot be trusted. Validate every semantic group atomically and
-        BEFORE any restoration mutates executor state, and route any
-        failure through the SAME fail-closed path malformed progress
-        takes: discard the checkpoint as corrupt, run every level fresh,
-        warn loudly — never adopt a partially-trustworthy mixture.
+        BEFORE any restoration mutates executor state, then preserve the
+        checkpoint and block the launch for operator repair — never adopt a
+        partially-trustworthy mixture or run fresh over unknown side effects.
         ``None``/absent payloads are the legacy migration shape, not
         corruption (identical to ``_checkpoint_progress_malformed``'s
         convention).
@@ -2980,74 +3175,92 @@ class ParallelACExecutor:
         state = cp.state
         if not isinstance(state, Mapping):
             return f"checkpoint state is not a mapping: {type(state).__name__}"
+        if "execution_profile" not in state:
+            return "execution_profile contract is missing"
         for reason in (
             cls._retry_policy_malformed(state.get("retry_policy")),
             cls._model_routing_malformed(state.get("model_routing")),
             cls._execution_semantics_malformed(state.get("execution_semantics")),
+            cls._execution_profile_malformed(state.get("execution_profile")),
         ):
             if reason is not None:
                 return reason
         return None
 
-    async def _reconstruct_ordinary_retry_counts(
+    async def _reconstruct_finalized_outcomes(
         self, *, execution_id: str, total_acs: int
-    ) -> dict[int, int] | None:
-        """Reconstruct each AC's highest durably-FINALIZED attempt number
-        from the original run's event aggregate (round-17 finding #4,
-        BLOCKING).
+    ) -> dict[int, _RecoveredFinalizedOutcome] | None:
+        """Replay the latest post-verify outcome for every root AC.
 
-        The per-AC ordinary (pre-ladder, same-runtime) retry counter lives
-        only in the in-memory ``ac_retry_attempts`` dict, re-initialized to
-        zero on every launch — and checkpoints cannot help: they save
-        per-level (plus the run-start anchor), so retries consumed INSIDE
-        the level a crash interrupts are never in any checkpoint. Only ACs
-        that already escalated into the ladder had a durable attempt record
-        (the ``progressed`` events round-6 #1 seeds
-        ``_lateral_escalation_resume_attempts`` from), so an AC that
-        crashed MID ordinary-retry resumed with a FRESH zero budget:
-        non-idempotent work repeated beyond the configured cap, and
-        attempt-number-keyed correlation (frugality telemetry, runtime
-        handles, ``outcome_finalized`` markers) reset onto already-used
-        ordinals.
-
-        The durable source ALREADY exists: ``execution.ac.outcome_finalized``
-        is emitted after EVERY attempt's verify gate — the initial
-        dispatch, each ordinary V3 retry, and ladder redispatches alike —
-        carrying ``root_ac_index`` + ``retry_attempt``, under the same
-        durable fail-closed write convention (round-9 #3) the ladder's own
-        resume correlation relies on. Replaying the ORIGINAL execution
-        aggregate (the restored ``execution_id``) and taking the per-AC
-        max therefore reconstructs exactly how far each AC's attempt
-        numbering had durably advanced — the same replay-on-resume
-        convention the ladder uses, requiring no new checkpoint field.
-
-        Returns the per-AC max finalized attempt number (ACs with no
-        marker are absent), or ``None`` when replay is indeterminate —
-        the caller MUST fail closed (assume the budget was consumed),
-        never treat unknown history as a fresh budget.
+        Attempt ordinals alone are insufficient: a success durably finalized
+        after the last level checkpoint is authoritative completion and must
+        be restored, not redispatched.  A failure with a matching
+        ``recovery_exhausted`` marker is likewise terminal.  A finalized
+        failure at the configured ordinary retry cap is reconstructed as a
+        post-dispatch result and handed directly to escalation/finalization;
+        recovery never repeats that already-completed attempt.
         """
         events = await self._replay_with_retry("execution", execution_id)
         if events is None:
             return None
-        max_finalized: dict[int, int] = {}
+
+        latest: dict[int, _RecoveredFinalizedOutcome] = {}
+        exhausted_attempts: set[tuple[int, int]] = set()
         for event in events:
-            if getattr(event, "type", None) != "execution.ac.outcome_finalized":
-                continue
+            event_type = getattr(event, "type", None)
             data = getattr(event, "data", None)
             if not isinstance(data, dict):
                 continue
             ac_idx = data.get("root_ac_index")
             attempt = data.get("retry_attempt")
             if (
-                isinstance(ac_idx, int)
-                and not isinstance(ac_idx, bool)
-                and 0 <= ac_idx < total_acs
-                and isinstance(attempt, int)
-                and not isinstance(attempt, bool)
-                and attempt >= 0
+                not isinstance(ac_idx, int)
+                or isinstance(ac_idx, bool)
+                or not 0 <= ac_idx < total_acs
+                or not isinstance(attempt, int)
+                or isinstance(attempt, bool)
+                or attempt < 0
             ):
-                max_finalized[ac_idx] = max(max_finalized.get(ac_idx, -1), attempt)
-        return max_finalized
+                continue
+            if event_type == "execution.ac.recovery_exhausted":
+                exhausted_attempts.add((ac_idx, attempt))
+                continue
+            if event_type != "execution.ac.outcome_finalized":
+                continue
+            success = data.get("success")
+            raw_outcome = data.get("outcome")
+            is_decomposed = data.get("is_decomposed", False)
+            forced_frontier_routing = data.get("forced_frontier_routing", False)
+            if (
+                not isinstance(success, bool)
+                or not isinstance(is_decomposed, bool)
+                or not isinstance(forced_frontier_routing, bool)
+            ):
+                continue
+            try:
+                outcome = (
+                    ACExecutionOutcome(raw_outcome)
+                    if isinstance(raw_outcome, str)
+                    else ACExecutionOutcome.SUCCEEDED
+                    if success
+                    else ACExecutionOutcome.FAILED
+                )
+            except ValueError:
+                continue
+            previous = latest.get(ac_idx)
+            if previous is None or attempt >= previous.retry_attempt:
+                latest[ac_idx] = _RecoveredFinalizedOutcome(
+                    retry_attempt=attempt,
+                    success=success,
+                    outcome=outcome,
+                    is_decomposed=is_decomposed,
+                    forced_frontier_routing=forced_frontier_routing,
+                )
+
+        for ac_idx, recovered in tuple(latest.items()):
+            if (ac_idx, recovered.retry_attempt) in exhausted_attempts:
+                latest[ac_idx] = replace(recovered, recovery_exhausted=True)
+        return latest
 
     def _discard_stale_checkpoint(
         self,
@@ -3173,6 +3386,7 @@ class ParallelACExecutor:
         execution_id: str,
         completed_levels: int,
         plan_total_stages: int,
+        execution_plan: StagedExecutionPlan,
         ac_statuses: dict[int, str],
         failed_indices: set[int],
         completed_count: int,
@@ -3192,56 +3406,13 @@ class ParallelACExecutor:
         after every level completion (the original RC3 cadence, which
         simply overwrites this same checkpoint with updated progress).
 
-        Round-15 finding #2 (BLOCKING): a failed write is logged loudly and
-        never fails the run itself, but it is no longer uniformly silent to
-        the CALLER — the return value says whether the checkpoint actually
-        landed (``True`` also when no checkpoint store is configured: the
-        run then has no durability contract to honor). The pre-dispatch
-        anchor call site schedules a deferred durable retry on ``False``,
-        because a silently-lost anchor recreates the exact round-13 hole
-        this save exists to close. The per-level call sites deliberately
-        remain best-effort: see the reasoning at the level-loop call site.
-
-        Every attempt records its arguments in
-        ``_latest_checkpoint_save_args`` and bumps ``_checkpoint_save_seq``;
-        a success advances ``_checkpoint_persisted_seq`` so the anchor's
-        deferred retry can both stand down once a newer save has landed and
-        re-persist the freshest attempted state rather than a stale
-        run-start snapshot.
-
-        Round-16 finding #2 (BLOCKING): the recorded arguments are a
-        point-in-time SNAPSHOT — the mutable collections (``ac_statuses``,
-        ``failed_indices``, ``level_contexts``) are copied HERE, at the
-        moment this attempt describes, never stored as live references.
-        Storing live references let the deferred anchor retry serialize
-        them at WRITE time, after ongoing execution had mutated them
-        further, persisting a torn checkpoint: the frozen
-        ``completed_levels`` of one moment combined with failure markers
-        from a LATER moment (e.g. "level 1 done" plus a ``failed_indices``
-        entry for an AC that only failed during level 2 — a state that
-        never existed). On recovery that AC is re-dispatched by the level
-        replay and may genuinely succeed, but the restored add-only
-        ``failed_indices`` still blocks its dependents as
-        "dependency failed" with zero dispatch and zero escalation — the
-        forbidden outcome. Shallow copies suffice: statuses are str->str,
-        indices are ints, and ``LevelContext`` is a frozen dataclass.
+        The return value is authoritative at the call site.  The run-start
+        anchor must succeed before any dispatch; per-level progress updates
+        remain best-effort because finalized outcomes are independently
+        reconciled from the durable event stream on recovery.
         """
         if not self._checkpoint_store:
             return True
-        self._checkpoint_save_seq += 1
-        attempt_seq = self._checkpoint_save_seq
-        self._latest_checkpoint_save_args = {
-            "seed": seed,
-            "session_id": session_id,
-            "execution_id": execution_id,
-            "completed_levels": completed_levels,
-            "plan_total_stages": plan_total_stages,
-            "ac_statuses": dict(ac_statuses),
-            "failed_indices": set(failed_indices),
-            "completed_count": completed_count,
-            "level_contexts": list(level_contexts),
-            "checkpoint_point": checkpoint_point,
-        }
         try:
             from ouroboros.persistence.checkpoint import CheckpointData
 
@@ -3266,6 +3437,11 @@ class ParallelACExecutor:
                     # never interpret the count against a differently-grouped
                     # re-derived plan.
                     "plan_total_stages": plan_total_stages,
+                    # Dependency analysis is re-run on every process start.
+                    # Persist the exact validated graph/stage contract so a
+                    # resume can reject drift before combining old outcomes
+                    # with a materially different write ordering.
+                    "execution_plan": self._serialize_execution_plan(execution_plan),
                     "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                     "failed_indices": sorted(failed_indices),
                     "completed_count": completed_count,
@@ -3331,6 +3507,11 @@ class ParallelACExecutor:
                         # (re)built — see ``system_prompt_builder``.
                         "context_pack_enabled": self._context_pack_enabled,
                     },
+                    # The complete resolved profile controls decomposition,
+                    # suggested tier, tools, evidence schema, verifier focus,
+                    # and prompts.  Crash recovery restores this contract
+                    # instead of re-reading live YAML.
+                    "execution_profile": serialize_execution_profile(self._execution_profile),
                     # Round-14 finding #3 (BLOCKING): the runner's resolved
                     # guidance identity, stored opaquely; recovery hands it
                     # back to the runner's prompt builder for the same
@@ -3355,7 +3536,6 @@ class ParallelACExecutor:
             )
             save_result = self._checkpoint_store.save(checkpoint)
             if hasattr(save_result, "is_ok") and save_result.is_ok:
-                self._checkpoint_persisted_seq = max(self._checkpoint_persisted_seq, attempt_seq)
                 log.info(
                     "parallel_executor.checkpoint.saved",
                     checkpoint_point=checkpoint_point,
@@ -3639,6 +3819,7 @@ class ParallelACExecutor:
         # caller's prompt (the pre-existing fresh-run posture).
         recovery_adopted = False
         restored_prompt_guidance: Any = None
+        self._ordinary_finalized_resume_results.clear()
 
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
@@ -3650,6 +3831,7 @@ class ParallelACExecutor:
             pre_recovery_execution_id = execution_id
             pre_recovery_result_count = len(all_results)
             pre_recovery_decomposition_decisions = dict(self._decomposition_decisions)
+            pre_recovery_execution_profile = self._execution_profile
             try:
                 seed_id = self._checkpoint_seed_id(seed, session_id)
                 cp = await self._load_checkpoint_for_recovery(seed_id)
@@ -3708,6 +3890,26 @@ class ParallelACExecutor:
                             "seed/session to run fresh."
                         )
                     elif cp.phase == "parallel_execution" and (
+                        fingerprint_malformed := self._checkpoint_seed_fingerprint_malformed(cp)
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.seed_fingerprint_malformed",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=fingerprint_malformed,
+                        )
+                        self._console.print(
+                            "[red]Refusing to start: the persisted checkpoint "
+                            "has no verifiable Seed fingerprint "
+                            f"({fingerprint_malformed}). It was preserved for "
+                            "operator repair.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint Seed identity is malformed: "
+                            f"{fingerprint_malformed}. Refusing to run fresh "
+                            "over an interrupted execution."
+                        )
+                    elif cp.phase == "parallel_execution" and (
                         content_mismatch := self._checkpoint_seed_content_mismatch(cp, seed)
                     ):
                         # Round-15 finding #1 (BLOCKING): the checkpoint key
@@ -3744,6 +3946,44 @@ class ParallelACExecutor:
                             ),
                         )
                     elif cp.phase == "parallel_execution" and (
+                        plan_malformed := self._checkpoint_plan_malformed(cp, total_acs=total_acs)
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.execution_plan_malformed",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=plan_malformed,
+                        )
+                        self._console.print(
+                            "[red]Refusing to start: this seed has a persisted "
+                            "checkpoint, but its execution-plan contract is "
+                            f"missing or malformed ({plan_malformed}). The "
+                            "checkpoint was preserved for operator repair.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint execution-plan contract is malformed: "
+                            f"{plan_malformed}. Refusing to run fresh over work "
+                            "whose side effects may already exist."
+                        )
+                    elif cp.phase == "parallel_execution" and (
+                        plan_mismatch := self._checkpoint_plan_mismatch(
+                            cp, execution_plan=execution_plan
+                        )
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.execution_plan_mismatch",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=plan_mismatch,
+                        )
+                        self._console.print(
+                            "[red]Refusing to resume: dependency analysis now "
+                            "produced a different plan from the interrupted "
+                            "run. Restore the original analysis inputs/runtime "
+                            "or start an explicitly new Seed.[/red]"
+                        )
+                        raise CheckpointPlanMismatchError(plan_mismatch)
+                    elif cp.phase == "parallel_execution" and (
                         progress_malformed := self._checkpoint_progress_malformed(cp)
                     ):
                         # Round-16 finding #3 (BLOCKING): a hash-valid
@@ -3753,37 +3993,28 @@ class ParallelACExecutor:
                         # applied incrementally until a conversion raised —
                         # by which point ``execution_id`` had already been
                         # reassigned, leaving recovery partially applied.
-                        # Every progress field was just validated atomically
-                        # above; any failure means the checkpoint as a whole
-                        # is corrupt, so it takes the SAME fail-closed path
-                        # every other malformed-checkpoint shape takes:
-                        # discard as stale, run every level fresh, warn the
-                        # operator loudly. Nothing was applied yet, so there
-                        # is no partial state to unwind.
+                        # Every progress field was validated atomically above.
+                        # Preserve malformed persisted state for operator
+                        # repair and block before any work; running fresh could
+                        # duplicate side effects already applied by the
+                        # interrupted execution.
                         log.error(
                             "parallel_executor.recovery.progress_state_malformed",
                             seed_id=seed_id,
                             checkpoint_execution_id=cp.state.get("execution_id"),
                             detail=progress_malformed,
                         )
-                        self._discard_stale_checkpoint(
-                            seed_id,
-                            saved_execution_id=cp.state.get("execution_id"),
-                            detail=(
-                                "checkpoint progress state is malformed and "
-                                "cannot be applied as a coherent whole "
-                                f"({progress_malformed}); adopting any part "
-                                "of it risks torn recovery state, so the "
-                                "checkpoint is treated as corrupt"
-                            ),
-                            console_message=(
-                                "[red]WARNING: found a checkpoint for this "
-                                "seed, but its recorded progress state is "
-                                "malformed/corrupt "
-                                f"({progress_malformed}). Refusing to adopt "
-                                "any of it — running all levels fresh "
-                                "instead.[/red]"
-                            ),
+                        self._console.print(
+                            "[red]Refusing to start: this seed's persisted "
+                            "checkpoint has malformed progress state "
+                            f"({progress_malformed}). It was preserved for "
+                            "operator repair; running fresh could duplicate "
+                            "already-applied side effects.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint progress state is malformed: "
+                            f"{progress_malformed}. Refusing to run fresh over "
+                            "an interrupted execution."
                         )
                     elif cp.phase == "parallel_execution" and (
                         semantics_malformed := self._checkpoint_semantics_malformed(cp)
@@ -3798,37 +4029,25 @@ class ParallelACExecutor:
                         # executed under a torn mixture of two runs'
                         # semantics. Every semantic group was just validated
                         # atomically above, BEFORE any restoration mutated
-                        # executor state; any failure means the checkpoint as
-                        # a whole is corrupt and takes the SAME fail-closed
-                        # path malformed progress takes: discard as stale,
-                        # run every level fresh, warn the operator loudly.
+                        # executor state. Preserve the corrupt checkpoint and
+                        # block the launch; do not invent fresh-run authority.
                         log.error(
                             "parallel_executor.recovery.semantic_state_malformed",
                             seed_id=seed_id,
                             checkpoint_execution_id=cp.state.get("execution_id"),
                             detail=semantics_malformed,
                         )
-                        self._discard_stale_checkpoint(
-                            seed_id,
-                            saved_execution_id=cp.state.get("execution_id"),
-                            detail=(
-                                "checkpoint execution-semantic state is "
-                                "malformed and cannot be applied as a "
-                                f"coherent whole ({semantics_malformed}); "
-                                "adopting the rest of the checkpoint around "
-                                "it would run under a mixture of the "
-                                "original run's and the current process's "
-                                "semantics, so the checkpoint is treated as "
-                                "corrupt"
-                            ),
-                            console_message=(
-                                "[red]WARNING: found a checkpoint for this "
-                                "seed, but its recorded execution-semantic "
-                                "state is malformed/corrupt "
-                                f"({semantics_malformed}). Refusing to adopt "
-                                "any of it — running all levels fresh "
-                                "instead.[/red]"
-                            ),
+                        self._console.print(
+                            "[red]Refusing to start: this seed's persisted "
+                            "checkpoint has malformed execution semantics "
+                            f"({semantics_malformed}). It was preserved for "
+                            "operator repair; running fresh could duplicate "
+                            "already-applied side effects.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint execution semantics are malformed: "
+                            f"{semantics_malformed}. Refusing to run fresh over "
+                            "an interrupted execution."
                         )
                     elif cp.phase == "parallel_execution":
                         # Restore the ORIGINAL run's execution_id. A crash-
@@ -3884,6 +4103,19 @@ class ParallelACExecutor:
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
+                        # Restore execution semantics before interpreting
+                        # finalized attempts: the original retry cap/profile
+                        # determine whether a completed failed dispatch was
+                        # the last ordinary attempt and what the continuation
+                        # is allowed to do next.
+                        self._restore_checkpoint_retry_policy(cp.state.get("retry_policy"))
+                        self._restore_checkpoint_model_router(cp.state.get("model_routing"))
+                        self._restore_checkpoint_execution_semantics(
+                            cp.state.get("execution_semantics")
+                        )
+                        self._restore_checkpoint_execution_profile(
+                            cp.state.get("execution_profile")
+                        )
                         # Round-16 finding #1 (BLOCKING): ``completed_levels``
                         # is an integer relative to the ORIGINAL run's plan
                         # STRUCTURE, but the plan is re-derived by LLM
@@ -3914,6 +4146,59 @@ class ParallelACExecutor:
                         # restore loop above already re-opened it as
                         # "pending" for the current plan's cascade to
                         # re-decide.
+                        # Restore level contexts so subsequent levels
+                        # have access to completed levels' output (parsed
+                        # up front, before any mutation — round-16 #3).
+                        if restored_contexts is not None:
+                            level_contexts = restored_contexts
+                        finalized_outcomes = await self._reconstruct_finalized_outcomes(
+                            execution_id=execution_id, total_acs=total_acs
+                        )
+                        if finalized_outcomes is None:
+                            raise CheckpointUnreadableError(
+                                "Could not replay the interrupted run's finalized AC "
+                                "outcomes. Refusing to redispatch work whose completion "
+                                "state cannot be determined."
+                            )
+                        self._ordinary_finalized_resume_results.clear()
+                        for retry_ac_idx, finalized in finalized_outcomes.items():
+                            prior_status = ac_statuses.get(retry_ac_idx, "pending")
+                            if prior_status in ("completed", "failed"):
+                                ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
+                                continue
+                            if finalized.success:
+                                ac_statuses[retry_ac_idx] = "completed"
+                                ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
+                                completed_count += 1
+                            elif finalized.recovery_exhausted:
+                                ac_statuses[retry_ac_idx] = "failed"
+                                ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
+                                failed_indices.add(retry_ac_idx)
+                            elif finalized.retry_attempt >= self._ac_retry_attempts:
+                                # Dispatch completed at the ordinary cap, but
+                                # the process died before escalation/terminal
+                                # closure. Resume from that post-dispatch
+                                # boundary; never execute the same side effect
+                                # again merely to reach the finalizer.
+                                ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt
+                                self._ordinary_finalized_resume_results[retry_ac_idx] = (
+                                    ACExecutionResult(
+                                        ac_index=retry_ac_idx,
+                                        ac_content=ac_text(seed.acceptance_criteria[retry_ac_idx]),
+                                        success=False,
+                                        error=(
+                                            "Restored durably finalized failure at the "
+                                            "ordinary retry boundary"
+                                        ),
+                                        retry_attempt=finalized.retry_attempt,
+                                        is_decomposed=finalized.is_decomposed,
+                                        outcome=finalized.outcome,
+                                        forced_frontier_routing=(finalized.forced_frontier_routing),
+                                    )
+                                )
+                            else:
+                                ac_retry_attempts[retry_ac_idx] = finalized.retry_attempt + 1
+
                         checkpoint_resolved = {
                             idx: status
                             for idx, status in ac_statuses.items()
@@ -3931,79 +4216,12 @@ class ParallelACExecutor:
                             else:
                                 break
                         if resume_from_level != saved_completed_levels:
-                            log.warning(
-                                "parallel_executor.recovery.plan_shape_diverged",
-                                detail=(
-                                    "the re-derived execution plan groups "
-                                    "this seed's ACs differently from the "
-                                    "plan the checkpointed run used; the "
-                                    "checkpoint's level count does not apply "
-                                    "to this plan, so resume falls back to "
-                                    "its per-AC statuses (unresolved ACs are "
-                                    "re-dispatched, never marked failed)"
-                                ),
+                            log.info(
+                                "parallel_executor.recovery.progress_advanced_by_events",
                                 checkpoint_completed_levels=saved_completed_levels,
                                 derived_resume_from_level=resume_from_level,
-                                total_levels=total_levels,
                                 resolved_ac_indices=sorted(checkpoint_resolved),
                             )
-                            self._console.print(
-                                "[yellow]Recovered checkpoint was saved "
-                                "under a different execution-plan shape; "
-                                "resuming from its per-AC progress instead "
-                                "of its level count (unfinished ACs will be "
-                                "re-dispatched).[/yellow]"
-                            )
-                        # Restore level contexts so subsequent levels
-                        # have access to completed levels' output (parsed
-                        # up front, before any mutation — round-16 #3).
-                        if restored_contexts is not None:
-                            level_contexts = restored_contexts
-                        # Round-17 finding #4 (BLOCKING): restore each AC's
-                        # ordinary (pre-ladder) retry consumption from the
-                        # ORIGINAL run's durable ``outcome_finalized``
-                        # markers — the in-memory counter died with the
-                        # crashed process, and the per-level checkpoint
-                        # cadence cannot carry mid-level consumption. An
-                        # unresolved AC resumes at (max finalized attempt
-                        # + 1): the next attempt that would have run, so
-                        # total budget consumption is preserved across the
-                        # crash and no durably-finalized attempt number is
-                        # ever reused. A resolved AC keeps its exact final
-                        # attempt ordinal (its reconstructed result below
-                        # reports the attempt it actually ended on). An
-                        # indeterminate replay fails CLOSED: an AC whose
-                        # consumption cannot be read gets NO fresh ordinary
-                        # budget (the full cap is treated as spent — the
-                        # same "never grant a fresh budget to an AC whose
-                        # durable phase we cannot read" posture the ladder
-                        # loader takes); the escalation ladder remains
-                        # available, so no AC is abandoned over it.
-                        finalized_attempt_counts = await self._reconstruct_ordinary_retry_counts(
-                            execution_id=execution_id, total_acs=total_acs
-                        )
-                        if finalized_attempt_counts is None:
-                            log.error(
-                                "parallel_executor.recovery.retry_consumption_unreadable",
-                                execution_id=execution_id,
-                                detail=(
-                                    "could not replay the original run's "
-                                    "finalized-attempt markers; failing "
-                                    "closed by treating every unresolved "
-                                    "AC's ordinary retry budget as already "
-                                    "consumed"
-                                ),
-                            )
-                            for retry_ac_idx in range(total_acs):
-                                if retry_ac_idx not in checkpoint_resolved:
-                                    ac_retry_attempts[retry_ac_idx] = self._ac_retry_attempts
-                        else:
-                            for retry_ac_idx, finalized in finalized_attempt_counts.items():
-                                ac_retry_attempts[retry_ac_idx] = (
-                                    finalized
-                                    if retry_ac_idx in checkpoint_resolved
-                                    else finalized + 1
-                                )
                         raw_decisions = cp.state.get("decomposition_decisions", {})
                         if isinstance(raw_decisions, Mapping):
                             for raw_node_id, raw_record in raw_decisions.items():
@@ -4035,7 +4253,6 @@ class ParallelACExecutor:
                         # predating the field keeps the current-config
                         # posture (genuine one-time migration, like the
                         # runner's ``retry_policy_migrated``).
-                        self._restore_checkpoint_retry_policy(cp.state.get("retry_policy"))
                         # Round-12 finding #2 (BLOCKING): two more
                         # execution-semantic input groups the checkpoint
                         # never carried — the resolved model router (tier
@@ -4047,10 +4264,6 @@ class ParallelACExecutor:
                         # must keep the routing and dispatch semantics it
                         # STARTED with, not the current process's
                         # construction args.
-                        self._restore_checkpoint_model_router(cp.state.get("model_routing"))
-                        self._restore_checkpoint_execution_semantics(
-                            cp.state.get("execution_semantics")
-                        )
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
@@ -4098,7 +4311,12 @@ class ParallelACExecutor:
                         # identity, if the checkpoint carried one).
                         recovery_adopted = True
                         restored_prompt_guidance = cp.state.get("prompt_guidance")
-            except (CheckpointOwnershipError, CheckpointUnreadableError):
+            except (
+                CheckpointCorruptError,
+                CheckpointOwnershipError,
+                CheckpointPlanMismatchError,
+                CheckpointUnreadableError,
+            ):
                 # Round-12 finding #3: the ownership refusal must FAIL the
                 # launch, never degrade into "recovery failed, run fresh" —
                 # a fresh run of the same seed would still race the live
@@ -4132,12 +4350,14 @@ class ParallelACExecutor:
                 # is part of the adopted state too — roll it back with the
                 # rest.
                 ac_retry_attempts.update(dict.fromkeys(range(total_acs), 0))
+                self._ordinary_finalized_resume_results.clear()
                 completed_count = 0
                 execution_id = pre_recovery_execution_id
                 level_contexts = list(reconciled_level_contexts or [])
                 del all_results[pre_recovery_result_count:]
                 self._decomposition_decisions.clear()
                 self._decomposition_decisions.update(pre_recovery_decomposition_decisions)
+                self._execution_profile = pre_recovery_execution_profile
                 recovery_adopted = False
                 restored_prompt_guidance = None
                 log.warning(
@@ -4159,6 +4379,7 @@ class ParallelACExecutor:
                 fat_harness_mode=self._fat_harness_mode,
                 context_pack_enabled=self._context_pack_enabled,
                 guidance_contract=restored_prompt_guidance,
+                execution_profile=self._execution_profile,
             )
 
         # Validation: check all AC indices are present in dependency graph
@@ -4255,28 +4476,18 @@ class ParallelACExecutor:
         # refreshes the round-12 ownership marker to THIS process). The
         # level loop keeps overwriting it as levels complete.
         #
-        # Round-15 finding #2 (BLOCKING): this anchor is the ONLY durable
-        # record a first-level crash has — if its write silently fails, the
-        # run is in exactly the "zero durable record" state round 13 was
-        # built to close, and the old best-effort posture proceeded anyway.
-        # A failed anchor save therefore gets the same deferred durable
-        # retry every other correctness-bearing write in this file gets
-        # (rounds 6-13): keep retrying at the parked cadence in the
-        # background, and surface a terminal give-up through
-        # ``unconfirmed_durable_writes``. The retry re-persists the FRESHEST
-        # attempted checkpoint state (each save attempt — including every
-        # later per-level attempt — records a coherent point-in-time
-        # snapshot of its arguments in ``_latest_checkpoint_save_args``;
-        # round-16 finding #2: never live references that ongoing execution
-        # could mutate between the attempt and the retry's actual write),
-        # and stands down as soon as any newer save has landed — it must
-        # never roll a newer durable checkpoint back to staler progress.
+        # This anchor is the ONLY durable execution identity before first
+        # dispatch.  A background retry cannot protect the crash window
+        # between dispatch and persistence, so failure below blocks the
+        # launch synchronously: zero AC work starts without a recoverable
+        # plan/profile/policy identity.
         anchor_persisted = self._save_execution_checkpoint(
             seed=seed,
             session_id=session_id,
             execution_id=execution_id,
             completed_levels=resume_from_level,
             plan_total_stages=total_levels,
+            execution_plan=execution_plan,
             ac_statuses=ac_statuses,
             failed_indices=failed_indices,
             completed_count=completed_count,
@@ -4284,30 +4495,22 @@ class ParallelACExecutor:
             checkpoint_point="run_start",
         )
         if self._checkpoint_store and not anchor_persisted:
-            anchor_attempt_seq = self._checkpoint_save_seq
-
-            async def _retry_run_start_anchor() -> bool:
-                if self._checkpoint_persisted_seq >= anchor_attempt_seq:
-                    # A save at/after the anchor attempt already landed — a
-                    # newer checkpoint strictly supersedes the anchor (same
-                    # shape, fresher progress); rewriting here could roll it
-                    # back to staler state.
-                    return True
-                latest_args = self._latest_checkpoint_save_args
-                if latest_args is None:  # pragma: no cover - anchor recorded args
-                    return False
-                retry_point = str(latest_args["checkpoint_point"])
-                if not retry_point.endswith("_deferred_retry"):
-                    retry_point += "_deferred_retry"
-                return self._save_execution_checkpoint(
-                    **{**latest_args, "checkpoint_point": retry_point}
-                )
-
-            self._schedule_deferred_durable_write(
-                write=_retry_run_start_anchor,
-                on_persisted=None,
-                log_key="parallel_executor.checkpoint.run_start_anchor",
+            log.error(
+                "parallel_executor.checkpoint.run_start_anchor_required",
                 execution_id=execution_id,
+                detail=(
+                    "refusing to dispatch any AC because the mandatory "
+                    "pre-dispatch recovery anchor was not persisted"
+                ),
+            )
+            self._console.print(
+                "[red]Refusing to dispatch: the run-start checkpoint anchor "
+                "could not be persisted. No AC work was started; repair the "
+                "checkpoint store and relaunch.[/red]"
+            )
+            raise CheckpointPersistenceError(
+                "The mandatory run-start checkpoint could not be persisted. "
+                "Refusing to dispatch work without a durable execution identity."
             )
 
         # Execute groups sequentially, but ACs within each group in parallel.
@@ -4752,26 +4955,20 @@ class ParallelACExecutor:
                 #
                 # Round-15 finding #2: deliberately still best-effort (the
                 # historical posture), unlike the pre-dispatch anchor above.
-                # Once the anchor has landed (or is durably retrying in the
-                # background — and that retry re-persists the freshest
-                # attempted state recorded by THIS call), a failed per-level
-                # overwrite only leaves the durable checkpoint's PROGRESS
-                # briefly stale: recovery still finds the run's identity,
-                # policy, router, and dispatch semantics, and merely resumes
-                # from an earlier level. That is the safe direction (re-run
-                # and re-verify, never skip), and re-executing a level whose
-                # completion never persisted is the same crash-mid-level
-                # shape the ambiguous-completion machinery (round 11)
-                # already guards. Scheduling a deferred retry HERE would add
-                # real risk instead: a background rewrite racing later
-                # per-level saves could roll a newer durable checkpoint back
-                # to staler progress.
+                # Once the mandatory anchor has landed, a failed per-level
+                # overwrite only leaves checkpoint progress stale. Recovery
+                # reconciles authoritative ``outcome_finalized`` /
+                # ``recovery_exhausted`` events before dispatch, so completed
+                # side effects are not repeated merely because this summary
+                # update failed. A deferred overwrite here could instead race
+                # and roll newer progress backward.
                 self._save_execution_checkpoint(
                     seed=seed,
                     session_id=session_id,
                     execution_id=execution_id,
                     completed_levels=level_idx + 1,
                     plan_total_stages=total_levels,
+                    execution_plan=execution_plan,
                     ac_statuses=ac_statuses,
                     failed_indices=failed_indices,
                     completed_count=completed_count,
@@ -7600,6 +7797,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=ac_session_id,
                     retry_attempt=retry_attempt,
                     depth=depth,
+                    forced_frontier_routing=force_frontier_routing,
                 )
 
             if signal_target is not None and self._session_signal_hub is not None:
@@ -8047,6 +8245,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 # raised-exception path below, instead of defaulting to
                 # ``False`` and entering the infinite retry/parking loop.
                 infra_fatal=dispatch_state.infra_fatal,
+                forced_frontier_routing=force_frontier_routing,
             )
 
         except Exception as e:
@@ -8107,6 +8306,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 runtime_handle=dispatch_state.runtime_handle,
                 infra_fatal=True,
+                forced_frontier_routing=force_frontier_routing,
             )
         finally:
             try:
@@ -8622,6 +8822,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         "success": result.success,
                         "outcome": result.outcome.value if result.outcome is not None else None,
                         "is_decomposed": result.is_decomposed,
+                        "forced_frontier_routing": result.forced_frontier_routing,
                     },
                 )
             )
@@ -8813,7 +9014,7 @@ Respond with either ATOMIC or the structured JSON object only.
         ac_idx: int,
         result: ACExecutionResult,
         retry_attempt: int,
-        same_runtime_retry_available: bool = True,
+        force_frontier_routing: bool = False,
     ) -> bool:
         """Whether ``result`` is a failure at this root AC's maximum strength.
 
@@ -8836,28 +9037,11 @@ Respond with either ATOMIC or the structured JSON object only.
         terminal "xhigh" here: one notch of the investment-authorized
         cheapening the real dispatch applies, then never subtracted back out.
 
-        Args:
-            same_runtime_retry_available: Whether a FUTURE budget-funded
-                same-runtime retry of this root AC could still happen under
-                this run's configuration. Defaults to ``True`` (some
-                same-runtime retry budget remains, so it is meaningful to ask
-                "would the NEXT retry already be at ceiling"). ``False``
-                means the ordinary same-runtime retry budget is EXHAUSTED
-                (which includes the ``self._ac_retry_attempts <= 0`` case the
-                Fix 6 redo originally special-cased, and — Round-4 Finding
-                #2 — every check made from inside the lateral-escalation
-                ladder, whose redispatches are ladder-owned rather than
-                budget-funded): there is no future budget-funded dispatch
-                that could climb this AC to a higher tier/effort, so the raw
-                tier/effort the dispatches happened to reach must not gate
-                ladder eligibility — effort escalation raises exactly one
-                notch total, so a low/medium base can never literally reach
-                the "xhigh" ceiling regardless of retries. Each
-                ACTIVELY-configured routing axis is instead treated as
-                already at this run's ceiling for it (a dormant axis,
-                resolved as ``None``, stays dormant) — eligibility is
-                decided by ``success``/``is_decomposed`` alone for those
-                axes.
+        ``force_frontier_routing`` must describe the dispatch that produced
+        ``result``.  Budget exhaustion is not evidence that the last attempt
+        actually ran at the ceilings; only ladder-owned dispatches pass
+        ``True`` and suspend investment cheapening exactly like the live
+        dispatch path.
         """
         ac_criterion = seed.acceptance_criteria[ac_idx]
         investment_spec = (
@@ -8869,27 +9053,28 @@ Respond with either ATOMIC or the structured JSON object only.
             router=self._model_router,
             is_decomposed_child=False,
             retry_attempt=retry_attempt,
-            suggested_tier=self._suggested_model_tier_hint(),
+            suggested_tier=(
+                DEFAULT_TIER_CEILING
+                if force_frontier_routing
+                else self._suggested_model_tier_hint()
+            ),
         )
         effort_decision, _effort_kwargs = resolve_execute_effort(
             self._adapter,
-            base_effort=self._reasoning_effort,
+            base_effort=(
+                DEFAULT_EFFORT_CEILING
+                if force_frontier_routing and self._reasoning_effort
+                else self._reasoning_effort
+            ),
             is_decomposed_child=False,
             retry_attempt=retry_attempt,
-            investment_assessment=investment_assessment,
+            investment_assessment=(None if force_frontier_routing else investment_assessment),
         )
-        model_tier = model_decision.tier
-        effort_level = effort_decision.level
-        if not same_runtime_retry_available:
-            if model_tier is not None:
-                model_tier = DEFAULT_TIER_CEILING
-            if effort_level is not None:
-                effort_level = DEFAULT_EFFORT_CEILING
         return is_terminal_state_failure(
             success=result.success,
             is_decomposed=result.is_decomposed,
-            model_tier=model_tier,
-            effort_level=effort_level,
+            model_tier=model_decision.tier,
+            effort_level=effort_decision.level,
         )
 
     async def _load_decomposition_attestation(
@@ -9784,6 +9969,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 level_contexts=level_contexts,
                 execution_counters=execution_counters,
                 retry_termination_reason="budget_exhausted",
+                result_was_forced_frontier=True,
             )
         # Round-11 finding #4 (BLOCKING): reaching this point means the
         # durable log carries a pre-dispatch ``progressed`` record for this
@@ -9974,7 +10160,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 error=str(candidate),
                 retry_attempt=ac_retry_attempts[ac_idx],
                 infra_fatal=True,
+                forced_frontier_routing=True,
             )
+        elif not candidate.forced_frontier_routing:
+            candidate = replace(candidate, forced_frontier_routing=True)
         candidate = await self._apply_verify_gate(
             seed=seed,
             ac_index=ac_idx,
@@ -10013,6 +10202,7 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_termination_reason=(
                 "budget_exhausted" if self._is_retryable_failure(candidate) else "not_retryable"
             ),
+            result_was_forced_frontier=True,
         )
 
     async def _maybe_run_lateral_escalation_ladder(
@@ -10029,6 +10219,7 @@ Respond with either ATOMIC or the structured JSON object only.
         system_prompt: str,
         level_contexts: list[LevelContext],
         execution_counters: dict[str, int] | None,
+        result_was_forced_frontier: bool = False,
     ) -> ACExecutionResult | None:
         """Task 2: never let a root AC give up at maximum strength.
 
@@ -10100,6 +10291,9 @@ Respond with either ATOMIC or the structured JSON object only.
             return None
 
         current_result = result
+        current_result_was_forced_frontier = (
+            result_was_forced_frontier or result.forced_frontier_routing
+        )
         # Round-9 finding #1 (BLOCKING): the batch counter alone can LAG the
         # attempt number the AC's current result actually ran under —
         # internal stall retries bump ``atomic_retry_attempt`` inside
@@ -10127,29 +10321,88 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_idx=ac_idx,
                 result=current_result,
                 retry_attempt=current_retry_attempt,
-                # Round-4 Finding #2 (BLOCKING), generalizing the Fix 6 redo:
-                # this method is ONLY ever reached once the AC's ordinary
-                # same-runtime retry budget is spent (both call sites route
-                # through ``_finalize_batch_ac_with_escalation``), so the
-                # premise "a higher tier/effort might arrive on a future
-                # BUDGET-FUNDED same-runtime retry" is false here in EVERY
-                # case -- not just the zero-budget-from-the-start one the Fix
-                # 6 redo special-cased. Effort escalation raises exactly ONE
-                # notch total (``EFFORT_RAISE_RETRY_THRESHOLD``), so a
-                # low/medium base can NEVER reach the "xhigh" ceiling no
-                # matter how many retries ran: gating ladder entry on
-                # literally reaching the ceiling let a small retry budget
-                # starve the ladder out entirely, surfacing FAILED with every
-                # persona untried. Each ACTIVELY-configured routing axis is
-                # therefore treated as at ceiling on every check (a dormant
-                # axis stays dormant, preserving the
-                # no-escalation-dial-configured opt-out), and eligibility is
-                # decided by ``success``/``is_decomposed`` alone -- the
-                # ladder's own redispatches still resolve their REAL
-                # tier/effort for the actual dispatch.
-                same_runtime_retry_available=False,
+                force_frontier_routing=current_result_was_forced_frontier,
             )
             if not terminal:
+                # Ordinary-budget exhaustion authorizes entering the ladder,
+                # but it does NOT retroactively make the last weak dispatch a
+                # frontier failure.  If the same failure would be terminal
+                # under the ladder's real forced routing, perform that
+                # frontier dispatch now without advancing the terminal streak.
+                # Only its actual result may count as terminal failure #1.
+                can_force_frontier = await self._root_ac_terminal_state(
+                    seed=seed,
+                    ac_idx=ac_idx,
+                    result=current_result,
+                    retry_attempt=current_retry_attempt,
+                    force_frontier_routing=True,
+                )
+                if (
+                    not current_result_was_forced_frontier
+                    and not current_result.success
+                    and not current_result.is_decomposed
+                    and can_force_frontier
+                ):
+                    current_retry_attempt += 1
+                    ac_retry_attempts[ac_idx] = current_retry_attempt
+                    retry_results = await self._execute_ac_batch(
+                        seed=seed,
+                        batch_indices=[ac_idx],
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        level_contexts=level_contexts,
+                        ac_retry_attempts=ac_retry_attempts,
+                        execution_counters=execution_counters,
+                        retry_prompts={
+                            ac_idx: self._build_ac_retry_prompt(
+                                result=current_result,
+                                ac_content=ac_content,
+                                is_final_attempt=False,
+                            )
+                        },
+                        same_runtime_budget_exhausted=True,
+                        force_frontier_routing=True,
+                    )
+                    candidate = retry_results[0]
+                    if not isinstance(candidate, ACExecutionResult):
+                        candidate = ACExecutionResult(
+                            ac_index=ac_idx,
+                            ac_content=ac_content,
+                            success=False,
+                            error=str(candidate),
+                            retry_attempt=current_retry_attempt,
+                            infra_fatal=True,
+                            forced_frontier_routing=True,
+                        )
+                    elif not candidate.forced_frontier_routing:
+                        # Real atomic dispatches carry this bit themselves;
+                        # normalize mocked/custom runtimes at the orchestration
+                        # boundary so durable replay still records the truth.
+                        candidate = replace(candidate, forced_frontier_routing=True)
+                    candidate = await self._apply_verify_gate(
+                        seed=seed,
+                        ac_index=ac_idx,
+                        result=candidate,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    await self._emit_ac_outcome_finalized(
+                        result=candidate,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    if candidate.success or not self._is_retryable_failure(candidate):
+                        return candidate
+                    if candidate.is_decomposed:
+                        return candidate
+                    current_result = candidate
+                    current_result_was_forced_frontier = True
+                    engaged = True
+                    continue
                 if not engaged:
                     # Never entered the ladder at all: success, or no
                     # escalation axis is actively configured (both dormant) --
@@ -10370,7 +10623,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     error=str(candidate),
                     retry_attempt=current_retry_attempt,
                     infra_fatal=True,
+                    forced_frontier_routing=True,
                 )
+            elif not candidate.forced_frontier_routing:
+                candidate = replace(candidate, forced_frontier_routing=True)
             candidate = await self._apply_verify_gate(
                 seed=seed,
                 ac_index=ac_idx,
@@ -10410,6 +10666,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 return candidate
 
             current_result = candidate
+            current_result_was_forced_frontier = True
             if not self._is_retryable_failure(candidate):
                 # Fix 3 (round 2, BLOCKING): propagate this CURRENT terminal
                 # result (infra-fatal, blocked, or otherwise non-retryable)
@@ -10499,8 +10756,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
 
         position_by_idx = {ac_idx: position for position, ac_idx in enumerate(batch_executable)}
+        ordinary_boundary_results = {
+            ac_idx: self._ordinary_finalized_resume_results.pop(ac_idx)
+            for ac_idx in batch_executable
+            if ac_idx not in resumed_ladder_states
+            and ac_idx in self._ordinary_finalized_resume_results
+        }
+        resume_finalized_indices = set(resumed_ladder_states) | set(ordinary_boundary_results)
         fresh_executable = [
-            ac_idx for ac_idx in batch_executable if ac_idx not in resumed_ladder_states
+            ac_idx for ac_idx in batch_executable if ac_idx not in resume_finalized_indices
         ]
         results: list[ACExecutionResult | BaseException] = [None] * len(batch_executable)  # type: ignore[list-item]
         if fresh_executable:
@@ -10541,11 +10805,26 @@ Respond with either ATOMIC or the structured JSON object only.
                 level_contexts=level_contexts,
                 execution_counters=execution_counters,
             )
+        for ac_idx, finalized_result in ordinary_boundary_results.items():
+            results[position_by_idx[ac_idx]] = await self._finalize_batch_ac_with_escalation(
+                seed=seed,
+                ac_idx=ac_idx,
+                result=finalized_result,
+                ac_retry_attempts=ac_retry_attempts,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                execution_counters=execution_counters,
+                retry_termination_reason="budget_exhausted",
+            )
 
         retry_termination_reasons: dict[int, str] = {}
         # V1 gate on freshly-successful ACs.
         for position, ac_idx in enumerate(batch_executable):
-            if ac_idx in resumed_ladder_states:
+            if ac_idx in resume_finalized_indices:
                 continue
             result = results[position]
             if isinstance(result, ACExecutionResult):
@@ -10578,7 +10857,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # here too even with ``lateral_escalation_enabled=True`` and a
             # zero ordinary retry budget.
             for position, ac_idx in enumerate(batch_executable):
-                if ac_idx in resumed_ladder_states:
+                if ac_idx in resume_finalized_indices:
                     continue
                 result = results[position]
                 if isinstance(result, ACExecutionResult):
@@ -10607,7 +10886,8 @@ Respond with either ATOMIC or the structured JSON object only.
         pending = {
             ac_idx
             for position, ac_idx in enumerate(batch_executable)
-            if ac_idx not in resumed_ladder_states and self._is_retryable_failure(results[position])
+            if ac_idx not in resume_finalized_indices
+            and self._is_retryable_failure(results[position])
         }
         last_failure_class = {
             ac_idx: self._failure_class_for_result(results[position_by_idx[ac_idx]])
@@ -10828,7 +11108,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     pending.discard(ac_idx)
 
         for position, ac_idx in enumerate(batch_executable):
-            if ac_idx in resumed_ladder_states:
+            if ac_idx in resume_finalized_indices:
                 # Round-5 Finding #1: already final — verify-gated, outcome-
                 # finalized, and ladder-processed inside _resume_escalated_ac.
                 continue
@@ -10875,6 +11155,7 @@ Respond with either ATOMIC or the structured JSON object only.
         level_contexts: list[LevelContext],
         execution_counters: dict[str, int] | None,
         retry_termination_reason: str,
+        result_was_forced_frontier: bool = False,
     ) -> ACExecutionResult:
         """Hand one exhausted batch AC to the lateral-escalation ladder before
         accepting it as recovery-exhausted (Fix 6, round 3 / Task 2).
@@ -10901,6 +11182,7 @@ Respond with either ATOMIC or the structured JSON object only.
             system_prompt=system_prompt,
             level_contexts=level_contexts,
             execution_counters=execution_counters,
+            result_was_forced_frontier=result_was_forced_frontier,
         )
         if escalated is not None:
             # Fix 3 (round 2, BLOCKING): the ladder can now return a FAILED

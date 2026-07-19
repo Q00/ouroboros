@@ -97,6 +97,11 @@ class ACExecutionResult:
             fed back into the ordinary retry loop or the lateral-escalation
             ladder, since the runtime itself — not the AC's work — is what
             failed. ``False`` for every ordinary result (default).
+        forced_frontier_routing: Whether the dispatch that produced this
+            result was ladder-owned and actually forced every active routing
+            axis to its terminal ceiling. Recovery and terminal-failure
+            counting use this fact instead of inferring strength from retry
+            budget exhaustion.
     """
 
     ac_index: int
@@ -123,6 +128,7 @@ class ACExecutionResult:
     decomposition_attestation: DecompositionAttestation | None = None
     dispatched_decomposition_trustworthy: bool = False
     infra_fatal: bool = False
+    forced_frontier_routing: bool = False
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""

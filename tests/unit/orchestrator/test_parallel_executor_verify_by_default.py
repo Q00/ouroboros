@@ -316,6 +316,7 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
         "success": False,
         "outcome": "failed",
         "is_decomposed": True,
+        "forced_frontier_routing": False,
     }
 
 

@@ -18,9 +18,10 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 import yaml
@@ -145,6 +146,33 @@ class ExecutionProfile(BaseModel):
 
 class ProfileError(ValueError):
     """Raised when a profile cannot be located or parsed."""
+
+
+def serialize_execution_profile(profile: ExecutionProfile | None) -> dict[str, Any] | None:
+    """Return the complete resolved profile contract consumed by execution."""
+    if profile is None:
+        return None
+    return profile.model_dump(mode="json")
+
+
+def deserialize_execution_profile(
+    raw_profile: object,
+) -> tuple[bool, ExecutionProfile | None]:
+    """Parse a persisted resolved profile without consulting live YAML.
+
+    The boolean distinguishes an explicit ``None`` (a run that resolved no
+    profile) from a malformed payload.  Callers separately decide whether a
+    missing field is a supported migration shape; current execution contracts
+    and checkpoints require the field to be present.
+    """
+    if raw_profile is None:
+        return True, None
+    if not isinstance(raw_profile, Mapping):
+        return False, None
+    try:
+        return True, ExecutionProfile.model_validate(dict(raw_profile))
+    except ValidationError:
+        return False, None
 
 
 def _candidate_path(name: str, profiles_dir: Path) -> Path:

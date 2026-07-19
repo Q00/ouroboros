@@ -1593,8 +1593,63 @@ class TestZeroRetryBudgetStillEngagesLadder:
         # ``[1]`` and ``results[0]`` would have been the STALE
         # ``initial_failure``, finalized as plain recovery-exhausted.
         assert len(dispatch_calls) >= 2
-        assert results[0] is breakthrough
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        assert results[0].forced_frontier_routing is True
         executor._emit_recovery_exhausted.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_persona_starts_only_after_two_real_forced_frontier_failures(self) -> None:
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._ac_retry_attempts = 0
+        executor._model_router = ModelRouter(
+            tier_models={
+                "frugal": "model-frugal",
+                "standard": "model-standard",
+                "frontier": "model-frontier",
+            },
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=5,
+        )
+        executor._adapter.runtime_backend = "claude"
+        executor._reasoning_effort = "medium"
+        executor._event_emitter.emit_lateral_escalation_progressed = AsyncMock(return_value=True)
+
+        dispatches: list[bool] = []
+
+        async def _dispatch(**kwargs: object) -> list[ACExecutionResult]:
+            forced = bool(kwargs.get("force_frontier_routing", False))
+            dispatches.append(forced)
+            if len(dispatches) == 4:
+                return [_success_result()]
+            return [_failed_result(error=f"failure {len(dispatches)}")]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=_dispatch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert dispatches == [False, True, True, True]
+        progressed_calls = (
+            executor._event_emitter.emit_lateral_escalation_progressed.await_args_list
+        )
+        assert [call.kwargs["persona"] for call in progressed_calls[:2]] == [None, "hacker"]
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
 
 
 class TestBudgetExhaustionAloneReachesLadder:

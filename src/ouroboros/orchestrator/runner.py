@@ -32,7 +32,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from uuid import uuid4
 
 from rich.console import Console
@@ -113,7 +113,13 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     evaluate_capability_policy,
 )
-from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
+from ouroboros.orchestrator.profile_loader import (
+    ExecutionProfile,
+    ProfileError,
+    deserialize_execution_profile,
+    load_profile,
+    serialize_execution_profile,
+)
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
@@ -313,6 +319,18 @@ def _strategy_for_seed(seed: Seed, *, fat_harness_mode: bool = False) -> Executi
         profile = _execution_profile_for_seed(seed)
         if profile is not None:
             return ProfileBackedStrategy(profile)
+    return get_strategy(seed.task_type)
+
+
+def _strategy_for_resolved_profile(
+    seed: Seed,
+    *,
+    fat_harness_mode: bool,
+    execution_profile: ExecutionProfile | None,
+) -> ExecutionStrategy:
+    """Build prompts from the profile contract the run already resolved."""
+    if fat_harness_mode and execution_profile is not None:
+        return ProfileBackedStrategy(execution_profile)
     return get_strategy(seed.task_type)
 
 
@@ -559,6 +577,7 @@ EXECUTION_CONTRACT_VERSION = 1
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
+_UNSET_EXECUTION_PROFILE = object()
 
 #: Round-13 finding #2: bounded foreground retries for the terminal RC3
 #: checkpoint delete. A leftover checkpoint from a finished run is the raw
@@ -839,6 +858,11 @@ class OrchestratorRunner:
             )
         self._apply_efficiency_mode_to_router()
         self._execution_contract: dict[str, Any] | None = None
+        # Resolved once per Seed and persisted as part of the durable
+        # execution contract.  Resume must never re-read a changed profile
+        # YAML and silently alter decomposition, routing, evidence, or prompt
+        # semantics while retaining the original run identity.
+        self._execution_profile: ExecutionProfile | None = None
         self._execution_guidance: ExecutionGuidanceBundle | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
@@ -1601,6 +1625,7 @@ class OrchestratorRunner:
         routing_contract: Mapping[str, Any],
         *,
         retry_policy: Mapping[str, Any] | None = None,
+        execution_profile: Mapping[str, Any] | None = None,
     ) -> str:
         """Hash a resolved routing contract into a stable cohort key.
 
@@ -1618,10 +1643,16 @@ class OrchestratorRunner:
         ``None`` (the pre-Fix-6 call shape, and what a legacy persisted
         contract with no ``retry_policy`` key re-derives) reproduces the
         EXACT pre-fix hash, so old cohort history keeps matching itself.
+
+        The resolved execution profile is folded in as a separate contract
+        axis because it controls decomposition, suggested tier, tools,
+        evidence validation, verifier focus, and worker prompts.
         """
         payload: dict[str, Any] = dict(routing_contract)
         if retry_policy is not None:
             payload["retry_policy"] = dict(retry_policy)
+        if execution_profile is not None:
+            payload["execution_profile"] = dict(execution_profile)
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -2233,6 +2264,7 @@ class OrchestratorRunner:
         fat_harness_mode: bool,
         context_pack_enabled: bool | None,
         guidance_contract: object = None,
+        execution_profile: ExecutionProfile | None = None,
     ) -> str:
         """Rebuild the worker system prompt AFTER RC3 checkpoint restoration.
 
@@ -2257,7 +2289,12 @@ class OrchestratorRunner:
         """
         if guidance_contract is not None:
             self._restore_guidance_contract({"guidance": guidance_contract})
-        strategy = _strategy_for_seed(seed, fat_harness_mode=fat_harness_mode)
+        self._execution_profile = execution_profile
+        strategy = _strategy_for_resolved_profile(
+            seed,
+            fat_harness_mode=fat_harness_mode,
+            execution_profile=self._execution_profile,
+        )
         return build_system_prompt(
             seed,
             strategy=strategy,
@@ -2326,10 +2363,22 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         seed_fingerprint: str | None = None,
+        execution_profile: ExecutionProfile | None | object = _UNSET_EXECUTION_PROFILE,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
 
+        if execution_profile is _UNSET_EXECUTION_PROFILE:
+            resolved_profile = _execution_profile_for_seed(seed) if seed is not None else None
+        else:
+            resolved_profile = cast(ExecutionProfile | None, execution_profile)
+        self._execution_profile = resolved_profile
+        profile_contract = serialize_execution_profile(resolved_profile)
+        profile_fingerprint_contract: Mapping[str, Any] = (
+            {"resolved": False}
+            if profile_contract is None
+            else {"resolved": True, "profile": profile_contract}
+        )
         guidance_bundle = self._ensure_new_run_guidance()
         routing_contract = serialize_model_router(self._model_router)
         routing_contract["constructor_model"] = self._constructor_model_contract()
@@ -2341,7 +2390,9 @@ class OrchestratorRunner:
         proof_contract: dict[str, Any] = {
             "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
             "routing_fingerprint": self._routing_fingerprint(
-                routing_contract, retry_policy=retry_policy_contract
+                routing_contract,
+                retry_policy=retry_policy_contract,
+                execution_profile=profile_fingerprint_contract,
             ),
         }
         workspace_identity = self._proof_workspace_identity()
@@ -2362,6 +2413,7 @@ class OrchestratorRunner:
                 "workspace": self._resume_workspace_identity(),
             },
             "retry_policy": retry_policy_contract,
+            "execution_profile": profile_contract,
         }
 
     async def _emit_run_configuration_resolved(
@@ -2638,6 +2690,25 @@ class OrchestratorRunner:
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
         raw_retry_policy = raw_contract.get("retry_policy")
+        if "execution_profile" not in raw_contract:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"missing": "execution_profile"},
+            )
+        raw_execution_profile = raw_contract.get("execution_profile")
+        profile_recognized, restored_execution_profile = deserialize_execution_profile(
+            raw_execution_profile
+        )
+        if not profile_recognized:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "execution_profile"},
+            )
+        profile_fingerprint_contract: Mapping[str, Any] = (
+            {"resolved": False}
+            if raw_execution_profile is None
+            else {"resolved": True, "profile": dict(cast(Mapping[str, Any], raw_execution_profile))}
+        )
         if (
             not isinstance(raw_proof, Mapping)
             or not isinstance(raw_routing, Mapping)
@@ -2697,6 +2768,7 @@ class OrchestratorRunner:
             != self._routing_fingerprint(
                 raw_routing,
                 retry_policy=None if retry_policy_migrated else raw_retry_policy,
+                execution_profile=profile_fingerprint_contract,
             )
             or (seed is not None and not valid_seed_fingerprint)
             or not self._valid_constructor_model_contract(persisted_constructor_model)
@@ -2943,13 +3015,16 @@ class OrchestratorRunner:
         else:
             self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
+            self._execution_profile = restored_execution_profile
             self._execution_contract = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
+                execution_profile=restored_execution_profile,
             )
             return self._execution_contract != raw_contract
 
         self._model_router = restored_router
+        self._execution_profile = restored_execution_profile
         # Preserve the exact persisted proof identity alongside the restored
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
@@ -2988,6 +3063,17 @@ class OrchestratorRunner:
         routing_contract = raw_contract.get("model_routing")
         if not isinstance(routing_contract, Mapping):
             return None
+        if "execution_profile" not in raw_contract:
+            return None
+        raw_execution_profile = raw_contract.get("execution_profile")
+        profile_recognized, _ = deserialize_execution_profile(raw_execution_profile)
+        if not profile_recognized:
+            return None
+        profile_fingerprint_contract: Mapping[str, Any] = (
+            {"resolved": False}
+            if raw_execution_profile is None
+            else {"resolved": True, "profile": dict(raw_execution_profile)}
+        )
         guidance_contract = raw_contract.get("guidance")
         if guidance_contract is None:
             guidance_fingerprint = "legacy:no-declared-guidance"
@@ -3060,6 +3146,7 @@ class OrchestratorRunner:
                 if isinstance(raw_retry_policy_for_fingerprint, Mapping)
                 else None
             ),
+            execution_profile=profile_fingerprint_contract,
         ):
             return None
         if (
@@ -4491,6 +4578,20 @@ class OrchestratorRunner:
                 )
             try:
                 await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
+                if "execution_profile" not in raw_contract:
+                    raise OrchestratorError(
+                        message="Cannot execute with an invalid execution contract",
+                        details={"missing": "execution_profile"},
+                    )
+                profile_recognized, execution_profile = deserialize_execution_profile(
+                    raw_contract.get("execution_profile")
+                )
+                if not profile_recognized:
+                    raise OrchestratorError(
+                        message="Cannot execute with an invalid execution contract",
+                        details={"invalid": "execution_profile"},
+                    )
+                self._execution_profile = execution_profile
                 self._execution_guidance_delivery_mode()
             except OrchestratorError as exc:
                 self._cleanup_pre_execution_state(
@@ -4525,7 +4626,13 @@ class OrchestratorRunner:
             # Build prompts with strategy. The fat-harness default path must use
             # the profile-backed prompt contract so leaf agents are told to emit
             # schema-valid evidence before the acceptance gate parses it.
-            strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
+            if self._execution_contract is None and self._execution_profile is None:
+                self._execution_profile = _execution_profile_for_seed(seed)
+            strategy = _strategy_for_resolved_profile(
+                seed,
+                fat_harness_mode=self._fat_harness_mode,
+                execution_profile=self._execution_profile,
+            )
             system_prompt = build_system_prompt(
                 seed,
                 strategy=strategy,
@@ -5233,7 +5340,13 @@ class OrchestratorRunner:
                 f"  Stage {stage.stage_number}: ACs {[idx + 1 for idx in stage.ac_indices]}"
             )
 
-        execution_profile = _execution_profile_for_seed(seed)
+        # Direct unit/integration callers may enter this private method
+        # without ``prepare_session``.  Production paths resolve the profile
+        # while building/restoring the durable contract and must consume that
+        # exact object rather than re-reading live YAML here.
+        if self._execution_contract is None and self._execution_profile is None:
+            self._execution_profile = _execution_profile_for_seed(seed)
+        execution_profile = self._execution_profile
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).

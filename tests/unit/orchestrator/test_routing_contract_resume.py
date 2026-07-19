@@ -23,6 +23,7 @@ from ouroboros.orchestrator.model_routing import (
     deserialize_model_router,
     serialize_model_router,
 )
+from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     FRUGALITY_PROOF_PROTOCOL_VERSION,
@@ -85,6 +86,11 @@ def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing surv
         ontology_schema=OntologySchema(name="Routing", description="Durable routing contract"),
         metadata=SeedMetadata(seed_id="seed-routing-contract"),
     )
+
+
+def _profile_fingerprint_contract(contract: dict) -> dict:
+    profile = contract.get("execution_profile")
+    return {"resolved": False} if profile is None else {"resolved": True, "profile": profile}
 
 
 def _workspace(*, durable_id: str, worktree_path: Path, repo_root: Path) -> TaskWorkspace:
@@ -175,6 +181,45 @@ def test_resume_restores_persisted_custom_frontier_router() -> None:
 
     assert changed is False
     assert resumed._model_router == _frontier_custom_router()
+
+
+def test_resume_restores_full_execution_profile_and_fingerprints_profile_drift() -> None:
+    seed = _seed()
+    original_profile = load_profile("code")
+    changed_profile = original_profile.model_copy(update={"axis": "changed-axis"})
+
+    original = _runner()
+    with patch(
+        "ouroboros.orchestrator.runner.load_profile",
+        return_value=original_profile,
+    ):
+        persisted = original._build_execution_contract(seed=seed)
+
+    fresh_with_changed_profile = _runner()
+    with patch(
+        "ouroboros.orchestrator.runner.load_profile",
+        return_value=changed_profile,
+    ):
+        changed_contract = fresh_with_changed_profile._build_execution_contract(seed=seed)
+
+    assert persisted["execution_profile"] != changed_contract["execution_profile"]
+    assert (
+        persisted["frugality_proof"]["routing_fingerprint"]
+        != changed_contract["frugality_proof"]["routing_fingerprint"]
+    )
+
+    resumed = _runner()
+    with patch(
+        "ouroboros.orchestrator.runner.load_profile",
+        side_effect=AssertionError("resume must not read current profile YAML"),
+    ):
+        changed = resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=seed,
+        )
+
+    assert changed is False
+    assert resumed._execution_profile == original_profile
 
 
 def test_resume_restores_persisted_kill_switch() -> None:
@@ -328,7 +373,8 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     # now-deleted retry_policy data and spuriously fail identity validation
     # before ever reaching the migration path this test exercises.
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
-        persisted["model_routing"]
+        persisted["model_routing"],
+        execution_profile=_profile_fingerprint_contract(persisted),
     )
 
     resumed = _runner()
@@ -817,7 +863,8 @@ def test_legacy_contract_missing_retry_policy_still_resolves_a_cohort_identity()
     runner = _runner()
     contract = runner._build_execution_contract(seed=seed)
     contract["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
-        contract["model_routing"]
+        contract["model_routing"],
+        execution_profile=_profile_fingerprint_contract(contract),
     )
     del contract["retry_policy"]
 
@@ -861,7 +908,9 @@ def test_empty_observed_runtime_identity_is_rejected() -> None:
         "frugality_proof": {
             **persisted["frugality_proof"],
             "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
-                malformed_routing, retry_policy=persisted["retry_policy"]
+                malformed_routing,
+                retry_policy=persisted["retry_policy"],
+                execution_profile=_profile_fingerprint_contract(persisted),
             ),
         },
     }
@@ -917,7 +966,9 @@ def test_explicit_tier_does_not_bypass_malformed_persisted_router() -> None:
         "frugality_proof": {
             **persisted["frugality_proof"],
             "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
-                malformed_routing, retry_policy=persisted["retry_policy"]
+                malformed_routing,
+                retry_policy=persisted["retry_policy"],
+                execution_profile=_profile_fingerprint_contract(persisted),
             ),
         },
     }
@@ -948,7 +999,9 @@ def test_explicit_tier_does_not_bypass_nested_backend_mismatch() -> None:
         "frugality_proof": {
             **persisted["frugality_proof"],
             "routing_fingerprint": OrchestratorRunner._routing_fingerprint(
-                inconsistent_routing, retry_policy=persisted["retry_policy"]
+                inconsistent_routing,
+                retry_policy=persisted["retry_policy"],
+                execution_profile=_profile_fingerprint_contract(persisted),
             ),
         },
     }

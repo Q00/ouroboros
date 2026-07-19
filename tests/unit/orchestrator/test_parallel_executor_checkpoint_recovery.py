@@ -44,7 +44,15 @@ from ouroboros.orchestrator.dependency_analyzer import (
 )
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.model_routing import ModelRouter, serialize_model_router
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionResult,
+    CheckpointCorruptError,
+    CheckpointPersistenceError,
+    CheckpointPlanMismatchError,
+    CheckpointUnreadableError,
+    ParallelACExecutor,
+)
+from ouroboros.orchestrator.profile_loader import load_profile
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.resilience.lateral import ThinkingPersona
@@ -710,6 +718,8 @@ class TestFirstLevelCrashLeavesRecoverableCheckpoint:
         state = saved.value.state
         assert state["execution_id"] == "exec-original"
         assert state["completed_levels"] == 0
+        assert state["execution_plan"] == run1._serialize_execution_plan(_plan())
+        assert "execution_profile" in state
         assert state["retry_policy"]["lateral_escalation_enabled"] is True
         assert state["retry_policy"]["parked_retry_backoff_seconds"] == 123.0
         assert "reasoning_effort" in state["retry_policy"]
@@ -784,48 +794,21 @@ class _AnchorFailingStore(CheckpointStore):
         return super().save(checkpoint)
 
 
-class TestAnchorSaveFailureIsDurablyRetried:
-    """Round-15 finding #2 (BLOCKING, save direction): the pre-dispatch
-    anchor save was best-effort — if THAT write silently failed, a
-    first-level crash was back in the exact "zero durable record" state
-    round 13 was built to close (fresh execution_id minted on restart, the
-    original run's ladder/escalation events unreachable). A failed anchor
-    save must now get the same deferred durable retry every other
-    correctness-bearing write in this file gets."""
+class TestAnchorSaveFailureBlocksDispatch:
+    """A missing run-start anchor must stop the launch before any AC work."""
 
     @pytest.mark.asyncio
-    async def test_failed_anchor_write_recovers_via_deferred_retry_then_crash_is_resumable(
-        self, tmp_path: Path
-    ) -> None:
-        """The review's exact scenario: the run-start anchor write FAILS,
-        the run then crashes during level 1 — recovery must STILL find the
-        original execution_id/policy (the deferred retry landed) instead of
-        silently starting fresh with zero durable record."""
-        seed = _seed("Anchor save failure is durably retried")
-        db_path = tmp_path / "events.db"
+    async def test_failed_anchor_write_refuses_launch_before_dispatch(self, tmp_path: Path) -> None:
+        seed = _seed("Anchor save failure blocks dispatch")
         ckpt_path = tmp_path / "checkpoints"
-
-        # --- Run 1: the anchor (run_start) save fails; the crash follows
-        # during level 1 before any level-completion save could land.
-        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
-        await run1_events.initialize()
         run1_ckpt = _AnchorFailingStore(ckpt_path, fail_first_saves=1)
         run1_ckpt.initialize()
         run1 = _executor(
-            event_store=run1_events,
+            event_store=AsyncMock(),
             checkpoint_store=run1_ckpt,
-            lateral_escalation_enabled=True,
-            parked_retry_backoff_seconds=0.01,
         )
-
-        async def _crash(**kwargs: object) -> list[ACExecutionResult]:
-            # Yield once so the deferred anchor retry's immediate first
-            # attempt gets scheduled the way it would in a real run.
-            await asyncio.sleep(0)
-            raise RuntimeError("simulated crash during the first level")
-
-        run1._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crash)
-        with pytest.raises(BaseException):
+        run1._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointPersistenceError):
             await run1.execute_parallel(
                 seed,
                 session_id="session-original",
@@ -834,62 +817,19 @@ class TestAnchorSaveFailureIsDurablyRetried:
                 system_prompt="system",
                 execution_plan=_plan(),
             )
-        await run1_events.close()
-
-        # The immediate anchor attempt failed, but the deferred retry (given
-        # its bounded final shot by the crash path's drain) landed the SAME
-        # identity/policy state durably.
-        assert run1_ckpt.save_attempts >= 2
-        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
-        assert saved.is_ok
-        state = saved.value.state
-        assert state["execution_id"] == "exec-original"
-        assert state["completed_levels"] == 0
-        assert state["retry_policy"]["lateral_escalation_enabled"] is True
-
-        # --- Run 2: crash-restart. Recovery must adopt the retried anchor:
-        # original execution_id restored, original escalation policy wins
-        # over the restart's contrary config, level 1 re-dispatched.
-        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
-        await run2_events.initialize()
-        run2 = _executor(
-            event_store=run2_events,
-            checkpoint_store=CheckpointStore(base_path=ckpt_path),
-            lateral_escalation_enabled=False,
-        )
-        captured: dict[str, object] = {}
-
-        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
-            captured["execution_id"] = kwargs["execution_id"]
-            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
-
-        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
-        result = await run2.execute_parallel(
-            seed,
-            session_id="session-restart",
-            execution_id="exec-restart",
-            tools=[],
-            system_prompt="system",
-            execution_plan=_plan(),
-        )
-        assert captured["execution_id"] == "exec-original"
-        assert result.execution_id == "exec-original"
-        assert run2._lateral_escalation_enabled is True
-        await run2_events.close()
+        assert run1_ckpt.save_attempts == 1
+        run1._run_batch_with_verify_and_retry.assert_not_awaited()
+        assert CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id).is_err
 
     @pytest.mark.asyncio
-    async def test_anchor_retry_stands_down_after_newer_save_landed(self, tmp_path: Path) -> None:
-        """The deferred anchor retry must never roll a NEWER durable
-        checkpoint back to staler run-start state: once a per-level save
-        has landed, the pending retry reports success without writing."""
-        seed = _seed("Anchor retry stands down")
+    async def test_successful_anchor_allows_dispatch(self, tmp_path: Path) -> None:
+        seed = _seed("Successful anchor allows dispatch")
         ckpt_path = tmp_path / "checkpoints"
-        store = _AnchorFailingStore(ckpt_path, fail_first_saves=1)
+        store = _AnchorFailingStore(ckpt_path, fail_first_saves=0)
         store.initialize()
         executor = _executor(
             event_store=AsyncMock(),
             checkpoint_store=store,
-            parked_retry_backoff_seconds=60.0,
         )
 
         async def _complete_level(**kwargs: object) -> list[ACExecutionResult]:
@@ -905,13 +845,9 @@ class TestAnchorSaveFailureIsDurablyRetried:
             execution_plan=_plan(),
         )
         assert result.success_count == 1
-        # Nothing left unconfirmed: the level-completion save superseded the
-        # failed anchor, so its deferred retry stood down cleanly.
-        assert result.unconfirmed_durable_writes == ()
+        executor._run_batch_with_verify_and_retry.assert_awaited_once()
         loaded = store.load(seed.metadata.seed_id)
         assert loaded.is_ok
-        # The durable checkpoint kept the NEWER per-level progress — it was
-        # not rolled back to the run-start snapshot's zero progress.
         assert loaded.value.state["completed_levels"] == 1
 
 
@@ -1168,7 +1104,9 @@ class TestCheckpointAdoptionValidatesSeedContent:
         assert result.execution_id == "exec-a"
 
     @pytest.mark.asyncio
-    async def test_malformed_fingerprint_fails_closed_to_fresh_run(self, tmp_path: Path) -> None:
+    async def test_malformed_fingerprint_blocks_launch_and_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
         """A present-but-unverifiable fingerprint must refuse adoption
         (fresh run, loudly) — adopting unverifiable progress risks the
         silent-false-success direction."""
@@ -1197,17 +1135,20 @@ class TestCheckpointAdoptionValidatesSeedContent:
                 ACExecutionResult(ac_index=0, ac_content="Implement feature A", success=True)
             ]
         )
-        result = await run2.execute_parallel(
-            seed_a,
-            session_id="session-b",
-            execution_id="exec-b",
-            tools=[],
-            system_prompt="system",
-            execution_plan=_plan_for(seed_a),
-        )
+        with pytest.raises(CheckpointCorruptError):
+            await run2.execute_parallel(
+                seed_a,
+                session_id="session-b",
+                execution_id="exec-b",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan_for(seed_a),
+            )
         await run2_events.close()
-        run2._run_batch_with_verify_and_retry.assert_called_once()
-        assert result.execution_id == "exec-b"
+        run2._run_batch_with_verify_and_retry.assert_not_called()
+        reloaded = CheckpointStore(base_path=ckpt_path).load("seed_shared_id")
+        assert reloaded.is_ok
+        assert reloaded.value.state["seed_fingerprint"] == 12345
 
 
 def _rich_seed(**overrides: object) -> Seed:
@@ -1513,7 +1454,7 @@ class TestMalformedCheckpointProgressFailsClosed:
         ],
     )
     @pytest.mark.asyncio
-    async def test_malformed_progress_runs_fresh_without_crash_or_torn_state(
+    async def test_malformed_progress_blocks_launch_and_preserves_checkpoint(
         self, tmp_path: Path, corruption: dict[str, object]
     ) -> None:
         from ouroboros.persistence.checkpoint import CheckpointData
@@ -1540,45 +1481,21 @@ class TestMalformedCheckpointProgressFailsClosed:
             event_store=run2_events,
             checkpoint_store=CheckpointStore(base_path=ckpt_path),
         )
-        dispatched: list[list[int]] = []
-
-        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
-            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
-            dispatched.append(batch)
-            return [
-                ACExecutionResult(
-                    ac_index=idx,
-                    ac_content=str(seed.acceptance_criteria[idx]),
-                    success=True,
-                )
-                for idx in batch
-            ]
-
-        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
-        # The recovery must NOT crash with an unhandled exception.
-        result = await run2.execute_parallel(
-            seed,
-            session_id="session-restarted",
-            execution_id="exec-restarted",
-            tools=[],
-            system_prompt="system",
-            execution_plan=self._two_stage_plan(),
-        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointCorruptError):
+            await run2.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._two_stage_plan(),
+            )
         await run2_events.close()
-
-        # Fresh-run posture: EVERY level dispatched — no level skipped off
-        # corrupt progress, no AC synthesized as restored/failed.
-        assert dispatched == [[0], [1]]
-        assert result.all_succeeded
-        assert all(r.final_message != "[Restored from checkpoint]" for r in result.results)
-        # No partial application: the caller's identity was kept — a torn
-        # restore would have left the ORIGINAL run's execution_id behind.
-        assert result.execution_id == "exec-restarted"
-        # The corrupt checkpoint was discarded and re-keyed to the fresh
-        # run's durable identity.
+        run2._run_batch_with_verify_and_retry.assert_not_awaited()
         reloaded = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert reloaded.is_ok
-        assert reloaded.value.state["execution_id"] == "exec-restarted"
+        assert reloaded.value.state == broken_state
 
     def test_progress_validation_accepts_the_saved_shape(self, tmp_path: Path) -> None:
         """Control: the exact state a real save writes must validate clean
@@ -1700,7 +1617,7 @@ class TestMalformedCheckpointSemanticsFailsClosed:
         ],
     )
     @pytest.mark.asyncio
-    async def test_malformed_semantics_discard_whole_checkpoint_never_a_mixture(
+    async def test_malformed_semantics_block_launch_and_preserve_checkpoint(
         self, tmp_path: Path, field: str, corruption: dict[str, object]
     ) -> None:
         from ouroboros.persistence.checkpoint import CheckpointData
@@ -1738,58 +1655,31 @@ class TestMalformedCheckpointSemanticsFailsClosed:
             decomposition_mode="preflight",
             max_concurrent=2,
         )
-        dispatched: list[list[int]] = []
-
-        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
-            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
-            dispatched.append(batch)
-            return [
-                ACExecutionResult(
-                    ac_index=idx,
-                    ac_content=str(seed.acceptance_criteria[idx]),
-                    success=True,
-                )
-                for idx in batch
-            ]
-
-        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
-        result = await run2.execute_parallel(
-            seed,
-            session_id="session-restarted",
-            execution_id="exec-restarted",
-            tools=[],
-            system_prompt="system",
-            execution_plan=self._plan_factory(),
-        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointCorruptError):
+            await run2.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._plan_factory(),
+            )
         await run2_events.close()
-
-        # Fresh-run posture: EVERY level dispatched — nothing skipped off
-        # the corrupt checkpoint, no AC synthesized as restored.
-        assert dispatched == [[0], [1]]
-        assert result.all_succeeded
-        assert all(r.final_message != "[Restored from checkpoint]" for r in result.results)
-        # The caller's identity was kept — adoption would have restored
-        # the ORIGINAL run's execution_id.
-        assert result.execution_id == "exec-restarted"
-        # NOTHING was restored, atomically: the well-formed groups next to
-        # the malformed one must NOT leak through (the pre-fix mixture kept
-        # e.g. the checkpoint's backoff while running the current process's
-        # concurrency). Every semantic group keeps the CURRENT process's
-        # construction values.
+        run2._run_batch_with_verify_and_retry.assert_not_awaited()
         assert run2._parked_retry_backoff_seconds == 300.0
         assert run2._decomposition_mode == "preflight"
         assert run2._max_concurrent == 2
-        # The corrupt checkpoint was discarded and re-keyed to the fresh
-        # run's durable identity.
         reloaded = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert reloaded.is_ok
-        assert reloaded.value.state["execution_id"] == "exec-restarted"
+        assert reloaded.value.state == broken_state
 
     def test_semantics_validation_accepts_the_saved_shape(self, tmp_path: Path) -> None:
         """Control: the exact semantic payloads a real save writes must
         validate clean (a genuine resume keeps restoring them), including
         absent legacy fields."""
         state = {
+            "execution_profile": None,
             "retry_policy": {
                 "lateral_escalation_enabled": True,
                 "parked_retry_backoff_seconds": 300.0,
@@ -1811,8 +1701,9 @@ class TestMalformedCheckpointSemanticsFailsClosed:
         }
         cp = SimpleNamespace(state=state)
         assert ParallelACExecutor._checkpoint_semantics_malformed(cp) is None
-        # Legacy shape: semantic payloads absent entirely — adopt posture.
-        assert ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state={})) is None
+        assert "execution_profile" in (
+            ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state={})) or ""
+        )
 
     @pytest.mark.parametrize(
         ("state", "expected_fragment"),
@@ -1851,6 +1742,7 @@ class TestMalformedCheckpointSemanticsFailsClosed:
                 "reasoning_effort",
             ),
             ({"model_routing": {"version": 99, "enabled": True}}, "model_routing"),
+            ({"execution_profile": {"profile": "code"}}, "execution_profile"),
             ({"execution_semantics": "corrupt"}, "execution_semantics"),
             ({"execution_semantics": {"decomposition_mode": "sideways"}}, "decomposition_mode"),
             ({"execution_semantics": {"max_decomposition_depth": True}}, "max_decomposition_depth"),
@@ -1862,7 +1754,9 @@ class TestMalformedCheckpointSemanticsFailsClosed:
     def test_semantics_validation_rejects_each_malformed_field(
         self, state: dict[str, object], expected_fragment: str
     ) -> None:
-        detail = ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state=state))
+        detail = ParallelACExecutor._checkpoint_semantics_malformed(
+            SimpleNamespace(state={"execution_profile": None, **state})
+        )
         assert detail is not None
         assert expected_fragment in detail
 
@@ -1978,15 +1872,10 @@ class TestIndeterminateReplayWithCompletedCheckpoint:
         await run2_events.close()
 
     @pytest.mark.asyncio
-    async def test_genuine_crash_with_indeterminate_replay_still_resumes(
+    async def test_genuine_crash_with_indeterminate_outcome_replay_blocks_dispatch(
         self, tmp_path: Path
     ) -> None:
-        """Round-9 #2 protection must survive this fix: a genuinely
-        INTERRUPTED run (partial checkpoint, no terminal record) whose
-        resume-time replay is degraded must still be adopted — original
-        execution_id restored, completed level skipped, remaining level
-        dispatched. Refusing it would drop ladder history/retry policy and
-        surface FAILED with escalation options untried."""
+        """Unknown finalized outcomes cannot safely be treated as pending."""
         seed = Seed(
             goal="Crashed run resumes under degraded replay",
             constraints=(),
@@ -2046,30 +1935,17 @@ class TestIndeterminateReplayWithCompletedCheckpoint:
             event_store=run2_events,
             checkpoint_store=CheckpointStore(base_path=ckpt_path),
         )
-        captured: dict[str, object] = {}
-
-        async def _resumed_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
-            captured["execution_id"] = kwargs["execution_id"]
-            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
-            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
-
-        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_resumed_stage_runner)
-        result = await run2.execute_parallel(
-            seed,
-            session_id="session-resumed",
-            execution_id="exec-resumed",
-            tools=[],
-            system_prompt="system",
-            execution_plan=plan,
-        )
-
-        # Genuine crash recovery preserved: the partial checkpoint was
-        # adopted despite the degraded replay — completed level skipped,
-        # ORIGINAL execution_id restored for the ladder loaders.
-        assert captured["batch_executable"] == [1]
-        assert captured["execution_id"] == "exec-original"
-        assert result.all_succeeded
-        assert result.execution_id == "exec-original"
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointUnreadableError):
+            await run2.execute_parallel(
+                seed,
+                session_id="session-resumed",
+                execution_id="exec-resumed",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        run2._run_batch_with_verify_and_retry.assert_not_awaited()
         await run2_events.close()
 
 
@@ -3477,10 +3353,49 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
                 "fat_harness_mode": True,
                 "context_pack_enabled": False,
                 "guidance_contract": self._GUIDANCE,
+                "execution_profile": None,
             }
         ]
         # And the rebuilt prompt — not the stale baked one — was dispatched.
         assert captured["system_prompt"] == "REBUILT-FROM-RESTORED-SETTINGS"
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_restores_full_execution_profile_before_prompt_build(
+        self, tmp_path: Path
+    ) -> None:
+        seed = _seed("Recovered execution profile")
+        original_profile = load_profile("code")
+        changed_profile = original_profile.model_copy(update={"axis": "changed-axis"})
+        ckpt_path = tmp_path / "checkpoints"
+        await self._crash_original_run(
+            seed,
+            ckpt_path,
+            execution_profile=original_profile,
+        )
+
+        restart = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            execution_profile=changed_profile,
+        )
+        builder = MagicMock(return_value="restored-profile-prompt")
+        restart._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+
+        result = await restart.execute_parallel(
+            seed,
+            session_id="session-restart",
+            execution_id="exec-restart",
+            tools=[],
+            system_prompt="stale-profile-prompt",
+            execution_plan=_plan(),
+            system_prompt_builder=builder,
+        )
+
+        assert result.all_succeeded
+        assert restart._execution_profile == original_profile
+        assert builder.call_args.kwargs["execution_profile"] == original_profile
 
     @pytest.mark.asyncio
     async def test_fresh_run_keeps_caller_prompt_and_never_calls_builder(
@@ -3596,7 +3511,7 @@ def _collapsed_fallback_plan(seed: Seed) -> StagedExecutionPlan:
     return graph.to_execution_plan()
 
 
-class TestResumeSurvivesPlanRegrouping:
+class TestResumeRejectsPlanRegrouping:
     """Round-16 finding #1 (BLOCKING): ``completed_levels`` is an integer
     relative to the ORIGINAL run's plan STRUCTURE, but the plan is re-derived
     by LLM dependency analysis on every launch — including a documented
@@ -3611,9 +3526,7 @@ class TestResumeSurvivesPlanRegrouping:
     per-AC statuses (stable AC index), not a plan-relative level count."""
 
     @pytest.mark.asyncio
-    async def test_collapsed_replan_dispatches_unfinished_acs_instead_of_failing_them(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_collapsed_replan_is_rejected_before_dispatch(self, tmp_path: Path) -> None:
         """The review's exact scenario: original 3-level plan, crash after
         level 1 (``completed_levels=1`` checkpointed), resume of the SAME
         (fingerprint-matching) seed content under the analyzer-fallback's
@@ -3672,45 +3585,18 @@ class TestResumeSurvivesPlanRegrouping:
             event_store=recovered_events,
             checkpoint_store=CheckpointStore(base_path=ckpt_path),
         )
-        dispatched: list[int] = []
-
-        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
-            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
-            dispatched.extend(batch)
-            return [
-                ACExecutionResult(
-                    ac_index=idx,
-                    ac_content=str(seed.acceptance_criteria[idx]),
-                    success=True,
-                )
-                for idx in batch
-            ]
-
-        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
-        result = await recovered.execute_parallel(
-            seed,
-            session_id="session-restarted",
-            execution_id="exec-restarted",
-            tools=[],
-            system_prompt="system",
-            execution_plan=collapsed,
-        )
+        recovered._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointPlanMismatchError):
+            await recovered.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=[],
+                system_prompt="system",
+                execution_plan=collapsed,
+            )
         await recovered_events.close()
-
-        # The ACs the original run never dispatched MUST be dispatched on
-        # resume. Pre-fix, the stale completed_levels=1 skipped the entire
-        # collapsed single-level plan (1 >= 1 stage) and reconstructed ACs
-        # 1 and 2 as "Failed (restored from checkpoint)" with zero dispatch.
-        assert sorted(dispatched) == [1, 2]
-        # AC 0 was genuinely completed by the original run: restored, not
-        # re-dispatched.
-        assert 0 not in dispatched
-        by_index = {r.ac_index: r for r in result.results}
-        assert by_index[0].success and by_index[0].final_message == "[Restored from checkpoint]"
-        assert all(r.error != "Failed (restored from checkpoint)" for r in result.results)
-        assert result.all_succeeded
-        # Recovery still rejoined the ORIGINAL run's aggregate.
-        assert result.execution_id == "exec-original"
+        recovered._run_batch_with_verify_and_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_indeterminate_replay_full_completion_judged_against_original_plan_shape(
@@ -3884,7 +3770,7 @@ class TestSkippedACsReevaluatedOnResume:
         return dispatched, result
 
     @pytest.mark.asyncio
-    async def test_skipped_ac_is_dispatched_when_replan_drops_the_failed_edge(
+    async def test_replan_that_drops_failed_edge_is_rejected_before_dispatch(
         self, tmp_path: Path
     ) -> None:
         """The review's exact scenario: AC1 was skipped ONLY because run 1's
@@ -3895,24 +3781,13 @@ class TestSkippedACsReevaluatedOnResume:
         seed = _seed_four_acs()
         ckpt_path = await self._crash_after_skip_recorded(tmp_path, seed)
 
-        dispatched, result = await self._resume(
-            tmp_path, ckpt_path, seed, _skip_cascade_plan(feature_depends_on_base=False)
-        )
-
-        # AC1 (previously skipped) and AC3 (never reached) are dispatched;
-        # AC0 (genuinely failed) and AC2 (genuinely completed) are not.
-        assert dispatched == [[1], [3]]
-        by_index = {r.ac_index: r for r in result.results}
-        assert by_index[1].success is True
-        assert by_index[1].error is None
-        # Pre-fix, AC1 was reconstructed as a terminal failed-shaped result
-        # with zero dispatch: error="Skipped: dependency failed".
-        assert by_index[0].error == "Failed (restored from checkpoint)"
-        assert by_index[2].success is True
-        assert by_index[2].final_message == "[Restored from checkpoint]"
-        assert by_index[3].success is True
-        # Recovery still rejoined the ORIGINAL run's aggregate.
-        assert result.execution_id == "exec-original"
+        with pytest.raises(CheckpointPlanMismatchError):
+            await self._resume(
+                tmp_path,
+                ckpt_path,
+                seed,
+                _skip_cascade_plan(feature_depends_on_base=False),
+            )
 
     @pytest.mark.asyncio
     async def test_skipped_ac_is_reskipped_identically_when_dependency_still_failed(
@@ -4090,189 +3965,135 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         # where the finalized-attempt markers were replayed from).
         assert result.execution_id == "exec-original"
 
-
-class _SwitchableFailStore(CheckpointStore):
-    """Real store whose ``save`` outages are toggled by the test; successful
-    saves record a deep copy of the persisted state and signal ``landed``."""
-
-    def __init__(self, base_path: Path, *, landed: asyncio.Event) -> None:
-        super().__init__(base_path=base_path)
-        self.failing = True
-        self.landed = landed
-        self.persisted_states: list[dict[str, object]] = []
-
-    def save(self, checkpoint):  # type: ignore[no-untyped-def]
-        if self.failing:
-            from ouroboros.core.errors import PersistenceError
-            from ouroboros.core.types import Result
-
-            return Result.err(
-                PersistenceError(
-                    "simulated checkpoint store outage",
-                    operation="write",
-                    details={"seed_id": checkpoint.seed_id},
-                )
-            )
-        import copy
-
-        self.persisted_states.append(copy.deepcopy(checkpoint.state))
-        result = super().save(checkpoint)
-        self.landed.set()
-        return result
-
-
-class TestDeferredAnchorRetryPersistsCoherentSnapshot:
-    """Round-16 finding #2 (BLOCKING): ``_latest_checkpoint_save_args``
-    froze the SCALARS (``completed_levels``, ``completed_count``) at the
-    moment a save was last ATTEMPTED but held LIVE references to the
-    mutable collections (``ac_statuses``, ``failed_indices``,
-    ``level_contexts``), which the deferred anchor retry serialized at
-    WRITE time — after ongoing execution had mutated them further. The
-    retry could persist a torn snapshot: ``completed_levels=1`` (frozen at
-    the level-1 attempt) combined with a ``failed_indices`` entry for an
-    AC that only failed DURING level 2 — a state that never existed at any
-    single point in time. On recovery, level 2 re-dispatches that AC (it
-    may genuinely succeed), but ``failed_indices`` is add-only, so its
-    dependents are blocked as "dependency failed" without ever being
-    dispatched or escalated — the forbidden outcome. Every save attempt
-    must record a coherent point-in-time snapshot."""
-
     @pytest.mark.asyncio
-    async def test_retry_never_mixes_stale_level_count_with_later_failures(
+    async def test_finalized_success_after_checkpoint_is_restored_without_redispatch(
         self, tmp_path: Path
     ) -> None:
-        """The review's exact scenario: (1) the run-start anchor save fails
-        and schedules a deferred retry; (2) level 1 completes but its own
-        best-effort save ALSO fails (updating the tracked args to
-        ``completed_levels=1``); (3) mid-level-2 an AC terminally fails —
-        ``failed_indices`` mutates; (4) the store recovers and the deferred
-        retry finally fires INSIDE that window. The persisted checkpoint
-        must describe the level-1 boundary it claims (no level-2 failure
-        markers), and a crash-restart resume from it must give the level-2
-        AC — and its dependent — a genuine re-run."""
-        seed = _seed_three_acs("Torn anchor snapshot")
+        seed = self._two_ac_seed()
         db_path = tmp_path / "events.db"
         ckpt_path = tmp_path / "checkpoints"
-
-        run_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
-        await run_events.initialize()
-        landed = asyncio.Event()
-        store = _SwitchableFailStore(ckpt_path, landed=landed)
-        store.initialize()
-        executor = _executor(
-            event_store=run_events,
-            checkpoint_store=store,
-            parked_retry_backoff_seconds=60.0,
-        )
-
-        # The deferred retry's first (immediate) attempt fails against the
-        # still-broken store; its next attempt then parks on this gate so
-        # the test controls exactly when it fires.
-        retry_gate = asyncio.Event()
-
-        async def _gated_sleep(_delay: float) -> None:
-            await asyncio.wait_for(retry_gate.wait(), timeout=10)
-
-        executor._sleep = _gated_sleep  # type: ignore[method-assign]
-
-        real_emit_level_completed = executor._emit_level_completed
-
-        async def _hooked_emit_level_completed(**kwargs: object) -> None:
-            if kwargs.get("level") == 2:
-                # The review's window: level 2's terminal failure has just
-                # been recorded in the LIVE failed_indices/ac_statuses, but
-                # the level-2 save attempt has not yet re-frozen the
-                # scalars. The store recovers and the deferred anchor retry
-                # fires exactly here.
-                store.failing = False
-                retry_gate.set()
-                await asyncio.wait_for(landed.wait(), timeout=10)
-                # No LATER correct save lands (the review's step 5): the
-                # per-level level-2 save stays best-effort and fails.
-                store.failing = True
-            await real_emit_level_completed(**kwargs)
-
-        executor._emit_level_completed = _hooked_emit_level_completed  # type: ignore[method-assign]
-
-        async def _stage_runner(**kwargs: object) -> list[ACExecutionResult]:
-            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
-            if batch == [0]:
-                return [ACExecutionResult(ac_index=0, ac_content="Build core", success=True)]
-            assert batch == [1]
-            return [
-                ACExecutionResult(
-                    ac_index=1,
-                    ac_content="Add API",
-                    success=False,
-                    error="terminal failure after ladder exhausted",
-                )
-            ]
-
-        executor._run_batch_with_verify_and_retry = AsyncMock(side_effect=_stage_runner)
-        result = await executor.execute_parallel(
-            seed,
-            session_id="session-original",
-            execution_id="exec-original",
-            tools=[],
-            system_prompt="system",
-            execution_plan=_three_level_plan(),
-        )
-        await run_events.close()
-        # Sanity: this run saw AC 1 fail and AC 2 blocked in-memory.
-        assert result.failure_count == 1
-        assert result.blocked_count == 1
-
-        # Exactly one save landed: the deferred anchor retry, fired inside
-        # the mutation window. It must be a COHERENT point-in-time snapshot
-        # of the state at the level-1 save ATTEMPT it re-persists — never
-        # the frozen level count mixed with the later-mutated collections.
-        assert len(store.persisted_states) == 1
-        state = store.persisted_states[0]
-        assert state["completed_levels"] == 1
-        # AC 1's failure happened AFTER the level-1 attempt: it must not
-        # appear in the persisted snapshot alongside completed_levels=1.
-        assert state["failed_indices"] == []
-        assert state["ac_statuses"] == {"0": "completed", "1": "pending", "2": "pending"}
-
-        # --- Crash-restart resume from that checkpoint: AC 1 gets a
-        # genuine re-run (succeeding this time), so its dependent AC 2 must
-        # be dispatched too. Pre-fix, the torn snapshot restored AC 1 as
-        # already terminally failed, so BOTH surfaced success=False with
-        # zero dispatch and zero escalation.
-        resumed_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
-        await resumed_events.initialize()
-        resumed = _executor(
-            event_store=resumed_events,
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1 = _executor(
+            event_store=run1_events,
             checkpoint_store=CheckpointStore(base_path=ckpt_path),
         )
-        dispatched: list[int] = []
+        real_level_completed = run1._emit_level_completed
 
-        async def _resumed_runner(**kwargs: object) -> list[ACExecutionResult]:
-            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
-            dispatched.extend(batch)
-            return [
-                ACExecutionResult(
-                    ac_index=idx,
-                    ac_content=str(seed.acceptance_criteria[idx]),
-                    success=True,
-                )
-                for idx in batch
+        async def _crash_before_level_two_checkpoint(**kwargs: object) -> None:
+            await real_level_completed(**kwargs)  # type: ignore[arg-type]
+            if kwargs.get("level") == 2:
+                raise RuntimeError("crash after finalized success")
+
+        run1._emit_level_completed = _crash_before_level_two_checkpoint  # type: ignore[method-assign]
+        run1._execute_ac_batch = AsyncMock(
+            side_effect=[
+                [ACExecutionResult(ac_index=0, ac_content="Prepare data", success=True)],
+                [ACExecutionResult(ac_index=1, ac_content="Apply migration", success=True)],
             ]
+        )
+        with pytest.raises(BaseException, match="finalized success|unhandled errors"):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._two_stage_plan(),
+            )
+        await run1_events.close()
 
-        resumed._run_batch_with_verify_and_retry = AsyncMock(side_effect=_resumed_runner)
-        resumed_result = await resumed.execute_parallel(
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        result = await run2.execute_parallel(
             seed,
-            session_id="session-restarted",
-            execution_id="exec-restarted",
+            session_id="session-restart",
+            execution_id="exec-restart",
             tools=[],
             system_prompt="system",
-            execution_plan=_three_level_plan(),
+            execution_plan=self._two_stage_plan(),
         )
-        await resumed_events.close()
+        await run2_events.close()
 
-        assert sorted(dispatched) == [1, 2]
-        assert resumed_result.all_succeeded
-        assert resumed_result.execution_id == "exec-original"
+        run2._run_batch_with_verify_and_retry.assert_not_awaited()
+        by_index = {item.ac_index: item for item in result.results}
+        assert by_index[1].success is True
+        assert by_index[1].final_message == "[Restored from checkpoint]"
+
+    @pytest.mark.asyncio
+    async def test_finalized_cap_failure_before_terminal_marker_is_not_redispatched(
+        self, tmp_path: Path
+    ) -> None:
+        seed = self._two_ac_seed()
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1 = _executor(
+            event_store=run1_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            ac_retry_attempts=0,
+            lateral_escalation_enabled=False,
+        )
+
+        async def _crash_before_terminal_marker(**kwargs: object) -> None:
+            result = kwargs["result"]
+            if isinstance(result, ACExecutionResult) and result.ac_index == 1:
+                raise RuntimeError("crash before terminal failure marker")
+
+        run1._emit_recovery_exhausted = AsyncMock(side_effect=_crash_before_terminal_marker)
+        run1._execute_ac_batch = AsyncMock(
+            side_effect=[
+                [ACExecutionResult(ac_index=0, ac_content="Prepare data", success=True)],
+                [
+                    ACExecutionResult(
+                        ac_index=1,
+                        ac_content="Apply migration",
+                        success=False,
+                        error="migration failed",
+                    )
+                ],
+            ]
+        )
+        with pytest.raises(BaseException, match="terminal failure marker|unhandled errors"):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._two_stage_plan(),
+            )
+        await run1_events.close()
+
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            ac_retry_attempts=0,
+            lateral_escalation_enabled=False,
+        )
+        run2._execute_ac_batch = AsyncMock()
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-restart",
+            execution_id="exec-restart",
+            tools=[],
+            system_prompt="system",
+            execution_plan=self._two_stage_plan(),
+        )
+        await run2_events.close()
+
+        run2._execute_ac_batch.assert_not_awaited()
+        by_index = {item.ac_index: item for item in result.results}
+        assert by_index[1].success is False
+        assert "Restored durably finalized failure" in (by_index[1].error or "")
 
 
 class TestRunnerAuditRecordsRestoredExecutionSettings:
