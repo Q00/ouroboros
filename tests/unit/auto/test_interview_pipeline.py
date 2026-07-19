@@ -19,8 +19,11 @@ from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
+    InvestmentSpec,
     OntologyField,
     OntologySchema,
     Seed,
@@ -63,7 +66,9 @@ def _fill_ready(ledger: SeedDraftLedger) -> None:
 
 
 def _seed(
-    ac: tuple[str, ...] = ("`habit list` prints stable stdout containing created habits",),
+    ac: tuple[AcceptanceCriterionInput, ...] = (
+        "`habit list` prints stable stdout containing created habits",
+    ),
 ) -> Seed:
     return Seed(
         goal="Build a local CLI",
@@ -1273,6 +1278,44 @@ def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
     assert repaired_acceptance.count("original requirement for") == 1
     assert "The CLI" in repaired_acceptance
     assert "original requirement for A command/API check" not in repaired_acceptance
+
+
+def test_seed_repairer_preserves_structured_ac_identity_and_evidence() -> None:
+    criterion = AcceptanceCriterionSpec(
+        description="The CLI should be easy and user-friendly",
+        semantic_ac_key="ac_0123456789abcdef",
+        verify_command="python -m pytest -q tests/test_cli.py",
+        expected_artifacts=("artifacts/cli.txt",),
+        output_assertion="1 passed",
+        investment=InvestmentSpec(
+            difficulty="medium",
+            stakes="high",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+    untouched = AcceptanceCriterionSpec(
+        description="`habit list` prints stable stdout containing created habits",
+        semantic_ac_key="ac_fedcba9876543210",
+        verify_command="python -m pytest -q tests/test_list.py",
+    )
+    seed = _seed(ac=(criterion, untouched))
+    ledger = SeedDraftLedger.from_goal(seed.goal)
+    _fill_ready(ledger)
+    review = SeedReviewer().review(seed, ledger=ledger)
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    repaired, preserved = result.seed.acceptance_criteria
+    assert isinstance(repaired, AcceptanceCriterionSpec)
+    assert repaired.description != criterion.description
+    assert repaired.semantic_ac_key == criterion.semantic_ac_key
+    assert repaired.verify_command == criterion.verify_command
+    assert repaired.expected_artifacts == criterion.expected_artifacts
+    assert repaired.output_assertion == criterion.output_assertion
+    assert repaired.investment == criterion.investment
+    assert preserved == untouched
 
 
 def test_seed_repairer_assigns_new_seed_identity_after_mutation() -> None:

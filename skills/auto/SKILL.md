@@ -58,6 +58,12 @@ ooo auto "Build a local-first habit tracker CLI" --complete-product
 /ouroboros:auto "Build a local-first habit tracker CLI"
 ```
 
+`ooo auto` does not accept a parent Seed ID/path or infer lineage from goal
+prose. Mentioning an existing Seed in the goal is ordinary context, not an
+authorized derivative operation. Use `ooo evolve` for typed parent evolution,
+or `ooo run` to execute an existing immutable Seed. Do not claim preserved
+lineage or AC edit scope from an `ooo auto` goal alone.
+
 ## CLI flag → MCP arg translation
 
 When the user types `ooo auto` with CLI-style flags inside chat, translate to MCP arguments before invoking `ouroboros_start_auto`:
