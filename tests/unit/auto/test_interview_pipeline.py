@@ -1244,9 +1244,7 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     assert result.status == "complete"
     assert result.grade == "A"
     # The user's vague "The CLI should be easy..." AC is repaired in
-    # place. After L1-d (#1171) the catalog's default_ac_template is
-    # prepended to the Seed before the repairer runs, so the *user*
-    # entry is no longer at index [0]; locate it by content instead.
+    # place without task-class defaults broadening the non-empty contract.
     repaired_entries = [
         item.get("description", "") if isinstance(item, dict) else item
         for item in state.seed_artifact["acceptance_criteria"]
@@ -1263,6 +1261,104 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
     assert result.run_session_id == "session_1"
     assert state.execution_id == "exec_1"
     assert state.run_session_id == "session_1"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_preserves_structured_contract_through_normalization(tmp_path) -> None:
+    goal = (
+        "Verify current ooo auto with hello_auto.py and tests/test_hello_auto.py; "
+        "hello_auto returns exactly hello from ooo auto and "
+        "uv run pytest tests/test_hello_auto.py passes."
+    )
+    criterion = AcceptanceCriterionSpec(
+        description=(
+            "A command/API check returns stable observable output or artifacts proving "
+            "the original requirement for `hello_auto.py` defines `hello_auto() -> str` "
+            "returning exactly `hello from ooo auto`."
+        ),
+        semantic_ac_key="ac_0123456789abcdef",
+        verify_command="uv run pytest tests/test_hello_auto.py",
+        expected_artifacts=("hello_auto.py", "tests/test_hello_auto.py"),
+        output_assertion="1 passed",
+        investment=InvestmentSpec(
+            difficulty="low",
+            stakes="medium",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+    generated_seed = _seed(ac=(criterion,)).model_copy(
+        update={"goal": goal, "constraints": ("Only edit the two hello_auto files",)}
+    )
+    executed: list[Seed] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_contract")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return generated_seed
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        executed.append(seed)
+        return {
+            "job_id": "job_contract",
+            "execution_id": "exec_contract",
+            "session_id": "run_contract",
+        }
+
+    class PassingRepairer:
+        def converge(
+            self, seed: Seed, *, ledger: SeedDraftLedger
+        ) -> tuple[Seed, SeedReview, list[object]]:  # noqa: ARG002
+            review = SeedReview(
+                grade_result=GradeResult(
+                    grade=SeedGrade.A,
+                    scores={
+                        "coverage": 1.0,
+                        "ambiguity": 0.0,
+                        "testability": 1.0,
+                        "execution_feasibility": 1.0,
+                        "risk": 0.0,
+                    },
+                    findings=[],
+                    blockers=[],
+                    may_run=True,
+                ),
+                findings=(),
+            )
+            return seed, review, []
+
+    state = AutoPipelineState(goal=goal, cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        repairer=PassingRepairer(),
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete", result.blocker
+    assert len(executed) == 1
+    normalized = executed[0].acceptance_criteria[0]
+    assert isinstance(normalized, AcceptanceCriterionSpec)
+    assert normalized.semantic_ac_key == criterion.semantic_ac_key
+    assert normalized.verify_command == criterion.verify_command
+    assert normalized.expected_artifacts == criterion.expected_artifacts
+    assert normalized.output_assertion == criterion.output_assertion
+    assert normalized.investment == criterion.investment
 
 
 def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:

@@ -16,6 +16,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
+    InvestmentSpec,
     OntologyField,
     OntologySchema,
     Seed,
@@ -207,6 +208,47 @@ def test_normalize_execution_acceptance_preserves_surviving_success_contracts() 
     assert normalized_spec.description == spec.description
     assert normalized_spec.verify_command == "uv run pytest tests/test_hello_auto.py"
     assert normalized_spec.expected_artifacts == ("hello_auto.py",)
+
+
+def test_normalize_execution_acceptance_preserves_canonicalized_success_contract() -> None:
+    spec = AcceptanceCriterionSpec(
+        description=(
+            "A command/API check returns stable observable output or artifacts proving "
+            "the original requirement for `hello_auto.py` defines `hello_auto() -> str` "
+            "returning exactly `hello from ooo auto`."
+        ),
+        semantic_ac_key="ac_0123456789abcdef",
+        verify_command="uv run pytest tests/test_hello_auto.py",
+        expected_artifacts=("hello_auto.py", "tests/test_hello_auto.py"),
+        output_assertion="1 passed",
+        investment=InvestmentSpec(
+            difficulty="low",
+            stakes="medium",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+    seed = _seed(spec).model_copy(
+        update={
+            "goal": (
+                "Verify current ooo auto with hello_auto.py and tests/test_hello_auto.py; "
+                "hello_auto returns exactly hello from ooo auto and "
+                "uv run pytest tests/test_hello_auto.py passes."
+            )
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert len(normalized.acceptance_criteria) == 1
+    normalized_spec = normalized.acceptance_criteria[0]
+    assert isinstance(normalized_spec, AcceptanceCriterionSpec)
+    assert normalized_spec.description == _SINGLE_HELLO_AUTO_OBSERVATION_AC
+    assert normalized_spec.semantic_ac_key == spec.semantic_ac_key
+    assert normalized_spec.verify_command == spec.verify_command
+    assert normalized_spec.expected_artifacts == spec.expected_artifacts
+    assert normalized_spec.output_assertion == spec.output_assertion
+    assert normalized_spec.investment == spec.investment
 
 
 def test_normalize_execution_acceptance_preserves_extra_hello_auto_requirements() -> None:
