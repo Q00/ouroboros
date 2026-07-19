@@ -113,6 +113,15 @@ def test_capsule_manifest_rejects_corrupt_version_and_digests(tmp_path) -> None:
         ACExecutionCapsuleManifest.from_contract_data(corrupt)
 
 
+def test_capsule_manifest_rejects_unbounded_persisted_references(tmp_path) -> None:
+    manifest = _capsule(tmp_path).manifest.to_contract_data()
+    reference = manifest["context_references"][0]
+    manifest["context_references"] = [reference] * (MAX_AC_CONTEXT_REFERENCES + 1)
+
+    with pytest.raises(ValueError, match="context reference limit exceeded"):
+        ACExecutionCapsuleManifest.from_contract_data(manifest)
+
+
 def test_capsule_references_dependency_without_copying_its_output(tmp_path) -> None:
     capsule = _capsule(tmp_path)
     rendered = capsule.to_prompt_reference_block()

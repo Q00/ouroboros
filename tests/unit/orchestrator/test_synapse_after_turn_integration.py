@@ -245,9 +245,25 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
         result = await asyncio.wait_for(execution_task, timeout=5)
         signal_events = await store.replay("session_signal", signal.signal_id)
         projection = project_session_signal(signal_events)
+        runtime_events = await store.replay("execution", scope_id)
+        dispatch_events = [
+            event for event in runtime_events if event.type == "execution.ac.attempt.dispatched"
+        ]
 
         assert result.success is True
         assert len(runtime.prompts) == 2
+        assert len(dispatch_events) == 2
+        assert len({event.data["ac_dispatch_id"] for event in dispatch_events}) == 2
+        assert dispatch_events[0].data["previous_ac_dispatch_id"] is None
+        assert (
+            dispatch_events[1].data["previous_ac_dispatch_id"]
+            == dispatch_events[0].data["ac_dispatch_id"]
+        )
+        assert dispatch_events[1].data["session_origin"] == "restored_same_attempt"
+        assert (
+            dispatch_events[1].data["runtime"]["metadata"]["ac_session_origin"]
+            == "restored_same_attempt"
+        )
         assert projection.state is SessionSignalState.COMPLETED
         assert projection.effective_mode is SessionSignalMode.AFTER_TURN
         assert [event.type for event in signal_events] == [
@@ -321,6 +337,104 @@ async def test_error_only_resume_is_delivery_uncertain_not_applied(tmp_path: Pat
             "control.session.signal.delivering",
             "control.session.signal.delivery_uncertain",
         ]
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("mode", "runtime_type", "expected_success"),
+    [
+        (SessionSignalMode.AFTER_TURN, _TwoTurnRuntime, False),
+        (SessionSignalMode.INFORM, _InformRuntime, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_signal_dispatch_persistence_failure_never_marks_provider_failed(
+    tmp_path: Path,
+    mode: SessionSignalMode,
+    runtime_type: type[_TwoTurnRuntime],
+    expected_success: bool,
+) -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    hub = SessionSignalHub()
+    runtime = runtime_type(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+    execution_id = f"exec_signal_dispatch_failure_{mode.value}"
+    scope_id = f"{execution_id}_ac_1"
+    signal = SessionSignal(
+        signal_id=f"sig_dispatch_persistence_failure_{mode.value}",
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=f"{scope_id}_attempt_1",
+        expected_execution_id=execution_id,
+        mode=mode,
+        message="Apply this only after the dispatch boundary is durable.",
+        source=SessionSignalSource.USER,
+        reason="Exercise the resumed provider boundary.",
+        idempotency_key="dispatch_persistence_failure_1",
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Keep the signal dispatch fail-closed",
+            session_id="orch_signal_dispatch_failure",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Never claim an unpersisted provider entry",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
+
+        original_append = store.append
+        failed_followup_dispatch = False
+
+        async def _append_with_failed_followup(event):  # noqa: ANN001
+            nonlocal failed_followup_dispatch
+            if event.type == "execution.ac.attempt.dispatched" and not failed_followup_dispatch:
+                failed_followup_dispatch = True
+                raise OSError("follow-up dispatch persistence unavailable")
+            await original_append(event)
+
+        store.append = _append_with_failed_followup  # type: ignore[method-assign]
+        runtime.release_first_turn.set()
+
+        result = await asyncio.wait_for(execution_task, timeout=5)
+        signal_events = await store.replay("session_signal", signal.signal_id)
+        runtime_events = await store.replay("execution", scope_id)
+
+        assert result.success is expected_success
+        assert result.infra_fatal is (not expected_success)
+        assert len(runtime.prompts) == 1
+        assert failed_followup_dispatch is True
+        assert project_session_signal(signal_events).state is SessionSignalState.DELIVERY_UNCERTAIN
+        assert (
+            len(
+                [
+                    event
+                    for event in runtime_events
+                    if event.type == "execution.ac.attempt.dispatched"
+                ]
+            )
+            == 1
+        )
+        assert not any(event.type == "execution.session.failed" for event in runtime_events)
+        assert any(event.type == "execution.session.completed" for event in runtime_events) is (
+            expected_success
+        )
     finally:
         if not execution_task.done():
             execution_task.cancel()

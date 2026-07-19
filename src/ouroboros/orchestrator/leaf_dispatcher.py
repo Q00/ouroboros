@@ -349,6 +349,7 @@ class LeafDispatcher:
         system_prompt: str,
         execute_effort_kwargs: dict[str, Any],
         runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
         execution_context_id: str,
         session_id: str,
         ac_index: int,
@@ -428,6 +429,7 @@ class LeafDispatcher:
                             await executor._emit_ac_runtime_event(
                                 event_type="execution.session.recovered",
                                 runtime_identity=runtime_identity,
+                                dispatch_id=dispatch_id,
                                 ac_content=ac_content,
                                 runtime_handle=state.runtime_handle,
                                 execution_id=execution_context_id,
@@ -471,6 +473,7 @@ class LeafDispatcher:
                     await executor._emit_ac_runtime_event(
                         event_type=lifecycle_event_type,
                         runtime_identity=runtime_identity,
+                        dispatch_id=dispatch_id,
                         ac_content=ac_content,
                         runtime_handle=state.runtime_handle,
                         execution_id=execution_context_id,
@@ -524,6 +527,7 @@ class LeafDispatcher:
 
                     await executor._event_emitter.emit_atomic_tool_started(
                         runtime_identity=runtime_identity,
+                        dispatch_id=dispatch_id,
                         tool_name=projected.tool_name,
                         tool_detail=tool_detail,
                         tool_input=tool_input,
@@ -540,6 +544,7 @@ class LeafDispatcher:
                 if completed_tool_name is not None:
                     await executor._event_emitter.emit_atomic_tool_completed(
                         runtime_identity=runtime_identity,
+                        dispatch_id=dispatch_id,
                         tool_name=completed_tool_name,
                         tool_result_text=projected.content,
                         runtime_metadata=executor._runtime_event_metadata(message),

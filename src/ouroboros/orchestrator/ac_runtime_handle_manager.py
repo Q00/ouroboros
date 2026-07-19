@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 import inspect
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +52,10 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
+_AC_ATTEMPT_DISPATCHED_EVENT = "execution.ac.attempt.dispatched"
+_AC_REUSABLE_RUNTIME_EVENT_TYPES = _REUSABLE_RUNTIME_EVENT_TYPES | {_AC_ATTEMPT_DISPATCHED_EVENT}
+_VERIFY_GATE_OUTCOME_KEYS = frozenset({"passed", "reason", "output_tail", "missing_artifacts"})
+_MAX_VERIFY_GATE_OUTCOME_CHARS = 65_536
 _AC_EFFECT_EVENT_TYPES = frozenset(
     {
         "execution.tool.started",
@@ -61,6 +66,23 @@ _AC_EFFECT_EVENT_TYPES = frozenset(
 
 class AmbiguousACExecutionError(RuntimeError):
     """A prior AC attempt may have external effects but cannot be resumed safely."""
+
+
+class CompletedACExecutionError(RuntimeError):
+    """The exact AC attempt already recorded a completed provider dispatch."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result_summary: str | None = None,
+        session_id: str | None = None,
+        verify_gate_outcome: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.result_summary = result_summary
+        self.session_id = session_id
+        self.verify_gate_outcome = verify_gate_outcome
 
 
 class ACRuntimeHandleManager:
@@ -144,18 +166,87 @@ class ACRuntimeHandleManager:
         *,
         retry_attempt: int,
     ) -> list[Any]:
-        """Slice the append-only AC stream down to the current attempt tail."""
+        """Select one attempt without depending on replay timestamp ordering."""
         attempt_events: list[Any] = []
-        for event in reversed(events):
+        for event in events:
             event_data = event.data if isinstance(getattr(event, "data", None), dict) else {}
             observed_attempt = cls._event_retry_attempt(event_data)
             if observed_attempt == retry_attempt:
                 attempt_events.append(event)
-                continue
-            if observed_attempt is not None and observed_attempt < retry_attempt:
-                break
-        attempt_events.reverse()
         return attempt_events
+
+    @staticmethod
+    def _validate_ac_dispatch_id(value: object) -> str:
+        """Return a canonical dispatch correlation id or reject persisted drift."""
+        if (
+            not isinstance(value, str)
+            or len(value) != 32
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError("durable AC dispatch id is malformed")
+        return value
+
+    @classmethod
+    def _event_ac_dispatch_id(cls, event_data: Mapping[str, Any]) -> str | None:
+        """Read dispatch correlation from the event and its runtime payload."""
+        event_value = event_data.get("ac_dispatch_id")
+        runtime_value: object = None
+        runtime_payload = event_data.get("runtime")
+        if isinstance(runtime_payload, Mapping):
+            metadata = runtime_payload.get("metadata")
+            if isinstance(metadata, Mapping):
+                runtime_value = metadata.get("ac_dispatch_id")
+
+        event_dispatch_id = (
+            cls._validate_ac_dispatch_id(event_value) if event_value is not None else None
+        )
+        runtime_dispatch_id = (
+            cls._validate_ac_dispatch_id(runtime_value) if runtime_value is not None else None
+        )
+        if (
+            event_dispatch_id is not None
+            and runtime_dispatch_id is not None
+            and event_dispatch_id != runtime_dispatch_id
+        ):
+            raise ValueError("durable runtime handle dispatch id disagrees with its event")
+        return event_dispatch_id or runtime_dispatch_id
+
+    @staticmethod
+    def _parse_verify_gate_outcome(value: object) -> dict[str, Any] | None:
+        """Parse the bounded exact-shape verify result used for crash recovery."""
+        if value is None:
+            return None
+        if not isinstance(value, Mapping) or set(value) != _VERIFY_GATE_OUTCOME_KEYS:
+            raise ValueError("durable completed AC verify outcome has an invalid shape")
+        passed = value.get("passed")
+        reason = value.get("reason")
+        output_tail = value.get("output_tail")
+        missing_artifacts = value.get("missing_artifacts")
+        if not isinstance(passed, bool):
+            raise ValueError("durable completed AC verify outcome has an invalid verdict")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("durable completed AC verify outcome has an invalid reason")
+        if not isinstance(output_tail, str):
+            raise ValueError("durable completed AC verify outcome has invalid output")
+        if not isinstance(missing_artifacts, list) or any(
+            not isinstance(item, str) for item in missing_artifacts
+        ):
+            raise ValueError("durable completed AC verify outcome has invalid artifacts")
+        normalized = {
+            "passed": passed,
+            "reason": reason,
+            "output_tail": output_tail,
+            "missing_artifacts": list(missing_artifacts),
+        }
+        encoded = json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if len(encoded) > _MAX_VERIFY_GATE_OUTCOME_CHARS:
+            raise ValueError("durable completed AC verify outcome exceeds the size limit")
+        return normalized
 
     @staticmethod
     def _build_expected_ac_runtime_metadata(
@@ -656,17 +747,6 @@ class ACRuntimeHandleManager:
             if not capsule_authorized:
                 continue
 
-            if cached_handle is not None:
-                cached_fingerprint = cached_handle.metadata.get("ac_capsule_fingerprint")
-                cached_attempt_id = cached_handle.metadata.get("session_attempt_id")
-                if (
-                    cached_fingerprint == expected_capsule_fingerprint
-                    and cached_attempt_id == runtime_identity.session_attempt_id
-                ):
-                    return cached_handle
-                self.runtime_handles.pop(runtime_identity.cache_key, None)
-                cached_handle = None
-
             unresolved_effect_event = any(
                 event.type in _AC_EFFECT_EVENT_TYPES
                 and self._event_matches_ac_runtime_identity(
@@ -676,34 +756,172 @@ class ACRuntimeHandleManager:
                 for event in attempt_events
             )
 
-            for event in reversed(attempt_events):
-                event_data = event.data if isinstance(event.data, dict) else {}
-                if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
-                    continue
-
-                if event.type in _NON_REUSABLE_RUNTIME_EVENT_TYPES:
-                    self._forget_ac_runtime_handle(
-                        ac_index,
-                        execution_context_id=execution_context_id,
+            if expected_capsule_fingerprint is None:
+                if cached_handle is not None:
+                    return cached_handle
+                for event in reversed(attempt_events):
+                    event_data = event.data if isinstance(event.data, dict) else {}
+                    if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
+                        continue
+                    if event.type in _NON_REUSABLE_RUNTIME_EVENT_TYPES:
+                        self._forget_ac_runtime_handle(
+                            ac_index,
+                            execution_context_id=execution_context_id,
+                            is_sub_ac=is_sub_ac,
+                            parent_ac_index=parent_ac_index,
+                            sub_ac_index=sub_ac_index,
+                            node_identity=node_identity,
+                            retry_attempt=retry_attempt,
+                        )
+                        if unresolved_effect_event:
+                            raise AmbiguousACExecutionError(
+                                "AC attempt recorded tool effects without a reusable runtime "
+                                "handle; refusing fresh redispatch because non-idempotent "
+                                "effects may duplicate"
+                            )
+                        return None
+                    if event.type not in _REUSABLE_RUNTIME_EVENT_TYPES:
+                        continue
+                    runtime_handle = RuntimeHandle.from_dict(event_data.get("runtime"))
+                    runtime_handle = self._normalize_ac_runtime_handle(
+                        runtime_handle,
+                        runtime_scope=runtime_identity.runtime_scope,
+                        ac_index=ac_index,
                         is_sub_ac=is_sub_ac,
                         parent_ac_index=parent_ac_index,
                         sub_ac_index=sub_ac_index,
                         node_identity=node_identity,
                         retry_attempt=retry_attempt,
+                        source="persisted_event",
+                        require_resume_scope_match=True,
                     )
-                    if unresolved_effect_event:
-                        raise AmbiguousACExecutionError(
-                            "AC attempt recorded tool effects without a reusable runtime handle; "
-                            "refusing fresh redispatch because non-idempotent effects may duplicate"
-                        )
-                    return None
-                if event.type not in _REUSABLE_RUNTIME_EVENT_TYPES:
-                    continue
+                    if runtime_handle is not None:
+                        self.runtime_handles[runtime_identity.cache_key] = runtime_handle
+                        return runtime_handle
+                if unresolved_effect_event:
+                    raise AmbiguousACExecutionError(
+                        "AC attempt recorded tool effects without a reusable runtime handle; "
+                        "refusing fresh redispatch because non-idempotent effects may duplicate"
+                    )
+                continue
 
+            matching_events: list[Any] = []
+            dispatch_events: dict[str, Any] = {}
+            dispatch_predecessors: dict[str, str | None] = {}
+            for event in attempt_events:
+                event_data = event.data if isinstance(event.data, dict) else {}
+                if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
+                    continue
+                matching_events.append(event)
+                if event.type != _AC_ATTEMPT_DISPATCHED_EVENT:
+                    continue
+                dispatch_id = self._event_ac_dispatch_id(event_data)
+                if dispatch_id is None:
+                    raise ValueError("durable AC dispatch id is missing")
+                if dispatch_id in dispatch_events:
+                    raise ValueError("durable AC dispatch id is duplicated")
+                if "previous_ac_dispatch_id" not in event_data:
+                    raise ValueError("durable AC dispatch predecessor is missing")
+                predecessor_value = event_data.get("previous_ac_dispatch_id")
+                predecessor_id = (
+                    self._validate_ac_dispatch_id(predecessor_value)
+                    if predecessor_value is not None
+                    else None
+                )
+                if predecessor_id == dispatch_id:
+                    raise ValueError("durable AC dispatch predecessor references itself")
+                if event_data.get("capsule_fingerprint") != expected_capsule_fingerprint:
+                    raise ValueError(
+                        "durable AC dispatch fingerprint disagrees with the current capsule"
+                    )
+                if event_data.get("session_origin") not in {
+                    "fresh",
+                    "restored_same_attempt",
+                }:
+                    raise ValueError("durable AC dispatch session origin is invalid")
+                dispatch_events[dispatch_id] = event
+                dispatch_predecessors[dispatch_id] = predecessor_id
+
+            active_dispatch_id: str | None = None
+            if dispatch_events:
+                successor_by_dispatch: dict[str, str] = {}
+                for dispatch_id, predecessor_id in dispatch_predecessors.items():
+                    if predecessor_id is None:
+                        continue
+                    if predecessor_id not in dispatch_events:
+                        raise ValueError(
+                            "durable AC dispatch predecessor references an unknown dispatch id"
+                        )
+                    known_successor = successor_by_dispatch.get(predecessor_id)
+                    if known_successor not in {None, dispatch_id}:
+                        raise ValueError(
+                            "durable AC dispatch history branches from one predecessor"
+                        )
+                    successor_by_dispatch[predecessor_id] = dispatch_id
+
+                roots = [
+                    dispatch_id
+                    for dispatch_id, predecessor_id in dispatch_predecessors.items()
+                    if predecessor_id is None
+                ]
+                heads = [
+                    dispatch_id
+                    for dispatch_id in dispatch_events
+                    if dispatch_id not in successor_by_dispatch
+                ]
+                if len(roots) != 1 or len(heads) != 1:
+                    raise ValueError("durable AC dispatch history is not one linear chain")
+
+                active_dispatch_id = heads[0]
+                visited_dispatches: set[str] = set()
+                cursor: str | None = active_dispatch_id
+                while cursor is not None:
+                    if cursor in visited_dispatches:
+                        raise ValueError("durable AC dispatch history contains a cycle")
+                    visited_dispatches.add(cursor)
+                    cursor = dispatch_predecessors[cursor]
+                if len(visited_dispatches) != len(dispatch_events):
+                    raise ValueError("durable AC dispatch history is disconnected")
+
+            candidate_handles: dict[str, list[tuple[int, RuntimeHandle]]] = {
+                dispatch_id: [] for dispatch_id in dispatch_events
+            }
+            legacy_candidates: list[tuple[int, RuntimeHandle]] = []
+            completed_dispatches: dict[str, list[Mapping[str, Any]]] = {
+                dispatch_id: [] for dispatch_id in dispatch_events
+            }
+            failed_dispatches: set[str] = set()
+            recovery_successors: dict[str, str] = {}
+
+            def _load_candidate(
+                event: Any,
+                event_data: Mapping[str, Any],
+                *,
+                dispatch_id: str | None,
+            ) -> RuntimeHandle | None:
                 runtime_payload = event_data.get("runtime")
+                if (
+                    event.type != _AC_ATTEMPT_DISPATCHED_EVENT
+                    and isinstance(runtime_payload, Mapping)
+                    and isinstance(runtime_payload.get("cwd"), str)
+                    and expected_capsule_workspace is not None
+                ):
+                    persisted_workspace = os.path.realpath(
+                        os.path.expanduser(runtime_payload["cwd"])
+                    )
+                    if persisted_workspace != expected_capsule_workspace:
+                        raise ValueError("persisted runtime handle workspace authority changed")
                 try:
-                    runtime_handle = RuntimeHandle.from_dict(runtime_payload)
+                    runtime_handle = (
+                        RuntimeHandle.from_dispatch_recovery_dict(runtime_payload)
+                        if event.type == _AC_ATTEMPT_DISPATCHED_EVENT
+                        else RuntimeHandle.from_persisted_recovery_projection(runtime_payload)
+                    )
                 except ValueError as exc:
+                    if event.type == _AC_ATTEMPT_DISPATCHED_EVENT:
+                        raise ValueError(
+                            "durable AC dispatch recovery handle is malformed"
+                        ) from exc
                     log.warning(
                         "parallel_executor.persisted_runtime_handle_invalid",
                         aggregate_id=event.aggregate_id,
@@ -713,25 +931,29 @@ class ACRuntimeHandleManager:
                         if isinstance(runtime_payload, dict)
                         else None,
                     )
-                    continue
+                    return None
                 if runtime_handle is None:
-                    continue
-                if expected_capsule_fingerprint is not None:
-                    self._validate_resumable_handle_authority(
-                        runtime_handle,
-                        expected_workspace=expected_capsule_workspace,
+                    return None
+                runtime_handle = replace(runtime_handle, cwd=expected_capsule_workspace)
+                self._validate_resumable_handle_authority(
+                    runtime_handle,
+                    expected_workspace=expected_capsule_workspace,
+                )
+                runtime_fingerprint = runtime_handle.metadata.get("ac_capsule_fingerprint")
+                runtime_attempt_id = runtime_handle.metadata.get("session_attempt_id")
+                if runtime_fingerprint != expected_capsule_fingerprint:
+                    raise ValueError(
+                        "persisted runtime handle disagrees with the durable AC capsule"
                     )
-                    runtime_fingerprint = runtime_handle.metadata.get("ac_capsule_fingerprint")
-                    runtime_attempt_id = runtime_handle.metadata.get("session_attempt_id")
-                    if runtime_fingerprint not in {None, expected_capsule_fingerprint}:
-                        raise ValueError(
-                            "persisted runtime handle disagrees with the durable AC capsule"
-                        )
-                    if (
-                        runtime_fingerprint is None
-                        or runtime_attempt_id != runtime_identity.session_attempt_id
-                    ):
-                        continue
+                if runtime_attempt_id != runtime_identity.session_attempt_id:
+                    raise ValueError(
+                        "persisted runtime handle disagrees with the durable AC attempt"
+                    )
+                runtime_dispatch_id = runtime_handle.metadata.get("ac_dispatch_id")
+                if dispatch_id is not None and runtime_dispatch_id != dispatch_id:
+                    raise ValueError(
+                        "persisted runtime handle disagrees with the durable AC dispatch"
+                    )
                 runtime_handle = self._normalize_ac_runtime_handle(
                     runtime_handle,
                     runtime_scope=runtime_identity.runtime_scope,
@@ -744,9 +966,244 @@ class ACRuntimeHandleManager:
                     source="persisted_event",
                     require_resume_scope_match=True,
                 )
+                if not self._is_resumable_runtime_handle(runtime_handle):
+                    return None
+                return runtime_handle
+
+            recovery_priority = {
+                _AC_ATTEMPT_DISPATCHED_EVENT: 0,
+                "execution.session.failed": 1,
+                "execution.session.started": 2,
+                "execution.session.resumed": 3,
+                "execution.session.recovered": 4,
+            }
+            recovery_event_types = _AC_REUSABLE_RUNTIME_EVENT_TYPES | {"execution.session.failed"}
+            for event in matching_events:
+                if event.type not in recovery_event_types | {"execution.session.completed"}:
+                    continue
+                event_data = event.data if isinstance(event.data, dict) else {}
+                event_dispatch_id = self._event_ac_dispatch_id(event_data)
+                if dispatch_events:
+                    if event_dispatch_id is None:
+                        continue
+                    if event_dispatch_id not in dispatch_events:
+                        raise ValueError(
+                            "durable AC lifecycle event references an unknown dispatch id"
+                        )
+                if event.type == "execution.session.completed":
+                    if event_data.get("success") is not True:
+                        raise ValueError("durable completed AC lifecycle is not successful")
+                    if event_dispatch_id is not None:
+                        completed_dispatches[event_dispatch_id].append(event_data)
+                    elif not dispatch_events:
+                        verify_gate_outcome = self._parse_verify_gate_outcome(
+                            event_data.get("verify_gate_outcome")
+                        )
+                        raise CompletedACExecutionError(
+                            "AC attempt already completed; refusing same-attempt redispatch",
+                            result_summary=event_data.get("result_summary")
+                            if isinstance(event_data.get("result_summary"), str)
+                            else None,
+                            session_id=event_data.get("session_id")
+                            if isinstance(event_data.get("session_id"), str)
+                            else None,
+                            verify_gate_outcome=verify_gate_outcome,
+                        )
+                    continue
+                if event.type == "execution.session.failed" and event_dispatch_id is not None:
+                    failed_dispatches.add(event_dispatch_id)
+                runtime_handle = _load_candidate(
+                    event,
+                    event_data,
+                    dispatch_id=event_dispatch_id if dispatch_events else None,
+                )
                 if runtime_handle is None:
                     continue
+                if event.type == "execution.session.recovered":
+                    discontinuity = event_data.get("recovery_discontinuity")
+                    if not isinstance(discontinuity, Mapping):
+                        raise ValueError("durable recovered lifecycle is missing linkage")
+                    failed = discontinuity.get("failed")
+                    replacement = discontinuity.get("replacement")
+                    if not isinstance(failed, Mapping) or not isinstance(replacement, Mapping):
+                        raise ValueError("durable recovered lifecycle linkage is malformed")
+                    failed_resume_id = failed.get("resume_session_id")
+                    replacement_resume_id = replacement.get("resume_session_id")
+                    if (
+                        not isinstance(failed_resume_id, str)
+                        or not failed_resume_id
+                        or not isinstance(replacement_resume_id, str)
+                        or not replacement_resume_id
+                    ):
+                        raise ValueError("durable recovered lifecycle linkage is incomplete")
+                    if self._runtime_resume_session_id(runtime_handle) != replacement_resume_id:
+                        raise ValueError(
+                            "durable recovered lifecycle replacement disagrees with its handle"
+                        )
+                    known_successor = recovery_successors.get(failed_resume_id)
+                    if known_successor not in {None, replacement_resume_id}:
+                        raise AmbiguousACExecutionError(
+                            "AC recovery history maps one failed runtime session to conflicting "
+                            "replacement sessions"
+                        )
+                    recovery_successors[failed_resume_id] = replacement_resume_id
+                priority = recovery_priority[event.type]
+                if event_dispatch_id is None:
+                    legacy_candidates.append((priority, runtime_handle))
+                else:
+                    candidate_handles[event_dispatch_id].append((priority, runtime_handle))
 
+            if cached_handle is not None and self._is_resumable_runtime_handle(cached_handle):
+                cached_fingerprint = cached_handle.metadata.get("ac_capsule_fingerprint")
+                cached_attempt_id = cached_handle.metadata.get("session_attempt_id")
+                if (
+                    cached_fingerprint != expected_capsule_fingerprint
+                    or cached_attempt_id != runtime_identity.session_attempt_id
+                ):
+                    self.runtime_handles.pop(runtime_identity.cache_key, None)
+                    cached_handle = None
+                else:
+                    cached_dispatch_value = cached_handle.metadata.get("ac_dispatch_id")
+                    cached_dispatch_id = (
+                        self._validate_ac_dispatch_id(cached_dispatch_value)
+                        if cached_dispatch_value is not None
+                        else None
+                    )
+                    if dispatch_events:
+                        if cached_dispatch_id not in dispatch_events:
+                            raise ValueError(
+                                "cached runtime handle references an unknown AC dispatch"
+                            )
+                        candidate_handles[cached_dispatch_id].append((5, cached_handle))
+                    else:
+                        legacy_candidates.append((5, cached_handle))
+
+            active_completed_events = (
+                completed_dispatches[active_dispatch_id] if active_dispatch_id is not None else []
+            )
+            if active_completed_events:
+                self._forget_ac_runtime_handle(
+                    ac_index,
+                    execution_context_id=execution_context_id,
+                    is_sub_ac=is_sub_ac,
+                    parent_ac_index=parent_ac_index,
+                    sub_ac_index=sub_ac_index,
+                    node_identity=node_identity,
+                    retry_attempt=retry_attempt,
+                )
+                completed_facts = {
+                    (
+                        event_data.get("result_summary")
+                        if isinstance(event_data.get("result_summary"), str)
+                        else None,
+                        event_data.get("session_id")
+                        if isinstance(event_data.get("session_id"), str)
+                        else None,
+                    )
+                    for event_data in active_completed_events
+                }
+                if len(completed_facts) != 1:
+                    raise ValueError("durable completed AC lifecycle events disagree")
+                result_summary, completed_session_id = next(iter(completed_facts))
+                parsed_verify_outcomes = [
+                    self._parse_verify_gate_outcome(event_data.get("verify_gate_outcome"))
+                    for event_data in active_completed_events
+                ]
+                completed_verify_outcomes = {
+                    json.dumps(
+                        outcome,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
+                    for outcome in parsed_verify_outcomes
+                }
+                if len(completed_verify_outcomes) != 1:
+                    raise ValueError("durable completed AC verify outcomes disagree")
+                completed_verify_outcome = parsed_verify_outcomes[0]
+                raise CompletedACExecutionError(
+                    "AC attempt already completed; refusing same-attempt redispatch",
+                    result_summary=result_summary,
+                    session_id=completed_session_id,
+                    verify_gate_outcome=completed_verify_outcome,
+                )
+
+            if dispatch_events:
+                if active_dispatch_id is None:  # pragma: no cover - guarded by chain validation
+                    raise ValueError("durable AC dispatch history has no active boundary")
+                active_dispatch_candidates = candidate_handles[active_dispatch_id]
+                if not active_dispatch_candidates:
+                    if active_dispatch_id in failed_dispatches:
+                        raise AmbiguousACExecutionError(
+                            "AC provider dispatch failed without a reusable runtime handle; "
+                            "refusing fresh redispatch because external effects may have occurred"
+                        )
+                    raise AmbiguousACExecutionError(
+                        "AC attempt crossed the provider dispatch boundary without a reusable "
+                        "runtime handle; refusing fresh redispatch because external effects may "
+                        "have occurred"
+                    )
+                all_candidates = active_dispatch_candidates
+            else:
+                all_candidates = legacy_candidates
+
+            resume_ids = {
+                self._runtime_resume_session_id(runtime_handle)
+                for _, runtime_handle in all_candidates
+            }
+            resume_ids.discard(None)
+            resolved_resume_ids: set[str] = set()
+            for resume_id in resume_ids:
+                current_id = resume_id
+                visited: set[str] = set()
+                while current_id in recovery_successors:
+                    if current_id in visited:
+                        raise AmbiguousACExecutionError(
+                            "AC recovery history contains a runtime-session replacement cycle"
+                        )
+                    visited.add(current_id)
+                    current_id = recovery_successors[current_id]
+                resolved_resume_ids.add(current_id)
+            if len(resolved_resume_ids) > 1:
+                raise AmbiguousACExecutionError(
+                    "AC attempt has conflicting reusable runtime sessions; refusing to guess "
+                    "which provider session owns the external effects"
+                )
+            if all_candidates:
+                active_resume_id = next(iter(resolved_resume_ids))
+                active_candidates = [
+                    candidate
+                    for candidate in all_candidates
+                    if self._runtime_resume_session_id(candidate[1]) == active_resume_id
+                ]
+                if not active_candidates:
+                    raise AmbiguousACExecutionError(
+                        "AC recovery history names a replacement runtime session without a "
+                        "reusable handle"
+                    )
+                highest_priority = max(priority for priority, _ in active_candidates)
+                highest_candidates = [
+                    runtime_handle
+                    for priority, runtime_handle in active_candidates
+                    if priority == highest_priority
+                ]
+                continuity_facts = {
+                    (
+                        runtime_handle.backend,
+                        runtime_handle.native_session_id,
+                        runtime_handle.server_session_id,
+                        runtime_handle.conversation_id,
+                        runtime_handle.previous_response_id,
+                        runtime_handle.approval_mode,
+                    )
+                    for runtime_handle in highest_candidates
+                }
+                if len(continuity_facts) != 1:
+                    raise AmbiguousACExecutionError(
+                        "AC recovery history has equally authoritative but conflicting runtime "
+                        "continuation handles"
+                    )
+                runtime_handle = highest_candidates[0]
                 self.runtime_handles[runtime_identity.cache_key] = runtime_handle
                 return runtime_handle
 
@@ -754,6 +1211,11 @@ class ACRuntimeHandleManager:
                 raise AmbiguousACExecutionError(
                     "AC attempt recorded tool effects without a reusable runtime handle; "
                     "refusing fresh redispatch because non-idempotent effects may duplicate"
+                )
+            if any(event.type == "execution.session.failed" for event in matching_events):
+                raise AmbiguousACExecutionError(
+                    "AC provider dispatch failed without a reusable runtime handle; refusing "
+                    "fresh redispatch because external effects may have occurred"
                 )
 
         return None
@@ -1154,6 +1616,7 @@ class ACRuntimeHandleManager:
         *,
         event_type: str,
         runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str | None = None,
         ac_content: str,
         runtime_handle: RuntimeHandle | None,
         execution_id: str | None = None,
@@ -1161,6 +1624,7 @@ class ACRuntimeHandleManager:
         result_summary: str | None = None,
         success: bool | None = None,
         error: str | None = None,
+        verify_gate_outcome: Mapping[str, Any] | None = None,
     ) -> None:
         """Persist AC-scoped runtime lifecycle events using normalized metadata."""
         from ouroboros.events.base import BaseEvent
@@ -1168,13 +1632,36 @@ class ACRuntimeHandleManager:
         effective_session_id = session_id or self._runtime_resume_session_id(runtime_handle)
         server_session_id = runtime_handle.server_session_id if runtime_handle is not None else None
         identity_metadata = runtime_identity.to_metadata()
+        runtime_dispatch_value = (
+            runtime_handle.metadata.get("ac_dispatch_id") if runtime_handle is not None else None
+        )
+        runtime_dispatch_id = (
+            self._validate_ac_dispatch_id(runtime_dispatch_value)
+            if runtime_dispatch_value is not None
+            else None
+        )
+        if dispatch_id is not None:
+            dispatch_id = self._validate_ac_dispatch_id(dispatch_id)
+        if (
+            dispatch_id is not None
+            and runtime_dispatch_id is not None
+            and dispatch_id != runtime_dispatch_id
+        ):
+            raise ValueError("runtime lifecycle dispatch id disagrees with its handle")
+        effective_dispatch_id = dispatch_id or runtime_dispatch_id
 
+        persisted_verify_gate_outcome = self._parse_verify_gate_outcome(verify_gate_outcome)
         event = BaseEvent(
             type=event_type,
             aggregate_type=runtime_identity.runtime_scope.aggregate_type,
             aggregate_id=runtime_identity.session_scope_id,
             data={
                 **identity_metadata,
+                **(
+                    {"ac_dispatch_id": effective_dispatch_id}
+                    if effective_dispatch_id is not None
+                    else {}
+                ),
                 "ac_id": runtime_identity.ac_id,
                 "acceptance_criterion": ac_content,
                 "scope": runtime_identity.scope,
@@ -1194,6 +1681,7 @@ class ACRuntimeHandleManager:
                 "success": success,
                 "result_summary": result_summary,
                 "error": error,
+                "verify_gate_outcome": (persisted_verify_gate_outcome),
             },
         )
         if runtime_handle is not None:

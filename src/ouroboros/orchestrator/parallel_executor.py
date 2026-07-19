@@ -99,7 +99,11 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
 )
-from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
+from ouroboros.orchestrator.ac_runtime_handle_manager import (
+    ACRuntimeHandleManager,
+    AmbiguousACExecutionError,
+    CompletedACExecutionError,
+)
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
@@ -757,6 +761,20 @@ class _VerifyGateOutcome:
     reason: str | None
     output_tail: str
     missing_artifacts: tuple[str, ...] = ()
+
+
+def _recovered_verify_gate_outcome(
+    value: Mapping[str, Any] | None,
+) -> _VerifyGateOutcome | None:
+    """Rehydrate the strict durable verify projection without running its command."""
+    if value is None:
+        return None
+    return _VerifyGateOutcome(
+        passed=value["passed"],
+        reason=value["reason"],
+        output_tail=value["output_tail"],
+        missing_artifacts=tuple(value["missing_artifacts"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -2071,6 +2089,7 @@ class ParallelACExecutor:
         *,
         event_type: str,
         runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str | None = None,
         ac_content: str,
         runtime_handle: RuntimeHandle | None,
         execution_id: str | None = None,
@@ -2078,10 +2097,12 @@ class ParallelACExecutor:
         result_summary: str | None = None,
         success: bool | None = None,
         error: str | None = None,
+        verify_gate_outcome: _VerifyGateOutcome | None = None,
     ) -> None:
         await self._ac_runtime_handle_manager._emit_ac_runtime_event(
             event_type=event_type,
             runtime_identity=runtime_identity,
+            dispatch_id=dispatch_id,
             ac_content=ac_content,
             runtime_handle=runtime_handle,
             execution_id=execution_id,
@@ -2089,6 +2110,16 @@ class ParallelACExecutor:
             result_summary=result_summary,
             success=success,
             error=error,
+            verify_gate_outcome=(
+                {
+                    "passed": verify_gate_outcome.passed,
+                    "reason": verify_gate_outcome.reason,
+                    "output_tail": verify_gate_outcome.output_tail,
+                    "missing_artifacts": list(verify_gate_outcome.missing_artifacts),
+                }
+                if verify_gate_outcome is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -8210,33 +8241,69 @@ class ParallelACExecutor:
             "capsule_success_contract": capsule_success_contract,
         }
         while True:
-            atomic_result = await self._execute_atomic_ac(
-                ac_index=ac_index,
-                ac_content=ac_content,
-                session_id=session_id,
-                tools=tools,
-                tool_catalog=tool_catalog,
-                system_prompt=system_prompt,
-                seed_goal=seed_goal,
-                depth=depth,
-                start_time=start_time,
-                execution_id=execution_id,
-                level_contexts=level_contexts,
-                sibling_acs=sibling_acs,
-                retry_attempt=atomic_retry_attempt,
-                execution_counters=execution_counters,
-                retry_prompt_extra=retry_prompt_extra,
-                is_sub_ac=is_sub_ac,
-                parent_ac_index=parent_ac_index,
-                sub_ac_index=sub_ac_index,
-                node_identity=node_identity,
-                ac_spec=ac_spec,
-                investment_spec=investment_spec,
-                decomposition_trustworthy=decomposition_trustworthy,
-                semantic_ac_key=semantic_ac_key,
-                force_frontier_routing=force_frontier_routing,
-                capsule_success_contract=capsule_success_contract,
-            )
+            try:
+                atomic_result = await self._execute_atomic_ac(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    session_id=session_id,
+                    tools=tools,
+                    tool_catalog=tool_catalog,
+                    system_prompt=system_prompt,
+                    seed_goal=seed_goal,
+                    depth=depth,
+                    start_time=start_time,
+                    execution_id=execution_id,
+                    level_contexts=level_contexts,
+                    sibling_acs=sibling_acs,
+                    retry_attempt=atomic_retry_attempt,
+                    execution_counters=execution_counters,
+                    retry_prompt_extra=retry_prompt_extra,
+                    is_sub_ac=is_sub_ac,
+                    parent_ac_index=parent_ac_index,
+                    sub_ac_index=sub_ac_index,
+                    node_identity=node_identity,
+                    ac_spec=ac_spec,
+                    investment_spec=investment_spec,
+                    decomposition_trustworthy=decomposition_trustworthy,
+                    semantic_ac_key=semantic_ac_key,
+                    force_frontier_routing=force_frontier_routing,
+                    capsule_success_contract=capsule_success_contract,
+                )
+            except CompletedACExecutionError as completed:
+                recovered_verify_outcome = _recovered_verify_gate_outcome(
+                    completed.verify_gate_outcome
+                )
+                if (
+                    self._run_verify_commands
+                    and isinstance(ac_spec, AcceptanceCriterionSpec)
+                    and ac_spec.verify_command
+                    and recovered_verify_outcome is None
+                ):
+                    raise AmbiguousACExecutionError(
+                        "Completed AC recovery is missing its non-idempotent verify-command "
+                        "outcome; refusing to replay the command"
+                    ) from completed
+                log.info(
+                    "parallel_executor.ac.completed_recovered",
+                    ac_index=ac_index,
+                    depth=depth,
+                    retry_attempt=atomic_retry_attempt,
+                )
+                return _finalize_node_result(
+                    ACExecutionResult(
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        success=True,
+                        messages=(),
+                        final_message=completed.result_summary or "",
+                        duration_seconds=(datetime.now(UTC) - start_time).total_seconds(),
+                        session_id=completed.session_id,
+                        retry_attempt=atomic_retry_attempt,
+                        depth=depth,
+                        verify_gate_outcome=recovered_verify_outcome,
+                        forced_frontier_routing=force_frontier_routing,
+                    )
+                )
             if atomic_result.error != _STALL_SENTINEL:
                 if not atomic_result.success and not force_atomic_execution:
                     (
@@ -9571,13 +9638,14 @@ Respond with either ATOMIC or the structured JSON object only.
             node_identity=node_identity,
             retry_attempt=retry_attempt,
         )
+        session_origin = (
+            "restored_same_attempt" if persisted_runtime_handle is not None else "fresh"
+        )
         await self._event_emitter.emit_ac_capsule_compiled(
             runtime_identity=runtime_identity,
             session_id=session_id,
             capsule=capsule,
-            session_origin=(
-                "restored_same_attempt" if persisted_runtime_handle is not None else "fresh"
-            ),
+            session_origin=session_origin,
         )
         await self._emit_atomic_context_governed_event(
             runtime_identity=runtime_identity,
@@ -9766,9 +9834,32 @@ Respond with either ATOMIC or the structured JSON object only.
                 with contextlib.suppress(Exception):
                     shadow_snapshot_stack.close()
                 shadow_snapshot_stack = contextlib.ExitStack()
+        dispatch_id = uuid.uuid4().hex
+        previous_dispatch_id: str | None = None
+        if runtime_handle is not None:
+            previous_dispatch_value = runtime_handle.metadata.get("ac_dispatch_id")
+            if previous_dispatch_value is not None:
+                previous_dispatch_id = ACRuntimeHandleManager._validate_ac_dispatch_id(
+                    previous_dispatch_value
+                )
+            runtime_handle = replace(
+                runtime_handle,
+                metadata={**runtime_handle.metadata, "ac_dispatch_id": dispatch_id},
+            )
+            runtime_handle = self._remember_ac_runtime_handle(
+                ac_index,
+                runtime_handle,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+            )
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
+        provider_boundary_persisted = False
         try:
             if self._session_signal_hub is not None:
                 signal_target = SessionSignalTarget(
@@ -9791,6 +9882,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
+            await self._event_emitter.emit_ac_attempt_dispatched(
+                runtime_identity=runtime_identity,
+                dispatch_id=dispatch_id,
+                previous_dispatch_id=previous_dispatch_id,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                capsule_fingerprint=capsule.fingerprint,
+                session_origin=session_origin,
+                runtime_handle=dispatch_state.runtime_handle,
+            )
+            provider_boundary_persisted = True
             await LeafDispatcher(self).stream(
                 state=dispatch_state,
                 prompt=prompt,
@@ -9798,6 +9900,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 system_prompt=system_prompt,
                 execute_effort_kwargs=execute_effort_kwargs,
                 runtime_identity=runtime_identity,
+                dispatch_id=dispatch_id,
                 execution_context_id=execution_context_id,
                 session_id=session_id,
                 ac_index=ac_index,
@@ -9901,7 +10004,42 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+                    previous_provider_boundary_persisted = provider_boundary_persisted
+                    provider_boundary_persisted = False
+                    signal_dispatch_id = uuid.uuid4().hex
+                    previous_runtime_handle = dispatch_state.runtime_handle
+                    if previous_runtime_handle is not None:
+                        dispatch_state.runtime_handle = replace(
+                            previous_runtime_handle,
+                            metadata={
+                                **previous_runtime_handle.metadata,
+                                "ac_dispatch_id": signal_dispatch_id,
+                                "ac_session_origin": "restored_same_attempt",
+                            },
+                        )
+                        dispatch_state.runtime_handle = self._remember_ac_runtime_handle(
+                            ac_index,
+                            dispatch_state.runtime_handle,
+                            execution_context_id=execution_context_id,
+                            is_sub_ac=is_sub_ac,
+                            parent_ac_index=parent_ac_index,
+                            sub_ac_index=sub_ac_index,
+                            node_identity=node_identity,
+                            retry_attempt=retry_attempt,
+                        )
                     try:
+                        await self._event_emitter.emit_ac_attempt_dispatched(
+                            runtime_identity=runtime_identity,
+                            dispatch_id=signal_dispatch_id,
+                            previous_dispatch_id=dispatch_id,
+                            execution_id=execution_context_id,
+                            session_id=session_id,
+                            capsule_fingerprint=capsule.fingerprint,
+                            session_origin="restored_same_attempt",
+                            runtime_handle=dispatch_state.runtime_handle,
+                        )
+                        dispatch_id = signal_dispatch_id
+                        provider_boundary_persisted = True
                         await LeafDispatcher(self).stream(
                             state=dispatch_state,
                             prompt=(
@@ -9913,6 +10051,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             system_prompt=system_prompt,
                             execute_effort_kwargs=execute_effort_kwargs,
                             runtime_identity=runtime_identity,
+                            dispatch_id=signal_dispatch_id,
                             execution_context_id=execution_context_id,
                             session_id=session_id,
                             ac_index=ac_index,
@@ -9928,6 +10067,18 @@ Respond with either ATOMIC or the structured JSON object only.
                             execution_counters=execution_counters,
                         )
                     except Exception as exc:
+                        if dispatch_id != signal_dispatch_id:
+                            dispatch_state.runtime_handle = previous_runtime_handle
+                            self._remember_ac_runtime_handle(
+                                ac_index,
+                                previous_runtime_handle,
+                                execution_context_id=execution_context_id,
+                                is_sub_ac=is_sub_ac,
+                                parent_ac_index=parent_ac_index,
+                                sub_ac_index=sub_ac_index,
+                                node_identity=node_identity,
+                                retry_attempt=retry_attempt,
+                            )
                         await self._event_store.append(
                             create_session_signal_delivery_uncertain_event(
                                 queued_signal.signal,
@@ -9941,6 +10092,8 @@ Respond with either ATOMIC or the structured JSON object only.
                             )
                         )
                         if inform_mode:
+                            if dispatch_id != signal_dispatch_id:
+                                provider_boundary_persisted = previous_provider_boundary_persisted
                             dispatch_state.success = primary_success
                             dispatch_state.final_message = primary_final_message
                             dispatch_state.infra_fatal = primary_infra_fatal
@@ -10226,12 +10379,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     "execution.session.completed" if success else "execution.session.failed"
                 ),
                 runtime_identity=runtime_identity,
+                dispatch_id=dispatch_id,
                 ac_content=ac_content,
                 runtime_handle=runtime_handle,
                 execution_id=execution_context_id,
                 session_id=ac_session_id,
                 result_summary=result_final_message or None,
                 success=success,
+                verify_gate_outcome=verify_gate_outcome,
                 error=(
                     None
                     if success
@@ -10316,16 +10471,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 node_identity=node_identity,
                 retry_attempt=retry_attempt,
             )
-            await self._emit_ac_runtime_event(
-                event_type="execution.session.failed",
-                runtime_identity=runtime_identity,
-                ac_content=ac_content,
-                runtime_handle=dispatch_state.runtime_handle,
-                execution_id=execution_context_id,
-                session_id=dispatch_state.ac_session_id,
-                success=False,
-                error=str(e),
-            )
+            if provider_boundary_persisted:
+                await self._emit_ac_runtime_event(
+                    event_type="execution.session.failed",
+                    runtime_identity=runtime_identity,
+                    dispatch_id=dispatch_id,
+                    ac_content=ac_content,
+                    runtime_handle=dispatch_state.runtime_handle,
+                    execution_id=execution_context_id,
+                    session_id=dispatch_state.ac_session_id,
+                    success=False,
+                    error=str(e),
+                )
             clear_cached_runtime_handle = True
 
             log.exception(

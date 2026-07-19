@@ -33,7 +33,7 @@ from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
-    from ouroboros.orchestrator.adapter import AgentMessage
+    from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.persistence.event_store import EventStore
 
@@ -103,6 +103,75 @@ class ExecutionEventEmitter:
                     "capsule_fingerprint": capsule.fingerprint,
                     "capsule_manifest": capsule.manifest.to_contract_data(),
                     "session_origin": session_origin,
+                },
+            )
+        )
+
+    async def emit_ac_attempt_dispatched(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
+        previous_dispatch_id: str | None,
+        execution_id: str,
+        session_id: str,
+        capsule_fingerprint: str,
+        session_origin: str,
+        runtime_handle: RuntimeHandle | None,
+    ) -> None:
+        """Persist the provider-boundary transition before invoking the runtime.
+
+        A compiled capsule proves dispatch authority, but it does not prove that
+        the provider was entered. This second durable transition closes that
+        crash gap: recovery must treat a dispatch without a resumable handle or
+        terminal successor as an uncertain external-effect boundary.
+        """
+        if not isinstance(capsule_fingerprint, str) or not capsule_fingerprint.startswith(
+            "sha256:"
+        ):
+            raise ValueError("AC dispatch capsule fingerprint is invalid")
+        if len(dispatch_id) != 32 or any(
+            character not in "0123456789abcdef" for character in dispatch_id
+        ):
+            raise ValueError("AC dispatch id is invalid")
+        if previous_dispatch_id is not None:
+            if len(previous_dispatch_id) != 32 or any(
+                character not in "0123456789abcdef" for character in previous_dispatch_id
+            ):
+                raise ValueError("previous AC dispatch id is invalid")
+            if previous_dispatch_id == dispatch_id:
+                raise ValueError("AC dispatch cannot name itself as its predecessor")
+        if session_origin not in {"fresh", "restored_same_attempt"}:
+            raise ValueError("AC dispatch session origin is invalid")
+        if runtime_handle is not None:
+            runtime_dispatch_id = runtime_handle.metadata.get("ac_dispatch_id")
+            if runtime_dispatch_id != dispatch_id:
+                raise ValueError("runtime handle dispatch id disagrees with dispatch event")
+            if runtime_handle.metadata.get("ac_capsule_fingerprint") != capsule_fingerprint:
+                raise ValueError("runtime handle capsule disagrees with dispatch event")
+            if runtime_handle.metadata.get("ac_session_origin") != session_origin:
+                raise ValueError("runtime handle session origin disagrees with dispatch event")
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.attempt.dispatched",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_dispatch_id": dispatch_id,
+                    "previous_ac_dispatch_id": previous_dispatch_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "capsule_fingerprint": capsule_fingerprint,
+                    "session_origin": session_origin,
+                    "runtime_backend": (
+                        runtime_handle.backend if runtime_handle is not None else None
+                    ),
+                    "runtime": (
+                        runtime_handle.to_dispatch_recovery_dict()
+                        if runtime_handle is not None
+                        else None
+                    ),
                 },
             )
         )
@@ -1112,6 +1181,7 @@ class ExecutionEventEmitter:
         self,
         *,
         runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
         tool_name: str,
         tool_detail: str,
         tool_input: dict[str, Any],
@@ -1125,6 +1195,7 @@ class ExecutionEventEmitter:
                 aggregate_id=runtime_identity.session_scope_id,
                 data={
                     **runtime_identity.to_metadata(),
+                    "ac_dispatch_id": dispatch_id,
                     "tool_name": tool_name,
                     "tool_detail": tool_detail,
                     "tool_input": tool_input,
@@ -1137,6 +1208,7 @@ class ExecutionEventEmitter:
         self,
         *,
         runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
         tool_name: str,
         tool_result_text: str,
         runtime_metadata: dict[str, Any],
@@ -1149,6 +1221,7 @@ class ExecutionEventEmitter:
                 aggregate_id=runtime_identity.session_scope_id,
                 data={
                     **runtime_identity.to_metadata(),
+                    "ac_dispatch_id": dispatch_id,
                     "tool_name": tool_name,
                     "tool_result_text": tool_result_text,
                     **runtime_metadata,

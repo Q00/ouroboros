@@ -28,7 +28,10 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACExecutionCapsuleManifest,
     compile_ac_execution_capsule,
 )
-from ouroboros.orchestrator.ac_runtime_handle_manager import AmbiguousACExecutionError
+from ouroboros.orchestrator.ac_runtime_handle_manager import (
+    AmbiguousACExecutionError,
+    CompletedACExecutionError,
+)
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -64,6 +67,7 @@ from ouroboros.orchestrator.parallel_executor import (
     _runtime_messages_have_masked_test_command_form,
     _runtime_messages_support_command_claim,
     _runtime_messages_support_test_claim,
+    _VerifyGateOutcome,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -969,16 +973,19 @@ def _compile_test_capsule(
     seed_goal: str,
     retry_attempt: int = 0,
     workspace: str = "/tmp/project",
+    node_identity: ExecutionNodeIdentity | None = None,
+    ac_spec: AcceptanceCriterionSpec | None = None,
 ) -> tuple[ACRuntimeIdentity, ACExecutionCapsule]:
     identity = build_ac_runtime_identity(
         ac_index,
         execution_context_id=session_id,
+        node_identity=node_identity,
         retry_attempt=retry_attempt,
     )
     capsule = compile_ac_execution_capsule(
         runtime_identity=identity,
         execution_id=session_id,
-        semantic_ac_key=derive_semantic_ac_key(ac_content),
+        semantic_ac_key=derive_semantic_ac_key(ac_spec or ac_content),
         workspace=os.path.realpath(workspace),
         authority_scope=executor._build_ac_capsule_authority_scope(
             execution_context_id=session_id,
@@ -993,7 +1000,7 @@ def _compile_test_capsule(
         ),
         seed_goal=seed_goal,
         ac_content=ac_content,
-        ac_spec=None,
+        ac_spec=ac_spec,
     )
     return identity, capsule
 
@@ -1010,6 +1017,74 @@ def _compiled_capsule_event(
             **identity.to_metadata(),
             "capsule_fingerprint": capsule.fingerprint,
             "capsule_manifest": capsule.manifest.to_contract_data(),
+        },
+    )
+
+
+def _dispatched_capsule_event(
+    identity: ACRuntimeIdentity,
+    capsule: ACExecutionCapsule,
+    *,
+    dispatch_id: str = "d" * 32,
+    previous_dispatch_id: str | None = None,
+    session_origin: str = "fresh",
+    runtime_handle: RuntimeHandle | None = None,
+) -> BaseEvent:
+    if runtime_handle is not None:
+        runtime_handle = replace(
+            runtime_handle,
+            metadata={**runtime_handle.metadata, "ac_dispatch_id": dispatch_id},
+        )
+    return BaseEvent(
+        type="execution.ac.attempt.dispatched",
+        aggregate_type="execution",
+        aggregate_id=identity.session_scope_id,
+        data={
+            **identity.to_metadata(),
+            "ac_dispatch_id": dispatch_id,
+            "previous_ac_dispatch_id": previous_dispatch_id,
+            "capsule_fingerprint": capsule.fingerprint,
+            "session_origin": session_origin,
+            "runtime": (
+                runtime_handle.to_dispatch_recovery_dict() if runtime_handle is not None else None
+            ),
+        },
+    )
+
+
+def _dispatch_lifecycle_event(
+    identity: ACRuntimeIdentity,
+    event_type: str,
+    *,
+    dispatch_id: str,
+    runtime_handle: RuntimeHandle | None,
+    timestamp: datetime | None = None,
+    result_summary: str | None = None,
+    session_id: str | None = None,
+    extra_data: dict[str, Any] | None = None,
+) -> BaseEvent:
+    if runtime_handle is not None:
+        runtime_handle = replace(
+            runtime_handle,
+            metadata={**runtime_handle.metadata, "ac_dispatch_id": dispatch_id},
+        )
+    return BaseEvent(
+        type=event_type,
+        timestamp=timestamp or datetime.now(UTC),
+        aggregate_type="execution",
+        aggregate_id=identity.session_scope_id,
+        data={
+            **identity.to_metadata(),
+            "ac_dispatch_id": dispatch_id,
+            "success": True
+            if event_type == "execution.session.completed"
+            else False
+            if event_type == "execution.session.failed"
+            else None,
+            "result_summary": result_summary,
+            "session_id": session_id,
+            "runtime": runtime_handle.to_persisted_dict() if runtime_handle is not None else None,
+            **(extra_data or {}),
         },
     )
 
@@ -4846,7 +4921,12 @@ class TestParallelACExecutor:
         replay_events.extend(
             event
             for event in appended_events
-            if event.type in {"execution.ac.capsule.compiled", "execution.session.started"}
+            if event.type
+            in {
+                "execution.ac.capsule.compiled",
+                "execution.ac.attempt.dispatched",
+                "execution.session.started",
+            }
         )
         restarted = ParallelACExecutor(
             adapter=_BareHandleRuntime(),
@@ -4907,9 +4987,1342 @@ class TestParallelACExecutor:
 
         assert runtime.calls == 0
 
+    @pytest.mark.asyncio
+    async def test_atomic_ac_persists_dispatch_transition_before_provider_call(self) -> None:
+        """The uncertain provider boundary must be durable before execute_task starts."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self, appended_events: list[BaseEvent]) -> None:
+                self.appended_events = appended_events
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                assert self.appended_events[-1].type == "execution.ac.attempt.dispatched"
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _Runtime(appended_events)
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Persist provider dispatch uncertainty",
+            session_id="session-dispatch-transition",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert runtime.calls == 1
+        assert result.success is True
+        dispatch_event = next(
+            event for event in appended_events if event.type == "execution.ac.attempt.dispatched"
+        )
+        capsule_event = next(
+            event for event in appended_events if event.type == "execution.ac.capsule.compiled"
+        )
+        assert (
+            dispatch_event.data["capsule_fingerprint"] == capsule_event.data["capsule_fingerprint"]
+        )
+        dispatch_id = dispatch_event.data["ac_dispatch_id"]
+        assert isinstance(dispatch_id, str) and len(dispatch_id) == 32
+        dispatch_runtime = dispatch_event.data["runtime"]
+        assert "cwd" not in dispatch_runtime
+        assert "transcript_path" not in dispatch_runtime
+        assert "tool_catalog" not in dispatch_runtime["metadata"]
+        assert "capability_graph" not in dispatch_runtime["metadata"]
+        assert "control_plane" not in dispatch_runtime["metadata"]
+        completed_event = next(
+            event for event in appended_events if event.type == "execution.session.completed"
+        )
+        assert completed_event.data["ac_dispatch_id"] == dispatch_id
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_does_not_call_provider_when_dispatch_transition_fails(self) -> None:
+        """Failure to persist DISPATCHED must leave the provider untouched."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+
+        async def _append(event: BaseEvent) -> None:
+            if event.type == "execution.ac.attempt.dispatched":
+                raise OSError("dispatch transition unavailable")
+            appended_events.append(event)
+
+        event_store.append.side_effect = _append
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Block unsafe provider dispatch",
+            session_id="session-dispatch-persist-failure",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert runtime.calls == 0
+        assert result.success is False
+        assert result.infra_fatal is True
+        assert result.error == "dispatch transition unavailable"
+        assert any(event.type == "execution.ac.capsule.compiled" for event in appended_events)
+        assert not any(event.type == "execution.session.failed" for event in appended_events)
+
+        event_store.append.side_effect = appended_events.append
+        retried = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Block unsafe provider dispatch",
+            session_id="session-dispatch-persist-failure",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert retried.success is True
+        assert runtime.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_refuses_fresh_dispatch_after_pre_message_crash(self) -> None:
+        """A durable dispatch with no handle/terminal successor is effect-ambiguous."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Apply one external effect before the first message",
+            session_id="session-pre-message-crash",
+            seed_goal="Ship",
+        )
+        appended_events.extend(
+            [
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
+                _dispatched_capsule_event(runtime_identity, persisted_capsule),
+            ]
+        )
+
+        with pytest.raises(
+            AmbiguousACExecutionError,
+            match="crossed the provider dispatch boundary",
+        ):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Apply one external effect before the first message",
+                session_id="session-pre-message-crash",
+                tools=["Read", "Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert runtime.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_correlates_dispatch_across_timestamp_rollback(self) -> None:
+        """Recovery uses dispatch identity, never timestamp/list successor order."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Recover by dispatch identity despite clock rollback",
+            session_id="session-dispatch-order",
+            seed_goal="Ship",
+        )
+        dispatch_id = "a" * 32
+        persisted_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-clock-rollback",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_dispatch_id": "e" * 32,
+                "ac_session_origin": "fresh",
+            },
+        )
+        lifecycle = _dispatch_lifecycle_event(
+            runtime_identity,
+            "execution.session.started",
+            dispatch_id=dispatch_id,
+            runtime_handle=persisted_handle,
+            timestamp=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+        event_store.replay.return_value = [
+            lifecycle,
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+        ]
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-dispatch-order",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+        )
+
+        assert restored is not None
+        assert restored.native_session_id == "codex-clock-rollback"
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rebinds_dispatch_workspace_before_resume(self) -> None:
+        """Minimal dispatch payloads regain cwd only from current capsule authority."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Resume from a minimal provider-boundary record",
+            session_id="session-dispatch-minimal-resume",
+            seed_goal="Ship",
+        )
+        persisted_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-minimal-resume",
+            cwd="/must-not-be-persisted",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "restored_same_attempt",
+            },
+        )
+        dispatch_event = _dispatched_capsule_event(
+            runtime_identity,
+            persisted_capsule,
+            dispatch_id="9" * 32,
+            session_origin="restored_same_attempt",
+            runtime_handle=persisted_handle,
+        )
+        assert "cwd" not in dispatch_event.data["runtime"]
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            dispatch_event,
+        ]
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-dispatch-minimal-resume",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+        )
+
+        assert restored is not None
+        assert restored.native_session_id == "codex-minimal-resume"
+        assert restored.cwd == persisted_capsule.workspace
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_nonminimal_dispatch_runtime_payload(self) -> None:
+        """Unknown dispatch fields cannot re-enter recovery through persisted corruption."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject a nonminimal dispatch recovery payload",
+            session_id="session-dispatch-nonminimal",
+            seed_goal="Ship",
+        )
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-nonminimal",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "restored_same_attempt",
+            },
+        )
+        dispatch_event = _dispatched_capsule_event(
+            runtime_identity,
+            persisted_capsule,
+            dispatch_id="4" * 32,
+            session_origin="restored_same_attempt",
+            runtime_handle=handle,
+        )
+        dispatch_event.data["runtime"]["cwd"] = "/smuggled/worktree"
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            dispatch_event,
+        ]
+
+        with pytest.raises(ValueError, match="dispatch recovery handle is malformed"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-nonminimal",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_keeps_failed_dispatch_ambiguous_without_handle(self) -> None:
+        """Adapter failure does not prove the provider performed no external effect."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=_Runtime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Close dispatch uncertainty with a terminal successor",
+            session_id="session-dispatch-terminal-successor",
+            seed_goal="Ship",
+        )
+        dispatch_id = "b" * 32
+        event_store.replay = AsyncMock(
+            return_value=[
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
+                _dispatched_capsule_event(
+                    runtime_identity,
+                    persisted_capsule,
+                    dispatch_id=dispatch_id,
+                ),
+                _dispatch_lifecycle_event(
+                    runtime_identity,
+                    "execution.session.failed",
+                    dispatch_id=dispatch_id,
+                    runtime_handle=None,
+                ),
+            ]
+        )
+
+        with pytest.raises(AmbiguousACExecutionError, match="failed without a reusable"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-terminal-successor",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_resumes_failed_dispatch_with_correlated_handle(self) -> None:
+        """A failure is recoverable only when its exact provider session is reconnectable."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Resume the exact provider session after adapter failure",
+            session_id="session-dispatch-failed-resume",
+            seed_goal="Ship",
+        )
+        dispatch_id = "8" * 32
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-failed-resume",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
+            },
+        )
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.failed",
+                dispatch_id=dispatch_id,
+                runtime_handle=handle,
+            ),
+        ]
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-dispatch-failed-resume",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+        )
+
+        assert restored is not None
+        assert restored.native_session_id == "codex-failed-resume"
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_resumes_only_latest_boundary_in_multi_dispatch_attempt(
+        self,
+    ) -> None:
+        """A later signal dispatch owns recovery even when an older event ranks higher."""
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Resume the exact latest provider boundary",
+            session_id="session-multi-dispatch-latest",
+            seed_goal="Ship",
+        )
+        first_dispatch_id = "1" * 32
+        second_dispatch_id = "2" * 32
+
+        def _handle(previous_response_id: str) -> RuntimeHandle:
+            return RuntimeHandle(
+                backend="codex_cli",
+                kind="implementation_session",
+                native_session_id="codex-shared-session",
+                previous_response_id=previous_response_id,
+                cwd="/tmp/project",
+                approval_mode="acceptEdits",
+                metadata={
+                    **runtime_identity.to_metadata(),
+                    "ac_capsule_version": persisted_capsule.version,
+                    "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                    "ac_session_origin": "restored_same_attempt",
+                },
+            )
+
+        event_store.replay.return_value = [
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.failed",
+                dispatch_id=second_dispatch_id,
+                runtime_handle=_handle("response-after-signal"),
+            ),
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=first_dispatch_id,
+                runtime_handle=_handle("response-before-signal"),
+            ),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=second_dispatch_id,
+                previous_dispatch_id=first_dispatch_id,
+                session_origin="restored_same_attempt",
+            ),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=first_dispatch_id,
+            ),
+        ]
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-multi-dispatch-latest",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+        )
+
+        assert restored is not None
+        assert restored.previous_response_id == "response-after-signal"
+        assert restored.metadata["ac_dispatch_id"] == second_dispatch_id
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_follows_explicit_recovery_session_successor(self) -> None:
+        """A durable recovered linkage supersedes its failed provider session."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Follow the explicit replacement provider session",
+            session_id="session-dispatch-recovered-successor",
+            seed_goal="Ship",
+        )
+        dispatch_id = "6" * 32
+
+        def _handle(session: str) -> RuntimeHandle:
+            return RuntimeHandle(
+                backend="codex_cli",
+                kind="implementation_session",
+                native_session_id=session,
+                cwd="/tmp/project",
+                approval_mode="acceptEdits",
+                metadata={
+                    **runtime_identity.to_metadata(),
+                    "ac_capsule_version": persisted_capsule.version,
+                    "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                    "ac_session_origin": "fresh",
+                },
+            )
+
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=dispatch_id,
+                runtime_handle=_handle("codex-failed-session"),
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.recovered",
+                dispatch_id=dispatch_id,
+                runtime_handle=_handle("codex-replacement-session"),
+                extra_data={
+                    "recovery_discontinuity": {
+                        "reason": "replacement_session",
+                        "failed": {"resume_session_id": "codex-failed-session"},
+                        "replacement": {"resume_session_id": "codex-replacement-session"},
+                    }
+                },
+            ),
+        ]
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-dispatch-recovered-successor",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+        )
+
+        assert restored is not None
+        assert restored.native_session_id == "codex-replacement-session"
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_tied_conflicting_continuation_handles(self) -> None:
+        """Timestamp order cannot choose between divergent response-chain cursors."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject divergent continuation cursors",
+            session_id="session-dispatch-cursor-conflict",
+            seed_goal="Ship",
+        )
+        dispatch_id = "5" * 32
+
+        def _handle(previous_response_id: str) -> RuntimeHandle:
+            return RuntimeHandle(
+                backend="codex_cli",
+                kind="implementation_session",
+                native_session_id="codex-same-session",
+                previous_response_id=previous_response_id,
+                cwd="/tmp/project",
+                approval_mode="acceptEdits",
+                metadata={
+                    **runtime_identity.to_metadata(),
+                    "ac_capsule_version": persisted_capsule.version,
+                    "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                    "ac_session_origin": "fresh",
+                },
+            )
+
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.resumed",
+                dispatch_id=dispatch_id,
+                runtime_handle=_handle("response-a"),
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.resumed",
+                dispatch_id=dispatch_id,
+                runtime_handle=_handle("response-b"),
+            ),
+        ]
+
+        with pytest.raises(AmbiguousACExecutionError, match="equally authoritative"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-cursor-conflict",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_lifecycle_for_unknown_dispatch(self) -> None:
+        """A resumable handle cannot be borrowed from another provider entry."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject a mismatched lifecycle dispatch",
+            session_id="session-dispatch-mismatch",
+            seed_goal="Ship",
+        )
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-foreign-dispatch",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
+            },
+        )
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id="1" * 32,
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id="2" * 32,
+                runtime_handle=handle,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="unknown dispatch id"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-mismatch",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.parametrize(
+        ("corruption", "error_match"),
+        [
+            ("missing_id", "dispatch id is missing"),
+            ("duplicate_id", "dispatch id is duplicated"),
+            ("fingerprint", "dispatch fingerprint disagrees"),
+            ("origin", "dispatch session origin is invalid"),
+            ("missing_predecessor", "dispatch predecessor is missing"),
+            ("unknown_predecessor", "predecessor references an unknown"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_corrupt_dispatch_contract(
+        self,
+        corruption: str,
+        error_match: str,
+    ) -> None:
+        """Every authority-bearing dispatch field is validated fail-closed."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject corrupted durable dispatch authority",
+            session_id=f"session-corrupt-dispatch-{corruption}",
+            seed_goal="Ship",
+        )
+        dispatch_event = _dispatched_capsule_event(
+            runtime_identity,
+            persisted_capsule,
+            dispatch_id="3" * 32,
+        )
+        dispatch_events = [dispatch_event]
+        if corruption == "missing_id":
+            dispatch_event.data.pop("ac_dispatch_id")
+        elif corruption == "duplicate_id":
+            dispatch_events.append(dispatch_event)
+        elif corruption == "fingerprint":
+            dispatch_event.data["capsule_fingerprint"] = "sha256:" + "0" * 64
+        elif corruption == "origin":
+            dispatch_event.data["session_origin"] = "foreign_attempt"
+        elif corruption == "missing_predecessor":
+            dispatch_event.data.pop("previous_ac_dispatch_id")
+        elif corruption == "unknown_predecessor":
+            dispatch_event.data["previous_ac_dispatch_id"] = "4" * 32
+        executor._event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            *dispatch_events,
+        ]
+
+        with pytest.raises(ValueError, match=error_match):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id=f"session-corrupt-dispatch-{corruption}",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.parametrize(
+        ("topology", "links", "error_match"),
+        [
+            (
+                "branch",
+                (("1", None), ("2", "1"), ("3", "1")),
+                "branches from one predecessor",
+            ),
+            (
+                "multiple_roots",
+                (("1", None), ("2", None)),
+                "not one linear chain",
+            ),
+            (
+                "cycle",
+                (("1", "2"), ("2", "1")),
+                "not one linear chain",
+            ),
+            (
+                "disconnected",
+                (("1", None), ("2", "1"), ("3", "4"), ("4", "3")),
+                "is disconnected",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_non_linear_dispatch_topology(
+        self,
+        topology: str,
+        links: tuple[tuple[str, str | None], ...],
+        error_match: str,
+    ) -> None:
+        """Branching, root ambiguity, cycles, and disconnected chains fail closed."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        execution_id = f"session-corrupt-dispatch-topology-{topology}"
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject non-linear durable dispatch history",
+            session_id=execution_id,
+            seed_goal="Ship",
+        )
+        executor._event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            *[
+                _dispatched_capsule_event(
+                    runtime_identity,
+                    persisted_capsule,
+                    dispatch_id=dispatch_digit * 32,
+                    previous_dispatch_id=(
+                        predecessor_digit * 32 if predecessor_digit is not None else None
+                    ),
+                )
+                for dispatch_digit, predecessor_digit in links
+            ],
+        ]
+
+        with pytest.raises(ValueError, match=error_match):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id=execution_id,
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.parametrize(
+        ("corruption", "error_type", "error_match"),
+        [
+            ("malformed", ValueError, "linkage is malformed"),
+            ("cycle", AmbiguousACExecutionError, "replacement cycle"),
+            ("conflict", AmbiguousACExecutionError, "conflicting replacement"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_corrupt_recovery_links(
+        self,
+        corruption: str,
+        error_type: type[Exception],
+        error_match: str,
+    ) -> None:
+        """Malformed, cyclic, and branching replacement histories never pick a session."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject corrupt provider-session replacement history",
+            session_id=f"session-corrupt-recovery-{corruption}",
+            seed_goal="Ship",
+        )
+        dispatch_id = "5" * 32
+
+        def _recovered_event(failed: str, replacement: str) -> BaseEvent:
+            handle = RuntimeHandle(
+                backend="codex_cli",
+                kind="implementation_session",
+                native_session_id=replacement,
+                cwd="/tmp/project",
+                approval_mode="acceptEdits",
+                metadata={
+                    **runtime_identity.to_metadata(),
+                    "ac_capsule_version": persisted_capsule.version,
+                    "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                    "ac_session_origin": "restored_same_attempt",
+                },
+            )
+            return _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.recovered",
+                dispatch_id=dispatch_id,
+                runtime_handle=handle,
+                extra_data={
+                    "recovery_discontinuity": {
+                        "failed": {"resume_session_id": failed},
+                        "replacement": {"resume_session_id": replacement},
+                    }
+                },
+            )
+
+        if corruption == "malformed":
+            malformed = _recovered_event("session-a", "session-b")
+            malformed.data["recovery_discontinuity"] = {"failed": {}}
+            recovery_events = [malformed]
+        elif corruption == "cycle":
+            recovery_events = [
+                _recovered_event("session-a", "session-b"),
+                _recovered_event("session-b", "session-a"),
+            ]
+        else:
+            recovery_events = [
+                _recovered_event("session-a", "session-b"),
+                _recovered_event("session-a", "session-c"),
+            ]
+        executor._event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+            *recovery_events,
+        ]
+
+        with pytest.raises(error_type, match=error_match):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id=f"session-corrupt-recovery-{corruption}",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_blocks_same_attempt_after_completed_dispatch(self) -> None:
+        """A completed dispatch is terminal, not permission for fresh redispatch."""
+
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Do not repeat an already completed provider dispatch",
+            session_id="session-dispatch-completed",
+            seed_goal="Ship",
+        )
+        dispatch_id = "c" * 32
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.completed",
+                dispatch_id=dispatch_id,
+                runtime_handle=None,
+            ),
+        ]
+
+        with pytest.raises(CompletedACExecutionError, match="already completed"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-completed",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.parametrize(
+        ("corruption", "error_match"),
+        [
+            ("facts", "lifecycle events disagree"),
+            ("verify_shape", "verify outcome has an invalid shape"),
+            ("verify_facts", "verify outcomes disagree"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_corrupt_completed_contract(
+        self,
+        corruption: str,
+        error_match: str,
+    ) -> None:
+        """Duplicate terminal facts must agree exactly before success is reconstructed."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject conflicting durable completion facts",
+            session_id=f"session-corrupt-completed-{corruption}",
+            seed_goal="Ship",
+        )
+        dispatch_id = "6" * 32
+        passed_outcome = {
+            "passed": True,
+            "reason": None,
+            "output_tail": "",
+            "missing_artifacts": [],
+        }
+        first = _dispatch_lifecycle_event(
+            runtime_identity,
+            "execution.session.completed",
+            dispatch_id=dispatch_id,
+            runtime_handle=None,
+            result_summary="done",
+            session_id="completed-session",
+            extra_data={"verify_gate_outcome": passed_outcome},
+        )
+        second = _dispatch_lifecycle_event(
+            runtime_identity,
+            "execution.session.completed",
+            dispatch_id=dispatch_id,
+            runtime_handle=None,
+            result_summary="done",
+            session_id="completed-session",
+            extra_data={"verify_gate_outcome": passed_outcome},
+        )
+        if corruption == "facts":
+            second.data["result_summary"] = "different"
+        elif corruption == "verify_shape":
+            first.data["verify_gate_outcome"] = {"passed": True}
+        else:
+            second.data["verify_gate_outcome"] = {
+                **passed_outcome,
+                "output_tail": "different",
+            }
+        executor._event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+            ),
+            first,
+            second,
+        ]
+
+        with pytest.raises(ValueError, match=error_match):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id=f"session-corrupt-completed-{corruption}",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_preserves_legacy_no_dispatch_completion(self) -> None:
+        """Pre-dispatch-id completed streams remain terminal and retain their result."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Recover a legacy completed attempt",
+            session_id="session-legacy-completed",
+            seed_goal="Ship",
+        )
+        executor._event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            BaseEvent(
+                type="execution.session.completed",
+                aggregate_type="execution",
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "success": True,
+                    "result_summary": "legacy done",
+                    "session_id": "legacy-session",
+                    "runtime": None,
+                },
+            ),
+        ]
+
+        with pytest.raises(CompletedACExecutionError) as completed:
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-legacy-completed",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+        assert completed.value.result_summary == "legacy done"
+        assert completed.value.session_id == "legacy-session"
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_preserves_legacy_no_dispatch_failed_resume(self) -> None:
+        """A legacy failed stream may resume only its exact capsule-bound handle."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Resume a legacy failed attempt",
+            session_id="session-legacy-failed-resume",
+            seed_goal="Ship",
+        )
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="legacy-failed-session",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "restored_same_attempt",
+            },
+        )
+        executor._event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            BaseEvent(
+                type="execution.session.failed",
+                aggregate_type="execution",
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "success": False,
+                    "runtime": handle.to_persisted_dict(),
+                },
+            ),
+        ]
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-legacy-failed-resume",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+        )
+
+        assert restored is not None
+        assert restored.native_session_id == "legacy-failed-session"
+
+    @pytest.mark.asyncio
+    async def test_single_ac_recovers_completed_dispatch_as_success(self) -> None:
+        """Crash recovery returns the already-gated result instead of failing the workflow."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        ac_content = "Recover one already completed AC"
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="session-dispatch-completed-recovery",
+            ac_index=0,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content=ac_content,
+            session_id="session-dispatch-completed-recovery",
+            seed_goal="Ship",
+            node_identity=node_identity,
+        )
+        dispatch_id = "7" * 32
+        appended_events.extend(
+            [
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
+                _dispatched_capsule_event(
+                    runtime_identity,
+                    persisted_capsule,
+                    dispatch_id=dispatch_id,
+                ),
+                _dispatch_lifecycle_event(
+                    runtime_identity,
+                    "execution.session.completed",
+                    dispatch_id=dispatch_id,
+                    runtime_handle=None,
+                    result_summary="[TASK_COMPLETE] recovered",
+                    session_id="codex-completed-session",
+                ),
+            ]
+        )
+
+        result = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content=ac_content,
+            session_id="session-dispatch-completed-recovery",
+            tools=["Read", "Edit"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship",
+            node_identity=node_identity,
+        )
+
+        assert result.success is True
+        assert result.final_message == "[TASK_COMPLETE] recovered"
+        assert result.session_id == "codex-completed-session"
+        assert runtime.calls == 0
+        assert (
+            len(
+                [
+                    event
+                    for event in appended_events
+                    if event.type == "execution.ac.attempt.dispatched"
+                ]
+            )
+            == 1
+        )
+
     @pytest.mark.parametrize(
         "terminal_event_type",
-        [None, "execution.session.completed", "execution.session.failed"],
+        [None, "execution.session.failed"],
     )
     @pytest.mark.asyncio
     async def test_atomic_ac_refuses_fresh_dispatch_after_unresumable_tool_effect(
@@ -9726,13 +11139,14 @@ class TestParallelACExecutor:
                 },
             }
         )
+        event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=_FinalMessageRuntime(
                 'Done.\n```json\n{"files_touched":["output.txt"]}\n```',
                 native_session_id="opencode-session-single-shot-contract",
                 cwd=str(tmp_path),
             ),
-            event_store=AsyncMock(),
+            event_store=event_store,
             console=MagicMock(),
             enable_decomposition=False,
             execution_profile=load_profile("artifact"),
@@ -9755,6 +11169,15 @@ class TestParallelACExecutor:
         assert result.success is True
         assert result.verify_gate_outcome is not None
         assert counter.read_text(encoding="utf-8") == "1"
+        completed_event = next(
+            event for event in appended_events if event.type == "execution.session.completed"
+        )
+        assert completed_event.data["verify_gate_outcome"] == {
+            "passed": True,
+            "reason": None,
+            "output_tail": "",
+            "missing_artifacts": [],
+        }
 
         finalized = await executor._apply_verify_gate(
             seed=seed,
@@ -9766,6 +11189,170 @@ class TestParallelACExecutor:
 
         assert finalized.success is True
         assert counter.read_text(encoding="utf-8") == "1"
+
+    @pytest.mark.asyncio
+    async def test_completed_recovery_reuses_durable_verify_outcome_without_command_replay(
+        self, tmp_path: Any
+    ) -> None:
+        """Crash recovery never repeats a verify command that already ran once."""
+        (tmp_path / "output.txt").write_text("done\n", encoding="utf-8")
+        counter = tmp_path / "verify-count.txt"
+        counter.write_text("1", encoding="utf-8")
+        command = (
+            "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
+            "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+            'raise SystemExit(0 if n == 0 else 7)"'
+        )
+        seed = Seed.from_dict(
+            {
+                "goal": "Create output.txt",
+                "task_type": "artifact",
+                "acceptance_criteria": [
+                    {
+                        "description": "Create output.txt once.",
+                        "expected_artifacts": ["output.txt"],
+                        "verify_command": command,
+                    }
+                ],
+                "ontology_schema": {
+                    "name": "RecoveredArtifact",
+                    "description": "Recovered artifact contract.",
+                    "fields": [],
+                },
+                "metadata": {"ambiguity_score": 0.0, "generation_mode": "test"},
+            }
+        )
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = str(tmp_path)
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="must not run")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        ac_spec = seed.acceptance_criteria[0]
+        assert isinstance(ac_spec, AcceptanceCriterionSpec)
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="session-completed-verify-recovery",
+            ac_index=0,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content=ac_spec.description,
+            session_id="session-completed-verify-recovery",
+            seed_goal=seed.goal,
+            workspace=str(tmp_path),
+            node_identity=node_identity,
+            ac_spec=ac_spec,
+        )
+        dispatch_id = "7" * 32
+        appended_events.extend(
+            [
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
+                _dispatched_capsule_event(
+                    runtime_identity,
+                    persisted_capsule,
+                    dispatch_id=dispatch_id,
+                ),
+                _dispatch_lifecycle_event(
+                    runtime_identity,
+                    "execution.session.completed",
+                    dispatch_id=dispatch_id,
+                    runtime_handle=None,
+                    result_summary="already verified",
+                    session_id="completed-provider-session",
+                    extra_data={
+                        "verify_gate_outcome": {
+                            "passed": True,
+                            "reason": None,
+                            "output_tail": "",
+                            "missing_artifacts": [],
+                        }
+                    },
+                ),
+            ]
+        )
+
+        recovered = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content=ac_spec.description,
+            session_id="session-completed-verify-recovery",
+            tools=["Read", "Edit"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal=seed.goal,
+            node_identity=node_identity,
+            ac_spec=ac_spec,
+        )
+        finalized = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=recovered,
+            session_id="session-completed-verify-recovery",
+            execution_id="session-completed-verify-recovery",
+        )
+
+        assert finalized.success is True
+        assert finalized.verify_gate_outcome is not None
+        assert finalized.verify_gate_outcome.passed is True
+        assert runtime.calls == 0
+        assert counter.read_text(encoding="utf-8") == "1"
+
+    @pytest.mark.asyncio
+    async def test_completed_recovery_without_verify_outcome_refuses_command_replay(
+        self,
+    ) -> None:
+        """Legacy completion without a cached command verdict fails closed."""
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        executor._execute_atomic_ac = AsyncMock(
+            side_effect=CompletedACExecutionError(
+                "already completed",
+                result_summary="legacy completion",
+                session_id="legacy-provider-session",
+            )
+        )
+
+        with pytest.raises(
+            AmbiguousACExecutionError,
+            match="missing its non-idempotent verify-command outcome",
+        ):
+            await executor._execute_single_ac(
+                ac_index=0,
+                ac_content="Run the command once",
+                session_id="session-missing-verify-outcome",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="system",
+                seed_goal="Ship",
+                ac_spec=AcceptanceCriterionSpec(
+                    description="Run the command once",
+                    verify_command="apply-once",
+                ),
+            )
 
     @pytest.mark.asyncio
     async def test_verify_gate_recovers_failed_artifact_result_when_contract_passes(
@@ -11617,6 +13204,41 @@ class TestParallelACExecutor:
         assert event_store.append.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_completed_verify_outcome_rejects_oversized_durable_projection(self) -> None:
+        """Verify command output cannot amplify the durable completion stream."""
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity = executor._resolve_ac_runtime_identity(
+            0,
+            execution_context_id="exec_oversized_verify_outcome",
+            retry_attempt=0,
+        )
+
+        with pytest.raises(ValueError, match="verify outcome exceeds the size limit"):
+            await executor._emit_ac_runtime_event(
+                event_type="execution.session.completed",
+                runtime_identity=runtime_identity,
+                ac_content="Bound the durable verify outcome",
+                runtime_handle=None,
+                execution_id="exec_oversized_verify_outcome",
+                session_id="server-oversized",
+                result_summary="[TASK_COMPLETE]",
+                success=True,
+                verify_gate_outcome=_VerifyGateOutcome(
+                    passed=True,
+                    reason=None,
+                    output_tail="x" * 65_536,
+                ),
+            )
+
+        event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_restarted_executor_loads_persisted_runtime_handle_for_same_attempt(self) -> None:
         """A fresh executor should rehydrate the same-attempt runtime handle from events."""
 
@@ -11696,18 +13318,16 @@ class TestParallelACExecutor:
         event_store.replay = AsyncMock(
             return_value=[
                 _compiled_capsule_event(runtime_identity, persisted_capsule),
-                BaseEvent(
-                    type="execution.session.started",
-                    aggregate_type="execution",
-                    aggregate_id="orch_123_ac_2",
-                    data={
-                        "retry_attempt": 0,
-                        "session_state_path": (
-                            "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_2.implementation_session"
-                        ),
-                        "runtime": persisted_handle.to_dict(),
-                    },
+                _dispatched_capsule_event(
+                    runtime_identity,
+                    persisted_capsule,
+                    dispatch_id="e" * 32,
+                ),
+                _dispatch_lifecycle_event(
+                    runtime_identity,
+                    "execution.session.started",
+                    dispatch_id="e" * 32,
+                    runtime_handle=persisted_handle,
                 ),
             ]
         )
@@ -11854,10 +13474,10 @@ class TestParallelACExecutor:
         assert result_handle == expected_handle
 
     @pytest.mark.asyncio
-    async def test_restarted_executor_prefers_latest_resumed_runtime_handle_for_same_attempt(
+    async def test_restarted_executor_rejects_conflicting_runtime_sessions_for_same_dispatch(
         self,
     ) -> None:
-        """Resume should hydrate from the newest active lifecycle event for the same attempt."""
+        """Replay order cannot choose between conflicting active provider sessions."""
 
         class _StubResumedHandleRuntime:
             def __init__(self) -> None:
@@ -11929,6 +13549,7 @@ class TestParallelACExecutor:
                 "server_session_id": "server-started",
                 "ac_capsule_version": persisted_capsule.version,
                 "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_dispatch_id": "f" * 32,
                 "ac_session_origin": "fresh",
             },
         )
@@ -11943,62 +13564,42 @@ class TestParallelACExecutor:
                 "server_session_id": "server-resumed",
                 "ac_capsule_version": persisted_capsule.version,
                 "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_dispatch_id": "f" * 32,
                 "ac_session_origin": "restored_same_attempt",
             },
         )
         event_store.replay = AsyncMock(
             return_value=[
                 _compiled_capsule_event(runtime_identity, persisted_capsule),
-                BaseEvent(
-                    type="execution.session.started",
-                    aggregate_type="execution",
-                    aggregate_id="orch_123_ac_2",
-                    data={
-                        "retry_attempt": 0,
-                        "session_state_path": (
-                            "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_2.implementation_session"
-                        ),
-                        "runtime": started_handle.to_dict(),
-                    },
+                _dispatched_capsule_event(
+                    runtime_identity,
+                    persisted_capsule,
+                    dispatch_id="f" * 32,
                 ),
-                BaseEvent(
-                    type="execution.session.resumed",
-                    aggregate_type="execution",
-                    aggregate_id="orch_123_ac_2",
-                    data={
-                        "retry_attempt": 0,
-                        "session_state_path": (
-                            "execution.workflows.orch_123.acceptance_criteria."
-                            "ac_2.implementation_session"
-                        ),
-                        "runtime": resumed_handle.to_dict(),
-                    },
+                _dispatch_lifecycle_event(
+                    runtime_identity,
+                    "execution.session.started",
+                    dispatch_id="f" * 32,
+                    runtime_handle=started_handle,
+                ),
+                _dispatch_lifecycle_event(
+                    runtime_identity,
+                    "execution.session.resumed",
+                    dispatch_id="f" * 32,
+                    runtime_handle=resumed_handle,
                 ),
             ]
         )
         event_store.append = AsyncMock()
 
-        result = await executor._execute_atomic_ac(
-            ac_index=1,
-            ac_content=ac_content,
-            session_id="orch_123",
-            tools=["Read", "Edit"],
-            system_prompt="system",
-            seed_goal="Ship the feature",
-            depth=0,
-            start_time=datetime.now(UTC),
-            retry_attempt=0,
-        )
-
-        resume_handle = runtime.calls[0]["resume_handle"]
-        assert isinstance(resume_handle, RuntimeHandle)
-        assert resume_handle.native_session_id == "opencode-session-resumed"
-        assert resume_handle.metadata["server_session_id"] == "server-resumed"
-        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
-        assert result.runtime_handle is not None
-        assert result.runtime_handle.native_session_id == resume_handle.native_session_id
-        assert result.runtime_handle.metadata == resume_handle.metadata
+        with pytest.raises(AmbiguousACExecutionError, match="conflicting reusable"):
+            await executor._load_persisted_ac_runtime_handle(
+                1,
+                execution_context_id="orch_123",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
 
     @pytest.mark.asyncio
     async def test_restarted_executor_does_not_cross_resume_into_another_execution_context(

@@ -422,6 +422,8 @@ class ACExecutionCapsuleManifest:
         references = raw.get("context_references")
         if not isinstance(references, list):
             raise ValueError("capsule manifest context references are invalid")
+        if len(references) > MAX_AC_CONTEXT_REFERENCES:
+            raise ValueError("capsule manifest context reference limit exceeded")
         node_id = raw.get("node_id")
         if node_id is not None and not isinstance(node_id, str):
             raise ValueError("capsule manifest node id is invalid")

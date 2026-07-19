@@ -25,9 +25,9 @@ the existing deterministic gate/evidence system.
 ## The Product Loop
 
 ```text
-GRILL -> COMPILE -> PAGE -> RUN -> PROVE -> LEARN
-  ^                                         |
-  +-----------------------------------------+
+GRILL -> COMPILE -> CAPSULE -> PAGE -> RUN -> PROVE -> LEARN
+  ^                                                    |
+  +----------------------------------------------------+
 ```
 
 ### 1. Grill — preserve reasoning coherence
@@ -57,7 +57,8 @@ verifiable outcome and bounded blast radius, not because it has an arbitrary
 token count.
 
 Operationally, each leaf should be expected to fit one fresh model context. A
-rough 100k-token smart-zone target is a planning heuristic. If a unit cannot fit
+configurable 140k-token continuation ceiling is an advisory attention policy,
+not an atomicity definition or a universal provider limit. If a unit cannot fit
 but still has only one acceptance gate, it remains one AC and may use a physical
 continuation segment; if it contains multiple independently verifiable outcomes,
 the compiler splits it before dispatch.
@@ -112,6 +113,24 @@ the authoritative workspace, pages additional context as needed, and emits
 normalized tool/output events. Native provider resume is allowed only within the
 same AC attempt after a crash; a handle can never cross an AC, retry, workspace,
 or authority boundary.
+
+Ouroboros persists two distinct pre-effect transitions: the authority-bearing
+`execution.ac.capsule.compiled` event, then
+`execution.ac.attempt.dispatched` immediately before entering the provider.
+Every provider entry gets a unique `ac_dispatch_id`, which is propagated into
+its lifecycle events. Each dispatch also names its exact predecessor, forming a
+single validated chain whose unique head is the only recoverable boundary.
+Recovery therefore correlates by durable identity rather than timestamp,
+replay position, or lifecycle-event priority. Only a correlated reusable
+same-attempt handle at the head may resume; a failed head without one remains
+ambiguous, while a completed head blocks same-attempt redispatch as already
+terminal. Completed lifecycle records include the bounded verify-gate result,
+preventing a crash from replaying a potentially non-idempotent verify command.
+The dispatch event stores only minimal reconnect and authority fields: workspace
+is rebound from the current capsule before validation, and transcript paths,
+tool catalogs, capability graphs, control-plane projections, and arbitrary
+metadata are excluded. This closes the pre-first-message crash gap without
+turning the durable event stream into a copy of provider context.
 
 When one genuinely atomic AC outgrows a physical session, Ouroboros **sheds** the
 provider context:

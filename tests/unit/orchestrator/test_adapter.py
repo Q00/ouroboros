@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from types import ModuleType
 from typing import Any, get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock, patch
@@ -601,6 +602,10 @@ class TestRuntimeHandle:
             updated_at="2026-03-13T09:00:00+00:00",
             metadata={
                 "ac_id": "ac_2",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_capsule_version": 2,
+                "ac_dispatch_id": "d" * 32,
+                "ac_session_origin": "fresh",
                 "server_session_id": "server-42",
                 "session_attempt_id": "ac_2_attempt_2",
                 "session_scope_id": "ac_2",
@@ -626,6 +631,10 @@ class TestRuntimeHandle:
             "approval_mode": "acceptEdits",
             "metadata": {
                 "ac_id": "ac_2",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_capsule_version": 2,
+                "ac_dispatch_id": "d" * 32,
+                "ac_session_origin": "fresh",
                 "server_session_id": "server-42",
                 "session_attempt_id": "ac_2_attempt_2",
                 "session_scope_id": "ac_2",
@@ -647,6 +656,122 @@ class TestRuntimeHandle:
         assert restored.session_scope_id == "ac_2"
         assert restored.session_attempt_id == "ac_2_attempt_2"
         assert "runtime_event_type" not in restored.metadata
+
+    def test_dispatch_recovery_dict_excludes_workspace_and_unbounded_metadata(self) -> None:
+        """The provider-boundary event stores only reconnect and AC authority state."""
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-session-1",
+            conversation_id="conversation-1",
+            previous_response_id="response-1",
+            transcript_path="/secret/transcript.jsonl",
+            cwd="/private/worktree",
+            approval_mode="acceptEdits",
+            metadata={
+                "ac_id": "ac_1",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_capsule_version": 2,
+                "ac_dispatch_id": "d" * 32,
+                "ac_session_origin": "fresh",
+                "session_attempt_id": "ac_1_attempt_1",
+                "session_scope_id": "ac_1",
+                "server_session_id": "server-1",
+                "tool_catalog": [{"name": "ExternalTool", "description": "x" * 10_000}],
+                "capability_graph": {"nodes": ["x"] * 1_000},
+                "control_plane": {"rules": ["x"] * 1_000},
+                "provider_secret": "drop-me",
+            },
+        )
+
+        persisted = handle.to_dispatch_recovery_dict()
+
+        assert persisted == {
+            "backend": "codex_cli",
+            "kind": "implementation_session",
+            "native_session_id": "codex-session-1",
+            "conversation_id": "conversation-1",
+            "previous_response_id": "response-1",
+            "approval_mode": "acceptEdits",
+            "metadata": {
+                "ac_id": "ac_1",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_capsule_version": 2,
+                "ac_dispatch_id": "d" * 32,
+                "ac_session_origin": "fresh",
+                "session_attempt_id": "ac_1_attempt_1",
+                "session_scope_id": "ac_1",
+                "server_session_id": "server-1",
+            },
+        }
+        restored = RuntimeHandle.from_dispatch_recovery_dict(persisted)
+        assert restored is not None
+        assert restored.native_session_id == "codex-session-1"
+        projected = RuntimeHandle.from_persisted_recovery_projection(handle.to_dict())
+        assert projected is not None
+        assert projected.native_session_id == "codex-session-1"
+        assert "tool_catalog" not in projected.metadata
+        assert "capability_graph" not in projected.metadata
+        assert "control_plane" not in projected.metadata
+
+        with_workspace = {**persisted, "cwd": "/untrusted/worktree"}
+        with pytest.raises(ValueError, match="invalid shape"):
+            RuntimeHandle.from_dispatch_recovery_dict(with_workspace)
+
+        with_unbounded_metadata = {
+            **persisted,
+            "metadata": {**persisted["metadata"], "tool_catalog": [{"name": "leak"}]},
+        }
+        with pytest.raises(ValueError, match="not allowlisted"):
+            RuntimeHandle.from_dispatch_recovery_dict(with_unbounded_metadata)
+
+        oversized = {**persisted, "native_session_id": "x" * 70_000}
+        with pytest.raises(ValueError, match="size limit"):
+            RuntimeHandle.from_dispatch_recovery_dict(oversized)
+        with pytest.raises(ValueError, match="size limit"):
+            replace(handle, native_session_id="x" * 70_000).to_dispatch_recovery_dict()
+
+    def test_persisted_recovery_projection_accepts_opencode_and_legacy_provider_shape(
+        self,
+    ) -> None:
+        """OpenCode's compact lifecycle payload and provider alias both remain resumable."""
+        handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="opencode-session-compact",
+            conversation_id="not-persisted-by-opencode",
+            previous_response_id="not-persisted-by-opencode",
+            cwd="/private/worktree",
+            approval_mode="acceptEdits",
+            metadata={
+                "ac_id": "ac_1",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_capsule_version": 2,
+                "ac_dispatch_id": "d" * 32,
+                "ac_session_origin": "fresh",
+                "session_attempt_id": "ac_1_attempt_1",
+                "session_scope_id": "ac_1",
+                "server_session_id": "server-compact",
+                "provider_secret": "drop-me",
+            },
+        )
+        compact = handle.to_persisted_dict()
+        assert "conversation_id" not in compact
+        assert "previous_response_id" not in compact
+
+        restored = RuntimeHandle.from_persisted_recovery_projection(compact)
+        assert restored is not None
+        assert restored.backend == "opencode"
+        assert restored.native_session_id == "opencode-session-compact"
+        assert restored.metadata["server_session_id"] == "server-compact"
+        assert "provider_secret" not in restored.metadata
+
+        legacy_provider = {**compact, "provider": compact["backend"]}
+        legacy_provider.pop("backend")
+        restored_legacy = RuntimeHandle.from_persisted_recovery_projection(legacy_provider)
+        assert restored_legacy is not None
+        assert restored_legacy.backend == "opencode"
+        assert restored_legacy.native_session_id == "opencode-session-compact"
 
     def test_opencode_handle_exposes_reconnect_identifiers(self) -> None:
         """OpenCode handles should expose the reconnect ids carried in metadata."""

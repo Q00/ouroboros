@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+import json
 import math
 import os
 from pathlib import Path
@@ -33,6 +34,9 @@ from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
+from ouroboros.orchestrator.evidence.runtime_metadata import (
+    _AC_RUNTIME_OWNERSHIP_METADATA_KEYS,
+)
 from ouroboros.orchestrator.rate_limit import (
     DEFAULT_ANTHROPIC_RPM_CEILING,
     DEFAULT_ANTHROPIC_TPM_CEILING,
@@ -70,6 +74,10 @@ _OPENCODE_PERSISTED_METADATA_KEYS = frozenset(
     {
         "ac_id",
         "ac_index",
+        "ac_capsule_fingerprint",
+        "ac_capsule_version",
+        "ac_dispatch_id",
+        "ac_session_origin",
         "attempt_number",
         "depth",
         "display_path",
@@ -109,6 +117,28 @@ _OPENCODE_PERSISTED_METADATA_KEYS = frozenset(
         "turn_number",
     }
 )
+
+_DISPATCH_RECOVERY_METADATA_KEYS = _AC_RUNTIME_OWNERSHIP_METADATA_KEYS | frozenset(
+    {
+        "ac_capsule_fingerprint",
+        "ac_capsule_version",
+        "ac_dispatch_id",
+        "ac_session_origin",
+        "server_session_id",
+    }
+)
+_DISPATCH_RECOVERY_PAYLOAD_KEYS = frozenset(
+    {
+        "approval_mode",
+        "backend",
+        "conversation_id",
+        "kind",
+        "metadata",
+        "native_session_id",
+        "previous_response_id",
+    }
+)
+_MAX_DISPATCH_RECOVERY_PAYLOAD_CHARS = 65_536
 
 _RUNTIME_TERMINAL_STATES = frozenset({"cancelled", "completed", "failed", "terminated"})
 _RUNTIME_LIFECYCLE_STATE_BY_EVENT_TYPE = {
@@ -607,7 +637,7 @@ class RuntimeHandle:
 
     def snapshot(self) -> dict[str, Any]:
         """Return a serializable snapshot of lifecycle and control state."""
-        return {
+        payload = {
             "backend": self.backend,
             "kind": self.kind,
             "native_session_id": self.native_session_id,
@@ -624,6 +654,7 @@ class RuntimeHandle:
             "can_terminate": self.can_terminate,
             "metadata": dict(self.metadata),
         }
+        return payload
 
     async def observe(self) -> dict[str, Any]:
         """Return the latest observable runtime state for this handle."""
@@ -674,6 +705,91 @@ class RuntimeHandle:
             "approval_mode": self.approval_mode,
             "metadata": metadata,
         }
+
+    def to_dispatch_recovery_dict(self) -> dict[str, Any]:
+        """Serialize only authority and reconnect state for a dispatch boundary.
+
+        The pre-provider dispatch event is correctness-bearing and replayed on
+        every crash recovery.  It must not duplicate workspace paths, transcript
+        locations, tool schemas, capability graphs, control-plane projections,
+        or arbitrary provider metadata.  The current capsule rebinds workspace
+        authority before a recovered handle is validated.
+        """
+        metadata = {
+            key: value
+            for key, value in self.metadata.items()
+            if key in _DISPATCH_RECOVERY_METADATA_KEYS
+        }
+        payload = {
+            "backend": self.backend,
+            "kind": self.kind,
+            "native_session_id": self.native_session_id,
+            "conversation_id": self.conversation_id,
+            "previous_response_id": self.previous_response_id,
+            "approval_mode": self.approval_mode,
+            "metadata": metadata,
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if len(encoded) > _MAX_DISPATCH_RECOVERY_PAYLOAD_CHARS:
+            raise ValueError("dispatch recovery handle exceeds the size limit")
+        return payload
+
+    @classmethod
+    def from_dispatch_recovery_dict(cls, value: object) -> RuntimeHandle | None:
+        """Parse the bounded, allowlisted provider-boundary recovery contract."""
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != _DISPATCH_RECOVERY_PAYLOAD_KEYS:
+            raise ValueError("dispatch recovery handle has an invalid shape")
+        metadata = value.get("metadata")
+        if not isinstance(metadata, dict):
+            raise ValueError("dispatch recovery handle metadata is invalid")
+        unknown_metadata = set(metadata) - _DISPATCH_RECOVERY_METADATA_KEYS
+        if unknown_metadata:
+            raise ValueError("dispatch recovery handle metadata is not allowlisted")
+        try:
+            encoded = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("dispatch recovery handle is not serializable") from exc
+        if len(encoded) > _MAX_DISPATCH_RECOVERY_PAYLOAD_CHARS:
+            raise ValueError("dispatch recovery handle exceeds the size limit")
+        return cls.from_dict(value)
+
+    @classmethod
+    def from_persisted_recovery_projection(cls, value: object) -> RuntimeHandle | None:
+        """Project a full lifecycle handle onto the bounded recovery contract."""
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("persisted runtime handle is invalid")
+        raw_metadata = value.get("metadata")
+        if not isinstance(raw_metadata, Mapping):
+            raise ValueError("persisted runtime handle metadata is invalid")
+        metadata = {
+            key: raw_metadata[key]
+            for key in _DISPATCH_RECOVERY_METADATA_KEYS
+            if key in raw_metadata
+        }
+        payload = {
+            "backend": value.get("backend", value.get("provider")),
+            "kind": value.get("kind", "agent_runtime"),
+            "native_session_id": value.get("native_session_id"),
+            "conversation_id": value.get("conversation_id"),
+            "previous_response_id": value.get("previous_response_id"),
+            "approval_mode": value.get("approval_mode"),
+            "metadata": metadata,
+        }
+        return cls.from_dispatch_recovery_dict(payload)
 
     def to_session_state_dict(self) -> dict[str, Any]:
         """Serialize only the runtime state required to resume a session later.

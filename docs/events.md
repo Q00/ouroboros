@@ -120,6 +120,47 @@ also records `omitted_context_count` and a rolling `omitted_context_digest`.
 This is an auditable bounded-retrieval fact, not a claim that a page resolver
 already exists.
 
+### execution.ac.attempt.dispatched
+
+Authority-bearing transition persisted immediately before Ouroboros invokes a
+provider for an AC attempt, including resumed SessionSignal turns. A compiled
+capsule alone does not prove whether a particular provider boundary was crossed;
+this event makes every entry distinct and durable. Persistence failure blocks
+that provider invocation.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ac_dispatch_id` | `string` | Unique correlation id for this exact provider entry |
+| `previous_ac_dispatch_id` | `string \| null` | Exact predecessor boundary in the same attempt; `null` only for the chain root |
+| `execution_id` | `string` | Durable execution/run anchor |
+| `session_id` | `string` | Orchestrator session id |
+| `capsule_fingerprint` | `string` | Capsule authority used for this dispatch |
+| `session_origin` | `string` | `"fresh"` or `"restored_same_attempt"` |
+| `runtime_backend` | `string \| null` | Provider-neutral runtime selector |
+| `runtime` | `object \| null` | Minimal reconnect/authority handle; excludes cwd, transcript, tool catalog, capability graph, control plane, and arbitrary metadata |
+
+Lifecycle events carry the same `ac_dispatch_id`. Dispatch events form one
+validated predecessor chain, and recovery considers only its unique head; it
+never infers a successor from timestamps, replay-list position, or lifecycle
+event type priority across boundaries. Only a correlated reusable same-attempt
+handle at that head can resume. A failed head without such a handle remains
+ambiguous, because provider effects may precede the reported adapter failure. A
+completed head blocks same-attempt redispatch as already terminal and
+reconstructs its durable successful result for the caller. When the AC ran a
+verify gate, the completed lifecycle also carries a bounded exact-shape
+`verify_gate_outcome`, so crash recovery does not replay a potentially
+non-idempotent `verify_command`. Recovery must not manufacture a fresh provider
+session merely because no first streamed message became durable.
+
+If `execution.session.recovered` explicitly links a failed resume id to a
+replacement resume id, that durable edge supersedes the failed handle. Absent
+such a linkage, conflicting session ids or equally authoritative response-chain
+cursors remain ambiguous and fail closed.
+
+The recovery handle contract is exact-shape, metadata-allowlisted, and bounded
+to 64 KiB before deserialization. Persisted payloads cannot smuggle excluded
+runtime context back into replay through unknown fields.
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.
