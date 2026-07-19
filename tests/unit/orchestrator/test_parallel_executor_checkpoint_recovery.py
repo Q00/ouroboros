@@ -3680,3 +3680,156 @@ class TestDeferredAnchorRetryPersistsCoherentSnapshot:
         assert sorted(dispatched) == [1, 2]
         assert resumed_result.all_succeeded
         assert resumed_result.execution_id == "exec-original"
+
+
+class TestRunnerAuditRecordsRestoredExecutionSettings:
+    """Round-16 finding #4 (BLOCKING): RC3 recovery restores the original
+    run's execution-semantic settings INSIDE the executor (rounds 9-15),
+    and dispatch correctly uses them — but the RUNNER persisted its own
+    pre-recovery ``effective_workers``/``max_decomposition_depth`` into
+    the completion summary / verification report, so the durable audit
+    record described settings that were never the ones executed. The
+    executor must carry the EXECUTED values back through
+    ``ParallelExecutionResult`` (the round-10 #3 restored-execution_id
+    pattern) and the runner must record those."""
+
+    @pytest.mark.asyncio
+    async def test_completion_summary_reflects_restored_settings(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+        from ouroboros.orchestrator.runner import OrchestratorRunner
+        from ouroboros.orchestrator.session import SessionTracker
+
+        seed = Seed(
+            goal="Config-drift crash recovery audit",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            execution_levels=((0,), (1,)),
+        )
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Original run: dispatched under workers=4 / depth=5, crashes
+        # during level 2, leaving a checkpoint that persists those
+        # execution semantics (rounds 12/15).
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        original = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=store,
+            max_concurrent=4,
+            max_decomposition_depth=5,
+        )
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            raise RuntimeError("simulated process crash during level 2")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException, match="simulated process crash|unhandled errors"):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["execution_semantics"]["max_concurrent"] == 4
+        assert saved.value.state["execution_semantics"]["max_decomposition_depth"] == 5
+
+        # --- Restarted process: the RUNNER is now configured DIFFERENTLY
+        # (workers=1, depth=2). The executor's recovery restores and
+        # dispatches under the ORIGINAL settings; the runner's durable
+        # audit records must describe those, not its own config.
+        mock_adapter = MagicMock(working_directory=str(tmp_path), runtime_backend="claude")
+        mock_events = AsyncMock()
+        mock_events.replay = AsyncMock(return_value=[])
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_events,
+            MagicMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            max_parallel_workers=1,
+            max_decomposition_depth=2,
+        )
+        tracker = SessionTracker.create("exec-restarted", seed.metadata.seed_id)
+        dispatched: list[list[int]] = []
+
+        async def _resumed_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=str(seed.acceptance_criteria[idx]),
+                    success=True,
+                )
+                for idx in batch
+            ]
+
+        class _RecoveringExecutor(ParallelACExecutor):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)  # type: ignore[arg-type]
+                self._run_batch_with_verify_and_retry = AsyncMock(  # type: ignore[method-assign]
+                    side_effect=_resumed_stage_runner
+                )
+
+        mock_mark_completed = AsyncMock(return_value=Result.ok(None))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                _RecoveringExecutor,
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id="exec-restarted",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok
+        # The recovery genuinely resumed: only the unfinished AC dispatched.
+        assert dispatched == [[1]]
+        summary = mock_mark_completed.await_args.args[1]
+        # The durable audit record describes the settings that EXECUTED —
+        # the checkpoint-restored originals, not this process's
+        # pre-recovery configuration.
+        assert summary["effective_parallel_workers"] == 4
+        assert summary["max_decomposition_depth"] == 5
+        # The requested (current-process) worker config remains documented
+        # as the request it is.
+        assert summary["max_parallel_workers"] == 1

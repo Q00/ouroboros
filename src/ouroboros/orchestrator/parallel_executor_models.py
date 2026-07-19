@@ -309,6 +309,24 @@ class ParallelExecutionResult:
             Callers MUST key all post-execution, execution-scoped
             bookkeeping off THIS value. ``None`` only for legacy
             constructions that predate the field.
+        effective_parallel_workers: Round-16 finding #4 (BLOCKING): the
+            shared-workspace fan-out (``max_concurrent``) this run ACTUALLY
+            dispatched under. Normally the value the caller constructed the
+            executor with — but RC3 checkpoint recovery restores the
+            ORIGINAL run's persisted execution semantics (rounds 9-15), so
+            after a config-drift crash-recovery the executed value can
+            differ from the caller's pre-recovery view. Like
+            ``execution_id`` above, that restoration used to stay inside
+            the executor: the runner persisted ITS OWN pre-recovery worker
+            count into the completion summary, so the durable audit record
+            described settings that were NOT the ones executed. Callers
+            MUST use this value (when present) in any durable record
+            describing what ran. ``None`` only for legacy constructions
+            that predate the field.
+        max_decomposition_depth: Round-16 finding #4 (BLOCKING): the
+            decomposition depth limit this run ACTUALLY executed under
+            (possibly checkpoint-restored — see
+            ``effective_parallel_workers``). Same audit contract.
     """
 
     results: tuple[ACExecutionResult, ...]
@@ -324,6 +342,8 @@ class ParallelExecutionResult:
     total_duration_seconds: float = 0.0
     unconfirmed_durable_writes: tuple[str, ...] = ()
     execution_id: str | None = None
+    effective_parallel_workers: int | None = None
+    max_decomposition_depth: int | None = None
 
     @property
     def all_succeeded(self) -> bool:

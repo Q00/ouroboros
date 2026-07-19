@@ -5373,6 +5373,50 @@ class OrchestratorRunner:
         else:
             effective_exec_id = exec_id
 
+        # Round-16 finding #4 (BLOCKING): after a config-drift crash-
+        # recovery, the executor's RC3 restoration correctly DISPATCHED
+        # under the ORIGINAL run's execution-semantic settings (rounds
+        # 9-15) — but this runner still held its own pre-recovery view of
+        # ``effective_workers`` / ``_max_decomposition_depth`` and
+        # persisted THAT into the completion summary and verification
+        # report, so the durable audit record described settings that were
+        # never the ones executed. Adopt the executed values the result
+        # carries back (the exact pattern the restored ``execution_id``
+        # above established); legacy results without the fields keep the
+        # runner's own view.
+        executed_workers = getattr(parallel_result, "effective_parallel_workers", None)
+        if not (
+            isinstance(executed_workers, int)
+            and not isinstance(executed_workers, bool)
+            and executed_workers >= 1
+        ):
+            executed_workers = effective_workers
+        executed_decomposition_depth = getattr(parallel_result, "max_decomposition_depth", None)
+        if not (
+            isinstance(executed_decomposition_depth, int)
+            and not isinstance(executed_decomposition_depth, bool)
+            and executed_decomposition_depth >= 0
+        ):
+            executed_decomposition_depth = self._max_decomposition_depth
+        if (
+            executed_workers != effective_workers
+            or executed_decomposition_depth != self._max_decomposition_depth
+        ):
+            log.info(
+                "orchestrator.runner.recovered_execution_settings_adopted",
+                detail=(
+                    "checkpoint recovery restored the original run's "
+                    "execution settings inside the executor; the completion "
+                    "summary and verification report record those EXECUTED "
+                    "values, not this process's pre-recovery configuration"
+                ),
+                configured_effective_parallel_workers=effective_workers,
+                executed_effective_parallel_workers=executed_workers,
+                configured_max_decomposition_depth=self._max_decomposition_depth,
+                executed_max_decomposition_depth=executed_decomposition_depth,
+                session_id=tracker.session_id,
+            )
+
         # Determine overall success
         success = parallel_result.all_succeeded
         recoverable_failure_pause = None
@@ -5389,7 +5433,10 @@ class OrchestratorRunner:
         verification_report = render_parallel_verification_report(
             parallel_result,
             len(seed.acceptance_criteria),
-            max_decomposition_depth=self._max_decomposition_depth,
+            # Round-16 finding #4: the depth that actually governed this
+            # run's dispatch (checkpoint-restored on recovery), never the
+            # current process's pre-recovery configuration.
+            max_decomposition_depth=executed_decomposition_depth,
         )
         execution_summary = {
             "goal": seed.goal,
@@ -5405,9 +5452,16 @@ class OrchestratorRunner:
             "invalid_count": parallel_result.invalid_count,
             "skipped_count": parallel_result.skipped_count,
             "total_levels": execution_plan.total_stages,
-            "max_decomposition_depth": self._max_decomposition_depth,
+            # Round-16 finding #4 (BLOCKING): these two describe what this
+            # run ACTUALLY executed under — the checkpoint-restored values
+            # after a config-drift recovery, not the runner's pre-recovery
+            # view — because this summary is the durable audit record an
+            # operator reads to understand what ran. ``max_parallel_workers``
+            # deliberately stays the CURRENT process's requested config: it
+            # documents the request, not the execution.
+            "max_decomposition_depth": executed_decomposition_depth,
             "max_parallel_workers": self._max_parallel_workers,
-            "effective_parallel_workers": effective_workers,
+            "effective_parallel_workers": executed_workers,
             "verification_report": verification_report,
             # Round-8 finding #3: correctness-bearing durable writes the
             # bounded run-completion drain could not confirm persisted. A

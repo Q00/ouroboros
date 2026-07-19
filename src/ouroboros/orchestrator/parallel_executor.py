@@ -4544,6 +4544,15 @@ class ParallelACExecutor:
             # terminal-status / frugality bookkeeping to the SAME aggregate
             # instead of the fresh id it originally passed in.
             execution_id=execution_id,
+            # Round-16 finding #4 (BLOCKING): the execution-semantic scalars
+            # this run ACTUALLY dispatched under — possibly checkpoint-
+            # restored by RC3 recovery, in which case they differ from the
+            # values the caller constructed this executor with. Returned
+            # for the same reason as ``execution_id`` above: the caller's
+            # durable completion summary / verification report must
+            # describe what EXECUTED, never its own pre-recovery view.
+            effective_parallel_workers=self._max_concurrent,
+            max_decomposition_depth=self._max_decomposition_depth,
         )
 
     def _coerce_decomposition_decision(
