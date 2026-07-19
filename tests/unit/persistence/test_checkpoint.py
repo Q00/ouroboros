@@ -666,3 +666,15 @@ class TestRecoveryManager:
         assert result.is_ok
         assert result.value is not None
         assert result.value.phase == "phase1"  # Rolled back to older checkpoint
+
+    async def test_recover_propagates_all_levels_corrupt_checkpoint(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Unreadable durable state is not equivalent to a first launch."""
+        seed_id = "all-levels-corrupt"
+        checkpoint_store._get_checkpoint_path(seed_id).write_text("{ not json")
+
+        result = await RecoveryManager(checkpoint_store).recover(seed_id)
+
+        assert result.is_err
+        assert result.error.details["no_checkpoint_found"] is False

@@ -630,10 +630,13 @@ class RecoveryManager:
 
         if result.is_err:
             error = result.error
-            # Check if error is due to no checkpoint (normal for first run)
-            # Match both "not found" and "no valid checkpoint found"
-            error_msg_lower = error.message.lower()
-            if "not found" in error_msg_lower or "no valid checkpoint found" in error_msg_lower:
+            # ``CheckpointStore.load`` deliberately uses one human-readable
+            # message for both confirmed absence and an unreadable/corrupt
+            # rollback chain. Only the structured marker can distinguish an
+            # ordinary first run from an indeterminate read that may hide
+            # already-applied side effects; string matching here would turn
+            # corruption into permission to start fresh.
+            if error.details.get("no_checkpoint_found") is True:
                 print(f"No checkpoint found for {seed_id} - starting fresh")
                 return Result.ok(None)
 
