@@ -61,6 +61,13 @@ class LeafDispatchState:
     success: bool = False
     stalled: bool = False
     infra_fatal: bool = False
+    # True once this dispatch has emitted a durable tool-effect event
+    # (``execution.tool.started``/``...completed``). A stall that occurs after a
+    # tool effect cannot be re-dispatched under a bumped retry attempt: recovery
+    # filters the prior attempt's effect events, so a fresh dispatch would bypass
+    # the ambiguity guard and could duplicate a non-idempotent effect. The
+    # executor reads this to fail such stalls closed instead of retrying.
+    tool_effects_observed: bool = False
 
 
 # Fix 4 (round 3, BLOCKING): some runtime adapters (e.g.
@@ -525,6 +532,10 @@ class LeafDispatcher:
                     executor._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
                     executor._flush_console()
 
+                    # A dispatched tool effect is now durable; a subsequent stall
+                    # must fail closed rather than re-dispatch (see
+                    # ``LeafDispatchState.tool_effects_observed``).
+                    state.tool_effects_observed = True
                     await executor._event_emitter.emit_atomic_tool_started(
                         runtime_identity=runtime_identity,
                         dispatch_id=dispatch_id,
@@ -542,6 +553,7 @@ class LeafDispatcher:
                 else:
                     completed_tool_name = None
                 if completed_tool_name is not None:
+                    state.tool_effects_observed = True
                     await executor._event_emitter.emit_atomic_tool_completed(
                         runtime_identity=runtime_identity,
                         dispatch_id=dispatch_id,

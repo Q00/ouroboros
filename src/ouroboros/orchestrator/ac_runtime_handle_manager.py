@@ -63,6 +63,13 @@ _AC_EFFECT_EVENT_TYPES = frozenset(
     }
 )
 
+#: Provider-entry phases a durable dispatch boundary may open. ``primary``
+#: replays the original AC prompt on resume; ``session_signal_followup`` replays
+#: a Synapse signal turn. An absent value on a persisted dispatch predates the
+#: field and is treated as ``primary`` (follow-up dispatches never existed
+#: without it), so recovery never infers a new phase for legacy records.
+_AC_DISPATCH_KINDS = frozenset({"primary", "session_signal_followup"})
+
 
 class AmbiguousACExecutionError(RuntimeError):
     """A prior AC attempt may have external effects but cannot be resumed safely."""
@@ -808,6 +815,7 @@ class ACRuntimeHandleManager:
             matching_events: list[Any] = []
             dispatch_events: dict[str, Any] = {}
             dispatch_predecessors: dict[str, str | None] = {}
+            dispatch_kinds: dict[str, str] = {}
             for event in attempt_events:
                 event_data = event.data if isinstance(event.data, dict) else {}
                 if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
@@ -839,8 +847,37 @@ class ACRuntimeHandleManager:
                     "restored_same_attempt",
                 }:
                     raise ValueError("durable AC dispatch session origin is invalid")
+                # Resolve the provider-entry PHASE this dispatch opened. A dispatch
+                # persisted before this field existed is, by construction, a
+                # ``primary`` AC dispatch (SessionSignal follow-up dispatches never
+                # existed without it), so an absent value keeps that historical
+                # meaning without inferring anything new. An explicitly persisted
+                # follow-up must carry its signal identity/mode and exact input
+                # digest, or the record is corrupt and rejected — recovery must not
+                # resume a follow-up phase whose exact input it cannot prove.
+                dispatch_kind = event_data.get("dispatch_kind")
+                if dispatch_kind is None:
+                    dispatch_kind = "primary"
+                elif dispatch_kind not in _AC_DISPATCH_KINDS:
+                    raise ValueError("durable AC dispatch kind is invalid")
+                if dispatch_kind == "session_signal_followup":
+                    signal_id = event_data.get("signal_id")
+                    signal_mode = event_data.get("signal_mode")
+                    input_digest = event_data.get("follow_up_input_digest")
+                    if (
+                        not isinstance(signal_id, str)
+                        or not signal_id
+                        or not isinstance(signal_mode, str)
+                        or not signal_mode
+                        or not isinstance(input_digest, str)
+                        or not input_digest.startswith("sha256:")
+                    ):
+                        raise ValueError(
+                            "durable SessionSignal follow-up dispatch is missing phase identity"
+                        )
                 dispatch_events[dispatch_id] = event
                 dispatch_predecessors[dispatch_id] = predecessor_id
+                dispatch_kinds[dispatch_id] = dispatch_kind
 
             active_dispatch_id: str | None = None
             if dispatch_events:
@@ -1131,6 +1168,21 @@ class ACRuntimeHandleManager:
             if dispatch_events:
                 if active_dispatch_id is None:  # pragma: no cover - guarded by chain validation
                     raise ValueError("durable AC dispatch history has no active boundary")
+                # Fail closed on a non-primary chain head. The caller
+                # (``_execute_atomic_ac``) always replays the ORIGINAL AC prompt
+                # after this handle is returned, so resuming a SessionSignal
+                # follow-up head would re-run the AC's acceptance work. We do not
+                # reconstruct the exact follow-up phase from persisted metadata
+                # here, so the only safe outcome is to refuse resumption rather
+                # than repeat a possibly non-idempotent AC prompt.
+                active_dispatch_kind = dispatch_kinds[active_dispatch_id]
+                if active_dispatch_kind != "primary":
+                    raise AmbiguousACExecutionError(
+                        "AC recovery resolved a non-primary provider-entry phase "
+                        f"({active_dispatch_kind}) as the active dispatch head; refusing to "
+                        "resume because replaying the original AC prompt would repeat "
+                        "acceptance work in the wrong phase"
+                    )
                 active_dispatch_candidates = candidate_handles[active_dispatch_id]
                 if not active_dispatch_candidates:
                     if active_dispatch_id in failed_dispatches:

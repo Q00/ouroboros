@@ -118,6 +118,10 @@ class ExecutionEventEmitter:
         capsule_fingerprint: str,
         session_origin: str,
         runtime_handle: RuntimeHandle | None,
+        dispatch_kind: str = "primary",
+        signal_id: str | None = None,
+        signal_mode: str | None = None,
+        follow_up_input_digest: str | None = None,
     ) -> None:
         """Persist the provider-boundary transition before invoking the runtime.
 
@@ -125,7 +129,35 @@ class ExecutionEventEmitter:
         the provider was entered. This second durable transition closes that
         crash gap: recovery must treat a dispatch without a resumable handle or
         terminal successor as an uncertain external-effect boundary.
+
+        ``dispatch_kind`` names the provider-entry PHASE this boundary opens. A
+        ``primary`` dispatch replays the original AC prompt; a
+        ``session_signal_followup`` dispatch replays a Synapse signal turn's
+        prompt instead. Recovery MUST distinguish them: resuming a follow-up
+        chain head while replaying the original AC prompt would repeat the AC's
+        acceptance work. Follow-up dispatches therefore persist the signal
+        identity/mode and the exact rendered follow-up input digest so recovery
+        can either reconstruct the exact phase or fail closed, never silently
+        fall back to the original prompt.
         """
+        if dispatch_kind not in {"primary", "session_signal_followup"}:
+            raise ValueError("AC dispatch kind is invalid")
+        follow_up_fields = (signal_id, signal_mode, follow_up_input_digest)
+        if dispatch_kind == "session_signal_followup":
+            if any(field is None for field in follow_up_fields):
+                raise ValueError(
+                    "SessionSignal follow-up dispatch requires signal id, mode, and input digest"
+                )
+            if not isinstance(signal_id, str) or not signal_id:
+                raise ValueError("SessionSignal follow-up dispatch signal id is invalid")
+            if not isinstance(signal_mode, str) or not signal_mode:
+                raise ValueError("SessionSignal follow-up dispatch signal mode is invalid")
+            if not isinstance(follow_up_input_digest, str) or not follow_up_input_digest.startswith(
+                "sha256:"
+            ):
+                raise ValueError("SessionSignal follow-up dispatch input digest is invalid")
+        elif any(field is not None for field in follow_up_fields):
+            raise ValueError("primary AC dispatch must not carry SessionSignal follow-up identity")
         if not isinstance(capsule_fingerprint, str) or not capsule_fingerprint.startswith(
             "sha256:"
         ):
@@ -160,6 +192,10 @@ class ExecutionEventEmitter:
                     **runtime_identity.to_metadata(),
                     "ac_dispatch_id": dispatch_id,
                     "previous_ac_dispatch_id": previous_dispatch_id,
+                    "dispatch_kind": dispatch_kind,
+                    "signal_id": signal_id,
+                    "signal_mode": signal_mode,
+                    "follow_up_input_digest": follow_up_input_digest,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "capsule_fingerprint": capsule_fingerprint,

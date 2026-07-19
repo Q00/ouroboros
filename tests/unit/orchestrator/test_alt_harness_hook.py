@@ -123,6 +123,80 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
 
 
 @pytest.mark.asyncio
+async def test_alternate_runtime_inherits_verify_policy_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocker #2: the alternate executor must inherit the operator's verify policy.
+
+    A verify command is an acceptance effect, so an operator who disabled verify
+    commands (or set a custom timeout) must have that policy honored on the
+    cross-harness redispatch path too. Without threading these, the throwaway alt
+    executor silently reverts to ``True``/600 and could run a disabled,
+    potentially non-idempotent verify command in the shared workspace.
+    """
+    adapter = MagicMock()
+    adapter.runtime_backend = "claude"
+    adapter.working_directory = "/tmp/work"
+    adapter.self_governs_rate_limit = True
+    executor = ParallelACExecutor(
+        adapter=adapter,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        cross_harness_redispatch=True,
+        run_verify_commands=False,
+        verify_command_timeout_seconds=123,
+    )
+
+    def _fake_create_agent_runtime(**_kwargs: object) -> MagicMock:
+        runtime = MagicMock()
+        runtime.runtime_backend = "codex_cli"
+        runtime.working_directory = "/tmp/work"
+        runtime.permission_mode = "bypassPermissions"
+        runtime.self_governs_rate_limit = True
+        return runtime
+
+    captured: dict[str, ParallelACExecutor] = {}
+
+    async def _fake_execute_single_ac(
+        _self: ParallelACExecutor,
+        **_kwargs: Any,
+    ) -> ACExecutionResult:
+        captured["alt"] = _self
+        return _succeeded()
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_factory.create_agent_runtime",
+        _fake_create_agent_runtime,
+    )
+    monkeypatch.setattr(ParallelACExecutor, "_execute_single_ac", _fake_execute_single_ac)
+
+    result = await executor._run_single_ac_on_backend(
+        "codex",
+        rerun_kwargs=_rerun_kwargs(),
+        retry_attempt=1,
+        decision=chr.AltHarnessDecision(
+            should_redispatch=True,
+            from_backend="claude",
+            to_backend="codex",
+            policy=None,
+            reason="test",
+        ),
+        runtime_identity=executor._resolve_ac_runtime_identity(
+            0,
+            execution_context_id="exec-1",
+        ),
+        failure_class="fabrication_suspected",
+    )
+
+    assert result is not None and result.success is True
+    alt_executor = captured["alt"]
+    assert alt_executor is not executor
+    assert alt_executor._run_verify_commands is False
+    assert alt_executor._verify_command_timeout_seconds == 123
+
+
+@pytest.mark.asyncio
 async def test_alternate_runtime_executes_through_fresh_capsule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -52,6 +52,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
+    _STALL_SENTINEL,
     MAX_STALL_RETRIES,
     STALL_TIMEOUT_SECONDS,
     ACExecutionOutcome,
@@ -1029,26 +1030,39 @@ def _dispatched_capsule_event(
     previous_dispatch_id: str | None = None,
     session_origin: str = "fresh",
     runtime_handle: RuntimeHandle | None = None,
+    dispatch_kind: str | None = None,
+    signal_id: str | None = None,
+    signal_mode: str | None = None,
+    follow_up_input_digest: str | None = None,
 ) -> BaseEvent:
     if runtime_handle is not None:
         runtime_handle = replace(
             runtime_handle,
             metadata={**runtime_handle.metadata, "ac_dispatch_id": dispatch_id},
         )
+    data: dict[str, Any] = {
+        **identity.to_metadata(),
+        "ac_dispatch_id": dispatch_id,
+        "previous_ac_dispatch_id": previous_dispatch_id,
+        "capsule_fingerprint": capsule.fingerprint,
+        "session_origin": session_origin,
+        "runtime": (
+            runtime_handle.to_dispatch_recovery_dict() if runtime_handle is not None else None
+        ),
+    }
+    # Only stamp the phase-identity fields when a caller opts in, so the default
+    # event shape reproduces a legacy dispatch (no ``dispatch_kind``) — the
+    # backward-compatible "treat absent as primary" recovery path.
+    if dispatch_kind is not None:
+        data["dispatch_kind"] = dispatch_kind
+        data["signal_id"] = signal_id
+        data["signal_mode"] = signal_mode
+        data["follow_up_input_digest"] = follow_up_input_digest
     return BaseEvent(
         type="execution.ac.attempt.dispatched",
         aggregate_type="execution",
         aggregate_id=identity.session_scope_id,
-        data={
-            **identity.to_metadata(),
-            "ac_dispatch_id": dispatch_id,
-            "previous_ac_dispatch_id": previous_dispatch_id,
-            "capsule_fingerprint": capsule.fingerprint,
-            "session_origin": session_origin,
-            "runtime": (
-                runtime_handle.to_dispatch_recovery_dict() if runtime_handle is not None else None
-            ),
-        },
+        data=data,
     )
 
 
@@ -5549,6 +5563,156 @@ class TestParallelACExecutor:
         assert restored is not None
         assert restored.previous_response_id == "response-after-signal"
         assert restored.metadata["ac_dispatch_id"] == second_dispatch_id
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_fails_closed_on_signal_followup_dispatch_head(self) -> None:
+        """A crashed SessionSignal follow-up head must not resume the AC prompt.
+
+        Blocker #1: the follow-up dispatch persists an explicit
+        ``session_signal_followup`` phase. Resuming it would let the caller
+        replay the ORIGINAL AC prompt in a session that is mid-signal-turn,
+        repeating the AC's (possibly non-idempotent) acceptance work. With no
+        safe exact reconstruction the loader must fail closed instead.
+        """
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Do not repeat the AC after a signal-turn crash",
+            session_id="session-signal-followup-head",
+            seed_goal="Ship",
+        )
+        primary_dispatch_id = "1" * 32
+        followup_dispatch_id = "2" * 32
+
+        def _handle(previous_response_id: str, origin: str) -> RuntimeHandle:
+            return RuntimeHandle(
+                backend="codex_cli",
+                kind="implementation_session",
+                native_session_id="codex-shared-session",
+                previous_response_id=previous_response_id,
+                cwd="/tmp/project",
+                approval_mode="acceptEdits",
+                metadata={
+                    **runtime_identity.to_metadata(),
+                    "ac_capsule_version": persisted_capsule.version,
+                    "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                    "ac_session_origin": origin,
+                },
+            )
+
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=primary_dispatch_id,
+                dispatch_kind="primary",
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=primary_dispatch_id,
+                runtime_handle=_handle("response-before-signal", "fresh"),
+            ),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=followup_dispatch_id,
+                previous_dispatch_id=primary_dispatch_id,
+                session_origin="restored_same_attempt",
+                dispatch_kind="session_signal_followup",
+                signal_id="sig-123",
+                signal_mode="inform",
+                follow_up_input_digest="sha256:" + "a" * 64,
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=followup_dispatch_id,
+                runtime_handle=_handle("response-after-signal", "restored_same_attempt"),
+            ),
+        ]
+
+        with pytest.raises(AmbiguousACExecutionError, match="non-primary provider-entry phase"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-signal-followup-head",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_rejects_signal_followup_missing_phase_identity(self) -> None:
+        """A follow-up dispatch without its signal identity is corrupt, not resumable.
+
+        Blocker #1: a ``session_signal_followup`` phase that lost its signal
+        id/mode/input digest cannot prove which phase it opened, so the loader
+        rejects the record rather than guessing.
+        """
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Reject a follow-up missing its phase identity",
+            session_id="session-signal-followup-corrupt",
+            seed_goal="Ship",
+        )
+        primary_dispatch_id = "1" * 32
+        followup_dispatch_id = "2" * 32
+
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=primary_dispatch_id,
+                dispatch_kind="primary",
+            ),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=followup_dispatch_id,
+                previous_dispatch_id=primary_dispatch_id,
+                session_origin="restored_same_attempt",
+                dispatch_kind="session_signal_followup",
+                signal_id=None,
+                signal_mode=None,
+                follow_up_input_digest=None,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="missing phase identity"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-signal-followup-corrupt",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
 
     @pytest.mark.asyncio
     async def test_capsule_loader_follows_explicit_recovery_session_successor(self) -> None:
@@ -12539,6 +12703,120 @@ class TestParallelACExecutor:
             "abandon",
         ]
         assert all(event.data["max_attempts"] == MAX_STALL_RETRIES + 1 for event in stall_events)
+
+    @pytest.mark.asyncio
+    async def test_effectful_stall_fails_closed_without_redispatch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blocker #3: a stall AFTER a tool effect must not take the retry path.
+
+        The provider emits a durable tool effect, then goes silent. The ordinary
+        stall retry would bump ``retry_attempt`` and re-dispatch, whose recovery
+        filters this attempt's effect events and bypasses the ambiguity guard —
+        potentially duplicating a non-idempotent effect. The effectful stall must
+        instead fail closed as an ``AmbiguousACExecutionError`` with the provider
+        entered exactly once.
+        """
+        import anyio
+
+        from ouroboros.orchestrator import leaf_dispatcher
+
+        monkeypatch.setattr(leaf_dispatcher, "STALL_TIMEOUT_SECONDS", 0.15)
+
+        class _EffectfulThenStallRuntime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(
+                    type="tool_use",
+                    content="edit a file",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": "app.py"}},
+                )
+                await anyio.sleep_forever()
+
+        event_store, _ = _make_replaying_event_store()
+        runtime = _EffectfulThenStallRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            cross_harness_redispatch=False,
+        )
+
+        with pytest.raises(AmbiguousACExecutionError, match="stalled after emitting tool effects"):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Do not duplicate the effect after an effectful stall",
+                session_id="session-effectful-stall",
+                tools=["Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert runtime.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_effect_free_stall_stays_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Blocker #3: a stall with NO observed tool effect keeps the retry sentinel.
+
+        The complement of the effectful-stall guard: when no effect was
+        dispatched, a fresh redispatch cannot duplicate anything, so the existing
+        retryable stall behavior is preserved (the sentinel error the batch/leaf
+        retry loop keys on).
+        """
+        import anyio
+
+        from ouroboros.orchestrator import leaf_dispatcher
+
+        monkeypatch.setattr(leaf_dispatcher, "STALL_TIMEOUT_SECONDS", 0.15)
+
+        class _SilentStallRuntime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                await anyio.sleep_forever()
+                yield  # pragma: no cover - never reached; keeps this an async generator
+
+        event_store, _ = _make_replaying_event_store()
+        runtime = _SilentStallRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            cross_harness_redispatch=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="A silent stall stays retryable",
+            session_id="session-silent-stall",
+            tools=["Edit"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error == _STALL_SENTINEL
+        assert runtime.calls == 1
 
     @pytest.mark.asyncio
     async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:

@@ -8648,6 +8648,14 @@ class ParallelACExecutor:
             session_signal_hub=self._session_signal_hub,
             context_pack_enabled=self._context_pack_enabled,
             prompt_guidance_contract=self._prompt_guidance_contract,
+            # A verify command is an acceptance effect, so the operator's policy
+            # and timeout are a capsule-boundary invariant that every runtime
+            # path must preserve. Without threading these, the throwaway alt
+            # executor silently reverts to the ``True``/600 defaults and could
+            # run an operator-disabled, potentially non-idempotent verify command
+            # during cross-harness redispatch.
+            run_verify_commands=self._run_verify_commands,
+            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
         )
         return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
 
@@ -9891,6 +9899,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 capsule_fingerprint=capsule.fingerprint,
                 session_origin=session_origin,
                 runtime_handle=dispatch_state.runtime_handle,
+                dispatch_kind="primary",
             )
             provider_boundary_persisted = True
             await LeafDispatcher(self).stream(
@@ -9929,8 +9938,22 @@ Respond with either ATOMIC or the structured JSON object only.
                     depth=depth,
                     silent_seconds=STALL_TIMEOUT_SECONDS,
                     message_count=dispatch_state.message_count,
+                    tool_effects_observed=dispatch_state.tool_effects_observed,
                 )
                 clear_cached_runtime_handle = True
+                # An effectful stall must not take the ordinary stall-retry path.
+                # That path (caller bumps ``retry_attempt`` and re-dispatches)
+                # starts a fresh attempt whose recovery filters out this attempt's
+                # durable tool-effect events, bypassing the ambiguity guard and
+                # potentially repeating a non-idempotent effect. Reconcile it as an
+                # explicit ambiguous/fail-closed terminal outcome instead; only a
+                # stall with no observed effect keeps the retryable stall sentinel.
+                if dispatch_state.tool_effects_observed:
+                    raise AmbiguousACExecutionError(
+                        "AC provider stalled after emitting tool effects; refusing stall retry "
+                        "because a fresh redispatch would bypass the recovery ambiguity guard and "
+                        "may duplicate non-idempotent effects"
+                    )
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
@@ -10004,6 +10027,19 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+                    # Render the exact follow-up input ONCE and persist its
+                    # digest with the dispatch boundary below, so recovery can
+                    # tell a follow-up chain head apart from the original AC
+                    # phase (and refuse to replay the AC prompt) instead of
+                    # inferring phase identity from event order.
+                    follow_up_prompt = (
+                        render_inform_signal_prompt(queued_signal.signal)
+                        if inform_mode
+                        else render_after_turn_signal_prompt(queued_signal.signal)
+                    )
+                    follow_up_input_digest = (
+                        "sha256:" + hashlib.sha256(follow_up_prompt.encode("utf-8")).hexdigest()
+                    )
                     previous_provider_boundary_persisted = provider_boundary_persisted
                     provider_boundary_persisted = False
                     signal_dispatch_id = uuid.uuid4().hex
@@ -10037,16 +10073,16 @@ Respond with either ATOMIC or the structured JSON object only.
                             capsule_fingerprint=capsule.fingerprint,
                             session_origin="restored_same_attempt",
                             runtime_handle=dispatch_state.runtime_handle,
+                            dispatch_kind="session_signal_followup",
+                            signal_id=queued_signal.signal.signal_id,
+                            signal_mode=str(queued_signal.effective_mode),
+                            follow_up_input_digest=follow_up_input_digest,
                         )
                         dispatch_id = signal_dispatch_id
                         provider_boundary_persisted = True
                         await LeafDispatcher(self).stream(
                             state=dispatch_state,
-                            prompt=(
-                                render_inform_signal_prompt(queued_signal.signal)
-                                if inform_mode
-                                else render_after_turn_signal_prompt(queued_signal.signal)
-                            ),
+                            prompt=follow_up_prompt,
                             tools=[] if inform_mode else tools,
                             system_prompt=system_prompt,
                             execute_effort_kwargs=execute_effort_kwargs,
@@ -10444,6 +10480,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 forced_frontier_routing=force_frontier_routing,
             )
 
+        except AmbiguousACExecutionError:
+            # A fail-closed ambiguity raised inside the dispatch body (e.g. an
+            # effectful stall — a stall observed AFTER this dispatch emitted a
+            # durable tool effect) must NOT be reclassified as infra-fatal below,
+            # and must NOT return a plain failed result (which the caller would
+            # feed to bounce decomposition / cross-harness redispatch, re-running
+            # the same effect in the shared workspace). Re-raise it to the batch
+            # boundary, which records a terminal FAILED result with no redispatch
+            # — the same fail-closed contract the recovery loader already uses.
+            raise
         except Exception as e:
             # Anything reaching this handler escaped the runtime dispatch
             # (``LeafDispatcher.stream`` / ``self._adapter.execute_task``) or
