@@ -4934,6 +4934,7 @@ class TestRunnerAuditRecordsRestoredExecutionSettings:
             checkpoint_store=store,
             max_concurrent=4,
             max_decomposition_depth=5,
+            task_cwd=str(tmp_path),
         )
 
         async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
