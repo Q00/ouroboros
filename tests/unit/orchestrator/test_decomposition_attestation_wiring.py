@@ -231,6 +231,62 @@ class TestExecuteDecompositionChildrenWiring:
     """End-to-end wiring through ``_execute_decomposition_children``."""
 
     @pytest.mark.asyncio
+    async def test_first_round_withholds_child_discount_until_gate_attested(self) -> None:
+        """Proposal trust alone cannot authorize cheaper child routing.
+
+        The first round has no prior gate evidence by definition, so every
+        child must run untrusted at the parent/base tier.  This round's
+        successful attestation may authorize a later retry, never the dispatch
+        that produced the evidence itself.
+        """
+        from datetime import UTC, datetime
+
+        executor = _make_executor()
+        executor._run_ac_verify_gate = AsyncMock(
+            return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        )
+        executor._event_emitter.emit_decomposition_attested = AsyncMock(return_value=True)
+        node_identity = ExecutionNodeIdentity.root(execution_context_id="exec-first", ac_index=0)
+        decision = _trustworthy_split_decision(node_identity.node_id)
+        captured_trust_flags: list[bool] = []
+
+        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+            captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+            return _child_result(
+                0,
+                verify_gate_outcome=_VerifyGateOutcome(passed=True, reason=None, output_tail=""),
+            )
+
+        executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+
+        result = await executor._execute_decomposition_children(
+            decision=decision,
+            ac_index=0,
+            ac_content="parent AC",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="goal",
+            depth=0,
+            execution_id="exec-first",
+            level_contexts=None,
+            retry_attempt=0,
+            execution_counters=None,
+            node_identity=node_identity,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="key",
+            ac_spec=AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q"),
+        )
+
+        assert decision.trustworthy is True
+        assert captured_trust_flags
+        assert all(flag is False for flag in captured_trust_flags)
+        assert result.dispatched_decomposition_trustworthy is False
+        assert result.decomposition_attestation is not None
+        assert result.decomposition_attestation.trustworthy is True
+
+    @pytest.mark.asyncio
     async def test_attestation_cached_and_event_emitted(self) -> None:
         from datetime import UTC, datetime
 
@@ -1480,10 +1536,8 @@ class TestDecompositionAttestationFailsClosedOnMalformedEventData:
     ``execution.ac.decomposition_attested`` event for this node id IS found,
     but its payload fails to parse into a valid
     :class:`DecompositionAttestation`. Returning ``None`` for that case is
-    indistinguishable from the legitimate "never attested" miss at the
-    caller (``prior_attestation is None`` re-admits the child-tier
-    discount), so a corrupt record of a prior UNTRUSTWORTHY verdict would
-    silently un-poison the node id. The loader must return the SAME
+    distinguishable from the legitimate "never attested" bootstrap state so
+    corruption remains explicit and loud. The loader must return the SAME
     synthetic fail-closed UNTRUSTWORTHY sentinel as the total-replay-failure
     case; ``None`` stays reserved for "no matching event exists at all".
     """
@@ -1801,12 +1855,11 @@ class TestAttestationEventDataCrossValidation:
 
 class TestAttestationWriteFailureFailsClosed:
     """Round-5 Finding #4 (BLOCKING): a lost ``decomposition_attested`` write
-    replays as silence, and silence reads as "never attested" — which
-    re-admits the child-tier discount (``prior_attestation is None``):
-    fail-OPEN. Once the write's retries are exhausted, the trust verdict the
-    durable log cannot corroborate must not be acted on: the cached AND
-    returned attestation are swapped for the fail-closed UNTRUSTWORTHY
-    sentinel."""
+    replays as silence. Bootstrap silence now withholds the child discount,
+    but the lost correctness-bearing verdict must still be repaired durably.
+    Once the write's retries are exhausted, the trust verdict the durable log
+    cannot corroborate must not be acted on: the cached AND returned
+    attestation are swapped for the fail-closed UNTRUSTWORTHY sentinel."""
 
     @staticmethod
     def _dispatch_kwargs(node_identity: ExecutionNodeIdentity) -> dict[str, object]:

@@ -5758,8 +5758,12 @@ class ParallelACExecutor:
         prior_attestation = await self._load_decomposition_attestation(
             node_identity.node_id, execution_id=execution_id, session_id=session_id
         )
-        child_decomposition_trustworthy = decision.trustworthy and (
-            prior_attestation is None or prior_attestation.trustworthy
+        # Proposal-time structure/semantic checks are not execution evidence.
+        # The first decomposition round therefore runs at the parent/base tier;
+        # only a durable gate-anchored attestation from an earlier round may
+        # authorize the child discount on a later retry.
+        child_decomposition_trustworthy = (
+            decision.trustworthy and prior_attestation is not None and prior_attestation.trustworthy
         )
         display_label = (
             f"AC {node_identity.display_path}"
@@ -6008,10 +6012,10 @@ class ParallelACExecutor:
         # Round-5 Finding #4 (BLOCKING, superseding round 4's log-only stance):
         # a FUTURE resume that replays this node id and finds no matching
         # durable event cannot tell "never attested" from "attested but the
-        # write failed" -- both are silence, and silence reads as "no prior
-        # state" (``prior_attestation is None`` re-admits the child-tier
-        # discount): fail-OPEN. Logging alone changes nothing about how this
-        # run behaves after the failure, so it is not fail-closed. Give the
+        # write failed" -- both are silence. Silence no longer authorizes the
+        # child-tier discount, but losing a correctness-bearing trust verdict
+        # would still make later retries needlessly stay at the base tier.
+        # Give the
         # write bounded EXTRA retry rounds on top of ``_safe_emit_event``'s
         # own internal retries; if truly exhausted, prevent the semantic
         # advancement that depends on it: swap the verdict this run caches
@@ -9781,18 +9785,19 @@ Respond with either ATOMIC or the structured JSON object only.
 
         if latest_data is None:
             # ONLY the genuine "no matching event exists at all" case may
-            # return ``None`` -- the caller treats ``None`` as "never
-            # attested; proposal trust applies".
+            # return ``None`` -- the caller treats it as "never attested" and
+            # withholds the child-tier discount until a gate-anchored verdict
+            # exists.
             return None
 
         attestation = _decomposition_attestation_from_event_data(latest_data)
         if attestation is None:
             # Round-4 Finding #4 (BLOCKING): a matching event WAS found but
             # its payload does not round-trip into a valid attestation.
-            # Returning ``None`` here is indistinguishable from "never
-            # attested" at the caller (``prior_attestation is None`` admits
-            # the child-tier discount) -- so a corrupt record of a prior
-            # UNTRUSTWORTHY verdict would silently un-poison this node id.
+            # Returning ``None`` here would erase the distinction between a
+            # legitimate first round and a corrupt prior verdict. Both paths
+            # withhold discount, but corruption must remain loud and
+            # explicitly fail-closed rather than masquerading as bootstrap.
             # Fail closed with the SAME synthetic UNTRUSTWORTHY sentinel the
             # total-replay-failure case above uses.
             log.warning(

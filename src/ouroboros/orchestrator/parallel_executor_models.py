@@ -75,8 +75,8 @@ class ACExecutionResult:
             nodes before the attestation runs.
         dispatched_decomposition_trustworthy: The trust value ACTUALLY consumed
             to select the model tier for this round's children -- i.e.
-            ``decision.trustworthy AND (prior_attestation is None or
-            prior_attestation.trustworthy)``, evaluated BEFORE this round ran
+            ``decision.trustworthy AND prior_attestation is not None AND
+            prior_attestation.trustworthy``, evaluated BEFORE this round ran
             (see ``_execute_decomposition_children``). This is distinct from
             ``decomposition_attestation.trustworthy``, which is this round's
             OWN just-computed verdict (only known AFTER the round finishes and
