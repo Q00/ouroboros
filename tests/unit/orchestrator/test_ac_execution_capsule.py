@@ -12,6 +12,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACContextReference,
     ACContextReferenceKind,
     ACExecutionCapsuleManifest,
+    ACSuccessContract,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
@@ -164,6 +165,46 @@ def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None
     )
 
     assert changed.fingerprint != capsule.fingerprint
+
+
+def test_capsule_success_contract_override_is_child_local(tmp_path) -> None:
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-child-contract",
+        retry_attempt=0,
+    )
+    parent_spec = AcceptanceCriterionSpec(
+        description="Parent",
+        verify_command="pytest -q",
+        expected_artifacts=("out_a.txt", "out_b.txt"),
+    )
+
+    child_a = compile_ac_execution_capsule(
+        runtime_identity=identity,
+        execution_id="execution-child-contract",
+        semantic_ac_key="semantic-key",
+        workspace=str(tmp_path.resolve()),
+        authority_scope="authority:v1",
+        seed_goal="Ship",
+        ac_content="Child",
+        ac_spec=parent_spec,
+        success_contract_override=ACSuccessContract(expected_artifacts=("out_a.txt",)),
+    )
+    child_b = compile_ac_execution_capsule(
+        runtime_identity=identity,
+        execution_id="execution-child-contract",
+        semantic_ac_key="semantic-key",
+        workspace=str(tmp_path.resolve()),
+        authority_scope="authority:v1",
+        seed_goal="Ship",
+        ac_content="Child",
+        ac_spec=parent_spec,
+        success_contract_override=ACSuccessContract(expected_artifacts=("out_b.txt",)),
+    )
+
+    assert child_a.success_contract.expected_artifacts == ("out_a.txt",)
+    assert child_b.success_contract.expected_artifacts == ("out_b.txt",)
+    assert child_a.fingerprint != child_b.fingerprint
 
 
 @pytest.mark.parametrize(

@@ -88,6 +88,7 @@ from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_execution_capsule import (
+    ACSuccessContract,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
@@ -6776,6 +6777,9 @@ class ParallelACExecutor:
                     investment_spec=investment_spec,
                     decomposition_trustworthy=child_decomposition_trustworthy,
                     semantic_ac_key=semantic_ac_key,
+                    capsule_success_contract=ACSuccessContract(
+                        expected_artifacts=assigned_artifacts
+                    ),
                     # Forward the PARENT's spec for prompt context and
                     # semantic-key derivation. Children NEVER execute this
                     # borrowed contract as their own verify gate (Fix 1,
@@ -7586,6 +7590,7 @@ class ParallelACExecutor:
         semantic_ac_key: str | None = None,
         force_frontier_routing: bool = False,
         force_atomic_execution: bool = False,
+        capsule_success_contract: ACSuccessContract | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -7800,6 +7805,7 @@ class ParallelACExecutor:
             "semantic_ac_key": semantic_ac_key,
             "force_frontier_routing": force_frontier_routing,
             "force_atomic_execution": force_atomic_execution,
+            "capsule_success_contract": capsule_success_contract,
         }
         while True:
             atomic_result = await self._execute_atomic_ac(
@@ -7827,6 +7833,7 @@ class ParallelACExecutor:
                 decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
                 force_frontier_routing=force_frontier_routing,
+                capsule_success_contract=capsule_success_contract,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if not atomic_result.success and not force_atomic_execution:
@@ -8986,6 +8993,7 @@ Respond with either ATOMIC or the structured JSON object only.
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
         force_frontier_routing: bool = False,
+        capsule_success_contract: ACSuccessContract | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -9041,6 +9049,7 @@ Respond with either ATOMIC or the structured JSON object only.
             seed_goal=seed_goal,
             ac_content=ac_content,
             ac_spec=ac_spec,
+            success_contract_override=capsule_success_contract,
             level_contexts=tuple(level_contexts or ()),
         )
 
@@ -9056,7 +9065,6 @@ Respond with either ATOMIC or the structured JSON object only.
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
             retry_prompt_extra=retry_prompt_extra,
-            ac_spec=ac_spec,
         )
         prompt = prompt_bundle.prompt
         label = prompt_bundle.label

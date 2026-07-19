@@ -17,7 +17,10 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
-from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
+from ouroboros.orchestrator.ac_execution_capsule import (
+    ACExecutionCapsule,
+    ACSuccessContract,
+)
 from ouroboros.orchestrator.evidence.ac_classification import (
     _effective_evidence_schema_for_ac,
     _is_documentation_only_ac,
@@ -31,7 +34,9 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 
 
-def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
+def _build_success_contract_block(
+    spec: AcceptanceCriterionSpec | ACSuccessContract | None,
+) -> str:
     """Render the worker-facing SUCCESS CONTRACT block for an AC, or ``""``.
 
     The parallel leaf dispatch builds its own prompt (it does not go through the
@@ -42,22 +47,23 @@ def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
     worker runs and reports the same evidence the verify gate checks. Contract-less
     ACs return ``""`` — the prompt stays byte-identical to before.
     """
-    if spec is None or not spec.has_success_contract:
+    contract = spec if isinstance(spec, ACSuccessContract) else ACSuccessContract.from_ac_spec(spec)
+    if not contract.has_success_contract:
         return ""
     lines = ["SUCCESS CONTRACT for this AC:"]
-    if spec.verify_command:
+    if contract.verify_command:
         lines.append(
-            f"- Run locally before completion: {spec.verify_command}. "
+            f"- Run locally before completion: {contract.verify_command}. "
             "The verify gate re-runs it and records authoritative evidence."
         )
-    if spec.expected_artifacts:
+    if contract.expected_artifacts:
         lines.append(
             "- Expected artifacts: "
-            + ", ".join(spec.expected_artifacts)
+            + ", ".join(contract.expected_artifacts)
             + " — ensure they exist in the workspace"
         )
-    if spec.output_assertion:
-        lines.append(f"- Expected output: {spec.output_assertion}")
+    if contract.output_assertion:
+        lines.append(f"- Expected output: {contract.output_assertion}")
     return "\n".join(lines)
 
 
@@ -93,7 +99,6 @@ class AtomicPromptBuilder:
         level_contexts: list[LevelContext] | None,
         sibling_acs: list[_SiblingACRef] | None,
         retry_prompt_extra: str,
-        ac_spec: AcceptanceCriterionSpec | None,
     ) -> AtomicPromptBundle:
         """Build the prompt for one atomic leaf dispatch."""
         executor = self._executor
@@ -126,7 +131,7 @@ class AtomicPromptBuilder:
         # Surface this AC's success contract to the worker so it runs and reports
         # the exact evidence the verify gate will grade. Empty for contract-less
         # ACs → the prompt stays byte-identical to before.
-        contract_block = _build_success_contract_block(ac_spec)
+        contract_block = _build_success_contract_block(capsule.success_contract)
         if contract_block:
             task_section = f"{task_section}\n\n{contract_block}"
         legacy_context_section = (
@@ -212,12 +217,8 @@ class AtomicPromptBuilder:
             file_listing = "(unable to list)"
 
         if executor._fat_harness_mode and executor._execution_profile is not None:
-            has_success_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
-                ac_spec.verify_command
-            )
-            has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
-                ac_spec.expected_artifacts
-            )
+            has_success_contract = bool(capsule.success_contract.verify_command)
+            has_expected_artifacts = bool(capsule.success_contract.expected_artifacts)
             # Only delegate tests_passed/files_touched to the verify gate when it
             # will actually run; with run_verify_commands off the worker's
             # displayed required-fields must still list them.

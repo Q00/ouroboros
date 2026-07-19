@@ -219,6 +219,10 @@ class ACSuccessContract:
             "output_assertion": self.output_assertion,
         }
 
+    @property
+    def has_success_contract(self) -> bool:
+        return bool(self.verify_command or self.expected_artifacts or self.output_assertion)
+
     @classmethod
     def from_ac_spec(cls, spec: AcceptanceCriterionSpec | None) -> ACSuccessContract:
         if spec is None:
@@ -651,13 +655,14 @@ def compile_ac_execution_capsule(
     seed_goal: str,
     ac_content: str,
     ac_spec: AcceptanceCriterionSpec | None,
+    success_contract_override: ACSuccessContract | None = None,
     level_contexts: Sequence[LevelContext] = (),
     segment_index: int = 0,
     context_budget_chars: int = DEFAULT_AC_CONTEXT_BUDGET_CHARS,
 ) -> ACExecutionCapsule:
     """Compile one deterministic capsule from existing orchestrator authority."""
     canonical_workspace = os.path.realpath(workspace)
-    success_contract = ACSuccessContract.from_ac_spec(ac_spec)
+    success_contract = success_contract_override or ACSuccessContract.from_ac_spec(ac_spec)
     required_references: list[ACContextReference] = [
         ACContextReference(
             kind=ACContextReferenceKind.WORKSPACE,
@@ -680,7 +685,7 @@ def compile_ac_execution_capsule(
         )
         for path in success_contract.expected_artifacts
     )
-    if ac_spec is not None and ac_spec.has_success_contract:
+    if success_contract.has_success_contract:
         required_references.append(
             ACContextReference(
                 kind=ACContextReferenceKind.GATE,

@@ -6,6 +6,8 @@ consulted to poison a root AC's NEXT retry's child-tier discount.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +18,7 @@ from ouroboros.harness.decomposition_attestation import (
     DecompositionTrustVerdict,
     SiblingVerifyOutcome,
 )
+from ouroboros.orchestrator.ac_execution_capsule import ACSuccessContract
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
@@ -970,6 +973,7 @@ def _make_live_artifact_executor(
     executor._emit_level_completed = AsyncMock()
     executor._emit_subtask_event = AsyncMock()
     executor._event_emitter.emit_decomposition_attested = AsyncMock()
+    executor._test_appended_events = _appended  # type: ignore[attr-defined]
     return executor
 
 
@@ -1039,6 +1043,29 @@ class TestPerChildArtifactSliceOracle:
         # The parent's own artifact gate also genuinely re-ran and passed.
         assert result.verify_gate_outcome is not None
         assert result.verify_gate_outcome.passed is True
+
+        capsule_events = [
+            event
+            for event in executor._test_appended_events  # type: ignore[attr-defined]
+            if event.type == "execution.ac.capsule.compiled"
+        ]
+
+        def _contract_digest(artifacts: tuple[str, ...]) -> str:
+            payload = ACSuccessContract(expected_artifacts=artifacts).to_contract_data()
+            canonical = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+        assert [
+            event.data["capsule_manifest"]["success_contract_digest"] for event in capsule_events
+        ] == [
+            _contract_digest(("out_a.txt",)),
+            _contract_digest(("out_b.txt",)),
+        ]
 
     @pytest.mark.asyncio
     async def test_preexisting_slice_denies_credit_fail_closed(self, tmp_path) -> None:
