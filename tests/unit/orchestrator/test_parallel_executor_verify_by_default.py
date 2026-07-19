@@ -274,6 +274,8 @@ async def test_verify_gate_times_out_hung_command(tmp_path: Any) -> None:
 async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: Any) -> None:
     """Every verify-gated dispatch is finalized, including atomic fallback."""
     executor = _make_executor(working_directory=str(tmp_path), ac_retry_attempts=0)
+    executor._lateral_escalation_enabled = True
+    executor._maybe_run_lateral_escalation_ladder = AsyncMock(return_value=None)  # type: ignore[method-assign]
     seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 1"))
     force_atomic_flags: list[bool] = []
 
@@ -736,6 +738,8 @@ async def test_retry_decomposed_child_reaches_retry3_frontier(tmp_path: Any) -> 
     spent exactly once as the 5th dispatch.
     """
     executor = _native_escalation_executor(tmp_path, ac_retry_attempts=3)
+    executor._lateral_escalation_enabled = True
+    executor._maybe_run_lateral_escalation_ladder = AsyncMock(return_value=None)  # type: ignore[method-assign]
     router = executor._model_router
     assert router is not None
     seed = _seed_with_specs("ac")
