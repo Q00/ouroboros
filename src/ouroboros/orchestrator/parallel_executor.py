@@ -4051,6 +4051,7 @@ class ParallelACExecutor:
         retry_prompts: dict[int, str] | None = None,
         same_runtime_budget_exhausted: bool = True,
         force_frontier_routing: bool = False,
+        force_atomic_execution: bool = False,
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool.
 
@@ -4066,6 +4067,12 @@ class ParallelACExecutor:
         the pre-ladder retry loop — the ladder's eligibility check already
         treats the AC as operating at those ceilings, so its dispatches must
         actually run there.
+
+        ``force_atomic_execution`` is the decomposition-fallback half of the
+        same recovery contract: a failed decomposed result has not yet spent
+        the root AC's atomic option. The post-budget recovery path sets this
+        flag for one redispatch, bypassing both preflight and bounce
+        decomposition so the remaining option is genuinely exercised.
         """
         batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
         sibling_acs: list[_SiblingACRef] = (
@@ -4095,6 +4102,7 @@ class ParallelACExecutor:
                         retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
                         same_runtime_budget_exhausted=same_runtime_budget_exhausted,
                         force_frontier_routing=force_frontier_routing,
+                        force_atomic_execution=force_atomic_execution,
                         ac_spec=(
                             ac_criterion
                             if isinstance(ac_criterion, AcceptanceCriterionSpec)
@@ -6649,6 +6657,7 @@ class ParallelACExecutor:
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
         force_frontier_routing: bool = False,
+        force_atomic_execution: bool = False,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -6699,6 +6708,9 @@ class ParallelACExecutor:
                 tier / max effort) instead of the incremental per-retry climb.
                 Forwarded to the atomic leaf and to a cross-harness replay of
                 this same call; dormant axes stay dormant.
+            force_atomic_execution: Bypass every decomposition branch for one
+                root-AC recovery dispatch. Used only after a decomposed failure
+                proves that the atomic fallback remains untried.
 
         Returns:
             ACExecutionResult for this AC.
@@ -6729,7 +6741,11 @@ class ParallelACExecutor:
 
         # Compatibility mode keeps preflight ordering, but every result is now a
         # persisted explicit decision and only a trusted SPLIT may lower children.
-        if self._decomposition_mode == "preflight" and depth < self._max_decomposition_depth:
+        if (
+            not force_atomic_execution
+            and self._decomposition_mode == "preflight"
+            and depth < self._max_decomposition_depth
+        ):
             display_label = (
                 f"AC {node_identity.display_path}"
                 if node_identity.depth == 0
@@ -6765,7 +6781,8 @@ class ParallelACExecutor:
                 )
 
         if (
-            node_decision is not None
+            not force_atomic_execution
+            and node_decision is not None
             and node_decision.disposition is DecompositionDisposition.SPLIT
             and len(node_decision.children) >= MIN_SUB_ACS
             and (self._decomposition_mode == "preflight" or node_decision.trustworthy is True)
@@ -6792,7 +6809,8 @@ class ParallelACExecutor:
             )
 
         if (
-            self._decomposition_mode == "preflight"
+            not force_atomic_execution
+            and self._decomposition_mode == "preflight"
             and depth >= self._max_decomposition_depth
             and node_decision is None
         ):
@@ -6812,7 +6830,9 @@ class ParallelACExecutor:
         # Depth-limit canary: execution is forced atomic once the soft recursion
         # safety net is reached, so downstream stages can detect decomposition pressure.
         decomposition_depth_warning = (
-            self._decomposition_mode == "preflight" and depth >= self._max_decomposition_depth
+            not force_atomic_execution
+            and self._decomposition_mode == "preflight"
+            and depth >= self._max_decomposition_depth
         )
 
         def _finalize_node_result(result: ACExecutionResult) -> ACExecutionResult:
@@ -6851,6 +6871,7 @@ class ParallelACExecutor:
             "decomposition_trustworthy": decomposition_trustworthy,
             "semantic_ac_key": semantic_ac_key,
             "force_frontier_routing": force_frontier_routing,
+            "force_atomic_execution": force_atomic_execution,
         }
         while True:
             atomic_result = await self._execute_atomic_ac(
@@ -6880,7 +6901,7 @@ class ParallelACExecutor:
                 force_frontier_routing=force_frontier_routing,
             )
             if atomic_result.error != _STALL_SENTINEL:
-                if not atomic_result.success:
+                if not atomic_result.success and not force_atomic_execution:
                     (
                         bounce_result,
                         bounce_decision,
@@ -6961,35 +6982,36 @@ class ParallelACExecutor:
                     atomic_result,
                     error=f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)",
                 )
-                (
-                    bounce_result,
-                    bounce_decision,
-                ) = await self._maybe_recover_with_bounce_decomposition(
-                    result=failed_result,
-                    ac_index=ac_index,
-                    ac_content=ac_content,
-                    session_id=session_id,
-                    tools=tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    seed_goal=seed_goal,
-                    depth=depth,
-                    execution_id=execution_id,
-                    level_contexts=level_contexts,
-                    retry_attempt=atomic_retry_attempt,
-                    execution_counters=execution_counters,
-                    node_identity=node_identity,
-                    ac_spec=ac_spec,
-                    start_time=start_time,
-                    semantic_ac_key=semantic_ac_key,
-                    investment_spec=investment_spec,
-                )
-                if bounce_decision is not None:
-                    node_decision = bounce_decision
-                    if bounce_decision.compromise_reason == "depth_cap_forced_atomic":
-                        decomposition_depth_warning = True
-                if bounce_result is not None:
-                    return _finalize_node_result(bounce_result)
+                if not force_atomic_execution:
+                    (
+                        bounce_result,
+                        bounce_decision,
+                    ) = await self._maybe_recover_with_bounce_decomposition(
+                        result=failed_result,
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed_goal,
+                        depth=depth,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        retry_attempt=atomic_retry_attempt,
+                        execution_counters=execution_counters,
+                        node_identity=node_identity,
+                        ac_spec=ac_spec,
+                        start_time=start_time,
+                        semantic_ac_key=semantic_ac_key,
+                        investment_spec=investment_spec,
+                    )
+                    if bounce_decision is not None:
+                        node_decision = bounce_decision
+                        if bounce_decision.compromise_reason == "depth_cap_forced_atomic":
+                            decomposition_depth_warning = True
+                    if bounce_result is not None:
+                        return _finalize_node_result(bounce_result)
                 # An abandoned stall is re-dispatched by the batch-level
                 # same-runtime retry loop (its error is no longer the stall
                 # sentinel), so only try a cross-harness redispatch once that
@@ -11746,6 +11768,73 @@ Respond with either ATOMIC or the structured JSON object only.
         unchanged (returns ``None``), so this always falls back to the
         original recovery-exhausted behavior for those cases.
         """
+        # A decomposed failure has not exercised the root AC's atomic path.
+        # Spend that option once before consulting the opt-in persona ladder
+        # (and even when the ladder is disabled): otherwise a zero ordinary
+        # retry budget can surface FAILED directly from child outcomes while
+        # the root atomic/frontier dispatch remains untried.
+        if (
+            result.is_decomposed
+            and not result.success
+            and not result_was_forced_frontier
+            and not result.forced_frontier_routing
+            and self._is_retryable_failure(result)
+        ):
+            atomic_retry_attempt = max(ac_retry_attempts[ac_idx], result.retry_attempt) + 1
+            ac_retry_attempts[ac_idx] = atomic_retry_attempt
+            atomic_results = await self._execute_ac_batch(
+                seed=seed,
+                batch_indices=[ac_idx],
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+                retry_prompts={
+                    ac_idx: self._build_ac_retry_prompt(
+                        result=result,
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        is_final_attempt=False,
+                    )
+                },
+                same_runtime_budget_exhausted=True,
+                force_frontier_routing=True,
+                force_atomic_execution=True,
+            )
+            atomic_candidate = atomic_results[0]
+            if not isinstance(atomic_candidate, ACExecutionResult):
+                atomic_candidate = ACExecutionResult(
+                    ac_index=ac_idx,
+                    ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                    success=False,
+                    error=str(atomic_candidate),
+                    retry_attempt=atomic_retry_attempt,
+                    infra_fatal=True,
+                    forced_frontier_routing=True,
+                )
+            elif not atomic_candidate.forced_frontier_routing:
+                atomic_candidate = replace(atomic_candidate, forced_frontier_routing=True)
+            atomic_candidate = await self._apply_verify_gate(
+                seed=seed,
+                ac_index=ac_idx,
+                result=atomic_candidate,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            await self._emit_ac_outcome_finalized(
+                result=atomic_candidate,
+                root_ac_index=ac_idx,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if atomic_candidate.success:
+                return atomic_candidate
+            result = atomic_candidate
+            result_was_forced_frontier = True
+
         escalated = await self._maybe_run_lateral_escalation_ladder(
             seed=seed,
             ac_idx=ac_idx,
@@ -11786,7 +11875,13 @@ Respond with either ATOMIC or the structured JSON object only.
             root_ac_index=ac_idx,
             session_id=session_id,
             execution_id=execution_id,
-            retry_termination_reason=retry_termination_reason,
+            retry_termination_reason=(
+                "infra_fatal"
+                if result.infra_fatal
+                else "not_retryable"
+                if not self._is_retryable_failure(result)
+                else retry_termination_reason
+            ),
         )
         return result
 

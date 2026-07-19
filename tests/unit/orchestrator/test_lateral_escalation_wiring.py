@@ -21,6 +21,14 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import ParamSupport
+from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionChild,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+)
 from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.lateral_escalation import (
@@ -1394,7 +1402,8 @@ class TestLadderFailurePropagatesToRecoveryExhausted:
             execution_counters=None,
         )
 
-        assert results[0] is breakthrough
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
         executor._emit_recovery_exhausted.assert_not_awaited()
 
 
@@ -1862,6 +1871,145 @@ class TestBudgetExhaustionAloneReachesLadder:
 
         assert outcome is None
         executor._execute_ac_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_decomposed_failure_spends_atomic_frontier_option(
+        self,
+    ) -> None:
+        """A child failure is not evidence that the root atomic AC failed."""
+        executor = _make_executor_with_active_ladder()
+        executor._ac_retry_attempts = 0
+        decomposed_failure = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="untrusted decomposition children failed",
+            is_decomposed=True,
+        )
+        breakthrough = _success_result()
+        dispatches: list[dict[str, object]] = []
+
+        async def _dispatch(**kwargs: object) -> ACExecutionResult:
+            dispatches.append(kwargs)
+            return decomposed_failure if len(dispatches) == 1 else breakthrough
+
+        executor._execute_single_ac = AsyncMock(side_effect=_dispatch)  # type: ignore[method-assign]
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        assert len(dispatches) == 2
+        assert dispatches[0]["force_atomic_execution"] is False
+        assert dispatches[0]["force_frontier_routing"] is False
+        assert dispatches[1]["force_atomic_execution"] is True
+        assert dispatches[1]["force_frontier_routing"] is True
+        executor._emit_recovery_exhausted.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_force_atomic_execution_bypasses_cached_split_and_bounce(self) -> None:
+        executor = _make_executor_with_active_ladder()
+        executor._decomposition_mode = "preflight"
+        node = ExecutionNodeIdentity.root(execution_context_id="exec-1", ac_index=0)
+        executor._decomposition_decisions[node.node_id] = DecompositionDecisionRecord(
+            node_id=node.node_id,
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.SPLIT,
+            children=(
+                DecompositionChild(
+                    "child one",
+                    coverage_claims=("first distinct obligation",),
+                    verification_hint="verify first obligation",
+                ),
+                DecompositionChild(
+                    "child two",
+                    coverage_claims=("second distinct obligation",),
+                    verification_hint="verify second obligation",
+                ),
+            ),
+            structural_status=StructuralCheckStatus.PASSED,
+            semantic_status=SemanticAttestationStatus.ESTABLISHED,
+            trustworthy=True,
+        )
+        atomic_failure = _failed_result(error="atomic fallback failed")
+        executor._execute_atomic_ac = AsyncMock(return_value=atomic_failure)
+        executor._execute_decomposition_children = AsyncMock()
+        executor._maybe_recover_with_bounce_decomposition = AsyncMock()
+
+        result = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Implement the widget",
+            session_id="s1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            seed_goal="Implement the stubborn widget",
+            execution_id="exec-1",
+            node_identity=node,
+            same_runtime_budget_exhausted=False,
+            force_frontier_routing=True,
+            force_atomic_execution=True,
+        )
+
+        assert result.error == "atomic fallback failed"
+        executor._execute_atomic_ac.assert_awaited_once()
+        executor._execute_decomposition_children.assert_not_awaited()
+        executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_atomic_fallback_is_spent_even_when_persona_ladder_is_disabled(self) -> None:
+        executor = _make_executor()
+        executor._ac_retry_attempts = 0
+        decomposed_failure = ACExecutionResult(
+            ac_index=0,
+            ac_content="Implement the widget",
+            success=False,
+            error="decomposition children failed",
+            is_decomposed=True,
+        )
+        atomic_failure = _failed_result(error="atomic root also failed")
+        dispatches: list[dict[str, object]] = []
+
+        async def _dispatch(**kwargs: object) -> ACExecutionResult:
+            dispatches.append(kwargs)
+            return decomposed_failure if len(dispatches) == 1 else atomic_failure
+
+        executor._execute_single_ac = AsyncMock(side_effect=_dispatch)  # type: ignore[method-assign]
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert len(dispatches) == 2
+        assert dispatches[1]["force_atomic_execution"] is True
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].error == "atomic root also failed"
+        executor._emit_recovery_exhausted.assert_awaited_once()
+        assert executor._emit_recovery_exhausted.await_args.kwargs["result"] is results[0]
 
 
 class TestTerminalEligibilityRecheckedEachIteration:
