@@ -691,6 +691,11 @@ class ACRuntimeHandleManager:
                         node_identity=node_identity,
                         retry_attempt=retry_attempt,
                     )
+                    if unresolved_effect_event:
+                        raise AmbiguousACExecutionError(
+                            "AC attempt recorded tool effects without a reusable runtime handle; "
+                            "refusing fresh redispatch because non-idempotent effects may duplicate"
+                        )
                     return None
                 if event.type not in _REUSABLE_RUNTIME_EVENT_TYPES:
                     continue

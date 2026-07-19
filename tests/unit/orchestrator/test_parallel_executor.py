@@ -4794,8 +4794,15 @@ class TestParallelACExecutor:
 
         assert runtime.calls == 0
 
+    @pytest.mark.parametrize(
+        "terminal_event_type",
+        [None, "execution.session.completed", "execution.session.failed"],
+    )
     @pytest.mark.asyncio
-    async def test_atomic_ac_refuses_fresh_dispatch_after_unresumable_tool_effect(self) -> None:
+    async def test_atomic_ac_refuses_fresh_dispatch_after_unresumable_tool_effect(
+        self,
+        terminal_event_type: str | None,
+    ) -> None:
         """A crash after a tool effect cannot be recovered by duplicating the attempt."""
 
         class _Runtime:
@@ -4840,6 +4847,18 @@ class TestParallelACExecutor:
                 ),
             ]
         )
+        if terminal_event_type is not None:
+            appended_events.append(
+                BaseEvent(
+                    type=terminal_event_type,
+                    aggregate_type="execution",
+                    aggregate_id=runtime_identity.session_scope_id,
+                    data={
+                        **runtime_identity.to_metadata(),
+                        "runtime": None,
+                    },
+                )
+            )
 
         with pytest.raises(
             AmbiguousACExecutionError,
