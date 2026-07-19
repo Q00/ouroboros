@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.lateral_escalation import (
@@ -32,6 +33,13 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.resilience.lateral import ThinkingPersona
 
 _THRESHOLD = 2  # mirrors lateral_escalation._LATERAL_ESCALATION_THRESHOLD
+
+
+def _declare_native_routing_capabilities(executor: ParallelACExecutor) -> None:
+    """Make a test adapter actually enforce the routing knobs it exercises."""
+    executor._adapter.capabilities.model_override_support = ParamSupport.NATIVE
+    executor._adapter.capabilities.reasoning_effort_support = ParamSupport.NATIVE
+    executor._adapter.capabilities.enforceable_reasoning_efforts = None
 
 
 def _make_executor() -> ParallelACExecutor:
@@ -51,6 +59,7 @@ def _make_executor() -> ParallelACExecutor:
     executor._event_emitter.emit_ac_parked_for_operator = AsyncMock()
     executor._event_emitter.emit_ac_parked_resolved = AsyncMock()
     executor._sleep = AsyncMock()
+    _declare_native_routing_capabilities(executor)
     return executor
 
 
@@ -535,6 +544,47 @@ class TestRootAcTerminalStateMatchesLiveDispatch:
         )
 
         assert terminal is False
+
+    @pytest.mark.asyncio
+    async def test_advised_frontier_and_xhigh_are_not_terminal_strength(self) -> None:
+        """A runtime that ignores both override knobs never actually runs
+        the calculated frontier/xhigh advice, so it has no active escalation
+        axis and must not enter the indefinite persona/parking loop."""
+        executor = _make_executor_with_active_ladder()
+        executor._reasoning_effort = "xhigh"
+        executor._adapter.capabilities.model_override_support = ParamSupport.IGNORED
+        executor._adapter.capabilities.reasoning_effort_support = ParamSupport.IGNORED
+        executor._adapter.capabilities.enforceable_reasoning_efforts = None
+
+        terminal = await executor._root_ac_terminal_state(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=3,
+            force_frontier_routing=True,
+        )
+
+        assert terminal is False
+
+    @pytest.mark.asyncio
+    async def test_ignored_model_axis_is_dormant_when_effort_is_enforced(self) -> None:
+        """One unenforced axis does not prevent the other genuinely active
+        axis from proving terminal strength at its own ceiling."""
+        executor = _make_executor_with_active_ladder()
+        executor._reasoning_effort = "xhigh"
+        executor._adapter.capabilities.model_override_support = ParamSupport.IGNORED
+        executor._adapter.capabilities.reasoning_effort_support = ParamSupport.NATIVE
+        executor._adapter.capabilities.enforceable_reasoning_efforts = frozenset({"xhigh"})
+
+        terminal = await executor._root_ac_terminal_state(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=3,
+            force_frontier_routing=True,
+        )
+
+        assert terminal is True
 
 
 class TestLateralEscalationStateDurability:
@@ -2094,6 +2144,7 @@ class TestPrePakingSuccessEmitsResolution:
             escalation_retry_threshold=999,
         )
         executor._adapter.runtime_backend = "claude"
+        _declare_native_routing_capabilities(executor)
         executor._emit_ac_outcome_finalized = AsyncMock()
         executor._sleep = AsyncMock()
         # The REAL emitter + REAL durable store: this test verifies the
@@ -2308,6 +2359,7 @@ class TestResumeReentersLadderAtRestoredPhase:
             escalation_retry_threshold=999,
         )
         executor._adapter.runtime_backend = "claude"
+        _declare_native_routing_capabilities(executor)
         executor._emit_ac_outcome_finalized = AsyncMock()
         executor._sleep = AsyncMock()
         executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
@@ -3432,6 +3484,7 @@ class TestResumeRestoresPersistedRetryAttempt:
             escalation_retry_threshold=999,
         )
         executor._adapter.runtime_backend = "claude"
+        _declare_native_routing_capabilities(executor)
         executor._emit_ac_outcome_finalized = AsyncMock()
         executor._sleep = AsyncMock()
         executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
@@ -3627,6 +3680,7 @@ class TestNonSuccessLadderExitsResolveDurableState:
             escalation_retry_threshold=999,
         )
         executor._adapter.runtime_backend = "claude"
+        _declare_native_routing_capabilities(executor)
         executor._emit_ac_outcome_finalized = AsyncMock()
         executor._sleep = AsyncMock()
         executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
@@ -3774,6 +3828,7 @@ class TestResumedLadderNonEngageableExitsCloseEpisode:
             escalation_retry_threshold=999,
         )
         executor._adapter.runtime_backend = "claude"
+        _declare_native_routing_capabilities(executor)
         executor._emit_ac_outcome_finalized = AsyncMock()
         executor._sleep = AsyncMock()
         executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])

@@ -9073,8 +9073,15 @@ Respond with either ATOMIC or the structured JSON object only.
         return is_terminal_state_failure(
             success=result.success,
             is_decomposed=result.is_decomposed,
-            model_tier=model_decision.tier,
-            effort_level=effort_decision.level,
+            # A resolver may calculate a frontier/xhigh *advice* for a
+            # runtime whose capability contract says the knob is ignored.
+            # Such a value never reaches ``execute_task`` (the kwargs above
+            # are empty), so it cannot prove this AC actually failed at a
+            # stronger configuration.  Treat unenforced axes as dormant;
+            # the ladder may engage only when at least one runtime-enforced
+            # axis genuinely ran at its ceiling.
+            model_tier=(model_decision.tier if model_decision.is_enforced else None),
+            effort_level=(effort_decision.level if effort_decision.is_enforced else None),
         )
 
     async def _load_decomposition_attestation(
