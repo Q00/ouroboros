@@ -548,6 +548,13 @@ FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
 
+#: Round-13 finding #2: bounded foreground retries for the terminal RC3
+#: checkpoint delete. A leftover checkpoint from a finished run is the raw
+#: material of the "adopt-and-skip-everything" false success, so the delete
+#: is correctness-bearing — but it must stay bounded and never fail the
+#: already-finished run (mirrors ``_replay_with_retry``'s 3-attempt cadence).
+_TERMINAL_CHECKPOINT_DELETE_ATTEMPTS = 3
+
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _DURATION_PATTERN = re.compile(
     r"\b(?P<value>\d+(?:\.\d+)?)\s*"
@@ -5326,17 +5333,54 @@ class OrchestratorRunner:
         # even if this delete fails (or the process dies right here), the
         # executor's terminal-record staleness gate refuses the leftover
         # checkpoint on the next run.
+        #
+        # Round-13 finding #2 (BLOCKING): that safety net only holds while
+        # the event store stays readable — a leftover COMPLETED checkpoint
+        # plus an INDETERMINATE replay is exactly the shape that used to be
+        # silently adopted (skip everything, report success with zero AC
+        # dispatches). The executor now refuses that combination, but the
+        # ambiguous window should also shrink at its source: this delete is
+        # correctness-bearing, so a transient failure gets the same bounded
+        # foreground retry cadence ``_replay_with_retry`` uses for
+        # correctness-bearing reads, instead of one silent best-effort
+        # shot. (The executor's ``_schedule_deferred_durable_write``
+        # background-retry machinery deliberately is NOT reused here: its
+        # drain already ran inside ``execute_parallel`` and the run
+        # result's ``unconfirmed_durable_writes`` snapshot is already
+        # final, so a task scheduled this late would die unobserved at
+        # ``asyncio.run`` teardown.) Still never worth failing the finished
+        # run over: the final give-up stays a loud log, and the
+        # executor-side staleness gates remain the backstop.
         if terminal_status in ("completed", "failed") and self._checkpoint_store is not None:
             try:
                 checkpoint_seed_id = parallel_executor._checkpoint_seed_id(seed, tracker.session_id)
-                delete_result = self._checkpoint_store.delete(checkpoint_seed_id)
-                if hasattr(delete_result, "is_ok") and not delete_result.is_ok:
-                    log.error(
-                        "orchestrator.runner.terminal_checkpoint_delete_failed",
-                        seed_id=checkpoint_seed_id,
-                        terminal_status=terminal_status,
-                        error=str(getattr(delete_result, "error", "unknown error")),
-                    )
+                for attempt in range(_TERMINAL_CHECKPOINT_DELETE_ATTEMPTS):
+                    delete_error: str | None = None
+                    try:
+                        delete_result = self._checkpoint_store.delete(checkpoint_seed_id)
+                        if hasattr(delete_result, "is_ok") and not delete_result.is_ok:
+                            delete_error = str(getattr(delete_result, "error", "unknown error"))
+                    except Exception as e:
+                        delete_error = str(e)
+                    if delete_error is None:
+                        break
+                    if attempt < _TERMINAL_CHECKPOINT_DELETE_ATTEMPTS - 1:
+                        log.warning(
+                            "orchestrator.runner.terminal_checkpoint_delete_retry",
+                            seed_id=checkpoint_seed_id,
+                            terminal_status=terminal_status,
+                            attempt=attempt + 1,
+                            error=delete_error,
+                        )
+                        await asyncio.sleep(min(1.0 * (2**attempt), 5.0))
+                    else:
+                        log.error(
+                            "orchestrator.runner.terminal_checkpoint_delete_failed",
+                            seed_id=checkpoint_seed_id,
+                            terminal_status=terminal_status,
+                            attempts=_TERMINAL_CHECKPOINT_DELETE_ATTEMPTS,
+                            error=delete_error,
+                        )
             except Exception as e:
                 log.error(
                     "orchestrator.runner.terminal_checkpoint_delete_failed",

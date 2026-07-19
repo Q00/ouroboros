@@ -643,6 +643,212 @@ class TestStaleCheckpointFromFinishedRunNeverResumed:
         await run2_events.close()
 
 
+class TestIndeterminateReplayWithCompletedCheckpoint:
+    """Round-13 finding #2 (BLOCKING): the terminal-staleness gate's
+    indeterminate-replay tiebreaker ("a surviving checkpoint is itself
+    evidence of interruption") is wrong exactly when the runner's
+    best-effort terminal delete failed: a COMPLETED run's checkpoint
+    survives, the degraded event store cannot confirm the terminal record,
+    and the old ``return False`` adopted the stale checkpoint — skipping
+    every level and reporting SUCCESS with zero AC dispatches. The
+    checkpoint's OWN state (``completed_levels == total_levels``) is a
+    replay-independent second signal for that shape; a partial checkpoint
+    keeps the round-9-protecting adopt posture."""
+
+    @pytest.mark.asyncio
+    async def test_completed_checkpoint_failed_delete_indeterminate_replay_reruns(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact reproduction: run 1 genuinely COMPLETED (its
+        terminal event landed) but its checkpoint delete failed (the
+        checkpoint is still present — the executor harness never deletes,
+        exactly the runner-delete-failure shape). Run 2's replay of the
+        execution aggregate is degraded (every attempt raises →
+        indeterminate). Run 2 must NOT silently adopt the full-completion
+        checkpoint and report success without dispatching: it must re-run
+        the ACs from scratch and warn the operator loudly."""
+        seed = _seed("Completed run, failed delete, degraded replay")
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Run 1: completes normally; its final checkpoint marks the
+        # whole plan done and the terminal event lands durably.
+        from ouroboros.orchestrator.events import create_execution_terminal_event
+
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = CheckpointStore(base_path=ckpt_path)
+        run1_ckpt.initialize()
+        run1 = _executor(event_store=run1_events, checkpoint_store=run1_ckpt)
+        run1._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+        result1 = await run1.execute_parallel(
+            seed,
+            session_id="session-original",
+            execution_id="exec-original",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        assert result1.all_succeeded
+        await run1_events.append(
+            create_execution_terminal_event(
+                execution_id="exec-original",
+                session_id="session-original",
+                status="completed",
+            )
+        )
+        await run1_events.close()
+        # The runner's terminal delete FAILED: the checkpoint survives and
+        # claims full completion.
+        leftover = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert leftover.is_ok
+        assert leftover.value.state["completed_levels"] == 1
+
+        # --- Run 2: fresh run of the same seed against a DEGRADED event
+        # store — every replay attempt raises, so the terminal-record
+        # check is indeterminate.
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+
+        async def _degraded_replay(*_args: object, **_kwargs: object) -> list[object]:
+            raise RuntimeError("simulated degraded event store read")
+
+        run2_events.replay = _degraded_replay  # type: ignore[method-assign]
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
+        result2 = await run2.execute_parallel(
+            seed,
+            session_id="session-rerun",
+            execution_id="exec-rerun",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+
+        # The ACs actually ran — never skipped off the ambiguous
+        # full-completion checkpoint — under the NEW run's execution_id.
+        assert captured["batch_executable"] == [0]
+        assert captured["execution_id"] == "exec-rerun"
+        assert result2.all_succeeded
+        assert result2.execution_id == "exec-rerun"
+        assert all(r.final_message != "[Restored from checkpoint]" for r in result2.results)
+        # And the ambiguity was surfaced loudly to the operator, never
+        # swallowed silently.
+        printed = " ".join(
+            str(call)
+            for call in run2._console.print.call_args_list  # type: ignore[union-attr]
+        )
+        assert "durable state is uncertain" in printed
+        await run2_events.close()
+
+    @pytest.mark.asyncio
+    async def test_genuine_crash_with_indeterminate_replay_still_resumes(
+        self, tmp_path: Path
+    ) -> None:
+        """Round-9 #2 protection must survive this fix: a genuinely
+        INTERRUPTED run (partial checkpoint, no terminal record) whose
+        resume-time replay is degraded must still be adopted — original
+        execution_id restored, completed level skipped, remaining level
+        dispatched. Refusing it would drop ladder history/retry policy and
+        surface FAILED with escalation options untried."""
+        seed = Seed(
+            goal="Crashed run resumes under degraded replay",
+            constraints=(),
+            acceptance_criteria=("Parent work", "Verify integration"),
+            ontology_schema=OntologySchema(name="Recovery", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+        plan = StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Parent work"),
+                ACNode(index=1, content="Verify integration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = CheckpointStore(base_path=ckpt_path)
+        run1_ckpt.initialize()
+        run1 = _executor(event_store=run1_events, checkpoint_store=run1_ckpt)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+            raise RuntimeError("simulated crash during level 2")
+
+        run1._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=plan,
+            )
+        # A genuine crash: NO terminal event was ever recorded.
+        await run1_events.close()
+        partial = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert partial.is_ok
+        assert partial.value.state["completed_levels"] == 1
+
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+
+        async def _degraded_replay(*_args: object, **_kwargs: object) -> list[object]:
+            raise RuntimeError("simulated degraded event store read")
+
+        run2_events.replay = _degraded_replay  # type: ignore[method-assign]
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        captured: dict[str, object] = {}
+
+        async def _resumed_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            captured["batch_executable"] = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            return [ACExecutionResult(ac_index=1, ac_content="Verify integration", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_resumed_stage_runner)
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-resumed",
+            execution_id="exec-resumed",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+
+        # Genuine crash recovery preserved: the partial checkpoint was
+        # adopted despite the degraded replay — completed level skipped,
+        # ORIGINAL execution_id restored for the ladder loaders.
+        assert captured["batch_executable"] == [1]
+        assert captured["execution_id"] == "exec-original"
+        assert result.all_succeeded
+        assert result.execution_id == "exec-original"
+        await run2_events.close()
+
+
 def _make_runner(tmp_path: Path) -> tuple[object, CheckpointStore, object]:
     from ouroboros.orchestrator.runner import OrchestratorRunner
 
@@ -826,6 +1032,44 @@ class TestRunnerDeletesCheckpointAtTerminal:
 
         assert result.is_ok
         assert store.load(seed.metadata.seed_id).is_ok
+
+    @pytest.mark.asyncio
+    async def test_transient_delete_failure_is_retried_until_removed(self, tmp_path: Path) -> None:
+        """Round-13 finding #2: the terminal delete is correctness-bearing
+        (a leftover COMPLETED checkpoint is the raw material of the
+        adopt-and-skip-everything false success), so a transient failure
+        must be retried instead of taking one silent best-effort shot."""
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionResult
+
+        seed = _seed("Transient delete failure gets retried")
+        runner, store, _ = self._runner_harness(tmp_path)
+        self._seed_checkpoint(store, seed)
+
+        real_delete = store.delete
+        attempts: list[int] = []
+
+        def _flaky_delete(seed_id: str) -> object:
+            attempts.append(1)
+            if len(attempts) < 3:
+                return SimpleNamespace(is_ok=False, error="simulated transient disk failure")
+            return real_delete(seed_id)
+
+        store.delete = _flaky_delete  # type: ignore[method-assign]
+        result = await self._run_parallel(
+            runner,
+            seed,
+            ParallelExecutionResult(
+                results=(ACExecutionResult(ac_index=0, ac_content="Parent work", success=True),),
+                success_count=1,
+                failure_count=0,
+            ),
+        )
+
+        assert result.is_ok
+        # Two transient failures, then the retry succeeded — the stale
+        # checkpoint is gone instead of lying in wait for a fresh run.
+        assert len(attempts) == 3
+        assert store.load(seed.metadata.seed_id).is_err
 
 
 class TestCrashRestartRestoresRetryPolicyLegacyAndMalformed:

@@ -2204,7 +2204,7 @@ class ParallelACExecutor:
     #: is exactly the state the RC3 checkpoint exists to resume.
     _NON_RESUMABLE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
-    async def _checkpoint_from_terminal_run(self, cp: Any) -> bool:
+    async def _checkpoint_from_terminal_run(self, cp: Any, *, total_levels: int) -> bool:
         """Return True when the checkpointed run already reached a
         non-resumable terminal outcome (round-10 finding #1, BLOCKING).
 
@@ -2237,6 +2237,31 @@ class ParallelACExecutor:
         interrupted run, and on a degraded event store the very ladder
         loaders this recovery exists to feed would fail closed on their own
         replays anyway. The degraded read is logged loudly instead.
+
+        Round-13 finding #2 (BLOCKING): the tiebreaker above has a real
+        gap — the runner's terminal checkpoint delete is best-effort, so a
+        COMPLETED run whose delete failed leaves its checkpoint behind, and
+        on an indeterminate replay "the checkpoint survived, therefore the
+        run was interrupted" is exactly wrong: adoption would skip EVERY
+        level and report success with zero AC dispatches. The checkpoint's
+        OWN recorded state is a second, replay-independent signal: only a
+        run that finished its LAST level writes ``completed_levels ==
+        total_levels``, so a full-completion checkpoint plus an
+        indeterminate replay is far more plausibly a finished run's failed
+        delete than a crash in the instant between the final level's save
+        and the terminal record. And the two failure modes are asymmetric:
+        adopting wrongly is a silent false SUCCESS (the forbidden
+        direction), while refusing wrongly merely re-runs work that the
+        checkpoint itself says already finished — no remaining levels means
+        no parked/mid-ladder escalation state to lose, so the round-9 #2
+        regression cannot re-open through this branch. Treat that
+        combination as terminal (discard, run fresh, re-verify by
+        re-executing) and say so loudly; a PARTIAL checkpoint keeps the
+        adopt posture — resuming it still dispatches the remaining levels,
+        so it can never produce a zero-dispatch false success. (The
+        round-12 owner pid-liveness probe was considered as a third signal
+        here but cannot help: a dead owner is equally consistent with
+        "completed then exited" and "crashed", so it cannot break this tie.)
         """
         saved_execution_id = cp.state.get("execution_id")
         if not (isinstance(saved_execution_id, str) and saved_execution_id):
@@ -2246,6 +2271,39 @@ class ParallelACExecutor:
             return False
         events = await self._replay_with_retry("execution", saved_execution_id)
         if events is None:
+            completed_levels = cp.state.get("completed_levels")
+            claims_full_completion = (
+                isinstance(completed_levels, int)
+                and not isinstance(completed_levels, bool)
+                and total_levels > 0
+                and completed_levels >= total_levels
+            )
+            if claims_full_completion:
+                log.error(
+                    "parallel_executor.recovery.terminal_check_indeterminate_full_completion",
+                    detail=(
+                        "could not replay the checkpointed run's execution "
+                        "aggregate to verify whether it reached a terminal "
+                        "state, and the checkpoint's own state claims every "
+                        "level already completed — adopting it would skip "
+                        "all work and report success without a single AC "
+                        "dispatch. Treating it as stale and re-running from "
+                        "scratch instead (re-verify, never silently skip)."
+                    ),
+                    execution_id=saved_execution_id,
+                    completed_levels=completed_levels,
+                    total_levels=total_levels,
+                )
+                self._console.print(
+                    "[red]WARNING: durable state is uncertain — the event "
+                    "log for this seed's previous run could not be read, "
+                    "and its leftover checkpoint claims the whole run "
+                    "already finished. Refusing to adopt it (that could "
+                    "falsely report success without doing any work); "
+                    "re-running all levels from scratch instead. Please "
+                    "investigate the event store degradation.[/red]"
+                )
+                return True
             log.error(
                 "parallel_executor.recovery.terminal_check_indeterminate",
                 detail=(
@@ -2253,7 +2311,8 @@ class ParallelACExecutor:
                     "aggregate to verify it never reached a terminal state; "
                     "proceeding with recovery because a surviving checkpoint "
                     "is itself evidence of interruption (terminal runs "
-                    "delete theirs)"
+                    "delete theirs) and its own state still has levels "
+                    "outstanding — resuming dispatches that remaining work"
                 ),
                 execution_id=saved_execution_id,
             )
@@ -2602,7 +2661,7 @@ class ParallelACExecutor:
                     # and run every level from scratch.
                     if (
                         cp.phase == "parallel_execution"
-                        and await self._checkpoint_from_terminal_run(cp)
+                        and await self._checkpoint_from_terminal_run(cp, total_levels=total_levels)
                     ):
                         self._discard_stale_checkpoint(
                             seed_id,
