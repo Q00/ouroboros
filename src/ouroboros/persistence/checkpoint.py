@@ -10,7 +10,8 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -167,6 +168,25 @@ class CheckpointStore:
         This method is idempotent - safe to call multiple times.
         """
         self._base_path.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def execution_lease(self, seed_id: str) -> Iterator[None]:
+        """Hold the cross-process execution right for one seed.
+
+        The checkpoint JSON lock protects one read or write at a time, but it
+        cannot close the load-before-first-save race between two fresh
+        processes. This separate non-blocking lease is held for the entire
+        checkpoint-backed execution, so exactly one process can perform
+        recovery, claim the run-start anchor, and dispatch ACs for ``seed_id``.
+
+        Raises:
+            BlockingIOError: Another process currently holds the seed lease.
+        """
+        checkpoint_path = self._get_checkpoint_path(seed_id)
+        lease_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".execution")
+        self._validate_path_containment(lease_path)
+        with _file_lock(lease_path, exclusive=True, blocking=False):
+            yield
 
     # Filename components used by _get_checkpoint_path:
     #   "checkpoint_" + <seed> + ".json"         (level 0)

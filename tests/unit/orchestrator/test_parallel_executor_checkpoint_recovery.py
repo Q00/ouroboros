@@ -3524,6 +3524,35 @@ class TestInProcessConcurrentSeedExecutionRefused:
         assert result.all_succeeded
 
     @pytest.mark.asyncio
+    async def test_cross_process_lease_conflict_refuses_before_dispatch(
+        self, tmp_path: Path
+    ) -> None:
+        """A lost filesystem claim maps to the same fail-closed launch error."""
+        from ouroboros.orchestrator.parallel_executor import ConcurrentSeedExecutionError
+
+        seed = _seed("Cross-process lease conflict")
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        store.execution_lease = MagicMock(
+            side_effect=BlockingIOError("another process owns this seed")
+        )  # type: ignore[method-assign]
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        executor._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(ConcurrentSeedExecutionError, match="Another process"):
+            await executor.execute_parallel(
+                seed,
+                session_id="session-loser",
+                execution_id="exec-loser",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+
+        executor._run_batch_with_verify_and_retry.assert_not_awaited()
+        assert seed.metadata.seed_id not in ParallelACExecutor._ACTIVE_SEED_LEASES
+
+    @pytest.mark.asyncio
     async def test_storeless_concurrent_same_seed_executions_stay_allowed(self) -> None:
         """The lease is scoped to checkpoint-store-backed executions (like
         the round-10/12 gates it complements): without a store there is no

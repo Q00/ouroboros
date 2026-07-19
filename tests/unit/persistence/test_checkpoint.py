@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import multiprocessing
 from pathlib import Path
+from queue import Empty
 
 import pytest
 
@@ -12,6 +14,39 @@ from ouroboros.persistence.checkpoint import (
     PeriodicCheckpointer,
     RecoveryManager,
 )
+
+
+def _execution_lease_probe(base_path: str, seed_id: str, result_queue: object) -> None:
+    """Attempt one lease acquisition in a genuinely separate process."""
+    store = CheckpointStore(base_path=Path(base_path))
+    store.initialize()
+    try:
+        with store.execution_lease(seed_id):
+            result_queue.put("acquired")  # type: ignore[attr-defined]
+    except BlockingIOError:
+        result_queue.put("blocked")  # type: ignore[attr-defined]
+
+
+def _run_execution_lease_probe(base_path: Path, seed_id: str) -> str:
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_execution_lease_probe,
+        args=(str(base_path), seed_id, result_queue),
+    )
+    process.start()
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        pytest.fail("execution lease probe process did not exit")
+    assert process.exitcode == 0
+    try:
+        return result_queue.get(timeout=2)
+    except Empty:
+        pytest.fail("execution lease probe produced no result")
+    finally:
+        result_queue.close()
 
 
 @pytest.fixture
@@ -114,6 +149,17 @@ class TestCheckpointStore:
         store = CheckpointStore(base_path=tmp_path / "checkpoints")
         store.initialize()
         store.initialize()  # Should not raise
+
+    def test_execution_lease_is_exclusive_across_processes(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """The first process owns recovery/dispatch until its run exits."""
+        seed_id = "same-seed-cross-process"
+
+        with checkpoint_store.execution_lease(seed_id):
+            assert _run_execution_lease_probe(checkpoint_store._base_path, seed_id) == "blocked"
+
+        assert _run_execution_lease_probe(checkpoint_store._base_path, seed_id) == "acquired"
 
     def test_save_creates_checkpoint_file(
         self, checkpoint_store: CheckpointStore, sample_checkpoint: CheckpointData

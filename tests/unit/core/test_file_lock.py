@@ -50,3 +50,19 @@ def test_file_lock_windows_shared_uses_read_lock_mode(monkeypatch, tmp_path: Pat
 
     mock_msvcrt.locking.assert_any_call(fd, mock_msvcrt.LK_RLCK, 1)
     mock_msvcrt.locking.assert_any_call(fd, mock_msvcrt.LK_UNLCK, 1)
+
+
+def test_file_lock_windows_nonblocking_uses_immediate_mode(monkeypatch, tmp_path: Path) -> None:
+    """Non-blocking Windows locks use the one-shot msvcrt mode."""
+    target = tmp_path / "exclusive.json"
+    target.write_text("{}")
+    with target.open("a+", encoding="utf-8") as handle:
+        fd = handle.fileno()
+        mock_msvcrt = MagicMock()
+        mock_msvcrt.LK_NBLCK = 4
+        monkeypatch.setattr(file_lock_module, "msvcrt", mock_msvcrt, raising=False)
+        monkeypatch.setattr(file_lock_module.os, "name", "nt")
+
+        _acquire_lock(handle, exclusive=True, blocking=False)
+
+    mock_msvcrt.locking.assert_called_once_with(fd, mock_msvcrt.LK_NBLCK, 1)

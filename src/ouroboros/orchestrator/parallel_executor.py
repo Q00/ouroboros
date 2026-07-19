@@ -1104,7 +1104,7 @@ class CheckpointPersistenceError(OuroborosError):
 
 
 class ConcurrentSeedExecutionError(OuroborosError):
-    """Another invocation IN THIS PROCESS is already executing this seed.
+    """Another invocation is already executing this checkpoint-backed seed.
 
     Round-14 finding #1 (BLOCKING): the round-12 ownership gate
     (:class:`CheckpointOwnershipError`) probes the checkpoint owner's PID —
@@ -1117,8 +1117,10 @@ class ConcurrentSeedExecutionError(OuroborosError):
     adopt/write the same seed-keyed checkpoint, and race the same
     execution aggregate — the exact double-dispatch/state-corruption the
     round-12 gate exists to prevent, one layer down. Coroutines in one
-    process share memory, so the precise probe here is an in-memory lease
-    (``ParallelACExecutor._ACTIVE_SEED_LEASES``), not an OS PID probe.
+    process share memory, so the precise same-process probe is an in-memory
+    lease (``ParallelACExecutor._ACTIVE_SEED_LEASES``). Separate processes
+    hold a non-blocking filesystem lease for the full execution, closing the
+    load-before-first-save race that owner PID metadata cannot make atomic.
     Like the round-12 refusal, this is an infra-fatal launch conflict
     raised before any AC work starts — no AC ever surfaces FAILED over it,
     and retrying cannot help while the first invocation is still running.
@@ -1145,14 +1147,11 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-#: How recently a cross-host owner's checkpoint must have been written to be
-#: treated as possibly live. Checkpoints are written per completed level, so
-#: this is a coarse heartbeat: a live cross-host run mid-level for longer than
-#: this window is NOT detected (accepted limitation — a shared checkpoint
-#: store across hosts is not this single-operator CLI's primary shape), while
-#: a genuine cross-host crash-restart inside the window merely has to wait it
-#: out (the refusal error says so). Same-host owners use the precise PID
-#: probe instead and never consult this window.
+#: Secondary liveness check after the duration-held filesystem execution lease
+#: has been acquired. Same-host owners use the precise PID probe; cross-host
+#: checkpoints use this coarse heartbeat as defense in depth for shared filesystems
+#: whose locking implementation may not coordinate across hosts. A genuine
+#: cross-host crash-restart inside the window merely has to wait it out.
 _CHECKPOINT_OWNER_FRESHNESS = timedelta(minutes=15)
 _EXECUTION_CHECKPOINT_CONTRACT_VERSION = 2
 _CHECKPOINT_DISPATCH_CONTRACT_VERSION = 2
@@ -1169,8 +1168,8 @@ class ParallelACExecutor:
     #: while every executor in the process shares this one dict. Purely
     #: in-memory on purpose: it guards same-process concurrency only (two
     #: coroutines sharing ``os.getpid()``, invisible to the round-12 PID
-    #: probe); process death releases it implicitly, and the durable
-    #: cross-process ownership marker keeps guarding across processes.
+    #: probe); process death releases it implicitly, while CheckpointStore's
+    #: duration-held filesystem execution lease guards separate processes.
     #: Only claimed for checkpoint-store-backed executions — the raced
     #: object is the seed-keyed checkpoint; store-less invocations keep
     #: their own execution aggregates and stay concurrency-safe by design.
@@ -4789,6 +4788,13 @@ class ParallelACExecutor:
         in the same every-exit-path ``finally`` that drains durable writes,
         so a crash/cancel can never leave the seed permanently walled off.
 
+        ZEP Stage-2 follow-up: the in-process lease alone does not make the
+        FIRST cross-process checkpoint claim atomic. Two processes can both
+        observe "no checkpoint" before either writes its run-start anchor.
+        Hold the store's non-blocking execution lease across recovery, the
+        initial anchor, and every AC dispatch so the loser fails before it can
+        load or overwrite checkpoint state.
+
         Scoped to checkpoint-store-backed executions, exactly like the
         round-10/12 gates it complements (both live inside ``if
         self._checkpoint_store``): the object being raced is the SEED-KEYED
@@ -4800,10 +4806,23 @@ class ParallelACExecutor:
         """
         lease_seed_id: str | None = None
         lease_token: str | None = None
+        process_lease_stack = contextlib.ExitStack()
         if self._checkpoint_store:
             lease_seed_id = self._checkpoint_seed_id(seed, session_id)
             lease_token = self._acquire_seed_execution_lease(lease_seed_id)
         try:
+            if self._checkpoint_store and lease_seed_id is not None:
+                try:
+                    process_lease_stack.enter_context(
+                        self._checkpoint_store.execution_lease(lease_seed_id)
+                    )
+                except BlockingIOError as exc:
+                    raise ConcurrentSeedExecutionError(
+                        f"Another process is already executing seed '{lease_seed_id}'. "
+                        "Checkpoint recovery and the run-start claim must be atomic; "
+                        "wait for the active run to finish (or cancel it) before "
+                        "launching this seed again."
+                    ) from exc
             return await self._execute_parallel_impl(
                 seed,
                 session_id=session_id,
@@ -4818,12 +4837,18 @@ class ParallelACExecutor:
                 system_prompt_builder=system_prompt_builder,
             )
         finally:
-            if lease_seed_id is not None and lease_token is not None:
-                self._release_seed_execution_lease(lease_seed_id, lease_token)
-            # Bounded (never the full parked-cadence budget), and safe to run
-            # twice: the happy path drains before aggregating results, leaving
-            # nothing pending for this second call.
-            await self._drain_deferred_durable_writes()
+            try:
+                # Keep both seed leases held through the final durable-write
+                # drain. A replacement process must not begin replay while
+                # this invocation is still settling correctness-bearing
+                # attestation/escalation events from its last dispatch.
+                await self._drain_deferred_durable_writes()
+            finally:
+                try:
+                    process_lease_stack.close()
+                finally:
+                    if lease_seed_id is not None and lease_token is not None:
+                        self._release_seed_execution_lease(lease_seed_id, lease_token)
 
     async def _execute_parallel_impl(
         self,
