@@ -923,14 +923,26 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             schema_path = Path(schema_path_str)
             schema_path.write_text(json.dumps(schema), encoding="utf-8")
 
-        command = self._build_command(
-            output_last_message_path=str(output_path),
-            output_schema_path=str(schema_path) if schema_path else None,
-            model=normalized_model,
-            profile=resolved.backend_profile,
-            reasoning_effort=effective_config.reasoning_effort,
-            prompt=prompt,
-        )
+        # Goose and Pi reuse this completion flow but expose no Codex-style
+        # per-invocation effort flag. Pass it only to Codex's command builder;
+        # their narrower overrides intentionally do not accept this argument.
+        if self._completion_profile_backend == "codex":
+            command = self._build_command(
+                output_last_message_path=str(output_path),
+                output_schema_path=str(schema_path) if schema_path else None,
+                model=normalized_model,
+                profile=resolved.backend_profile,
+                reasoning_effort=effective_config.reasoning_effort,
+                prompt=prompt,
+            )
+        else:
+            command = self._build_command(
+                output_last_message_path=str(output_path),
+                output_schema_path=str(schema_path) if schema_path else None,
+                model=normalized_model,
+                profile=resolved.backend_profile,
+                prompt=prompt,
+            )
 
         prompt_stdin_bytes = self._prompt_stdin_bytes(prompt)
 
