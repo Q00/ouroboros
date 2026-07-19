@@ -99,6 +99,12 @@ turn uncertain, stakeholder-dependent, or unknown answers into confirmed
 requirements. Put tentative claims in assumptions and unresolved choices in
 decide_later_items.
 
+success_criteria must contain only delivered-behavior and policy acceptance
+criteria: what the PM must observe in the delivered feature to accept it as
+built. Do not promote post-launch outcomes from the transcript — conversion,
+KPI targets, adoption goals, or observation windows — into success_criteria;
+put them in assumptions or decide_later_items instead.
+
 Respond ONLY with valid JSON in this exact format:
 {
     "product_name": "Short product/feature name",

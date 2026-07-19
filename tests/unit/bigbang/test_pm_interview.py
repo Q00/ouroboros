@@ -68,6 +68,11 @@ class TestPMSuccessCriteriaBoundary:
         """Steering prefix with line wraps collapsed for phrase assertions."""
         return " ".join(_PM_SYSTEM_PROMPT_PREFIX.split())
 
+    @staticmethod
+    def _flattened_extraction_prompt() -> str:
+        """Extraction prompt with line wraps collapsed for phrase assertions."""
+        return " ".join(_EXTRACTION_SYSTEM_PROMPT.split())
+
     def test_steering_defines_prd_as_pm_developer_contract(self) -> None:
         prefix = self._flattened_prefix()
         assert "contract between the PM and the developers" in prefix
@@ -78,6 +83,14 @@ class TestPMSuccessCriteriaBoundary:
         prefix = self._flattened_prefix()
         assert "Post-launch outcomes" in prefix
         assert "no place in this contract" in prefix
+
+    def test_extraction_enforces_success_criteria_contract(self) -> None:
+        prompt = self._flattened_extraction_prompt()
+        assert "delivered-behavior and policy acceptance criteria" in prompt
+        assert "observe in the delivered feature to accept it as built" in prompt
+        assert "conversion, KPI targets, adoption goals, or observation windows" in prompt
+        assert "into success_criteria" in prompt
+        assert "assumptions or decide_later_items instead" in prompt
 
 
 class TestPMSteeringPromptBudget:
