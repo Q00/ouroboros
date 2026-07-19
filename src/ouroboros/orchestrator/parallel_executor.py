@@ -4974,11 +4974,6 @@ class ParallelACExecutor:
         stage_results: list[ParallelExecutionStageResult] = []
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
-        # Scope reusable trust to the exact unchanged Seed. Similar-looking
-        # ACs in another project/Seed cannot inherit this run's verdict.
-        self._decomposition_attestation_scope = (
-            f"{self._checkpoint_seed_id(seed, session_id)}:{self._seed_semantic_fingerprint(seed)}"
-        )
         level_contexts = self._normalize_reconciled_level_contexts(
             reconciled_level_contexts,
             total_acs=total_acs,
@@ -5782,6 +5777,20 @@ class ParallelACExecutor:
                     "the restored system-prompt builder did not reproduce the "
                     "interrupted run's exact prompt identity"
                 )
+
+        # Reusable decomposition trust is correctness-bearing routing authority:
+        # a passing attestation can lower the model tier of a later child
+        # dispatch. Bind that authority to the exact canonical workspace and
+        # dispatch contract that produced the verification evidence, not merely
+        # to a serialized Seed/split. The final dispatch contract is selected
+        # only after checkpoint recovery above; using the pre-recovery request
+        # here would let a resumed run publish/consume trust under semantics it
+        # did not actually execute.
+        self._decomposition_attestation_scope = self._build_decomposition_attestation_scope(
+            seed_id=self._checkpoint_seed_id(seed, session_id),
+            seed_fingerprint=self._seed_semantic_fingerprint(seed),
+            dispatch_contract=dispatch_contract,
+        )
 
         # Validation: check all AC indices are present in dependency graph
         expected_indices = set(range(total_acs))
@@ -10750,6 +10759,36 @@ Respond with either ATOMIC or the structured JSON object only.
         self._decomposition_attestations[node_id] = attestation
         return attestation
 
+    @staticmethod
+    def _build_decomposition_attestation_scope(
+        *,
+        seed_id: str,
+        seed_fingerprint: str,
+        dispatch_contract: Mapping[str, Any],
+    ) -> str:
+        """Bind reusable trust to the verified Seed, workspace, and authority.
+
+        ``dispatch_contract`` already carries the canonical absolute workspace,
+        runtime/capability and permission identity, model router, execution
+        profile, tool/tool-schema authority, prompt identity, and reconciled
+        context. Any change to those inputs must produce a different registry
+        aggregate so workspace-local verification can never authorize cheaper
+        routing in another checkout or under different dispatch authority.
+        """
+        payload = {
+            "schema_version": 2,
+            "seed_id": seed_id,
+            "seed_fingerprint": seed_fingerprint,
+            "dispatch_contract": dict(dispatch_contract),
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return f"v2:{hashlib.sha256(canonical).hexdigest()}"
+
     def _decomposition_attestation_key(
         self,
         *,
@@ -10762,12 +10801,13 @@ Respond with either ATOMIC or the structured JSON object only.
         """Return a stable identity for one reusable semantic split.
 
         The key excludes execution/node ids and includes every input that can
-        change the split or its gate contract. A different child partition,
-        parent verification contract, goal, or execution profile cannot
+        change the split or its gate contract. The enclosing ``seed_scope`` is
+        already bound to the canonical workspace and complete dispatch
+        authority, so a different checkout/runtime/tool/prompt contract cannot
         inherit an older verdict accidentally.
         """
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "seed_scope": self._decomposition_attestation_scope or f"execution:{execution_id}",
             "semantic_ac_key": semantic_ac_key,
             "seed_goal": seed_goal,

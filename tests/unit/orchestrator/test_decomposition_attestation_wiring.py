@@ -359,6 +359,37 @@ class TestExecuteDecompositionChildrenWiring:
         assert second_flags and all(flag is True for flag in second_flags)
         assert second_result.dispatched_decomposition_trustworthy is True
 
+    def test_reusable_scope_binds_workspace_and_dispatch_authority(self, tmp_path) -> None:
+        """Workspace-local verification cannot authorize another checkout.
+
+        The registry scope must also change when the prompt/tool/runtime
+        authority changes, even when the serialized Seed and split are
+        identical.
+        """
+
+        def _scope(workspace, *, system_prompt: str) -> str:
+            executor = _make_executor()
+            executor._task_cwd = str(workspace)
+            contract = executor._build_checkpoint_dispatch_contract(
+                tools=["Read", "Edit"],
+                tool_catalog=None,
+                system_prompt=system_prompt,
+                system_prompt_builder=None,
+            )
+            return executor._build_decomposition_attestation_scope(
+                seed_id="seed-shared",
+                seed_fingerprint="semantic-fingerprint",
+                dispatch_contract=contract,
+            )
+
+        workspace_a = tmp_path / "checkout-a"
+        workspace_b = tmp_path / "checkout-b"
+
+        scope_a = _scope(workspace_a, system_prompt="same authority")
+        assert scope_a == _scope(workspace_a, system_prompt="same authority")
+        assert scope_a != _scope(workspace_b, system_prompt="same authority")
+        assert scope_a != _scope(workspace_a, system_prompt="changed authority")
+
     @pytest.mark.asyncio
     async def test_registered_trust_dispatches_real_children_at_lower_tier(
         self,
@@ -418,7 +449,7 @@ class TestExecuteDecompositionChildrenWiring:
         event_store, _events = _make_replaying_event_store()
 
         async def _run(execution_id: str, cwd: Path) -> tuple[ACExecutionResult, list[str | None]]:
-            cwd.mkdir()
+            cwd.mkdir(exist_ok=True)
             runtime = _ArtifactRuntime(cwd)
             executor = ParallelACExecutor(
                 adapter=runtime,
@@ -428,7 +459,19 @@ class TestExecuteDecompositionChildrenWiring:
                 task_cwd=str(cwd),
                 model_router=_claude_router(),
             )
-            executor._decomposition_attestation_scope = "seed-real-shared:v2:test"
+            dispatch_contract = executor._build_checkpoint_dispatch_contract(
+                tools=[],
+                tool_catalog=None,
+                system_prompt="",
+                system_prompt_builder=None,
+            )
+            executor._decomposition_attestation_scope = (
+                executor._build_decomposition_attestation_scope(
+                    seed_id="seed-real-shared",
+                    seed_fingerprint="semantic-fingerprint",
+                    dispatch_contract=dispatch_contract,
+                )
+            )
             executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
             executor._emit_workflow_progress = AsyncMock()
             executor._emit_level_started = AsyncMock()
@@ -468,14 +511,21 @@ class TestExecuteDecompositionChildrenWiring:
             )
             return result, runtime.models
 
-        first_result, first_models = await _run("exec-real-first", tmp_path / "first")
+        first_workspace = tmp_path / "first"
+        first_result, first_models = await _run("exec-real-first", first_workspace)
         assert first_result.decomposition_attestation is not None
         assert first_result.decomposition_attestation.trustworthy is True
         assert first_models == ["sonnet-x", "sonnet-x"]
 
-        second_result, second_models = await _run("exec-real-second", tmp_path / "second")
-        assert second_result.dispatched_decomposition_trustworthy is True
-        assert second_models == ["haiku-x", "haiku-x"]
+        other_result, other_models = await _run("exec-real-other", tmp_path / "other")
+        assert other_result.dispatched_decomposition_trustworthy is False
+        assert other_models == ["sonnet-x", "sonnet-x"]
+
+        for artifact in ("child-0.txt", "child-1.txt"):
+            (first_workspace / artifact).unlink()
+        reused_result, reused_models = await _run("exec-real-reused", first_workspace)
+        assert reused_result.dispatched_decomposition_trustworthy is True
+        assert reused_models == ["haiku-x", "haiku-x"]
 
     @pytest.mark.asyncio
     async def test_attestation_cached_and_event_emitted(self) -> None:
