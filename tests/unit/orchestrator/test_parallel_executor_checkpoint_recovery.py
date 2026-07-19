@@ -717,6 +717,7 @@ class TestFirstLevelCrashLeavesRecoverableCheckpoint:
         saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert saved.is_ok
         state = saved.value.state
+        assert state["checkpoint_contract_version"] == 1
         assert state["execution_id"] == "exec-original"
         assert state["completed_levels"] == 0
         assert state["execution_plan"] == run1._serialize_execution_plan(_plan())
@@ -1733,6 +1734,31 @@ class TestMalformedCheckpointSemanticsFailsClosed:
     _seed_factory = staticmethod(TestMalformedCheckpointProgressFailsClosed._two_ac_seed)
     _plan_factory = staticmethod(TestMalformedCheckpointProgressFailsClosed._two_stage_plan)
 
+    @staticmethod
+    def _valid_semantics_state() -> dict[str, object]:
+        return {
+            "execution_profile": None,
+            "retry_policy": {
+                "lateral_escalation_enabled": True,
+                "parked_retry_backoff_seconds": 300.0,
+                "ac_retry_attempts": 2,
+                "reasoning_effort": None,
+                "run_verify_commands": True,
+                "verify_command_timeout_seconds": 300,
+            },
+            "model_routing": serialize_model_router(None),
+            "execution_semantics": {
+                "decomposition_mode": "preflight",
+                "max_decomposition_depth": 2,
+                "fat_harness_mode": False,
+                "cross_harness_redispatch_enabled": False,
+                "shadow_replay_enabled": False,
+                "context_pack_enabled": None,
+                "max_concurrent": 3,
+            },
+            "prompt_guidance": None,
+        }
+
     async def _crash_after_level_one(self, ckpt_path: Path, seed: Seed) -> None:
         """Run 1 (distinct semantics: backoff 777, bounce_only, fan-out 3):
         level 1 completes and its anchor checkpoint persists, then the
@@ -1848,34 +1874,51 @@ class TestMalformedCheckpointSemanticsFailsClosed:
         assert reloaded.is_ok
         assert reloaded.value.state == broken_state
 
+    @pytest.mark.asyncio
+    async def test_unversioned_checkpoint_is_rejected_without_dispatch(self, tmp_path: Path) -> None:
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed = self._seed_factory()
+        ckpt_path = tmp_path / "checkpoints"
+        await self._crash_after_level_one(ckpt_path, seed)
+        store = CheckpointStore(base_path=ckpt_path)
+        saved = store.load(seed.metadata.seed_id)
+        assert saved.is_ok
+        unversioned_state = dict(saved.value.state)
+        unversioned_state.pop("checkpoint_contract_version")
+        assert store.save(
+            CheckpointData.create(
+                seed_id=seed.metadata.seed_id,
+                phase="parallel_execution",
+                state=unversioned_state,
+            )
+        ).is_ok
+
+        resumed = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        resumed._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(CheckpointCorruptError, match="format is unsupported"):
+            await resumed.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._plan_factory(),
+            )
+
+        resumed._run_batch_with_verify_and_retry.assert_not_awaited()
+
     def test_semantics_validation_accepts_the_saved_shape(self, tmp_path: Path) -> None:
         """Control: the exact semantic payloads a real save writes must
-        validate clean (a genuine resume keeps restoring them), including
-        absent legacy fields."""
-        state = {
-            "execution_profile": None,
-            "retry_policy": {
-                "lateral_escalation_enabled": True,
-                "parked_retry_backoff_seconds": 300.0,
-                "ac_retry_attempts": 2,
-                "reasoning_effort": None,
-                "run_verify_commands": True,
-                "verify_command_timeout_seconds": 300,
-            },
-            "model_routing": serialize_model_router(None),
-            "execution_semantics": {
-                "decomposition_mode": "preflight",
-                "max_decomposition_depth": 2,
-                "fat_harness_mode": False,
-                "cross_harness_redispatch_enabled": False,
-                "shadow_replay_enabled": False,
-                "context_pack_enabled": None,
-                "max_concurrent": 3,
-            },
-        }
+        validate clean; missing groups are indeterminate and rejected."""
+        state = self._valid_semantics_state()
         cp = SimpleNamespace(state=state)
         assert ParallelACExecutor._checkpoint_semantics_malformed(cp) is None
-        assert "execution_profile" in (
+        assert "missing" in (
             ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state={})) or ""
         )
 
@@ -1928,11 +1971,32 @@ class TestMalformedCheckpointSemanticsFailsClosed:
     def test_semantics_validation_rejects_each_malformed_field(
         self, state: dict[str, object], expected_fragment: str
     ) -> None:
+        complete_state = self._valid_semantics_state()
+        complete_state.update(state)
         detail = ParallelACExecutor._checkpoint_semantics_malformed(
-            SimpleNamespace(state={"execution_profile": None, **state})
+            SimpleNamespace(state=complete_state)
         )
         assert detail is not None
         assert expected_fragment in detail
+
+    @pytest.mark.parametrize(
+        "missing_group",
+        [
+            "retry_policy",
+            "model_routing",
+            "execution_semantics",
+            "execution_profile",
+            "prompt_guidance",
+        ],
+    )
+    def test_semantics_validation_rejects_missing_versioned_group(
+        self, missing_group: str
+    ) -> None:
+        state = self._valid_semantics_state()
+        state.pop(missing_group)
+        detail = ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state=state))
+        assert detail is not None
+        assert missing_group in detail
 
 
 class TestIndeterminateReplayWithCompletedCheckpoint:

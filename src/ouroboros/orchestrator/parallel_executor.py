@@ -1154,6 +1154,7 @@ def _pid_alive(pid: int) -> bool:
 #: out (the refusal error says so). Same-host owners use the precise PID
 #: probe instead and never consult this window.
 _CHECKPOINT_OWNER_FRESHNESS = timedelta(minutes=15)
+_EXECUTION_CHECKPOINT_CONTRACT_VERSION = 1
 
 
 class ParallelACExecutor:
@@ -2365,6 +2366,10 @@ class ParallelACExecutor:
         recognized_profile, _ = deserialize_execution_profile(raw.get("execution_profile"))
         if not recognized_profile:
             return "dispatch_contract.execution_profile is not recognized"
+        if raw.get("model_routing") != state.get("model_routing"):
+            return "dispatch_contract.model_routing disagrees with checkpoint semantics"
+        if raw.get("execution_profile") != state.get("execution_profile"):
+            return "dispatch_contract.execution_profile disagrees with checkpoint semantics"
         raw_tools = raw.get("tools")
         if not isinstance(raw_tools, list) or any(not isinstance(tool, str) for tool in raw_tools):
             return "dispatch_contract.tools is not a list of strings"
@@ -2427,10 +2432,6 @@ class ParallelACExecutor:
         if isinstance(saved, Mapping):
             current["model_routing"] = cp.state.get("model_routing")
             current["execution_profile"] = cp.state.get("execution_profile")
-            if saved.get("model_routing") != cp.state.get("model_routing"):
-                return "dispatch contract model routing disagrees with checkpoint semantics"
-            if saved.get("execution_profile") != cp.state.get("execution_profile"):
-                return "dispatch contract execution profile disagrees with checkpoint semantics"
         if saved == current:
             return None
         return (
@@ -3642,8 +3643,16 @@ class ParallelACExecutor:
         state = cp.state
         if not isinstance(state, Mapping):
             return f"checkpoint state is not a mapping: {type(state).__name__}"
-        if "execution_profile" not in state:
-            return "execution_profile contract is missing"
+        required_groups = {
+            "retry_policy",
+            "model_routing",
+            "execution_semantics",
+            "execution_profile",
+            "prompt_guidance",
+        }
+        missing_groups = sorted(required_groups - set(state))
+        if missing_groups:
+            return "checkpoint semantic groups are missing: " + ", ".join(missing_groups)
         for reason in (
             cls._retry_policy_malformed(state.get("retry_policy")),
             cls._model_routing_malformed(state.get("model_routing")),
@@ -3652,6 +3661,19 @@ class ParallelACExecutor:
         ):
             if reason is not None:
                 return reason
+        return None
+
+    @staticmethod
+    def _checkpoint_contract_version_malformed(cp: Any) -> str | None:
+        state = cp.state
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        version = state.get("checkpoint_contract_version")
+        if version != _EXECUTION_CHECKPOINT_CONTRACT_VERSION or isinstance(version, bool):
+            return (
+                "checkpoint_contract_version is missing or unsupported: "
+                f"{version!r} (expected {_EXECUTION_CHECKPOINT_CONTRACT_VERSION})"
+            )
         return None
 
     def _durable_ac_context_summary(
@@ -4053,6 +4075,7 @@ class ParallelACExecutor:
                 seed_id=seed_id,
                 phase="parallel_execution",
                 state={
+                    "checkpoint_contract_version": _EXECUTION_CHECKPOINT_CONTRACT_VERSION,
                     "session_id": session_id,
                     "execution_id": execution_id,
                     # Round-15 finding #1 (BLOCKING): what this progress is
@@ -4489,7 +4512,26 @@ class ParallelACExecutor:
                     # outcome, this is a genuinely NEW execution of the same
                     # seed — adopt nothing, discard the stale checkpoint,
                     # and run every level from scratch.
-                    if (
+                    if cp.phase == "parallel_execution" and (
+                        version_malformed := self._checkpoint_contract_version_malformed(cp)
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.checkpoint_version_unsupported",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=version_malformed,
+                        )
+                        self._console.print(
+                            "[red]Refusing to start: this seed's checkpoint has "
+                            f"an unsupported format ({version_malformed}). It was "
+                            "preserved for operator repair.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint format is unsupported: "
+                            f"{version_malformed}. Refusing to infer missing "
+                            "execution semantics."
+                        )
+                    elif (
                         cp.phase == "parallel_execution"
                         and await self._checkpoint_from_terminal_run(cp, total_levels=total_levels)
                     ):
