@@ -329,6 +329,7 @@ def build_system_prompt(
     *,
     repo_root: str | Path | None = None,
     guidance_fragment: str = "",
+    context_pack_enabled: bool | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -344,6 +345,10 @@ def build_system_prompt(
         guidance_fragment: Explicit project execution guidance resolved and
             provenance-checked by the runner. Empty preserves the historical
             prompt byte-for-byte.
+        context_pack_enabled: Round-13 finding #3 — the runner passes its
+            durable-contract-pinned value here so a resumed run keeps the
+            worker-prompt semantics it started with. ``None`` (direct
+            callers/tests) preserves the historical live-config lookup.
 
     Returns:
         System prompt string.
@@ -381,7 +386,7 @@ def build_system_prompt(
     if conductor_directive:
         prompt = f"{prompt}\n\n{conductor_directive}"
 
-    context_pack_fragment = _context_pack_fragment(seed, repo_root)
+    context_pack_fragment = _context_pack_fragment(seed, repo_root, enabled=context_pack_enabled)
     if context_pack_fragment:
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
@@ -465,20 +470,26 @@ def _resolve_context_pack_root(
 def _context_pack_fragment(
     seed: Seed,
     repo_root: str | Path | None,
+    *,
+    enabled: bool | None = None,
 ) -> str:
     """Render the deterministic context pack fragment, or empty string.
 
     Root resolution happens before the config lookup so the common
     no-repo path (unit tests, greenfield seeds) never loads config and
-    never touches the filesystem scanner.
+    never touches the filesystem scanner. ``enabled`` carries the runner's
+    durable-contract-pinned value (round-13 finding #3); ``None`` keeps
+    the historical live-config lookup for direct callers.
     """
     root = _resolve_context_pack_root(seed, repo_root)
     if root is None:
         return ""
 
-    from ouroboros.config import get_context_pack_enabled
+    if enabled is None:
+        from ouroboros.config import get_context_pack_enabled
 
-    if not get_context_pack_enabled():
+        enabled = get_context_pack_enabled()
+    if not enabled:
         return ""
 
     from ouroboros.orchestrator.context_pack import build_context_pack, render_context_pack
@@ -788,6 +799,24 @@ class OrchestratorRunner:
                 else decomposition_mode
             )
         )
+        # Round-13 finding #3 (BLOCKING): resolve the remaining
+        # execution-semantic switches ONCE at construction so the durable
+        # execution contract can pin them for resume_session, exactly like
+        # the retry/verify knobs above. ``cross_harness_redispatch_enabled``
+        # changes whether a terminally failing AC gets one alternate-runtime
+        # redispatch before FAILED (termination semantics);
+        # ``context_pack_enabled`` changes whether worker prompts carry the
+        # deterministic repo context pack (worker-prompt construction
+        # semantics). Both were previously re-read from the live config at
+        # each use site, so a config edit between the original run and a
+        # resume silently drifted resumed behavior outside the contract.
+        from ouroboros.config import (
+            get_context_pack_enabled,
+            get_cross_harness_redispatch_enabled,
+        )
+
+        self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
+        self._context_pack_enabled = get_context_pack_enabled()
         if not _model_routing_disabled:
             from ouroboros.orchestrator.model_routing import build_model_router
 
@@ -1962,6 +1991,20 @@ class OrchestratorRunner:
         semantics, and the frugality proof's cohort fingerprint (which
         folds this policy in) would conflate runs that actually behaved
         differently.
+
+        Round-13 finding #3 (BLOCKING): three more execution-semantic
+        inputs join for the same reason — round 12 pinned them in the
+        EXECUTOR's RC3 checkpoint but this runner-level contract (the
+        ``resume_session`` path) still silently re-read the current
+        config. ``decomposition_mode`` changes what a run dispatches
+        (preflight decomposition vs bounce-only vs off);
+        ``cross_harness_redispatch_enabled`` changes whether a terminally
+        failing AC gets one alternate-runtime redispatch before FAILED
+        (termination semantics); ``context_pack_enabled`` changes how
+        worker prompts are constructed (the deterministic repo context
+        pack). ``context_pack`` needs no dedicated serializer: the config
+        input is a plain bool — the pack CONTENT is derived from the
+        workspace, whose identity the contract already pins separately.
         """
         return {
             "lateral_escalation_enabled": self._lateral_escalation_enabled,
@@ -1970,6 +2013,9 @@ class OrchestratorRunner:
             "reasoning_effort": self._reasoning_effort,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "decomposition_mode": self._decomposition_mode,
+            "cross_harness_redispatch_enabled": self._cross_harness_redispatch_enabled,
+            "context_pack_enabled": self._context_pack_enabled,
         }
 
     @staticmethod
@@ -1981,6 +2027,9 @@ class OrchestratorRunner:
             "reasoning_effort",
             "run_verify_commands",
             "verify_command_timeout_seconds",
+            "decomposition_mode",
+            "cross_harness_redispatch_enabled",
+            "context_pack_enabled",
         }:
             return False
         enabled = value.get("lateral_escalation_enabled")
@@ -1989,6 +2038,17 @@ class OrchestratorRunner:
         reasoning_effort = value.get("reasoning_effort")
         run_verify_commands = value.get("run_verify_commands")
         verify_timeout = value.get("verify_command_timeout_seconds")
+        # Round-13 finding #3: the new fields mirror their own config-schema
+        # contracts exactly, like every field above — ``decomposition_mode``
+        # is the ExecutionConfig Literal vocabulary, the other two are plain
+        # bools. Present-but-malformed fails closed (resume blocked), same
+        # convention as the rest of this validator.
+        if value.get("decomposition_mode") not in {"preflight", "bounce_only", "off"}:
+            return False
+        if not isinstance(value.get("cross_harness_redispatch_enabled"), bool):
+            return False
+        if not isinstance(value.get("context_pack_enabled"), bool):
+            return False
         # Round-9 finding #4: the new fields mirror their own config-schema
         # contracts exactly, like the fields above mirror theirs —
         # ``reasoning_effort`` is the effort-routing vocabulary or ``None``
@@ -2200,7 +2260,6 @@ class OrchestratorRunner:
         session_id: str,
     ) -> None:
         """Persist the user-facing run configuration before any AC dispatch."""
-        from ouroboros.config import get_cross_harness_redispatch_enabled
         from ouroboros.events.base import BaseEvent
 
         starting_tier = self._model_router.base_tier if self._model_router else None
@@ -2227,7 +2286,10 @@ class OrchestratorRunner:
                     "starting_model_tier": starting_tier,
                     "starting_model": starting_model,
                     "progressive_escalation_enabled": self._model_router is not None,
-                    "alternate_harness_enabled": get_cross_harness_redispatch_enabled(),
+                    # Round-13 finding #3: report the run's PINNED contract
+                    # value, not a live config re-read that could already
+                    # disagree with what this run will actually do.
+                    "alternate_harness_enabled": self._cross_harness_redispatch_enabled,
                     "strict_baseline_authorized": (
                         self._execution_preferences.strict_baseline_authorized
                     ),
@@ -2732,6 +2794,19 @@ class OrchestratorRunner:
             self._verify_command_timeout_seconds = int(
                 raw_retry_policy["verify_command_timeout_seconds"]
             )
+            # Round-13 finding #3 (BLOCKING): restore the dispatch-shape and
+            # worker-prompt semantics the run started with, exactly like the
+            # fields above. ``decomposition_mode`` keeps its paired
+            # ``enable_decomposition`` gate consistent, mirroring both
+            # ``__init__`` and the executor's checkpoint-level
+            # ``_restore_checkpoint_execution_semantics``.
+            restored_decomposition_mode = raw_retry_policy["decomposition_mode"]
+            self._decomposition_mode = restored_decomposition_mode
+            self._enable_decomposition = restored_decomposition_mode != "off"
+            self._cross_harness_redispatch_enabled = bool(
+                raw_retry_policy["cross_harness_redispatch_enabled"]
+            )
+            self._context_pack_enabled = bool(raw_retry_policy["context_pack_enabled"])
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
@@ -4323,6 +4398,7 @@ class OrchestratorRunner:
                 strategy=strategy,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=self._context_pack_enabled,
             )
             await self._record_execution_guidance_injection(
                 session_id=tracker.session_id,
@@ -5067,6 +5143,11 @@ class OrchestratorRunner:
             session_signal_hub=self._session_signal_hub,
             parked_retry_backoff_seconds=self._parked_retry_backoff_seconds,
             lateral_escalation_enabled=self._lateral_escalation_enabled,
+            # Round-13 finding #3: pass the runner's PINNED contract value
+            # instead of letting the executor re-read the live config (its
+            # ``None`` default) — a resumed run must keep the redispatch
+            # semantics it started with.
+            cross_harness_redispatch=self._cross_harness_redispatch_enabled,
         )
 
         # Check for cancellation before starting parallel execution
@@ -5754,6 +5835,7 @@ class OrchestratorRunner:
                 seed,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=self._context_pack_enabled,
             )
             await self._record_execution_guidance_injection(
                 session_id=session_id,

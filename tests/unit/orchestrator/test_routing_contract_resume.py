@@ -236,6 +236,11 @@ def test_resume_restores_persisted_retry_policy() -> None:
     original._reasoning_effort = "high"
     original._run_verify_commands = False
     original._verify_command_timeout_seconds = 123
+    # Round-13 finding #3: dispatch-shape and worker-prompt semantics join
+    # the contract for the same reason.
+    original._decomposition_mode = "bounce_only"
+    original._cross_harness_redispatch_enabled = True
+    original._context_pack_enabled = False
     persisted = original._build_execution_contract()
     assert persisted["retry_policy"] == {
         "lateral_escalation_enabled": True,
@@ -244,6 +249,9 @@ def test_resume_restores_persisted_retry_policy() -> None:
         "reasoning_effort": "high",
         "run_verify_commands": False,
         "verify_command_timeout_seconds": 123,
+        "decomposition_mode": "bounce_only",
+        "cross_harness_redispatch_enabled": True,
+        "context_pack_enabled": False,
     }
 
     resumed = _runner()
@@ -258,6 +266,10 @@ def test_resume_restores_persisted_retry_policy() -> None:
     resumed._reasoning_effort = None
     resumed._run_verify_commands = True
     resumed._verify_command_timeout_seconds = 600
+    resumed._decomposition_mode = "off"
+    resumed._enable_decomposition = False
+    resumed._cross_harness_redispatch_enabled = False
+    resumed._context_pack_enabled = True
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -268,6 +280,11 @@ def test_resume_restores_persisted_retry_policy() -> None:
     assert resumed._reasoning_effort == "high"
     assert resumed._run_verify_commands is False
     assert resumed._verify_command_timeout_seconds == 123
+    assert resumed._decomposition_mode == "bounce_only"
+    # The paired gate follows the restored mode, mirroring __init__.
+    assert resumed._enable_decomposition is True
+    assert resumed._cross_harness_redispatch_enabled is True
+    assert resumed._context_pack_enabled is False
 
 
 def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
@@ -297,6 +314,9 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     resumed._reasoning_effort = "medium"
     resumed._run_verify_commands = True
     resumed._verify_command_timeout_seconds = 77
+    resumed._decomposition_mode = "preflight"
+    resumed._cross_harness_redispatch_enabled = False
+    resumed._context_pack_enabled = True
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -312,11 +332,14 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         "reasoning_effort": "medium",
         "run_verify_commands": True,
         "verify_command_timeout_seconds": 77,
+        "decomposition_mode": "preflight",
+        "cross_harness_redispatch_enabled": False,
+        "context_pack_enabled": True,
     }
 
 
 def _full_retry_policy(**overrides: object) -> dict[str, object]:
-    """A well-formed six-field policy, with targeted per-test corruption."""
+    """A well-formed nine-field policy, with targeted per-test corruption."""
     policy: dict[str, object] = {
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 300.0,
@@ -324,6 +347,9 @@ def _full_retry_policy(**overrides: object) -> dict[str, object]:
         "reasoning_effort": "high",
         "run_verify_commands": True,
         "verify_command_timeout_seconds": 600,
+        "decomposition_mode": "preflight",
+        "cross_harness_redispatch_enabled": False,
+        "context_pack_enabled": True,
     }
     policy.update(overrides)
     return policy
@@ -381,6 +407,26 @@ def _full_retry_policy(**overrides: object) -> dict[str, object]:
         _full_retry_policy(verify_command_timeout_seconds="600"),
         _full_retry_policy(verify_command_timeout_seconds=True),
         _full_retry_policy(verify_command_timeout_seconds=600.5),
+        # Round-13 finding #3: a rounds-9-12-era contract shape (or any
+        # tampered payload) missing/malformed on the NEW dispatch-shape and
+        # worker-prompt fields must fail closed here too.
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+            "ac_retry_attempts": 2,
+            "reasoning_effort": "high",
+            "run_verify_commands": True,
+            "verify_command_timeout_seconds": 600,
+        },  # rounds-9-12-era six-field contract shape
+        _full_retry_policy(decomposition_mode="everything"),
+        _full_retry_policy(decomposition_mode=True),
+        _full_retry_policy(decomposition_mode=None),
+        _full_retry_policy(cross_harness_redispatch_enabled="yes"),
+        _full_retry_policy(cross_harness_redispatch_enabled=None),
+        _full_retry_policy(cross_harness_redispatch_enabled=1),
+        _full_retry_policy(context_pack_enabled="on"),
+        _full_retry_policy(context_pack_enabled=None),
+        _full_retry_policy(context_pack_enabled=0),
     ],
 )
 def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:
@@ -440,6 +486,41 @@ def test_effort_and_verify_gate_are_folded_into_routing_fingerprint(
     can be evaluated at all. Two runs differing ONLY on one of these axes
     behave materially differently and must never collapse into the same
     frugality-proof cohort."""
+    first = _runner()
+    setattr(first, field, first_value)
+    first_contract = first._build_execution_contract()
+
+    second = _runner()
+    setattr(second, field, second_value)
+    second_contract = second._build_execution_contract()
+
+    assert first_contract["model_routing"] == second_contract["model_routing"]
+    assert first_contract["retry_policy"] != second_contract["retry_policy"]
+    assert (
+        first_contract["frugality_proof"]["routing_fingerprint"]
+        != second_contract["frugality_proof"]["routing_fingerprint"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "first_value", "second_value"),
+    [
+        ("_decomposition_mode", "preflight", "off"),
+        ("_decomposition_mode", "preflight", "bounce_only"),
+        ("_decomposition_mode", "bounce_only", "off"),
+        ("_cross_harness_redispatch_enabled", False, True),
+        ("_context_pack_enabled", True, False),
+    ],
+)
+def test_dispatch_and_prompt_semantics_are_folded_into_routing_fingerprint(
+    field: str, first_value: object, second_value: object
+) -> None:
+    """Round-13 finding #3 (BLOCKING): ``decomposition_mode`` changes what
+    a run dispatches, ``cross_harness_redispatch_enabled`` changes whether
+    a terminally failing AC gets an alternate-runtime redispatch before
+    FAILED, and ``context_pack_enabled`` changes how worker prompts are
+    constructed. Two runs differing ONLY on one of these axes behave
+    materially differently and must never share a fingerprint/cohort."""
     first = _runner()
     setattr(first, field, first_value)
     first_contract = first._build_execution_contract()
