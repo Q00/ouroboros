@@ -1014,6 +1014,13 @@ def _compiled_capsule_event(
     )
 
 
+_GLOBAL_VERIFIER_PASS = True
+
+
+def _global_state_verifier(**_kwargs: Any) -> VerifierVerdict:
+    return VerifierVerdict(passed=_GLOBAL_VERIFIER_PASS)
+
+
 def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
     """Every input that can alter provider work or acceptance must change authority."""
 
@@ -1163,6 +1170,34 @@ def test_capsule_authority_distinguishes_callable_verifier_state() -> None:
         console=MagicMock(),
         enable_decomposition=False,
         atomic_verifier=ConfiguredVerifier(False),
+    )
+
+    assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority
+    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "durable"
+
+
+def test_capsule_authority_distinguishes_referenced_verifier_globals(monkeypatch) -> None:
+    """Changing a module-global policy cannot preserve acceptance authority."""
+    runtime = SimpleNamespace(
+        runtime_backend="codex_cli",
+        working_directory="/tmp/project",
+        permission_mode="acceptEdits",
+    )
+    monkeypatch.setitem(_global_state_verifier.__globals__, "_GLOBAL_VERIFIER_PASS", True)
+    passing = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=_global_state_verifier,
+    )
+    monkeypatch.setitem(_global_state_verifier.__globals__, "_GLOBAL_VERIFIER_PASS", False)
+    rejecting = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=_global_state_verifier,
     )
 
     assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority

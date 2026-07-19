@@ -2354,7 +2354,20 @@ class ParallelACExecutor:
             return {"kind": "datetime", "value": value.isoformat()}
         if isinstance(value, timedelta):
             return {"kind": "timedelta", "seconds": value.total_seconds()}
-        if inspect.isroutine(value) or inspect.isclass(value):
+        if inspect.ismodule(value):
+            raise ValueError(f"{field} contains mutable module state")
+        if inspect.isclass(value):
+            try:
+                source = inspect.getsource(value)
+            except (OSError, TypeError) as exc:
+                raise ValueError(f"{field} contains an opaque class") from exc
+            return {
+                "kind": "class",
+                "module": str(getattr(value, "__module__", "")),
+                "qualname": str(getattr(value, "__qualname__", value.__name__)),
+                "source_digest": cls._prompt_identity(source),
+            }
+        if inspect.isroutine(value):
             raise ValueError(f"{field} contains nested executable state")
 
         seen = set() if seen is None else seen
@@ -2510,6 +2523,7 @@ class ParallelACExecutor:
                 raw_state: object = {"explicit_identity": dict(identity)}
             elif inspect.isfunction(verifier) or inspect.ismethod(verifier):
                 function = verifier.__func__ if inspect.ismethod(verifier) else verifier
+                closure_vars = inspect.getclosurevars(function)
                 closure_values: list[object] = []
                 for cell in getattr(function, "__closure__", None) or ():
                     try:
@@ -2522,6 +2536,9 @@ class ParallelACExecutor:
                     "closure": closure_values,
                     "function_attributes": dict(vars(function)),
                     "bound_instance": verifier.__self__ if inspect.ismethod(verifier) else None,
+                    "referenced_globals": dict(closure_vars.globals),
+                    "referenced_builtins": sorted(closure_vars.builtins),
+                    "unbound_names": sorted(closure_vars.unbound),
                 }
             else:
                 raw_state = {"callable_instance": verifier}
