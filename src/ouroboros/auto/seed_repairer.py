@@ -14,7 +14,12 @@ from uuid import uuid4
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
-from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
+from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
+    Seed,
+    ac_text,
+)
 
 
 def _review_accepts_closure_mode(review_callable: Callable[..., Any]) -> bool:
@@ -151,8 +156,14 @@ class SeedRepairer:
                 index = _target_index(finding.target)
                 if index is not None and index < len(acceptance):
                     if index not in repaired_acceptance_indices:
-                        acceptance[index] = _observable_preserving_replacement(
+                        replacement = _observable_preserving_replacement(
                             ac_text(acceptance[index]), index=index
+                        )
+                        criterion = acceptance[index]
+                        acceptance[index] = (
+                            criterion.model_copy(update={"description": replacement})
+                            if isinstance(criterion, AcceptanceCriterionSpec)
+                            else replacement
                         )
                         repaired_acceptance_indices.add(index)
                 else:
@@ -194,7 +205,7 @@ class SeedRepairer:
                 {
                     "goal": goal,
                     "constraints": tuple(dict.fromkeys(constraints)),
-                    "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
+                    "acceptance_criteria": tuple(acceptance),
                     "metadata": seed.metadata.model_copy(
                         update={
                             "seed_id": f"seed_{uuid4().hex[:12]}",

@@ -19,8 +19,11 @@ from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
+    InvestmentSpec,
     OntologyField,
     OntologySchema,
     Seed,
@@ -63,7 +66,9 @@ def _fill_ready(ledger: SeedDraftLedger) -> None:
 
 
 def _seed(
-    ac: tuple[str, ...] = ("`habit list` prints stable stdout containing created habits",),
+    ac: tuple[AcceptanceCriterionInput, ...] = (
+        "`habit list` prints stable stdout containing created habits",
+    ),
 ) -> Seed:
     return Seed(
         goal="Build a local CLI",
@@ -1238,10 +1243,7 @@ async def test_pipeline_repairs_b_seed_to_a_and_starts_run(tmp_path) -> None:
 
     assert result.status == "complete"
     assert result.grade == "A"
-    # The user's vague "The CLI should be easy..." AC is repaired in
-    # place. After L1-d (#1171) the catalog's default_ac_template is
-    # prepended to the Seed before the repairer runs, so the *user*
-    # entry is no longer at index [0]; locate it by content instead.
+    # The user's vague "The CLI should be easy..." AC is repaired in place.
     repaired_entries = [
         item.get("description", "") if isinstance(item, dict) else item
         for item in state.seed_artifact["acceptance_criteria"]
@@ -1273,6 +1275,63 @@ def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
     assert repaired_acceptance.count("original requirement for") == 1
     assert "The CLI" in repaired_acceptance
     assert "original requirement for A command/API check" not in repaired_acceptance
+
+
+def test_seed_repairer_preserves_structured_contract_and_ac_multiplicity() -> None:
+    sibling = AcceptanceCriterionSpec(
+        description="The status command prints the current state.",
+        semantic_ac_key="ac_1111111111111111",
+        verify_command="pytest tests/test_status.py",
+    )
+    target = AcceptanceCriterionSpec(
+        description="The CLI should be easy and user-friendly.",
+        semantic_ac_key="ac_2222222222222222",
+        verify_command="pytest tests/test_cli.py",
+        expected_artifacts=("build/cli-report.json",),
+        output_assertion="stdout contains ready",
+        investment=InvestmentSpec(
+            difficulty="medium",
+            stakes="high",
+            provenance="measured",
+            confidence="high",
+        ),
+    )
+    seed = _seed(ac=(sibling, target, sibling))
+    finding = ReviewFinding.from_parts(
+        code="vague_acceptance_criteria",
+        target="acceptance_criteria[1]",
+        severity="high",
+        message="Acceptance criterion is vague",
+        repair_instruction="Replace with observable behavior or artifact.",
+    )
+    review = SeedReview(
+        grade_result=GradeResult(
+            grade=SeedGrade.B,
+            scores={
+                "coverage": 0.8,
+                "ambiguity": 0.2,
+                "testability": 0.7,
+                "execution_feasibility": 0.9,
+                "risk": 0.1,
+            },
+            may_run=False,
+        ),
+        findings=(finding,),
+    )
+
+    result = SeedRepairer().repair_once(seed, review)
+
+    assert result.changed
+    assert len(result.seed.acceptance_criteria) == 3
+    assert result.seed.acceptance_criteria[0] == sibling
+    assert result.seed.acceptance_criteria[2] == sibling
+    repaired = result.seed.acceptance_criteria[1]
+    assert "stable observable output" in repaired.description
+    assert repaired.semantic_ac_key == target.semantic_ac_key
+    assert repaired.verify_command == target.verify_command
+    assert repaired.expected_artifacts == target.expected_artifacts
+    assert repaired.output_assertion == target.output_assertion
+    assert repaired.investment == target.investment
 
 
 def test_seed_repairer_assigns_new_seed_identity_after_mutation() -> None:

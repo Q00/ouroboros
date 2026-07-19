@@ -93,6 +93,11 @@ ask or send either argument; Auto restores the persisted contract.
 5. Starts execution only after A-grade.
 6. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
 
+Goal prose does not establish typed Seed lineage. Mentioning a parent Seed path
+or Seed ID in an `ooo auto` goal is treated only as text and does not set
+`parent_seed_id` or create a derivative generation. Use the `ooo evolve`
+surface and its lineage handle when work must derive from an existing Seed.
+
 ## Background monitoring UX
 
 When an auto start response includes `response.meta.job_id`:
