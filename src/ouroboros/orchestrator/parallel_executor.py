@@ -2833,6 +2833,27 @@ class ParallelACExecutor:
 
     #: The closed vocabulary ``__init__`` accepts for ``decomposition_mode``.
     _DECOMPOSITION_MODES = frozenset({"preflight", "bounce_only", "off"})
+    _CHECKPOINT_V2_RETRY_POLICY_FIELDS = frozenset(
+        {
+            "lateral_escalation_enabled",
+            "parked_retry_backoff_seconds",
+            "ac_retry_attempts",
+            "reasoning_effort",
+            "run_verify_commands",
+            "verify_command_timeout_seconds",
+        }
+    )
+    _CHECKPOINT_V2_EXECUTION_SEMANTICS_FIELDS = frozenset(
+        {
+            "decomposition_mode",
+            "max_decomposition_depth",
+            "fat_harness_mode",
+            "cross_harness_redispatch_enabled",
+            "shadow_replay_enabled",
+            "context_pack_enabled",
+            "max_concurrent",
+        }
+    )
 
     @classmethod
     def _execution_semantics_malformed(cls, raw_semantics: object) -> str | None:
@@ -3833,14 +3854,38 @@ class ParallelACExecutor:
         missing_groups = sorted(required_groups - set(state))
         if missing_groups:
             return "checkpoint semantic groups are missing: " + ", ".join(missing_groups)
+        raw_retry_policy = state.get("retry_policy")
+        raw_execution_semantics = state.get("execution_semantics")
         for reason in (
-            cls._retry_policy_malformed(state.get("retry_policy")),
+            cls._retry_policy_malformed(raw_retry_policy),
             cls._model_routing_malformed(state.get("model_routing")),
-            cls._execution_semantics_malformed(state.get("execution_semantics")),
+            cls._execution_semantics_malformed(raw_execution_semantics),
             cls._execution_profile_malformed(state.get("execution_profile")),
         ):
             if reason is not None:
                 return reason
+        if isinstance(raw_retry_policy, Mapping) and set(raw_retry_policy) != set(
+            cls._CHECKPOINT_V2_RETRY_POLICY_FIELDS
+        ):
+            missing = sorted(cls._CHECKPOINT_V2_RETRY_POLICY_FIELDS - set(raw_retry_policy))
+            unknown = sorted(set(raw_retry_policy) - cls._CHECKPOINT_V2_RETRY_POLICY_FIELDS)
+            return (
+                "checkpoint v2 retry_policy field set is incomplete or unknown: "
+                f"missing={missing}, unknown={unknown}"
+            )
+        if isinstance(raw_execution_semantics, Mapping) and set(raw_execution_semantics) != set(
+            cls._CHECKPOINT_V2_EXECUTION_SEMANTICS_FIELDS
+        ):
+            missing = sorted(
+                cls._CHECKPOINT_V2_EXECUTION_SEMANTICS_FIELDS - set(raw_execution_semantics)
+            )
+            unknown = sorted(
+                set(raw_execution_semantics) - cls._CHECKPOINT_V2_EXECUTION_SEMANTICS_FIELDS
+            )
+            return (
+                "checkpoint v2 execution_semantics field set is incomplete or unknown: "
+                f"missing={missing}, unknown={unknown}"
+            )
         return None
 
     @staticmethod

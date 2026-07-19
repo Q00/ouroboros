@@ -2063,6 +2063,38 @@ class TestMalformedCheckpointSemanticsFailsClosed:
         assert detail is not None
         assert missing_group in detail
 
+    @pytest.mark.parametrize(
+        ("group", "missing_field"),
+        [
+            ("retry_policy", "reasoning_effort"),
+            ("retry_policy", "run_verify_commands"),
+            ("retry_policy", "verify_command_timeout_seconds"),
+            ("execution_semantics", "decomposition_mode"),
+            ("execution_semantics", "max_decomposition_depth"),
+            ("execution_semantics", "fat_harness_mode"),
+            ("execution_semantics", "cross_harness_redispatch_enabled"),
+            ("execution_semantics", "shadow_replay_enabled"),
+            ("execution_semantics", "context_pack_enabled"),
+            ("execution_semantics", "max_concurrent"),
+        ],
+    )
+    def test_semantics_validation_rejects_missing_versioned_field(
+        self,
+        group: str,
+        missing_field: str,
+    ) -> None:
+        """A v2 checkpoint never applies legacy per-field migration rules."""
+        state = self._valid_semantics_state()
+        payload = state[group]
+        assert isinstance(payload, dict)
+        payload.pop(missing_field)
+
+        detail = ParallelACExecutor._checkpoint_semantics_malformed(SimpleNamespace(state=state))
+
+        assert detail is not None
+        assert group in detail
+        assert missing_field in detail
+
 
 class TestIndeterminateReplayWithCompletedCheckpoint:
     """Round-13 finding #2 (BLOCKING): the terminal-staleness gate's
