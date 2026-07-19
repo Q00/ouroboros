@@ -1078,6 +1078,15 @@ class RuntimeCapabilities:
     # Synapse is independently capability-gated.  Existing runtimes must remain
     # unchanged until a transport proves and tests each delivery boundary.
     session_signals: SessionSignalCapabilities = field(default_factory=SessionSignalCapabilities)
+    # Whether the driver yields tool-effect events in REAL TIME (before the tool
+    # runs / as it runs), so a stall with no observed tool effect proves no
+    # effect occurred. Defaults to False: a buffered driver that awaits the whole
+    # turn before yielding tool events (e.g. the Claude worker transport) can
+    # mutate the workspace and then hang WITHOUT emitting any message, so the
+    # orchestrator must fail closed on such a stall rather than fresh-redispatch.
+    # A runtime opts in to True only when it verifiably streams tool effects as
+    # they happen, which lets an effect-free stall stay retryable.
+    realtime_tool_effect_visibility: bool = False
 
 
 # Default capability profile for first-class backends (Claude, Codex).

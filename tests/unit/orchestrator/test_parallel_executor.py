@@ -1271,6 +1271,117 @@ def test_claude_worker_transport_executable_contract_includes_command_policy() -
     assert "add_dirs" in contract["command_policy"]
 
 
+def test_runtime_executable_identity_resolves_bare_name_via_path(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """R5 blocker #4: a bare command name is fingerprinted via the effective PATH.
+
+    ``create_subprocess_exec`` resolves a bare name through PATH, not the
+    workspace, so ``claude`` pointing at two different binaries under two PATHs
+    must produce different executable identity.
+    """
+    import os as _os
+    import stat
+
+    def _make_bin(directory: Any, target: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        script = directory / "toolx"
+        script.write_text(f"#!/bin/sh\nexec {target}\n")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    _make_bin(dir_a, "/bin/true")
+    _make_bin(dir_b, "/bin/false")
+
+    class _Runtime:
+        _cli_path = "toolx"
+
+    monkeypatch.setenv("PATH", str(dir_a))
+    identity_a = ParallelACExecutor._runtime_executable_identity(_Runtime())
+    monkeypatch.setenv("PATH", str(dir_b))
+    identity_b = ParallelACExecutor._runtime_executable_identity(_Runtime())
+
+    assert identity_a["executable"]["realpath"] == _os.path.realpath(str(dir_a / "toolx"))
+    assert identity_b["executable"]["realpath"] == _os.path.realpath(str(dir_b / "toolx"))
+    assert identity_a != identity_b
+
+
+def test_runtime_executable_identity_marks_unresolved_bare_name(monkeypatch: Any) -> None:
+    """R5 blocker #4: a bare name PATH cannot resolve is a distinct fail-visible id."""
+
+    class _Runtime:
+        _cli_path = "definitely-not-a-real-binary-xyz"
+
+    monkeypatch.setenv("PATH", "/nonexistent-dir")
+    identity = ParallelACExecutor._runtime_executable_identity(_Runtime())
+    assert identity["executable"]["realpath"] is None
+    assert identity["executable"]["path_resolution"] == "unresolved"
+
+
+def test_capsule_authority_binds_session_signal_hub_presence() -> None:
+    """R5 blocker #5: enabling the signal hub changes acceptance-affecting semantics."""
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+    def _scope(with_hub: bool) -> str:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            session_signal_hub=MagicMock() if with_hub else None,
+        )
+        return executor._build_ac_capsule_authority_scope(
+            execution_context_id="exec-1",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+            is_sub_ac=False,
+            decomposition_trustworthy=False,
+            force_frontier_routing=False,
+            investment_spec=None,
+        )
+
+    assert _scope(with_hub=True) != _scope(with_hub=False)
+
+
+def test_bound_verify_gate_outcome_caps_and_rejects_oversized() -> None:
+    """R5 blocker #6: verify outcomes are bounded before persistence."""
+    from ouroboros.orchestrator.execution_event_emitter import (
+        _MAX_VERIFY_MISSING_ARTIFACTS,
+        bound_verify_gate_outcome,
+    )
+
+    outcome = {
+        "passed": False,
+        "reason": "expected_artifacts missing",
+        "output_tail": "",
+        "missing_artifacts": [f"path/{i}" for i in range(1000)],
+    }
+    bounded = bound_verify_gate_outcome(outcome)
+    assert bounded["passed"] is False
+    assert len(bounded["missing_artifacts"]) == _MAX_VERIFY_MISSING_ARTIFACTS
+    assert bounded["missing_artifacts_omitted"] == 1000 - _MAX_VERIFY_MISSING_ARTIFACTS
+
+    # Even after count/length caps, pathological 4-byte-per-char content can blow
+    # the hard UTF-8 byte cap; such a payload is rejected outright.
+    with pytest.raises(ValueError, match="size bound"):
+        bound_verify_gate_outcome(
+            {
+                "passed": True,
+                "reason": None,
+                "output_tail": "",
+                # "𐍈" is 4 UTF-8 bytes: 64 entries × 512 chars × 4 bytes ≈ 128 KiB.
+                "missing_artifacts": ["𐍈" * 512 for _ in range(_MAX_VERIFY_MISSING_ARTIFACTS)],
+            }
+        )
+
+
 def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
     """Every input that can alter provider work or acceptance must change authority."""
 
@@ -5951,6 +6062,53 @@ class TestParallelACExecutor:
             await executor._load_persisted_ac_runtime_handle(
                 0,
                 execution_context_id="session-sealed-primary-head",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_fails_closed_on_dispatch_without_capsule(self) -> None:
+        """R5 blocker #2: a dispatch boundary with no prerequisite capsule is corrupt.
+
+        A matching attempt.dispatched with a missing capsule.compiled event is
+        partial/corrupt history — the provider may already have been entered under
+        authority we cannot verify. Recovery must fail closed rather than silently
+        return None and let the caller re-enter as fresh.
+        """
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Dispatch without its capsule must fail closed",
+            session_id="session-dispatch-no-capsule",
+            seed_goal="Ship",
+        )
+        # A dispatch event WITHOUT the prerequisite capsule.compiled event.
+        event_store.replay.return_value = [
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id="1" * 32,
+                dispatch_kind="primary",
+            ),
+        ]
+
+        with pytest.raises(AmbiguousACExecutionError, match="without its prerequisite capsule"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-no-capsule",
                 retry_attempt=0,
                 expected_capsule_fingerprint=persisted_capsule.fingerprint,
                 expected_capsule_workspace=persisted_capsule.workspace,
@@ -13013,16 +13171,16 @@ class TestParallelACExecutor:
 
     @pytest.mark.asyncio
     async def test_effect_free_stall_stays_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Blocker #3: a stall with NO observed tool effect keeps the retry sentinel.
+        """Blocker #3: an effect-free stall on a REAL-TIME driver keeps the sentinel.
 
-        The complement of the effectful-stall guard: when no effect was
-        dispatched, a fresh redispatch cannot duplicate anything, so the existing
-        retryable stall behavior is preserved (the sentinel error the batch/leaf
-        retry loop keys on).
+        When the driver attests real-time tool-effect visibility, no observed
+        effect proves no effect occurred, so a fresh redispatch cannot duplicate
+        anything and the existing retryable stall behavior is preserved.
         """
         import anyio
 
         from ouroboros.orchestrator import leaf_dispatcher
+        from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
 
         monkeypatch.setattr(leaf_dispatcher, "STALL_TIMEOUT_SECONDS", 0.15)
 
@@ -13030,6 +13188,9 @@ class TestParallelACExecutor:
             runtime_backend = "codex_cli"
             working_directory = "/tmp/project"
             permission_mode = "acceptEdits"
+            # Attests it streams tool effects in real time, so a stall with no
+            # observed effect is genuinely effect-free and stays retryable.
+            capabilities = replace(FULL_CAPABILITIES, realtime_tool_effect_visibility=True)
 
             def __init__(self) -> None:
                 self.calls = 0
@@ -13062,6 +13223,61 @@ class TestParallelACExecutor:
 
         assert result.success is False
         assert result.error == _STALL_SENTINEL
+
+    @pytest.mark.asyncio
+    async def test_opaque_driver_stall_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """R5 blocker #1: a stall on a driver WITHOUT real-time effect visibility.
+
+        A buffered driver (default ``realtime_tool_effect_visibility=False``) may
+        have mutated the workspace and then hung before yielding any message, so
+        even an effect-free-looking stall must seal and fail closed rather than
+        fresh-redispatch.
+        """
+        import anyio
+
+        from ouroboros.orchestrator import leaf_dispatcher
+
+        monkeypatch.setattr(leaf_dispatcher, "STALL_TIMEOUT_SECONDS", 0.15)
+
+        class _OpaqueStallRuntime:
+            runtime_backend = "claude_mcp"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+            # No capabilities attribute → defaults to no real-time visibility.
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                await anyio.sleep_forever()
+                yield  # pragma: no cover - never reached; keeps this an async generator
+
+        event_store, appended = _make_replaying_event_store()
+        runtime = _OpaqueStallRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            cross_harness_redispatch=False,
+        )
+
+        with pytest.raises(
+            AmbiguousACExecutionError, match="does not attest real-time tool-effect visibility"
+        ):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="An opaque-driver stall fails closed",
+                session_id="session-opaque-stall",
+                tools=["Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+        assert runtime.calls == 1
+        assert any(e.type == "execution.ac.dispatch.sealed" for e in appended)
         assert runtime.calls == 1
 
     @pytest.mark.asyncio
@@ -13165,6 +13381,68 @@ class TestParallelACExecutor:
                 identity_metadata={"ac_id": "ac-0"},
             )
         assert run_count == 0  # the possibly-executed command was NOT run again
+
+    @pytest.mark.asyncio
+    async def test_verify_gate_rejects_orphan_outcome_without_intent(self) -> None:
+        """R5 blocker #3: a verify outcome with no preceding intent is not trusted.
+
+        An outcome-only record (corrupted or injected) could otherwise manufacture
+        a passing acceptance verdict without the verifier ever running.
+        """
+        from ouroboros.events.base import BaseEvent
+
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        spec = AcceptanceCriterionSpec(description="AC", verify_command="./deploy.sh")
+        command_digest = executor._verify_gate_command_digest(spec)
+        # A durable outcome with NO preceding intent (the orphan the probe injects).
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.verify.outcome",
+                aggregate_type="execution",
+                aggregate_id="exec-orphan-outcome",
+                data={
+                    "verify_key": "atomic:ac-0:attempt-0:0",
+                    "verify_command_digest": command_digest,
+                    "verify_gate_outcome": {
+                        "passed": True,
+                        "reason": None,
+                        "output_tail": "",
+                        "missing_artifacts": [],
+                    },
+                },
+            )
+        )
+
+        run_count = 0
+
+        async def _counting_gate(*, spec: Any, cwd: str) -> _VerifyGateOutcome:
+            nonlocal run_count
+            run_count += 1
+            return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+
+        executor._run_ac_verify_gate = _counting_gate  # type: ignore[method-assign]
+
+        with pytest.raises(AmbiguousACExecutionError, match="orphan verify record"):
+            await executor._run_verify_gate_single_shot(
+                spec=spec,
+                cwd="/tmp/project",
+                aggregate_id="exec-orphan-outcome",
+                verify_key="atomic:ac-0:attempt-0:0",
+                execution_id="exec-orphan-outcome",
+                session_id="sess",
+                identity_metadata={"ac_id": "ac-0"},
+            )
+        assert run_count == 0
 
     @pytest.mark.asyncio
     async def test_successful_turn_seals_before_terminal_completion(self) -> None:

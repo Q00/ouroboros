@@ -757,6 +757,25 @@ class ACRuntimeHandleManager:
                     capsule_authorized = True
 
             if not capsule_authorized:
+                # A dispatch boundary without its prerequisite capsule is corrupt
+                # or partially-written history — the provider may already have been
+                # entered under authority we cannot verify. Treating it as fresh
+                # (skipping to None) would let the caller re-enter the provider, so
+                # fail closed instead. Absent any matching dispatch, this scope is
+                # legitimately empty for this attempt and is skipped.
+                if any(
+                    event.type == _AC_ATTEMPT_DISPATCHED_EVENT
+                    and self._event_matches_ac_runtime_identity(
+                        event.data if isinstance(event.data, dict) else {},
+                        runtime_identity,
+                    )
+                    for event in attempt_events
+                ):
+                    raise AmbiguousACExecutionError(
+                        "durable AC dispatch boundary exists without its prerequisite capsule "
+                        "authority; refusing to treat the attempt as fresh because the provider "
+                        "may already have been entered"
+                    )
                 continue
 
             unresolved_effect_event = any(

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+import json
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import ac_text
@@ -40,6 +41,56 @@ if TYPE_CHECKING:
 
 SafeEmitEvent = Callable[[Any], Awaitable[bool]]
 ToolDetailFormatter = Callable[[str, dict[str, Any]], str]
+
+# Durable verify-outcome payload bounds (measured in UTF-8 bytes for the final
+# serialized value). ``expected_artifacts`` is not otherwise size-limited, so a
+# failing gate could list thousands of missing paths; bound the count, per-entry
+# length, and free-text fields, then hard-cap the serialized size.
+_MAX_VERIFY_OUTCOME_BYTES = 65_536
+_MAX_VERIFY_MISSING_ARTIFACTS = 64
+_MAX_VERIFY_MISSING_ARTIFACT_CHARS = 512
+_MAX_VERIFY_TEXT_CHARS = 4096
+
+
+def bound_verify_gate_outcome(outcome: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a bounded, shape-validated verify outcome safe to persist/replay.
+
+    Preserves the acceptance verdict (``passed``) exactly while capping the
+    unbounded ``missing_artifacts`` list and the free-text ``reason``/
+    ``output_tail`` fields, recording an omission count when the list is
+    truncated. Raises ``ValueError`` if the bounded payload still exceeds the
+    hard UTF-8 size cap, so an oversized record can never be persisted.
+    """
+    if not isinstance(outcome, Mapping):
+        raise ValueError("verify outcome payload is not a mapping")
+
+    def _bounded_text(value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("verify outcome text field is not a string")
+        return value[:_MAX_VERIFY_TEXT_CHARS]
+
+    raw_missing = outcome.get("missing_artifacts") or []
+    if not isinstance(raw_missing, (list, tuple)):
+        raise ValueError("verify outcome missing_artifacts is not a sequence")
+    bounded_missing = [
+        str(item)[:_MAX_VERIFY_MISSING_ARTIFACT_CHARS]
+        for item in list(raw_missing)[:_MAX_VERIFY_MISSING_ARTIFACTS]
+    ]
+    result: dict[str, Any] = {
+        "passed": bool(outcome.get("passed")),
+        "reason": _bounded_text(outcome.get("reason")),
+        "output_tail": _bounded_text(outcome.get("output_tail")) or "",
+        "missing_artifacts": bounded_missing,
+    }
+    omitted = len(raw_missing) - len(bounded_missing)
+    if omitted > 0:
+        result["missing_artifacts_omitted"] = omitted
+    encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
+    if len(encoded.encode("utf-8")) > _MAX_VERIFY_OUTCOME_BYTES:
+        raise ValueError("verify outcome exceeds the durable size bound")
+    return result
 
 
 class ExecutionEventEmitter:
@@ -299,6 +350,9 @@ class ExecutionEventEmitter:
         Recovery consumes this instead of re-running the command. The
         ``verify_command_digest`` binds the outcome to the exact command/contract
         that produced it, so a changed contract never consumes a stale outcome.
+        The outcome is bounded before persistence — a contract with a very large
+        ``expected_artifacts`` list (which is not otherwise size-limited) could
+        otherwise emit a multi-megabyte event.
         """
         await self._event_store.append(
             BaseEvent(
@@ -311,7 +365,7 @@ class ExecutionEventEmitter:
                     "verify_command_digest": command_digest,
                     "execution_id": execution_id,
                     "session_id": session_id,
-                    "verify_gate_outcome": verify_gate_outcome,
+                    "verify_gate_outcome": bound_verify_gate_outcome(verify_gate_outcome),
                 },
             )
         )

@@ -182,12 +182,21 @@ cannot smuggle excluded runtime context back into replay through unknown fields.
 
 ### execution.ac.dispatch.sealed
 
-Seals an already-completed provider turn immediately before a SessionSignal
-follow-up dispatch supersedes it. If the follow-up's own dispatch record fails
-to persist — or a crash lands before the follow-up reaches a terminal outcome —
-the predecessor becomes the chain head again. A sealed head with no durable
-terminal completion fails closed on recovery instead of resuming and replaying
-the original AC prompt over already-completed work.
+General fail-closed marker: a sealed dispatch that ends up the active recovery
+head (with no durable terminal completion) is refused rather than resumed, so
+consumers must NOT read a seal as completion. It is written for every phase where
+a provider turn ran but its authoritative terminal is not yet durable, so a crash
+in that window cannot replay the AC prompt over already-done or ambiguous work:
+
+- a completed provider turn, immediately after its stream and BEFORE signal
+  handling, verification, evidence, and shadow replay (the later
+  `execution.session.completed` supersedes the seal on the normal path);
+- an effectful or opaque-driver stall (a stall after an observed tool effect, or
+  any stall on a driver that does not attest real-time tool-effect visibility);
+- a SessionSignal follow-up before it supersedes its (already-completed)
+  predecessor, and a stalled effectful follow-up.
+
+A sealed head fails closed on recovery instead of resuming and replaying the AC.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -213,7 +222,11 @@ and decomposed-parent verify gates.
 | `verify_command_digest` | `string` | Digest of the exact command, expected artifacts, and output assertion |
 | `execution_id` | `string` | Durable execution/run anchor |
 | `session_id` | `string` | Orchestrator session id |
-| `verify_gate_outcome` | `object` | (outcome only) Bounded exact-shape gate result: `passed`, `reason`, `output_tail`, `missing_artifacts` |
+| `verify_gate_outcome` | `object` | (outcome only) Bounded exact-shape gate result: `passed`, `reason`, `output_tail`, `missing_artifacts` (count- and length-capped, with `missing_artifacts_omitted` when truncated). Enforced ≤ 64 KiB UTF-8 both at persistence and on replay. |
+
+An outcome is trusted only when preceded by exactly one matching intent for the
+same `verify_key` and `verify_command_digest`; orphan, duplicate, or out-of-order
+records fail closed rather than manufacture acceptance evidence.
 
 ### mcp.job.cancelled
 

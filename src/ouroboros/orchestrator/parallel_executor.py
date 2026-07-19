@@ -41,6 +41,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 import uuid
@@ -288,7 +289,12 @@ from ouroboros.orchestrator.evidence_schema import (
     extract_evidence,
     validate_evidence,
 )
-from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
+from ouroboros.orchestrator.execution_event_emitter import (
+    _MAX_VERIFY_MISSING_ARTIFACTS,
+    _MAX_VERIFY_TEXT_CHARS,
+    ExecutionEventEmitter,
+    bound_verify_gate_outcome,
+)
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
     ExecutionNodeIdentity,
@@ -766,14 +772,20 @@ class _VerifyGateOutcome:
 def _recovered_verify_gate_outcome(
     value: Mapping[str, Any] | None,
 ) -> _VerifyGateOutcome | None:
-    """Rehydrate the strict durable verify projection without running its command."""
+    """Rehydrate the strict durable verify projection without running its command.
+
+    Enforces the same bound during replay as at persistence: a corrupted or
+    oversized persisted outcome (e.g. an unbounded ``missing_artifacts`` list)
+    raises rather than being trusted as acceptance evidence.
+    """
     if value is None:
         return None
+    bounded = bound_verify_gate_outcome(value)
     return _VerifyGateOutcome(
-        passed=value["passed"],
-        reason=value["reason"],
-        output_tail=value["output_tail"],
-        missing_artifacts=tuple(value["missing_artifacts"]),
+        passed=bounded["passed"],
+        reason=bounded["reason"],
+        output_tail=bounded["output_tail"],
+        missing_artifacts=tuple(bounded["missing_artifacts"]),
     )
 
 
@@ -2592,17 +2604,30 @@ class ParallelACExecutor:
         is probed so a delegated launcher still participates in identity.
         """
 
-        def _resolve(value: object) -> dict[str, str] | None:
+        def _resolve(value: object) -> dict[str, object] | None:
             if isinstance(value, os.PathLike):
                 value = os.fspath(value)
             if not isinstance(value, str) or not value:
                 return None
             expanded = os.path.expanduser(value)
+            # A bare command name (no path separator) is resolved by
+            # ``create_subprocess_exec`` through the effective child PATH, NOT
+            # relative to the workspace. Fingerprinting a cwd-relative realpath
+            # would make ``claude`` look identical even when PATH points it at two
+            # different binaries, so resolve it through PATH here; a name that PATH
+            # cannot resolve is recorded as ``unresolved`` (a distinct, fail-visible
+            # identity) rather than silently collapsing to the raw name.
+            has_sep = os.sep in expanded or (os.altsep is not None and os.altsep in expanded)
+            if not has_sep:
+                which = shutil.which(expanded)
+                if which is None:
+                    return {"path": value, "realpath": None, "path_resolution": "unresolved"}
+                return {"path": value, "realpath": os.path.realpath(which)}
             return {"path": value, "realpath": os.path.realpath(expanded)}
 
         def _probe(
             obj: object,
-        ) -> tuple[dict[str, str] | None, dict[str, str] | None, object | None]:
+        ) -> tuple[dict[str, object] | None, dict[str, object] | None, object | None]:
             # An explicit contract wins — a wrapping runtime uses it to name the
             # executable/launcher its transport really invokes AND any additional
             # command-affecting policy (e.g. Claude's --add-dir / --disallowedTools)
@@ -2887,6 +2912,12 @@ class ParallelACExecutor:
             ),
             "runtime_execution_authority": self._runtime_execution_authority,
             "atomic_verifier_authority": self._atomic_verifier_authority,
+            # Whether Synapse signal delivery is wired in. An executor WITH a hub
+            # registers/replays durable signals and may run provider follow-up
+            # turns; one WITHOUT it never does. That changes acceptance-affecting
+            # execution semantics, so it must change authority — otherwise a
+            # restart could resume the same capsule under different signal policy.
+            "session_signal_hub_enabled": self._session_signal_hub is not None,
             "prompt_authority": {
                 "retry_prompt_digest": self._prompt_identity(retry_prompt_extra),
                 "siblings": [
@@ -10051,12 +10082,23 @@ Respond with either ATOMIC or the structured JSON object only.
                 # potentially repeating a non-idempotent effect. Reconcile it as an
                 # explicit ambiguous/fail-closed terminal outcome instead; only a
                 # stall with no observed effect keeps the retryable stall sentinel.
-                if dispatch_state.tool_effects_observed:
-                    # Persist the ambiguity durably BEFORE raising. The raise only
-                    # clears the in-memory handle; a cold restart would otherwise
-                    # find this dispatch's session.started handle, treat it as a
-                    # resumable active head, and re-enter the provider. Sealing the
-                    # dispatch makes recovery fail closed on it instead.
+                # A stall is only safely retryable when we can PROVE no effect
+                # occurred: either a tool effect WAS observed (effectful stall), or
+                # the driver does not stream tool effects in real time (an opaque
+                # driver may have mutated the workspace/external systems and then
+                # hung before yielding any message). Both cases seal the dispatch
+                # durably BEFORE raising — the raise only clears the in-memory
+                # handle, so a cold restart would otherwise find this dispatch's
+                # session.started handle, treat it as a resumable active head, and
+                # re-enter the provider. Sealing makes recovery fail closed instead.
+                realtime_effect_visibility = bool(
+                    getattr(
+                        getattr(self._adapter, "capabilities", None),
+                        "realtime_tool_effect_visibility",
+                        False,
+                    )
+                )
+                if dispatch_state.tool_effects_observed or not realtime_effect_visibility:
                     await self._event_emitter.emit_ac_dispatch_sealed(
                         runtime_identity=runtime_identity,
                         dispatch_id=dispatch_id,
@@ -10064,10 +10106,15 @@ Respond with either ATOMIC or the structured JSON object only.
                         session_id=session_id,
                         capsule_fingerprint=capsule.fingerprint,
                     )
+                    reason = (
+                        "after emitting tool effects"
+                        if dispatch_state.tool_effects_observed
+                        else "and its driver does not attest real-time tool-effect visibility"
+                    )
                     raise AmbiguousACExecutionError(
-                        "AC provider stalled after emitting tool effects; refusing stall retry "
-                        "because a fresh redispatch would bypass the recovery ambiguity guard and "
-                        "may duplicate non-idempotent effects"
+                        f"AC provider stalled {reason}; refusing stall retry because a fresh "
+                        "redispatch would bypass the recovery ambiguity guard and may duplicate "
+                        "non-idempotent effects"
                     )
                 return ACExecutionResult(
                     ac_index=ac_index,
@@ -11046,7 +11093,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 "could not read durable verify history; refusing to run a non-idempotent "
                 "verify command without a single-shot guarantee"
             ) from exc
-        intent_seen = False
+        intent_count = 0
+        outcome_count = 0
         durable_outcome: _VerifyGateOutcome | None = None
         conflicting = False
         for event in events:
@@ -11064,8 +11112,17 @@ Respond with either ATOMIC or the structured JSON object only.
                     conflicting = True
                 continue
             if event.type == "execution.ac.verify.intent":
-                intent_seen = True
+                intent_count += 1
             elif event.type == "execution.ac.verify.outcome":
+                # An outcome is only trustworthy as the durable result of a real
+                # command run, which is always preceded by its intent. An outcome
+                # with no preceding intent is an orphan (corrupted or injected)
+                # record that could manufacture acceptance evidence — reject it.
+                if intent_count == 0:
+                    raise AmbiguousACExecutionError(
+                        "durable verify outcome has no preceding intent; refusing to trust an "
+                        "orphan verify record that could manufacture acceptance evidence"
+                    )
                 projected = _recovered_verify_gate_outcome(data.get("verify_gate_outcome"))
                 if projected is None:
                     raise AmbiguousACExecutionError(
@@ -11077,7 +11134,12 @@ Respond with either ATOMIC or the structured JSON object only.
                     or durable_outcome.reason != projected.reason
                 ):
                     conflicting = True
+                outcome_count += 1
                 durable_outcome = projected
+        # Exactly-one intent / at-most-one outcome: duplicates are out-of-order or
+        # replayed records and make the single-shot guarantee ambiguous.
+        if intent_count > 1 or outcome_count > 1:
+            conflicting = True
         if conflicting:
             raise AmbiguousACExecutionError(
                 "durable verify records for this attempt disagree; refusing to replay or "
@@ -11085,7 +11147,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         if durable_outcome is not None:
             return durable_outcome, False
-        return None, intent_seen
+        return None, intent_count > 0
 
     async def _run_verify_gate_single_shot(
         self,
@@ -11171,11 +11233,18 @@ Respond with either ATOMIC or the structured JSON object only.
 
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
         if missing_artifacts:
+            # ``expected_artifacts`` is not size-limited, so bound the reported
+            # miss list (verdict is preserved) before it flows into any durable
+            # outcome; the emitter/replay enforce a hard byte cap on top of this.
+            capped_missing = missing_artifacts[:_MAX_VERIFY_MISSING_ARTIFACTS]
+            reason = "expected_artifacts missing: " + ", ".join(capped_missing)
+            if len(missing_artifacts) > len(capped_missing):
+                reason += f" (+{len(missing_artifacts) - len(capped_missing)} more)"
             return _VerifyGateOutcome(
                 passed=False,
-                reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
+                reason=reason[:_MAX_VERIFY_TEXT_CHARS],
                 output_tail="",
-                missing_artifacts=missing_artifacts,
+                missing_artifacts=capped_missing,
             )
 
         command = spec.verify_command
