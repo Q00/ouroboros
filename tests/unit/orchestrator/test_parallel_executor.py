@@ -1183,6 +1183,51 @@ def test_runtime_executable_identity_binds_zcode_launcher() -> None:
     assert identity["launcher"]["path"] == "/opt/zcode/node"
 
 
+def test_runtime_executable_identity_follows_delegated_transport() -> None:
+    """R3 blocker #4: a runtime whose real CLI lives on a wrapped transport.
+
+    ``LeaderDrivenWorkerRuntime`` keeps the launched binary under
+    ``_transport._cli_path``. Two such runtimes at different transport binaries
+    must not both fingerprint as ``observed=False`` / identical authority.
+    """
+
+    class _Transport:
+        def __init__(self, cli_path: str) -> None:
+            self._cli_path = cli_path
+
+    class _WrappingRuntime:
+        # Mirrors LeaderDrivenWorkerRuntime.executable_identity_contract delegating
+        # to its transport's executable.
+        def __init__(self, cli_path: str) -> None:
+            self._transport = _Transport(cli_path)
+
+        def executable_identity_contract(self) -> dict[str, str | None]:
+            return {"executable": self._transport._cli_path, "launcher": None}
+
+    true_identity = ParallelACExecutor._runtime_executable_identity(_WrappingRuntime("/bin/true"))
+    false_identity = ParallelACExecutor._runtime_executable_identity(_WrappingRuntime("/bin/false"))
+    assert true_identity["observed"] is True
+    assert false_identity["observed"] is True
+    assert true_identity["executable"]["path"] == "/bin/true"
+    assert false_identity["executable"]["path"] == "/bin/false"
+    assert true_identity != false_identity
+
+
+def test_runtime_executable_identity_probes_transport_without_contract() -> None:
+    """R3 blocker #4: even without an explicit contract, a wrapped transport's
+    ``_cli_path`` is probed one delegation level so the launcher still binds."""
+
+    class _Transport:
+        _cli_path = "/usr/local/bin/worker-cli"
+
+    class _WrappingRuntime:
+        _transport = _Transport()
+
+    identity = ParallelACExecutor._runtime_executable_identity(_WrappingRuntime())
+    assert identity["observed"] is True
+    assert identity["executable"]["path"] == "/usr/local/bin/worker-cli"
+
+
 def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
     """Every input that can alter provider work or acceptance must change authority."""
 
@@ -5482,7 +5527,7 @@ class TestParallelACExecutor:
             ]
         )
 
-        with pytest.raises(AmbiguousACExecutionError, match="failed without a reusable"):
+        with pytest.raises(AmbiguousACExecutionError, match="terminally failed dispatch head"):
             await executor._load_persisted_ac_runtime_handle(
                 0,
                 execution_context_id="session-dispatch-terminal-successor",
@@ -5492,9 +5537,15 @@ class TestParallelACExecutor:
             )
 
     @pytest.mark.asyncio
-    async def test_capsule_loader_resumes_failed_dispatch_with_correlated_handle(self) -> None:
-        """A failure is recoverable only when its exact provider session is reconnectable."""
+    async def test_capsule_loader_fails_closed_on_failed_head_even_with_handle(self) -> None:
+        """R3 blocker #1: a terminally failed head is not resumed even with a handle.
 
+        A durable ``execution.session.failed`` head ran a provider turn whose
+        effects may precede the reported failure; resuming its session would send
+        another provider turn and could repeat non-idempotent effects. Without an
+        explicit ``execution.session.recovered`` linkage, recovery must fail closed
+        rather than reconnect to the failed session.
+        """
         runtime = SimpleNamespace(
             runtime_backend="codex_cli",
             working_directory="/tmp/project",
@@ -5510,7 +5561,7 @@ class TestParallelACExecutor:
         runtime_identity, persisted_capsule = _compile_test_capsule(
             executor=executor,
             ac_index=0,
-            ac_content="Resume the exact provider session after adapter failure",
+            ac_content="Do not resume a terminally failed provider session",
             session_id="session-dispatch-failed-resume",
             seed_goal="Ship",
         )
@@ -5543,16 +5594,14 @@ class TestParallelACExecutor:
             ),
         ]
 
-        restored = await executor._load_persisted_ac_runtime_handle(
-            0,
-            execution_context_id="session-dispatch-failed-resume",
-            retry_attempt=0,
-            expected_capsule_fingerprint=persisted_capsule.fingerprint,
-            expected_capsule_workspace=persisted_capsule.workspace,
-        )
-
-        assert restored is not None
-        assert restored.native_session_id == "codex-failed-resume"
+        with pytest.raises(AmbiguousACExecutionError, match="terminally failed dispatch head"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-dispatch-failed-resume",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
 
     @pytest.mark.asyncio
     async def test_capsule_loader_resumes_only_latest_boundary_in_multi_dispatch_attempt(
@@ -5598,9 +5647,12 @@ class TestParallelACExecutor:
             )
 
         event_store.replay.return_value = [
+            # Both boundaries are resumable (started) — this test isolates
+            # latest-boundary head selection, not failed-head recovery, which is
+            # covered by test_capsule_loader_fails_closed_on_failed_head_even_with_handle.
             _dispatch_lifecycle_event(
                 runtime_identity,
-                "execution.session.failed",
+                "execution.session.started",
                 dispatch_id=second_dispatch_id,
                 runtime_handle=_handle("response-after-signal"),
             ),
@@ -12888,7 +12940,7 @@ class TestParallelACExecutor:
                 )
                 await anyio.sleep_forever()
 
-        event_store, _ = _make_replaying_event_store()
+        event_store, appended = _make_replaying_event_store()
         runtime = _EffectfulThenStallRuntime()
         executor = ParallelACExecutor(
             adapter=runtime,
@@ -12911,6 +12963,10 @@ class TestParallelACExecutor:
             )
 
         assert runtime.calls == 1
+        # R3 blocker #2: the ambiguity is persisted (sealed) BEFORE the raise, so a
+        # cold restart fails closed on the sealed head instead of re-entering the
+        # provider using the dispatch's still-resumable session handle.
+        assert any(e.type == "execution.ac.dispatch.sealed" for e in appended)
 
     @pytest.mark.asyncio
     async def test_effect_free_stall_stays_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -13066,6 +13122,64 @@ class TestParallelACExecutor:
                 identity_metadata={"ac_id": "ac-0"},
             )
         assert run_count == 0  # the possibly-executed command was NOT run again
+
+    @pytest.mark.asyncio
+    async def test_apply_verify_gate_recovery_is_single_shot(self) -> None:
+        """R3 blocker #3: the failed-runtime recovery gate uses the single-shot oracle.
+
+        A failed atomic result carries no cached outcome, so `_apply_verify_gate`
+        runs the verify command. Replaying the SAME failed result must consume the
+        durable outcome instead of running the (side-effecting) command twice.
+        """
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        run_count = 0
+
+        async def _counting_gate(*, spec: Any, cwd: str) -> _VerifyGateOutcome:
+            nonlocal run_count
+            run_count += 1
+            return _VerifyGateOutcome(passed=True, reason=None, output_tail="ok")
+
+        executor._run_ac_verify_gate = _counting_gate  # type: ignore[method-assign]
+        seed = _make_seed(
+            AcceptanceCriterionSpec(description="AC", verify_command="./deploy.sh"),
+        )
+        failed_result = ACExecutionResult(
+            ac_index=0,
+            ac_content="AC",
+            success=False,
+            error="runtime failed",
+            retry_attempt=0,
+        )
+
+        first = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=failed_result,
+            session_id="sess",
+            execution_id="exec-apply-gate",
+        )
+        assert run_count == 1
+        assert first.success is True  # contract passed → recovered
+
+        # Replaying the same failed result must not run the command again.
+        await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=failed_result,
+            session_id="sess",
+            execution_id="exec-apply-gate",
+        )
+        assert run_count == 1
 
     @pytest.mark.asyncio
     async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:

@@ -2582,6 +2582,14 @@ class ParallelACExecutor:
         executable. Record the canonical executable and launcher paths (raw and
         realpath, so both a path change and a symlink swap change authority) as a
         provider-neutral field every subprocess runtime contributes.
+
+        Resolution is provider-neutral and delegation-aware. An adapter may
+        expose an explicit ``executable_identity_contract()`` (the preferred
+        contract for runtimes that wrap a transport, e.g.
+        ``LeaderDrivenWorkerRuntime`` whose real CLI lives under
+        ``_transport._cli_path``); otherwise its own ``cli_path``/``_cli_path``
+        and launcher attributes are probed, and finally a wrapped ``_transport``
+        is probed so a delegated launcher still participates in identity.
         """
 
         def _resolve(value: object) -> dict[str, str] | None:
@@ -2592,14 +2600,34 @@ class ParallelACExecutor:
             expanded = os.path.expanduser(value)
             return {"path": value, "realpath": os.path.realpath(expanded)}
 
-        # ``cli_path`` is exposed both as a property (Codex) and as a private
-        # attribute (most subprocess runtimes); probe the public form first.
-        executable = _resolve(getattr(adapter, "cli_path", None)) or _resolve(
-            getattr(adapter, "_cli_path", None)
-        )
-        # Zcode launches its CLI through an Electron/Node host; that launcher is
-        # part of what actually executes and must be bound too.
-        launcher = _resolve(getattr(adapter, "_electron_node_path", None))
+        def _probe(obj: object) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+            # An explicit contract wins — a wrapping runtime uses it to name the
+            # executable/launcher its transport really invokes.
+            contract = getattr(obj, "executable_identity_contract", None)
+            if callable(contract):
+                try:
+                    declared = contract()
+                except Exception:
+                    declared = None
+                if isinstance(declared, Mapping):
+                    return _resolve(declared.get("executable")), _resolve(declared.get("launcher"))
+            # ``cli_path`` is exposed both as a property (Codex) and as a private
+            # attribute (most subprocess runtimes); probe the public form first.
+            executable = _resolve(getattr(obj, "cli_path", None)) or _resolve(
+                getattr(obj, "_cli_path", None)
+            )
+            # Zcode launches its CLI through an Electron/Node host; that launcher
+            # is part of what actually executes and must be bound too.
+            launcher = _resolve(getattr(obj, "_electron_node_path", None))
+            return executable, launcher
+
+        executable, launcher = _probe(adapter)
+        if executable is None and launcher is None:
+            # A wrapping runtime holds the real launcher under a transport; probe
+            # one delegation level so a delegated executable still fingerprints.
+            transport = getattr(adapter, "_transport", None)
+            if transport is not None:
+                executable, launcher = _probe(transport)
         return {
             "version": 1,
             "observed": executable is not None or launcher is not None,
@@ -10001,6 +10029,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 # explicit ambiguous/fail-closed terminal outcome instead; only a
                 # stall with no observed effect keeps the retryable stall sentinel.
                 if dispatch_state.tool_effects_observed:
+                    # Persist the ambiguity durably BEFORE raising. The raise only
+                    # clears the in-memory handle; a cold restart would otherwise
+                    # find this dispatch's session.started handle, treat it as a
+                    # resumable active head, and re-enter the provider. Sealing the
+                    # dispatch makes recovery fail closed on it instead.
+                    await self._event_emitter.emit_ac_dispatch_sealed(
+                        runtime_identity=runtime_identity,
+                        dispatch_id=dispatch_id,
+                        execution_id=execution_context_id,
+                        session_id=session_id,
+                        capsule_fingerprint=capsule.fingerprint,
+                    )
                     raise AmbiguousACExecutionError(
                         "AC provider stalled after emitting tool effects; refusing stall retry "
                         "because a fresh redispatch would bypass the recovery ambiguity guard and "
@@ -11150,7 +11190,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 outcome=cached_outcome,
             )
         else:
-            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+            # A failed atomic result carries no cached outcome, so this recovery
+            # gate would otherwise run the (non-idempotent) verify_command with no
+            # durable intent/outcome — replaying the same failed result would run
+            # it twice. Route it through the single-shot oracle keyed to the
+            # AC/attempt so recovery consumes the outcome instead of re-running.
+            outcome = await self._run_verify_gate_single_shot(
+                spec=spec,
+                cwd=cwd,
+                aggregate_id=execution_id or session_id,
+                verify_key=f"apply_gate:{ac_index}:{result.retry_attempt}",
+                execution_id=execution_id,
+                session_id=session_id,
+                identity_metadata={"ac_index": ac_index, "retry_attempt": result.retry_attempt},
+            )
         if outcome.passed:
             if not result.success and not result.is_blocked and not result.is_invalid:
                 from ouroboros.events.base import BaseEvent

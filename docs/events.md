@@ -154,8 +154,12 @@ Lifecycle events carry the same `ac_dispatch_id`. Dispatch events form one
 validated predecessor chain, and recovery considers only its unique head; it
 never infers a successor from timestamps, replay-list position, or lifecycle
 event type priority across boundaries. Only a correlated reusable same-attempt
-handle at that head can resume. A failed head without such a handle remains
-ambiguous, because provider effects may precede the reported adapter failure. A
+handle at that head can resume. Terminal failure takes precedence over a
+resumable handle: a head with a durable `execution.session.failed` is NOT
+resumed even when it carries a reusable handle, because provider effects may
+precede the reported failure and resuming would send another provider turn. The
+only safe resume of a failed head is an explicit `execution.session.recovered`
+linkage to a live replacement session; without it, recovery fails closed. A
 completed head blocks same-attempt redispatch as already terminal and
 reconstructs its durable successful result for the caller. When the AC ran a
 verify gate, the completed lifecycle also carries a bounded exact-shape

@@ -939,6 +939,7 @@ class ACRuntimeHandleManager:
                 dispatch_id: [] for dispatch_id in dispatch_events
             }
             failed_dispatches: set[str] = set()
+            recovered_dispatch_ids: set[str] = set()
             recovery_successors: dict[str, str] = {}
 
             def _load_candidate(
@@ -1060,6 +1061,8 @@ class ACRuntimeHandleManager:
                     continue
                 if event.type == "execution.session.failed" and event_dispatch_id is not None:
                     failed_dispatches.add(event_dispatch_id)
+                if event.type == "execution.session.recovered" and event_dispatch_id is not None:
+                    recovered_dispatch_ids.add(event_dispatch_id)
                 runtime_handle = _load_candidate(
                     event,
                     event_data,
@@ -1205,6 +1208,23 @@ class ACRuntimeHandleManager:
                         "dispatch head; refusing to resume because a follow-up superseded it "
                         "without a durable terminal outcome and replaying the AC prompt would "
                         "repeat completed work"
+                    )
+                # Terminal failure evidence takes precedence over a resumable
+                # handle. A dispatch with a durable ``execution.session.failed``
+                # ran a provider turn whose effects may precede the reported
+                # failure; resuming it would send another provider turn and could
+                # repeat non-idempotent effects. The ONLY safe resume is an
+                # explicit ``execution.session.recovered`` linkage to a live
+                # replacement session; without it, fail closed before selecting a
+                # handle instead of reconnecting to the failed session.
+                if (
+                    active_dispatch_id in failed_dispatches
+                    and active_dispatch_id not in recovered_dispatch_ids
+                ):
+                    raise AmbiguousACExecutionError(
+                        "AC recovery resolved a terminally failed dispatch head without a "
+                        "durable recovery linkage; refusing to resume its provider session "
+                        "because external effects may precede the reported failure"
                     )
                 active_dispatch_candidates = candidate_handles[active_dispatch_id]
                 if not active_dispatch_candidates:

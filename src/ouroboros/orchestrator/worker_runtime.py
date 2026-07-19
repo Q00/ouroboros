@@ -150,6 +150,25 @@ class LeaderDrivenWorkerRuntime:
 
     # -- AgentRuntime Protocol properties ---------------------------------
 
+    def executable_identity_contract(self) -> dict[str, str | None]:
+        """Expose the real executable/launcher this runtime drives via its transport.
+
+        The launched binary lives on the wrapped transport (e.g. its
+        ``cli_path``/``_cli_path``), not on this runtime. Surface it so capsule
+        authority fingerprints the actual executable and a restart cannot resume
+        the same capsule under a different transport binary.
+        """
+        transport = self._transport
+        executable = getattr(transport, "cli_path", None)
+        if not isinstance(executable, str) or not executable:
+            candidate = getattr(transport, "_cli_path", None)
+            executable = candidate if isinstance(candidate, str) and candidate else None
+        launcher = getattr(transport, "_electron_node_path", None)
+        return {
+            "executable": executable,
+            "launcher": launcher if isinstance(launcher, str) and launcher else None,
+        }
+
     @property
     def runtime_backend(self) -> str:
         return self._runtime_backend
