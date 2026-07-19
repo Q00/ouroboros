@@ -2086,7 +2086,7 @@ class TestBudgetExhaustionAloneReachesLadder:
         executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_atomic_fallback_is_spent_even_when_persona_ladder_is_disabled(self) -> None:
+    async def test_atomic_fallback_is_not_spent_when_persona_ladder_is_disabled(self) -> None:
         executor = _make_executor()
         executor._ac_retry_attempts = 0
         decomposed_failure = ACExecutionResult(
@@ -2096,12 +2096,11 @@ class TestBudgetExhaustionAloneReachesLadder:
             error="decomposition children failed",
             is_decomposed=True,
         )
-        atomic_failure = _failed_result(error="atomic root also failed")
         dispatches: list[dict[str, object]] = []
 
         async def _dispatch(**kwargs: object) -> ACExecutionResult:
             dispatches.append(kwargs)
-            return decomposed_failure if len(dispatches) == 1 else atomic_failure
+            return decomposed_failure
 
         executor._execute_single_ac = AsyncMock(side_effect=_dispatch)  # type: ignore[method-assign]
         executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
@@ -2120,10 +2119,10 @@ class TestBudgetExhaustionAloneReachesLadder:
             execution_counters=None,
         )
 
-        assert len(dispatches) == 2
-        assert dispatches[1]["force_atomic_execution"] is True
+        assert len(dispatches) == 1
+        assert dispatches[0]["force_atomic_execution"] is False
         assert isinstance(results[0], ACExecutionResult)
-        assert results[0].error == "atomic root also failed"
+        assert results[0] is decomposed_failure
         executor._emit_recovery_exhausted.assert_awaited_once()
         assert executor._emit_recovery_exhausted.await_args.kwargs["result"] is results[0]
 

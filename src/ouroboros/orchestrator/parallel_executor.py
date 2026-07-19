@@ -12554,12 +12554,13 @@ Respond with either ATOMIC or the structured JSON object only.
         original recovery-exhausted behavior for those cases.
         """
         # A decomposed failure has not exercised the root AC's atomic path.
-        # Spend that option once before consulting the opt-in persona ladder
-        # (and even when the ladder is disabled): otherwise a zero ordinary
-        # retry budget can surface FAILED directly from child outcomes while
-        # the root atomic/frontier dispatch remains untried.
+        # Once lateral recovery is explicitly enabled, spend that option before
+        # consulting the persona ladder. Keep it behind the same opt-in gate:
+        # default-off must preserve the pre-feature dispatch count and must not
+        # repeat potentially non-idempotent work at frontier strength.
         if (
-            result.is_decomposed
+            self._lateral_escalation_enabled
+            and result.is_decomposed
             and not result.success
             and not result_was_forced_frontier
             and not result.forced_frontier_routing
