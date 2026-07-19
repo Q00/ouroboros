@@ -3013,6 +3013,15 @@ class ParallelACExecutor:
             # semantics: concurrency 1 vs 8 interleave sibling mutations
             # differently, so a resume must not silently change it.
             "max_concurrent": self._max_concurrent,
+            # Every declared execution-semantic knob that changes what work runs
+            # (or how many provider turns execute) must participate in authority,
+            # so a restart cannot resume the same capsule under a different policy
+            # (e.g. shadow replay performs an extra provider execution).
+            "shadow_replay_enabled": self._shadow_replay_enabled,
+            "cross_harness_redispatch_enabled": self._cross_harness_redispatch_enabled,
+            "ac_retry_attempts": self._ac_retry_attempts,
+            "lateral_escalation_enabled": self._lateral_escalation_enabled,
+            "parked_retry_backoff_seconds": self._parked_retry_backoff_seconds,
             "prompt_authority": {
                 "retry_prompt_digest": self._prompt_identity(retry_prompt_extra),
                 "siblings": [

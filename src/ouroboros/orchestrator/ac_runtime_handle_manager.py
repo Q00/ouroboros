@@ -1255,6 +1255,27 @@ class ACRuntimeHandleManager:
                         "durable recovery linkage; refusing to resume its provider session "
                         "because external effects may precede the reported failure"
                     )
+                # Durable effect evidence outranks a resumable handle. An active
+                # dispatch that recorded a tool effect but did not terminate cannot
+                # be safely resumed: the caller (``_execute_atomic_ac``) resends the
+                # ORIGINAL AC prompt on resume, which starts ANOTHER provider turn
+                # and can duplicate the non-idempotent effect. We have no mechanism
+                # to continue the exact in-flight turn without resending the prompt,
+                # so fail closed regardless of handle availability.
+                if any(
+                    event.type in _AC_EFFECT_EVENT_TYPES
+                    and self._event_ac_dispatch_id(
+                        event.data if isinstance(event.data, dict) else {}
+                    )
+                    == active_dispatch_id
+                    for event in matching_events
+                ):
+                    raise AmbiguousACExecutionError(
+                        "AC active dispatch head recorded durable tool effects without "
+                        "terminating; refusing to resume because replaying the original AC "
+                        "prompt would start another provider turn and may duplicate "
+                        "non-idempotent effects"
+                    )
                 active_dispatch_candidates = candidate_handles[active_dispatch_id]
                 if not active_dispatch_candidates:
                     if active_dispatch_id in failed_dispatches:

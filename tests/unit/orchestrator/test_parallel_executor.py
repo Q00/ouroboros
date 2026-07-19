@@ -1555,6 +1555,43 @@ def test_watchdog_identity_binds_total_turn_timeout() -> None:
     assert fast != slow
 
 
+def test_capsule_authority_binds_execution_semantic_policy() -> None:
+    """R11: every declared execution-semantic knob participates in capsule authority."""
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+    def _scope(**overrides: Any) -> str:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            **overrides,
+        )
+        return executor._build_ac_capsule_authority_scope(
+            execution_context_id="exec-1",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+            is_sub_ac=False,
+            decomposition_trustworthy=False,
+            force_frontier_routing=False,
+            investment_spec=None,
+        )
+
+    baseline = _scope()
+    # Each execution-semantic field must independently change authority.
+    assert _scope(shadow_replay_enabled=True) != baseline
+    assert _scope(cross_harness_redispatch=True) != _scope(cross_harness_redispatch=False)
+    assert _scope(ac_retry_attempts=3) != baseline
+    assert _scope(lateral_escalation_enabled=True) != baseline
+    assert _scope(parked_retry_backoff_seconds=42.0) != baseline
+
+
 def test_capsule_authority_binds_max_concurrent() -> None:
     """R9 blocker #3: shared-workspace concurrency participates in capsule identity."""
 
@@ -6412,6 +6449,79 @@ class TestParallelACExecutor:
             await executor._load_persisted_ac_runtime_handle(
                 0,
                 execution_context_id="session-dispatch-no-capsule",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_fails_closed_on_effectful_active_dispatch(self) -> None:
+        """R11 blocker #1: durable effect evidence outranks a resumable handle.
+
+        An active dispatch that recorded a tool effect but did not terminate must
+        NOT resume: the caller resends the original AC prompt on resume, starting
+        another provider turn that can duplicate a non-idempotent effect.
+        """
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Do not resume an effectful in-flight turn",
+            session_id="session-effectful-active",
+            seed_goal="Ship",
+        )
+        dispatch_id = "3" * 32
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-inflight",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
+            },
+        )
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+                dispatch_kind="primary",
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=dispatch_id,
+                runtime_handle=handle,
+            ),
+            # A durable tool effect on the active dispatch, with no terminal event.
+            BaseEvent(
+                type="execution.tool.started",
+                aggregate_type="execution",
+                aggregate_id=runtime_identity.session_scope_id,
+                data={**runtime_identity.to_metadata(), "ac_dispatch_id": dispatch_id},
+            ),
+        ]
+
+        with pytest.raises(AmbiguousACExecutionError, match="recorded durable tool effects"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-effectful-active",
                 retry_attempt=0,
                 expected_capsule_fingerprint=persisted_capsule.fingerprint,
                 expected_capsule_workspace=persisted_capsule.workspace,
