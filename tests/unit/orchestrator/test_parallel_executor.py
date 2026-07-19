@@ -1463,6 +1463,89 @@ def test_codex_runtime_watchdog_identity_reflects_timeouts() -> None:
     assert "startup_output_timeout_seconds" in contract
 
 
+def test_runtime_executable_identity_resolves_bare_name_relative_path_against_child_cwd(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """R9 blocker #1: a bare name under a RELATIVE PATH entry binds the child cwd.
+
+    ``PATH=bin`` resolves ``bin/<name>`` from the CHILD's workspace, not the
+    orchestrator. Two workspaces with different ``bin/probe`` targets must
+    produce different executable identity, not both collapse to ``unresolved``.
+    """
+    import os as _os
+    import stat
+
+    def _make_ws(name: str, target: str) -> Any:
+        ws = tmp_path / name
+        (ws / "bin").mkdir(parents=True)
+        script = ws / "bin" / "probe"
+        script.write_text(f"#!/bin/sh\nexec {target}\n")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return ws
+
+    ws_true = _make_ws("wtrue", "/bin/true")
+    ws_false = _make_ws("wfalse", "/bin/false")
+
+    class _Runtime:
+        _cli_path = "probe"
+
+    monkeypatch.setenv("PATH", "bin")  # relative PATH entry
+    id_true = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(ws_true))
+    id_false = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(ws_false))
+    assert id_true["executable"]["realpath"] == _os.path.realpath(str(ws_true / "bin" / "probe"))
+    assert id_false["executable"]["realpath"] == _os.path.realpath(str(ws_false / "bin" / "probe"))
+    assert id_true != id_false
+
+
+def test_watchdog_identity_binds_total_turn_timeout() -> None:
+    """R9 blocker #2: a wrapped transport's total-turn ``_timeout`` participates."""
+
+    class _Transport:
+        def __init__(self, timeout: float) -> None:
+            self._timeout = timeout
+
+    class _WrappingRuntime:
+        def __init__(self, timeout: float) -> None:
+            self._transport = _Transport(timeout)
+
+    fast = ParallelACExecutor._runtime_watchdog_identity(_WrappingRuntime(1.0))
+    slow = ParallelACExecutor._runtime_watchdog_identity(_WrappingRuntime(999.0))
+    assert fast["observed"] is True
+    assert fast["policy"]["timeout"] == 1.0
+    assert fast != slow
+
+
+def test_capsule_authority_binds_max_concurrent() -> None:
+    """R9 blocker #3: shared-workspace concurrency participates in capsule identity."""
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+    def _scope(max_concurrent: int) -> str:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            max_concurrent=max_concurrent,
+        )
+        return executor._build_ac_capsule_authority_scope(
+            execution_context_id="exec-1",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+            is_sub_ac=False,
+            decomposition_trustworthy=False,
+            force_frontier_routing=False,
+            investment_spec=None,
+        )
+
+    assert _scope(1) != _scope(8)
+
+
 def test_watchdog_identity_is_provider_neutral_via_attributes() -> None:
     """R8 blocker #3: runtimes without a watchdog contract still fingerprint policy.
 

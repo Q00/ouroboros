@@ -2622,7 +2622,20 @@ class ParallelACExecutor:
             # identity) rather than silently collapsing to the raw name.
             has_sep = os.sep in expanded or (os.altsep is not None and os.altsep in expanded)
             if not has_sep:
-                which = shutil.which(expanded)
+                # ``create_subprocess_exec`` resolves a bare name against the child
+                # process's PATH, and a RELATIVE PATH entry (e.g. ``PATH=bin``) is
+                # resolved from the CHILD's working directory — not the
+                # orchestrator's. Anchor relative PATH entries to the effective
+                # child cwd so ``<cwd>/bin/probe-cli`` is fingerprinted (and a
+                # swap of its target changes authority) instead of collapsing to
+                # ``unresolved`` because it does not exist under the orchestrator.
+                search_path = os.environ.get("PATH", os.defpath)
+                if cwd is not None:
+                    search_path = os.pathsep.join(
+                        entry if not entry or os.path.isabs(entry) else os.path.join(cwd, entry)
+                        for entry in search_path.split(os.pathsep)
+                    )
+                which = shutil.which(expanded, path=search_path)
                 if which is None:
                     return {"path": value, "realpath": None, "path_resolution": "unresolved"}
                 return {"path": value, "realpath": os.path.realpath(which)}
@@ -2701,6 +2714,9 @@ class ParallelACExecutor:
             "_stdout_idle_timeout_seconds",
             "_process_shutdown_timeout_seconds",
             "_completed_process_group_shutdown_timeout_seconds",
+            # Total-turn kill timeout (e.g. ClaudeWorkerTransport._timeout, applied
+            # via asyncio.wait_for) — also decides when a turn is interrupted.
+            "_timeout",
         )
 
         def _probe(obj: object) -> dict[str, object] | None:
@@ -2982,6 +2998,10 @@ class ParallelACExecutor:
             # execution semantics, so it must change authority — otherwise a
             # restart could resume the same capsule under different signal policy.
             "session_signal_hub_enabled": self._session_signal_hub is not None,
+            # Effective sibling concurrency is shared-workspace execution
+            # semantics: concurrency 1 vs 8 interleave sibling mutations
+            # differently, so a resume must not silently change it.
+            "max_concurrent": self._max_concurrent,
             "prompt_authority": {
                 "retry_prompt_digest": self._prompt_identity(retry_prompt_extra),
                 "siblings": [

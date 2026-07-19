@@ -233,6 +233,12 @@ def test_success_contract_rejects_unbounded_text_before_serialization() -> None:
         ACSuccessContract(verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1))
 
 
+def test_success_contract_rejects_output_assertion_without_command() -> None:
+    """R9 (non-blocking): mirror the spec rule — output_assertion needs a command."""
+    with pytest.raises(ValueError, match="output_assertion requires a verify_command"):
+        ACSuccessContract(output_assertion="OK")
+
+
 def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None:
     capsule = _capsule(tmp_path)
     changed = replace(
