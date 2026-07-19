@@ -3372,6 +3372,7 @@ class TestOrchestratorRunner:
                 system_prompt="system",
                 start_time=tracker.start_time,
                 force_sequential_levels=True,
+                externally_satisfied_acs={2: {"reason": "already present"}},
             )
 
         assert result.is_ok
@@ -3387,6 +3388,8 @@ class TestOrchestratorRunner:
             if call.args[0].type == "execution.plan.created"
         )
         assert plan_event.data["forced_sequential"] is True
+        assert plan_event.data["externally_satisfied_ac_indices"] == [2]
+        assert plan_event.data["plan_contract"]["externally_satisfied_ac_indices"] == [2]
         assert runner._proof_plan_identity(plan_event.data) == (
             plan_event.data["plan_fingerprint"],
             True,

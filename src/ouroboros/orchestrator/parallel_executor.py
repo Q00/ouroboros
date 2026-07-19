@@ -2199,6 +2199,36 @@ class ParallelACExecutor:
         return "sha256:" + hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _normalize_externally_satisfied_acs(
+        raw: Mapping[int, Mapping[str, Any]] | None,
+        *,
+        total_acs: int,
+    ) -> dict[int, dict[str, Any]]:
+        """Validate the caller-controlled skip set before it can gate dispatch."""
+        if raw is None:
+            return {}
+        if not isinstance(raw, Mapping):
+            msg = "externally_satisfied_acs must be a mapping"
+            raise ValueError(msg)
+        normalized: dict[int, dict[str, Any]] = {}
+        for ac_index, metadata in raw.items():
+            if (
+                isinstance(ac_index, bool)
+                or not isinstance(ac_index, int)
+                or not 0 <= ac_index < total_acs
+            ):
+                msg = f"externally_satisfied_acs contains invalid AC index: {ac_index!r}"
+                raise ValueError(msg)
+            if not isinstance(metadata, Mapping):
+                msg = (
+                    "externally_satisfied_acs metadata must be a mapping "
+                    f"for AC {ac_index}: {metadata!r}"
+                )
+                raise ValueError(msg)
+            normalized[ac_index] = dict(metadata)
+        return normalized
+
+    @staticmethod
     def _runtime_capabilities_contract(adapter: object) -> dict[str, Any] | None:
         capabilities = getattr(adapter, "capabilities", None)
         if not isinstance(capabilities, RuntimeCapabilities):
@@ -2228,6 +2258,7 @@ class ParallelACExecutor:
         tool_catalog: tuple[MCPToolDefinition, ...] | None,
         system_prompt: str,
         system_prompt_builder: Callable[..., str] | None,
+        externally_satisfied_ac_indices: tuple[int, ...] = (),
     ) -> dict[str, Any]:
         """Canonicalize the actual dispatch authority used by this run.
 
@@ -2256,6 +2287,7 @@ class ParallelACExecutor:
             },
             "model_routing": serialize_model_router(self._model_router),
             "execution_profile": serialize_execution_profile(self._execution_profile),
+            "externally_satisfied_ac_indices": list(externally_satisfied_ac_indices),
             "tools": list(tools),
             "tool_catalog": {
                 "present": tool_catalog is not None,
@@ -2282,6 +2314,7 @@ class ParallelACExecutor:
             "runtime",
             "model_routing",
             "execution_profile",
+            "externally_satisfied_ac_indices",
             "tools",
             "tool_catalog",
             "system_prompt",
@@ -2370,6 +2403,16 @@ class ParallelACExecutor:
             return "dispatch_contract.model_routing disagrees with checkpoint semantics"
         if raw.get("execution_profile") != state.get("execution_profile"):
             return "dispatch_contract.execution_profile disagrees with checkpoint semantics"
+        external_indices = raw.get("externally_satisfied_ac_indices")
+        if (
+            not isinstance(external_indices, list)
+            or any(
+                isinstance(ac_index, bool) or not isinstance(ac_index, int) or ac_index < 0
+                for ac_index in external_indices
+            )
+            or external_indices != sorted(set(external_indices))
+        ):
+            return "dispatch_contract.externally_satisfied_ac_indices is invalid"
         raw_tools = raw.get("tools")
         if not isinstance(raw_tools, list) or any(not isinstance(tool, str) for tool in raw_tools):
             return "dispatch_contract.tools is not a list of strings"
@@ -2418,6 +2461,7 @@ class ParallelACExecutor:
         tool_catalog: tuple[MCPToolDefinition, ...] | None,
         system_prompt: str,
         system_prompt_builder: Callable[..., str] | None,
+        externally_satisfied_ac_indices: tuple[int, ...] = (),
     ) -> str | None:
         saved = cp.state.get("dispatch_contract")
         current = self._build_checkpoint_dispatch_contract(
@@ -2425,6 +2469,7 @@ class ParallelACExecutor:
             tool_catalog=tool_catalog,
             system_prompt=system_prompt,
             system_prompt_builder=system_prompt_builder,
+            externally_satisfied_ac_indices=externally_satisfied_ac_indices,
         )
         # Router/profile are restorable versioned contracts.  Their dispatch
         # snapshots must agree with the checkpoint's semantic groups, while
@@ -2432,6 +2477,12 @@ class ParallelACExecutor:
         if isinstance(saved, Mapping):
             current["model_routing"] = cp.state.get("model_routing")
             current["execution_profile"] = cp.state.get("execution_profile")
+            # The interrupted run's caller-controlled skip set is restored on
+            # adoption below. Compare every other live authority axis here,
+            # but do not let a restart silently replace that durable set.
+            current["externally_satisfied_ac_indices"] = saved.get(
+                "externally_satisfied_ac_indices"
+            )
         if saved == current:
             return None
         return (
@@ -4460,7 +4511,10 @@ class ParallelACExecutor:
 
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
-        external_completed = externally_satisfied_acs or {}
+        external_completed = self._normalize_externally_satisfied_acs(
+            externally_satisfied_acs,
+            total_acs=total_acs,
+        )
         execution_counters = {
             "messages_count": 0,
             "tool_calls_count": 0,
@@ -4470,6 +4524,7 @@ class ParallelACExecutor:
             tool_catalog=tool_catalog,
             system_prompt=system_prompt,
             system_prompt_builder=system_prompt_builder,
+            externally_satisfied_ac_indices=tuple(sorted(external_completed)),
         )
 
         # Track AC statuses for TUI updates
@@ -4681,6 +4736,7 @@ class ParallelACExecutor:
                             tool_catalog=tool_catalog,
                             system_prompt=system_prompt,
                             system_prompt_builder=system_prompt_builder,
+                            externally_satisfied_ac_indices=tuple(sorted(external_completed)),
                         )
                     ):
                         log.error(
@@ -5103,6 +5159,15 @@ class ParallelACExecutor:
                         # identity, if the checkpoint carried one).
                         recovery_adopted = True
                         restored_prompt_guidance = cp.state.get("prompt_guidance")
+                        saved_dispatch_contract = cp.state["dispatch_contract"]
+                        saved_external_indices = saved_dispatch_contract[
+                            "externally_satisfied_ac_indices"
+                        ]
+                        external_completed = {
+                            ac_index: external_completed.get(ac_index, {})
+                            for ac_index in saved_external_indices
+                        }
+                        dispatch_contract = dict(saved_dispatch_contract)
             except (
                 CheckpointCorruptError,
                 CheckpointDispatchMismatchError,

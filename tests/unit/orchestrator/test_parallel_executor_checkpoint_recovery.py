@@ -3526,6 +3526,7 @@ class TestCheckpointDispatchContract:
         permission_mode: str | None = None,
         constructor_model: str | None = None,
         capabilities: object = None,
+        externally_satisfied_acs: dict[int, dict[str, object]] | None = None,
     ) -> tuple[Seed, Path, dict[str, object]]:
         seed = self._seed()
         ckpt_path = tmp_path / "checkpoints"
@@ -3561,11 +3562,13 @@ class TestCheckpointDispatchContract:
                 system_prompt=system_prompt,
                 execution_plan=self._plan(),
                 system_prompt_builder=system_prompt_builder,  # type: ignore[arg-type]
+                externally_satisfied_acs=externally_satisfied_acs,  # type: ignore[arg-type]
             )
 
         saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert saved.is_ok
-        assert saved.value.state["completed_levels"] == 1
+        expected_completed_levels = 0 if externally_satisfied_acs else 1
+        assert saved.value.state["completed_levels"] == expected_completed_levels
         return seed, ckpt_path, saved.value.to_dict()
 
     @pytest.mark.asyncio
@@ -3743,6 +3746,46 @@ class TestCheckpointDispatchContract:
 
         assert dispatched == [[1]]
         assert result.execution_id == "exec-original"
+        assert result.all_succeeded
+
+    @pytest.mark.asyncio
+    async def test_recovery_restores_original_externally_satisfied_set(
+        self, tmp_path: Path
+    ) -> None:
+        seed, ckpt_path, _ = await self._crash_after_first_stage(
+            tmp_path,
+            tools=["Read"],
+            system_prompt="direct-v1",
+            externally_satisfied_acs={0: {"reason": "already present"}},
+        )
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["dispatch_contract"]["externally_satisfied_ac_indices"] == [0]
+
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _finish(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [ACExecutionResult(ac_index=1, ac_content="Apply change", success=True)]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=["Read"],
+            system_prompt="direct-v1",
+            execution_plan=self._plan(),
+            externally_satisfied_acs={},
+        )
+
+        assert dispatched == [[1]]
+        assert result.externally_satisfied_count == 1
         assert result.all_succeeded
 
     @pytest.mark.asyncio

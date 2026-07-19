@@ -1174,10 +1174,12 @@ def _plan_created_event(
     execution_plan: object,
     *,
     forced_sequential: bool,
+    externally_satisfied_ac_indices: tuple[int, ...] = (),
 ) -> BaseEvent:
     plan_contract = runner._execution_plan_contract(  # type: ignore[arg-type]
         execution_plan,
         forced_sequential=forced_sequential,
+        externally_satisfied_ac_indices=externally_satisfied_ac_indices,
     )
     return BaseEvent(
         type="execution.plan.created",
@@ -1441,6 +1443,73 @@ class TestFrugalityProofConsumer:
                 runner,
                 "run-same",
                 parallel_plan,
+                forced_sequential=False,
+            ),
+        ]
+
+        async def _query_events(*, event_type: str, limit: int) -> list[BaseEvent]:
+            del limit
+            if event_type == "orchestrator.session.started":
+                return session_events
+            if event_type == "execution.plan.created":
+                return plan_events
+            return []
+
+        runner._event_store.query_events.side_effect = _query_events
+
+        seed_id, cohort = await runner._frugality_proof_cohort("run-current")
+
+        assert seed_id == seed.metadata.seed_id
+        assert cohort == ("run-current", "run-same")
+
+    @pytest.mark.asyncio
+    async def test_cohort_excludes_different_externally_satisfied_set(self) -> None:
+        runner, _appended, _console = _consumer_runner([])
+        seed = Seed(
+            goal="Skip-sensitive proof cohort",
+            acceptance_criteria=("Prepare", "Apply"),
+            ontology_schema=OntologySchema(name="SkipProof", description="Proof cohort"),
+            metadata=SeedMetadata(seed_id="seed-skip-proof"),
+        )
+        contract = runner._build_execution_contract(seed=seed)
+        session_events = [
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=f"session-{execution_id}",
+                data={
+                    "execution_id": execution_id,
+                    "seed_id": seed.metadata.seed_id,
+                    "execution_contract": contract,
+                },
+            )
+            for execution_id in ("run-current", "run-skipped", "run-same")
+        ]
+        plan = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Prepare"),
+                ACNode(index=1, content="Apply"),
+            ),
+            execution_levels=((0, 1),),
+        ).to_execution_plan()
+        plan_events = [
+            _plan_created_event(
+                runner,
+                "run-current",
+                plan,
+                forced_sequential=False,
+            ),
+            _plan_created_event(
+                runner,
+                "run-skipped",
+                plan,
+                forced_sequential=False,
+                externally_satisfied_ac_indices=(1,),
+            ),
+            _plan_created_event(
+                runner,
+                "run-same",
+                plan,
                 forced_sequential=False,
             ),
         ]

@@ -2494,6 +2494,7 @@ class OrchestratorRunner:
         session_id: str,
         execution_plan: Any,
         forced_sequential: bool = False,
+        externally_satisfied_ac_indices: tuple[int, ...] = (),
     ) -> None:
         """Persist one bounded whole-run plan before the first level starts."""
         from ouroboros.events.base import BaseEvent
@@ -2501,6 +2502,7 @@ class OrchestratorRunner:
         plan_contract = self._execution_plan_contract(
             execution_plan,
             forced_sequential=forced_sequential,
+            externally_satisfied_ac_indices=externally_satisfied_ac_indices,
         )
         plan_fingerprint = self._execution_plan_fingerprint(plan_contract)
         levels: list[dict[str, Any]] = []
@@ -2535,6 +2537,7 @@ class OrchestratorRunner:
                     "plan_fingerprint": plan_fingerprint,
                     "forced_sequential": forced_sequential,
                     "plan_contract": plan_contract,
+                    "externally_satisfied_ac_indices": list(externally_satisfied_ac_indices),
                     "total_acs": len(seed.acceptance_criteria),
                     "total_levels": execution_plan.total_stages,
                     "parallelizable": execution_plan.is_parallelizable,
@@ -2550,12 +2553,14 @@ class OrchestratorRunner:
         execution_plan: Any,
         *,
         forced_sequential: bool,
+        externally_satisfied_ac_indices: tuple[int, ...] = (),
     ) -> dict[str, Any]:
         """Return the canonical resolved-plan semantics used for proof cohorts."""
         nodes = sorted(execution_plan.nodes, key=lambda node: node.index)
         return {
-            "version": 1,
+            "version": 2,
             "forced_sequential": forced_sequential,
+            "externally_satisfied_ac_indices": list(externally_satisfied_ac_indices),
             "nodes": [
                 {
                     "ac_index": node.index,
@@ -2594,16 +2599,24 @@ class OrchestratorRunner:
         if not isinstance(plan_contract, Mapping) or set(plan_contract) != {
             "version",
             "forced_sequential",
+            "externally_satisfied_ac_indices",
             "nodes",
             "stages",
         }:
             return False
         forced_sequential = plan_contract.get("forced_sequential")
+        externally_satisfied_ac_indices = plan_contract.get("externally_satisfied_ac_indices")
         nodes = plan_contract.get("nodes")
         stages = plan_contract.get("stages")
         if (
-            plan_contract.get("version") != 1
+            plan_contract.get("version") != 2
             or not isinstance(forced_sequential, bool)
+            or not isinstance(externally_satisfied_ac_indices, list)
+            or any(
+                isinstance(ac_index, bool) or not isinstance(ac_index, int) or ac_index < 0
+                for ac_index in externally_satisfied_ac_indices
+            )
+            or externally_satisfied_ac_indices != sorted(set(externally_satisfied_ac_indices))
             or not isinstance(nodes, list)
             or not isinstance(stages, list)
         ):
@@ -2680,6 +2693,8 @@ class OrchestratorRunner:
             return False
         if set(staged_ac_indices) != node_indices:
             return False
+        if not set(externally_satisfied_ac_indices).issubset(node_indices):
+            return False
         if any(
             dependency not in node_indices for node in nodes for dependency in node["depends_on"]
         ):
@@ -2689,6 +2704,36 @@ class OrchestratorRunner:
             for stage in stages
             for dependency in stage["depends_on_stages"]
         )
+
+    @staticmethod
+    def _externally_satisfied_ac_indices(
+        raw: Mapping[int, Mapping[str, Any]] | None,
+        *,
+        total_acs: int,
+    ) -> tuple[int, ...]:
+        """Return the exact caller-controlled skip set used by plan proof identity."""
+        if raw is None:
+            return ()
+        if not isinstance(raw, Mapping):
+            msg = "externally_satisfied_acs must be a mapping"
+            raise ValueError(msg)
+        indices: list[int] = []
+        for ac_index, metadata in raw.items():
+            if (
+                isinstance(ac_index, bool)
+                or not isinstance(ac_index, int)
+                or not 0 <= ac_index < total_acs
+            ):
+                msg = f"externally_satisfied_acs contains invalid AC index: {ac_index!r}"
+                raise ValueError(msg)
+            if not isinstance(metadata, Mapping):
+                msg = (
+                    "externally_satisfied_acs metadata must be a mapping "
+                    f"for AC {ac_index}: {metadata!r}"
+                )
+                raise ValueError(msg)
+            indices.append(ac_index)
+        return tuple(sorted(indices))
 
     @staticmethod
     def _proof_plan_identity(event_data: Mapping[str, Any]) -> tuple[str, bool] | None:
@@ -5514,6 +5559,10 @@ class OrchestratorRunner:
                 dependency_graph = dep_result.value
 
         execution_plan = dependency_graph.to_execution_plan()
+        externally_satisfied_ac_indices = self._externally_satisfied_ac_indices(
+            externally_satisfied_acs,
+            total_acs=len(seed.acceptance_criteria),
+        )
 
         await self._emit_execution_plan_created(
             seed=seed,
@@ -5521,6 +5570,7 @@ class OrchestratorRunner:
             session_id=tracker.session_id,
             execution_plan=execution_plan,
             forced_sequential=force_sequential_levels,
+            externally_satisfied_ac_indices=externally_satisfied_ac_indices,
         )
 
         # Log execution plan
