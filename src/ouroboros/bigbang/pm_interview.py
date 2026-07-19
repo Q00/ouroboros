@@ -114,6 +114,42 @@ Respond ONLY with valid JSON in this exact format:
 """
 
 
+# Static markers of inner-builder guidance that PM steering must never
+# evict: the answer-prefix legend and the brownfield intent hint. The
+# ambiguity snapshot is checked as its full text (built per state) because
+# it carries the "Weakest area" feedback the steering philosophy is meant
+# to govern — its heading surviving while the weakest-area lines are cut
+# would still defeat the policy. The inner header truncates from the end,
+# so a surviving later element implies everything before it is intact.
+_INNER_GUIDANCE_STATIC_MARKERS = (
+    "[from-research]",
+    "not on discovering what exists.",
+)
+
+# Identifies the PRD-contract paragraph — the policy #1663 exists to
+# enforce. It is shed last so tight budgets drop the supporting paragraphs
+# before the policy itself.
+_PM_CONTRACT_MARKER = "contract between the PM and the developers"
+
+
+def _shed_one_paragraph(block: str) -> str:
+    """Drop the lowest-priority paragraph from a fitted steering block.
+
+    Paragraphs are shed from the end, except the PRD-contract paragraph,
+    which is kept until nothing else remains.
+    """
+    paragraphs = [p for p in block.split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1:
+        return ""
+    for index in range(len(paragraphs) - 1, -1, -1):
+        if _PM_CONTRACT_MARKER not in paragraphs[index]:
+            del paragraphs[index]
+            break
+    else:
+        paragraphs.pop()
+    return "\n\n".join(paragraphs) + "\n\n"
+
+
 def _fit_steering_paragraphs(steering: str, budget: int) -> str:
     """Fit whole steering paragraphs into ``budget`` characters.
 
@@ -518,6 +554,13 @@ class PMInterviewEngine:
         steering paragraph is either included whole or dropped, never cut
         mid-sentence, so a reduced budget can narrow the policy but never
         garble or invert it.
+
+        The minimum reserve alone is not sufficient — a long initial context
+        plus an ambiguity snapshot can need more than the minimum, and the
+        snapshot carries the "Weakest area" feedback this steering exists to
+        govern. So after fitting, steering paragraphs are shed one by one
+        until the inner guidance markers that survive an unconstrained build
+        also survive the steered build (or no steering remains).
         """
         self._pm_steering = getattr(self, "_pm_steering", _PM_SYSTEM_PROMPT_PREFIX)
 
@@ -538,16 +581,40 @@ class PMInterviewEngine:
                 self._pm_steering,
                 budget=max(0, cap - inner_reserve),
             )
-            # Never pass 0 down: the inner builder treats falsy max_chars as
-            # "use the default cap", which would blow the budget again.
-            inner_budget = max(1, cap - len(steering_block))
-            base = original_build(
+
+            # Guidance the unconstrained inner build retains must also
+            # survive the steered build; steering yields otherwise. The
+            # ambiguity snapshot is required as its full text so the
+            # "Weakest area" lines survive, not just the heading.
+            base_full = original_build(
                 state,
                 initial_context=initial_context,
-                max_chars=inner_budget,
+                max_chars=cap,
             )
-            # Hard cap as final safety net (degenerate tiny-cap case).
-            return (steering_block + base)[:cap]
+            snapshot_text = self.inner._build_ambiguity_snapshot_prompt(state)
+            required_markers = [
+                marker
+                for marker in (*_INNER_GUIDANCE_STATIC_MARKERS, snapshot_text)
+                if marker and marker in base_full
+            ]
+
+            while True:
+                # Never pass 0 down: the inner builder treats falsy max_chars
+                # as "use the default cap", which would blow the budget again.
+                inner_budget = max(1, cap - len(steering_block))
+                base = (
+                    original_build(
+                        state,
+                        initial_context=initial_context,
+                        max_chars=inner_budget,
+                    )
+                    if steering_block
+                    else base_full
+                )
+                if not steering_block or all(m in base for m in required_markers):
+                    # Hard cap as final safety net (degenerate tiny-cap case).
+                    return (steering_block + base)[:cap]
+                steering_block = _shed_one_paragraph(steering_block)
 
         self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]
 

@@ -113,10 +113,13 @@ class TestPMSteeringPromptBudget:
         assert self._INNER_JOB_MARKER in prompt
 
     def test_caller_supplied_cap_keeps_full_steering_and_inner_prompt(self, tmp_path: Path) -> None:
+        """With a comfortable caller cap and a short context, the full
+        steering and the inner prompt coexist within the cap. (Long-context
+        shedding behavior has its own dedicated tests below.)"""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_caller",
-            initial_context="A" * 4_000,
+            initial_context="Build a task manager",
         )
         cap = 3_000
         prompt = engine.inner._build_system_prompt(state, max_chars=cap)
@@ -188,6 +191,80 @@ class TestPMSteeringPromptBudget:
         )
         prompt = engine.inner._build_system_prompt(state, max_chars=200)
         assert len(prompt) <= 200
+
+    @staticmethod
+    def _ambiguity_breakdown() -> dict[str, dict[str, object]]:
+        return {
+            "goal_clarity": {
+                "name": "Goal Clarity",
+                "clarity_score": 0.7,
+                "justification": "Goal is mostly clear",
+            },
+            "success_criteria_clarity": {
+                "name": "Success Criteria Clarity",
+                "clarity_score": 0.3,
+                "justification": "Criteria not yet verifiable",
+            },
+        }
+
+    def test_long_context_with_snapshot_keeps_inner_ambiguity_guidance(
+        self, tmp_path: Path
+    ) -> None:
+        """A max-length initial context plus an ambiguity breakdown is a
+        normal runtime state; the steering must shed itself before evicting
+        the answer-prefix legend or the "Weakest area" snapshot feedback it
+        exists to govern."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_long_ctx_snapshot",
+            initial_context="C" * InterviewEngine._MAX_INITIAL_CONTEXT_SYSTEM_CHARS,
+            ambiguity_score=0.55,
+            ambiguity_breakdown=self._ambiguity_breakdown(),
+        )
+        prompt = engine.inner._build_system_prompt(state)
+        assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        # The full snapshot text survives — not just its heading.
+        snapshot = engine.inner._build_ambiguity_snapshot_prompt(state)
+        assert snapshot and snapshot in prompt
+        assert "Weakest area" in prompt
+        assert "[from-research]" in prompt
+        self._assert_steering_paragraphs_atomic(prompt, InterviewEngine._MAX_SYSTEM_PROMPT_CHARS)
+
+    def test_steering_sheds_supporting_paragraphs_before_the_contract(self, tmp_path: Path) -> None:
+        """When only part of the steering fits, the PRD-contract paragraph —
+        the policy #1663 exists to enforce — outlives the supporting ones."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_contract_last",
+            initial_context="C" * InterviewEngine._MAX_INITIAL_CONTEXT_SYSTEM_CHARS,
+            ambiguity_score=0.55,
+            ambiguity_breakdown=self._ambiguity_breakdown(),
+        )
+        prompt = engine.inner._build_system_prompt(state)
+        flat = " ".join(prompt.split())
+        assert "contract between the PM and the developers" in flat
+        assert "no place in this contract" in flat
+
+    def test_brownfield_long_context_sheds_steering_entirely_before_inner_guidance(
+        self, tmp_path: Path
+    ) -> None:
+        """When even the contract paragraph cannot coexist with the inner
+        guidance, steering yields entirely and the wrapped prompt keeps
+        parity with the unwrapped build."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_brownfield_long",
+            initial_context="C" * InterviewEngine._MAX_INITIAL_CONTEXT_SYSTEM_CHARS,
+            is_brownfield=True,
+            ambiguity_score=0.55,
+            ambiguity_breakdown=self._ambiguity_breakdown(),
+        )
+        prompt = engine.inner._build_system_prompt(state)
+        assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        snapshot = engine.inner._build_ambiguity_snapshot_prompt(state)
+        assert snapshot and snapshot in prompt
+        assert "[from-research]" in prompt
+        assert "not on discovering what exists." in prompt
 
 
 def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:
