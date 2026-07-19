@@ -23,6 +23,9 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.observability.decomposition_attestation_projection import (
+    decomposition_attestation_retry_rank,
+)
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 
@@ -866,7 +869,9 @@ def _merge_trust_escalation_events_into_snapshot(
     ``execution.ac.parked_for_operator`` / ``execution.ac.parked_resolved``
     are per-node badges layered on a node the tree already knows about,
     resolved by ``node_id`` (falling back to the legacy ``ac_N`` id via
-    ``root_ac_index`` for older/simpler tree payloads).
+    ``root_ac_index`` for older/simpler tree payloads). Attestations select
+    the highest retry identity because a delayed persistence retry may land
+    after a newer round; list order only breaks ties within one attempt.
     """
     raw_nodes = snapshot.get("nodes")
     root_id = _coerce_non_empty_string(snapshot.get("root_id")) or _ROOT_ID
@@ -878,6 +883,7 @@ def _merge_trust_escalation_events_into_snapshot(
         for node_id, raw_node in raw_nodes.items()
         if isinstance(raw_node, Mapping)
     }
+    attestation_retry_rank_by_node: dict[str, int] = {}
 
     for event in execution_events:
         event_type = getattr(event, "type", None)
@@ -896,10 +902,13 @@ def _merge_trust_escalation_events_into_snapshot(
             continue
 
         if event_type == "execution.ac.decomposition_attested":
-            verdict = _coerce_non_empty_string(data.get("verdict"))
-            if verdict:
-                nodes[target_id]["trust_verdict"] = verdict
-                nodes[target_id]["trustworthy"] = bool(data.get("trustworthy"))
+            retry_rank = decomposition_attestation_retry_rank(data)
+            if retry_rank >= attestation_retry_rank_by_node.get(target_id, -1):
+                attestation_retry_rank_by_node[target_id] = retry_rank
+                verdict = _coerce_non_empty_string(data.get("verdict"))
+                if verdict:
+                    nodes[target_id]["trust_verdict"] = verdict
+                    nodes[target_id]["trustworthy"] = bool(data.get("trustworthy"))
         elif event_type == "execution.ac.lateral_escalation_progressed":
             # Round-4 follow-up: emitted on EVERY ladder iteration, so the
             # tree shows in-flight persona-escalation progress (which persona

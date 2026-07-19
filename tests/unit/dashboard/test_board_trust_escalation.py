@@ -86,6 +86,93 @@ class TestDecompositionAttestedFolding:
 
         assert all(len(column) == 0 for column in board["columns"].values())
 
+    def test_delayed_older_retry_cannot_hide_newer_untrustworthy_verdict(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.ac.decomposition_attested",
+                    {
+                        "node_id": "ac_1",
+                        "retry_attempt": 2,
+                        "verdict": "untrustworthy",
+                        "trustworthy": False,
+                    },
+                ),
+                (
+                    "execution.ac.decomposition_attested",
+                    {
+                        "node_id": "ac_1",
+                        "retry_attempt": 1,
+                        "verdict": "trustworthy",
+                        "trustworthy": True,
+                    },
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_1")
+        assert card["trust_verdict"] == "untrustworthy"
+        assert card["trustworthy"] is False
+
+    def test_same_retry_attempt_uses_chronology_as_tiebreaker(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.ac.decomposition_attested",
+                    {
+                        "node_id": "ac_1",
+                        "retry_attempt": 2,
+                        "verdict": "untrustworthy",
+                        "trustworthy": False,
+                    },
+                ),
+                (
+                    "execution.ac.decomposition_attested",
+                    {
+                        "node_id": "ac_1",
+                        "retry_attempt": 2,
+                        "verdict": "trustworthy",
+                        "trustworthy": True,
+                    },
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_1")
+        assert card["trust_verdict"] == "trustworthy"
+        assert card["trustworthy"] is True
+
+    def test_malformed_retry_attempt_cannot_override_valid_attempt(self) -> None:
+        board = reduce_board(
+            _events(
+                (
+                    "execution.ac.decomposition_attested",
+                    {
+                        "node_id": "ac_1",
+                        "retry_attempt": 2,
+                        "verdict": "untrustworthy",
+                        "trustworthy": False,
+                    },
+                ),
+                (
+                    "execution.ac.decomposition_attested",
+                    {
+                        "node_id": "ac_1",
+                        "retry_attempt": "3",
+                        "verdict": "trustworthy",
+                        "trustworthy": True,
+                    },
+                ),
+            ),
+            execution_id="exec_1",
+        )
+
+        card = _card_by_id(board, "ac_1")
+        assert card["trust_verdict"] == "untrustworthy"
+        assert card["trustworthy"] is False
+
 
 class TestParkedForOperatorFolding:
     def test_parked_event_sets_escalation_state(self) -> None:

@@ -13,7 +13,11 @@ from collections.abc import AsyncIterator
 import pytest
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler, render_ac_tree_hud_markdown
+from ouroboros.mcp.tools.ac_tree_hud_handler import (
+    ACTreeHUDHandler,
+    _merge_trust_escalation_events_into_snapshot,
+    render_ac_tree_hud_markdown,
+)
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -36,6 +40,46 @@ def _progress_data() -> dict[str, object]:
             {"node_id": "ac_2", "index": 2, "content": "Second criterion", "status": "executing"},
         ],
     }
+
+
+def test_delayed_older_attestation_cannot_hide_newer_hud_verdict() -> None:
+    snapshot = {
+        "root_id": "root",
+        "nodes": {
+            "root": {"id": "root", "children_ids": ["ac_1"]},
+            "ac_1": {"id": "ac_1", "children_ids": []},
+        },
+    }
+    merged = _merge_trust_escalation_events_into_snapshot(
+        snapshot,
+        [
+            BaseEvent(
+                type="execution.ac.decomposition_attested",
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "node_id": "ac_1",
+                    "retry_attempt": 2,
+                    "verdict": "untrustworthy",
+                    "trustworthy": False,
+                },
+            ),
+            BaseEvent(
+                type="execution.ac.decomposition_attested",
+                aggregate_type="execution",
+                aggregate_id="exec_1",
+                data={
+                    "node_id": "ac_1",
+                    "retry_attempt": 1,
+                    "verdict": "trustworthy",
+                    "trustworthy": True,
+                },
+            ),
+        ],
+    )
+
+    assert merged["nodes"]["ac_1"]["trust_verdict"] == "untrustworthy"
+    assert merged["nodes"]["ac_1"]["trustworthy"] is False
 
 
 class TestRenderMarkdownDirectly:

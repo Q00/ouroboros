@@ -219,6 +219,49 @@ async def test_node_untrustworthy_then_trustworthy_again_is_not_reported(
 
 
 @pytest.mark.asyncio
+async def test_delayed_older_attestation_cannot_hide_newer_conductor_warning(
+    store: EventStore,
+) -> None:
+    from datetime import UTC, datetime
+
+    await store.append(
+        BaseEvent(
+            type="execution.ac.decomposition_attested",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_1",
+                "retry_attempt": 2,
+                "verdict": "untrustworthy",
+                "trustworthy": False,
+            },
+        )
+    )
+    await store.append(
+        BaseEvent(
+            type="execution.ac.decomposition_attested",
+            aggregate_type="execution",
+            aggregate_id="exec_predecessor",
+            timestamp=datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC),
+            data={
+                "node_id": "ac_1",
+                "retry_attempt": 1,
+                "verdict": "trustworthy",
+                "trustworthy": True,
+            },
+        )
+    )
+
+    handler = RecordConductorDecisionHandler(store)
+    result = await handler.handle(_selected())
+
+    assert result.is_ok
+    assert "1 untrustworthy decomposition" in result.value.text_content
+    assert "1 untrustworthy decomposition" in result.value.meta["trust_escalation_summary"]
+
+
+@pytest.mark.asyncio
 async def test_park_resolve_park_cycle_still_reports_parked(store: EventStore) -> None:
     """Fix 8 (round 3, BLOCKING): a node parked, then resolved, then parked
     AGAIN (a second escalation cycle) must be reported as CURRENTLY parked --

@@ -19,6 +19,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ouroboros.observability.decomposition_attestation_projection import (
+    decomposition_attestation_retry_rank,
+)
 from ouroboros.observability.frugality_retrospective import (
     project_frugality_retrospective,
 )
@@ -346,6 +349,7 @@ def reduce_board(
     ledger = ProviderLedger()
     session_by_node: dict[str, str] = {}
     tool_by_node: dict[str, str] = {}
+    attestation_retry_rank_by_node: dict[str, int] = {}
     terminal: set[str] = set()  # node_ids finished by an authoritative event
     meta: dict[str, Any] = {
         "execution_id": execution_id,
@@ -427,14 +431,19 @@ def reduce_board(
         elif event_type == "execution.ac.decomposition_attested":
             # Task 1: the gate-anchored decomposition trust verdict for this
             # node's decomposition round. Never gates status — it is a badge,
-            # not a lifecycle signal.
+            # not a lifecycle signal. Delayed durability retries can append an
+            # older round after a newer one, so retry identity outranks log
+            # order; chronology only breaks ties within the same attempt.
             node_id = payload.get("node_id")
             if isinstance(node_id, str) and node_id:
-                card = _card(cards, node_id)
-                verdict = payload.get("verdict")
-                if isinstance(verdict, str) and verdict:
-                    card["trust_verdict"] = verdict
-                    card["trustworthy"] = bool(payload.get("trustworthy"))
+                retry_rank = decomposition_attestation_retry_rank(payload)
+                if retry_rank >= attestation_retry_rank_by_node.get(node_id, -1):
+                    attestation_retry_rank_by_node[node_id] = retry_rank
+                    card = _card(cards, node_id)
+                    verdict = payload.get("verdict")
+                    if isinstance(verdict, str) and verdict:
+                        card["trust_verdict"] = verdict
+                        card["trustworthy"] = bool(payload.get("trustworthy"))
 
         elif event_type == "execution.ac.lateral_escalation_progressed":
             # Task 2 (round-4 follow-up): emitted on EVERY ladder iteration,

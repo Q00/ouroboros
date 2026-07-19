@@ -27,6 +27,9 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.observability.decomposition_attestation_projection import (
+    decomposition_attestation_retry_rank,
+)
 from ouroboros.persistence.event_store import EventStore
 
 _TOOL_NAME = "ouroboros_record_conductor_decision"
@@ -392,24 +395,25 @@ class RecordConductorDecisionHandler:
         except Exception:  # noqa: BLE001 - optional audit enrichment, never fatal.
             return None
 
-        # Fix 8 (round 3, BLOCKING): fold events in CHRONOLOGICAL order per
-        # node id and keep only the LATEST state per node -- matching
-        # ``board.py``'s ``reduce_board`` reducer exactly (the established
-        # pattern for this exact shape of problem) -- instead of the
+        # Fix 8 (round 3, BLOCKING): fold escalation events in CHRONOLOGICAL
+        # order per node id and keep only the LATEST state per node -- matching
+        # ``board.py``'s ``reduce_board`` reducer -- instead of the
         # previous "ever true across all history" set accumulation, which
         # could never fully reverse: (a) a node that was untrustworthy and
         # later became trustworthy again stayed reported as untrustworthy
         # forever, and (b) a park -> resolve -> park cycle stayed reported
         # as "resolved" forever after the first resolve, even though the
         # node was parked again later. ``query_events`` returns newest-first;
-        # sort by timestamp ascending to replay in true chronological order
-        # so a later event always overwrites an earlier one's state for that
-        # node id.
+        # sort by timestamp ascending to replay in true chronological order.
+        # Decomposition attestations are the exception: delayed durability
+        # retries can land an older round late, so the highest retry identity
+        # wins and chronology only breaks ties within one attempt.
         combined = sorted(
             (*attested, *parked, *resolved, *progressed, *interrupted),
             key=lambda item: item.timestamp,
         )
         node_states: dict[str, dict[str, Any]] = {}
+        attestation_retry_rank_by_node: dict[str, int] = {}
         for item in combined:
             if not isinstance(item.data, dict):
                 continue
@@ -418,7 +422,10 @@ class RecordConductorDecisionHandler:
                 continue
             state = node_states.setdefault(node_id, {})
             if item.type == "execution.ac.decomposition_attested":
-                state["trustworthy"] = item.data.get("trustworthy") is True
+                retry_rank = decomposition_attestation_retry_rank(item.data)
+                if retry_rank >= attestation_retry_rank_by_node.get(node_id, -1):
+                    attestation_retry_rank_by_node[node_id] = retry_rank
+                    state["trustworthy"] = item.data.get("trustworthy") is True
             elif item.type == "execution.ac.lateral_escalation_progressed":
                 is_parked = item.data.get("parked") is True
                 state["parked"] = is_parked
