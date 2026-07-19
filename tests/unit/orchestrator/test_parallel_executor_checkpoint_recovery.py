@@ -3940,6 +3940,157 @@ class TestSkippedACsReevaluatedOnResume:
         assert result.execution_id == "exec-original"
 
 
+class TestOrdinaryRetryBudgetSurvivesCrashRestart:
+    """Round-17 finding #4 (BLOCKING): the per-AC ordinary (pre-ladder,
+    same-runtime) retry counter ``ac_retry_attempts`` lived only in memory
+    and reset to zero on every launch — and checkpoints cannot carry it:
+    they save per-level, so retries consumed INSIDE the level a crash
+    interrupts are never in any checkpoint. Only ACs already escalated
+    into the ladder had a durable attempt record (round-6 #1's
+    ``progressed`` seeding), so an AC that crashed MID ordinary-retry
+    resumed with a FRESH zero budget: non-idempotent work re-run beyond
+    the configured cap, and attempt-number-keyed correlation reset onto
+    already-used ordinals. The consumption is now RECONSTRUCTED from the
+    original run's durable ``execution.ac.outcome_finalized`` markers
+    (emitted after EVERY attempt's verify gate — the same replay-on-resume
+    convention the ladder uses), so a resumed AC re-enters at the next
+    attempt after its highest durably-finalized one."""
+
+    @staticmethod
+    def _two_ac_seed() -> Seed:
+        return Seed(
+            goal="Ordinary retry budget survives crash",
+            constraints=(),
+            acceptance_criteria=("Prepare data", "Apply migration"),
+            ontology_schema=OntologySchema(name="RetryBudget", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+    @staticmethod
+    def _two_stage_plan() -> StagedExecutionPlan:
+        return StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Prepare data"),
+                ACNode(index=1, content="Apply migration", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_retry_consumption_reconstructed_from_finalized_markers(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact scenario: an AC has already consumed SOME
+        ordinary retries (attempts 0 and 1 durably finalized; counter at 2)
+        when the process dies mid attempt 2, before the ladder was ever
+        reached. Resume must re-enter at attempt 2 with only the REMAINING
+        budget — never at 0 with a fresh one. The outer verify/retry layer
+        is REAL here (it emits the real durable markers); only the
+        innermost dispatch is stubbed."""
+        seed = self._two_ac_seed()
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Run 1: AC0 completes level 1 (checkpoint saved), then AC1
+        # fails attempt 0 and ordinary retry 1 (both finalized durably by
+        # the real outer layer) and the process crashes MID attempt 2.
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = CheckpointStore(base_path=ckpt_path)
+        run1_ckpt.initialize()
+        run1 = _executor(event_store=run1_events, checkpoint_store=run1_ckpt, ac_retry_attempts=3)
+        run1_attempts: list[int] = []
+
+        async def _run1_dispatch(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_indices"])  # type: ignore[call-overload]
+            counters = kwargs["ac_retry_attempts"]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Prepare data", success=True)]
+            attempt = counters[1]  # type: ignore[index]
+            run1_attempts.append(attempt)
+            if attempt >= 2:
+                raise RuntimeError("simulated process crash mid ordinary retry")
+            return [
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Apply migration",
+                    success=False,
+                    error=f"migration failed on attempt {attempt}",
+                    retry_attempt=attempt,
+                )
+            ]
+
+        run1._execute_ac_batch = AsyncMock(side_effect=_run1_dispatch)
+        with pytest.raises(BaseException, match="simulated process crash|unhandled errors"):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=self._two_stage_plan(),
+            )
+        await run1_events.close()
+        # Precondition: attempts 0 and 1 ran and finalized; 2 was in flight.
+        assert run1_attempts == [0, 1, 2]
+
+        # --- Run 2: crash-restart of the same seed. The resumed AC must
+        # pick up at attempt 2 (re-running the interrupted, never-finalized
+        # attempt) and have exactly ONE ordinary retry left (attempt 3).
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            ac_retry_attempts=3,
+        )
+        run2_attempts: list[int] = []
+
+        async def _run2_dispatch(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_indices"])  # type: ignore[call-overload]
+            counters = kwargs["ac_retry_attempts"]
+            assert batch == [1]
+            attempt = counters[1]  # type: ignore[index]
+            run2_attempts.append(attempt)
+            return [
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Apply migration",
+                    success=False,
+                    error=f"migration failed on attempt {attempt}",
+                    retry_attempt=attempt,
+                )
+            ]
+
+        run2._execute_ac_batch = AsyncMock(side_effect=_run2_dispatch)
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=self._two_stage_plan(),
+        )
+        await run2_events.close()
+
+        # Pre-fix: the counter reset to 0 and the AC burned a full fresh
+        # budget (attempts 0, 1, 2, 3 — repeating non-idempotent work under
+        # already-finalized attempt numbers). Post-fix: total consumption is
+        # tracked across the crash — only attempts 2 and 3 remain.
+        assert run2_attempts == [2, 3]
+        by_index = {r.ac_index: r for r in result.results}
+        # AC0 was genuinely completed: restored, never re-dispatched.
+        assert by_index[0].success is True
+        assert by_index[0].final_message == "[Restored from checkpoint]"
+        assert by_index[1].success is False
+        # Recovery rejoined the ORIGINAL run's aggregate (which is exactly
+        # where the finalized-attempt markers were replayed from).
+        assert result.execution_id == "exec-original"
+
+
 class _SwitchableFailStore(CheckpointStore):
     """Real store whose ``save`` outages are toggled by the test; successful
     saves record a deep copy of the persisted state and signal ``landed``."""

@@ -2989,6 +2989,66 @@ class ParallelACExecutor:
                 return reason
         return None
 
+    async def _reconstruct_ordinary_retry_counts(
+        self, *, execution_id: str, total_acs: int
+    ) -> dict[int, int] | None:
+        """Reconstruct each AC's highest durably-FINALIZED attempt number
+        from the original run's event aggregate (round-17 finding #4,
+        BLOCKING).
+
+        The per-AC ordinary (pre-ladder, same-runtime) retry counter lives
+        only in the in-memory ``ac_retry_attempts`` dict, re-initialized to
+        zero on every launch — and checkpoints cannot help: they save
+        per-level (plus the run-start anchor), so retries consumed INSIDE
+        the level a crash interrupts are never in any checkpoint. Only ACs
+        that already escalated into the ladder had a durable attempt record
+        (the ``progressed`` events round-6 #1 seeds
+        ``_lateral_escalation_resume_attempts`` from), so an AC that
+        crashed MID ordinary-retry resumed with a FRESH zero budget:
+        non-idempotent work repeated beyond the configured cap, and
+        attempt-number-keyed correlation (frugality telemetry, runtime
+        handles, ``outcome_finalized`` markers) reset onto already-used
+        ordinals.
+
+        The durable source ALREADY exists: ``execution.ac.outcome_finalized``
+        is emitted after EVERY attempt's verify gate — the initial
+        dispatch, each ordinary V3 retry, and ladder redispatches alike —
+        carrying ``root_ac_index`` + ``retry_attempt``, under the same
+        durable fail-closed write convention (round-9 #3) the ladder's own
+        resume correlation relies on. Replaying the ORIGINAL execution
+        aggregate (the restored ``execution_id``) and taking the per-AC
+        max therefore reconstructs exactly how far each AC's attempt
+        numbering had durably advanced — the same replay-on-resume
+        convention the ladder uses, requiring no new checkpoint field.
+
+        Returns the per-AC max finalized attempt number (ACs with no
+        marker are absent), or ``None`` when replay is indeterminate —
+        the caller MUST fail closed (assume the budget was consumed),
+        never treat unknown history as a fresh budget.
+        """
+        events = await self._replay_with_retry("execution", execution_id)
+        if events is None:
+            return None
+        max_finalized: dict[int, int] = {}
+        for event in events:
+            if getattr(event, "type", None) != "execution.ac.outcome_finalized":
+                continue
+            data = getattr(event, "data", None)
+            if not isinstance(data, dict):
+                continue
+            ac_idx = data.get("root_ac_index")
+            attempt = data.get("retry_attempt")
+            if (
+                isinstance(ac_idx, int)
+                and not isinstance(ac_idx, bool)
+                and 0 <= ac_idx < total_acs
+                and isinstance(attempt, int)
+                and not isinstance(attempt, bool)
+                and attempt >= 0
+            ):
+                max_finalized[ac_idx] = max(max_finalized.get(ac_idx, -1), attempt)
+        return max_finalized
+
     def _discard_stale_checkpoint(
         self,
         seed_id: str,
@@ -3899,6 +3959,51 @@ class ParallelACExecutor:
                         # up front, before any mutation — round-16 #3).
                         if restored_contexts is not None:
                             level_contexts = restored_contexts
+                        # Round-17 finding #4 (BLOCKING): restore each AC's
+                        # ordinary (pre-ladder) retry consumption from the
+                        # ORIGINAL run's durable ``outcome_finalized``
+                        # markers — the in-memory counter died with the
+                        # crashed process, and the per-level checkpoint
+                        # cadence cannot carry mid-level consumption. An
+                        # unresolved AC resumes at (max finalized attempt
+                        # + 1): the next attempt that would have run, so
+                        # total budget consumption is preserved across the
+                        # crash and no durably-finalized attempt number is
+                        # ever reused. A resolved AC keeps its exact final
+                        # attempt ordinal (its reconstructed result below
+                        # reports the attempt it actually ended on). An
+                        # indeterminate replay fails CLOSED: an AC whose
+                        # consumption cannot be read gets NO fresh ordinary
+                        # budget (the full cap is treated as spent — the
+                        # same "never grant a fresh budget to an AC whose
+                        # durable phase we cannot read" posture the ladder
+                        # loader takes); the escalation ladder remains
+                        # available, so no AC is abandoned over it.
+                        finalized_attempt_counts = await self._reconstruct_ordinary_retry_counts(
+                            execution_id=execution_id, total_acs=total_acs
+                        )
+                        if finalized_attempt_counts is None:
+                            log.error(
+                                "parallel_executor.recovery.retry_consumption_unreadable",
+                                execution_id=execution_id,
+                                detail=(
+                                    "could not replay the original run's "
+                                    "finalized-attempt markers; failing "
+                                    "closed by treating every unresolved "
+                                    "AC's ordinary retry budget as already "
+                                    "consumed"
+                                ),
+                            )
+                            for retry_ac_idx in range(total_acs):
+                                if retry_ac_idx not in checkpoint_resolved:
+                                    ac_retry_attempts[retry_ac_idx] = self._ac_retry_attempts
+                        else:
+                            for retry_ac_idx, finalized in finalized_attempt_counts.items():
+                                ac_retry_attempts[retry_ac_idx] = (
+                                    finalized
+                                    if retry_ac_idx in checkpoint_resolved
+                                    else finalized + 1
+                                )
                         raw_decisions = cp.state.get("decomposition_decisions", {})
                         if isinstance(raw_decisions, Mapping):
                             for raw_node_id, raw_record in raw_decisions.items():
@@ -4023,6 +4128,10 @@ class ParallelACExecutor:
                 checkpoint_resolved = {}
                 failed_indices.clear()
                 ac_statuses.update(dict.fromkeys(range(total_acs), "pending"))
+                # Round-17 finding #4: the restored per-AC retry consumption
+                # is part of the adopted state too — roll it back with the
+                # rest.
+                ac_retry_attempts.update(dict.fromkeys(range(total_acs), 0))
                 completed_count = 0
                 execution_id = pre_recovery_execution_id
                 level_contexts = list(reconciled_level_contexts or [])
