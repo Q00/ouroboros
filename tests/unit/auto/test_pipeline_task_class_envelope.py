@@ -3,8 +3,8 @@
 Asserts:
 - After ``ouroboros_auto`` runs, ``AutoPipelineResult.active_task_class``
   is populated when the ledger unambiguously matches a single class.
-- The Seed passed downstream has the catalog's ``default_ac_template``
-  prepended to ``acceptance_criteria``.
+- Task-class defaults fill a genuinely empty acceptance contract but never
+  broaden an existing user/generated contract.
 - Unmatched and ambiguous ledgers leave ``active_task_class`` as None and AC
   untouched.
 """
@@ -170,10 +170,8 @@ def _ambiguous_ledger() -> SeedDraftLedger:
 
 
 @pytest.mark.asyncio
-async def test_envelope_carries_active_task_class_on_single_match(tmp_path) -> None:
-    """Single-match inference → ``active_task_class`` populated and the
-    catalog template AC entries are prepended to the Seed."""
-    profile = TASK_CLASS_CATALOG[TaskClass.CLI]
+async def test_envelope_preserves_existing_contract_on_single_match(tmp_path) -> None:
+    """Single-match inference records the class without broadening Seed ACs."""
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_envelope")
@@ -207,13 +205,46 @@ async def test_envelope_carries_active_task_class_on_single_match(tmp_path) -> N
     ac_descriptions = [
         item.get("description", "") if isinstance(item, dict) else item for item in ac
     ]
-    # Template entries are prepended in order.
-    for index, expected in enumerate(profile.default_ac_template):
-        assert ac_descriptions[index] == expected, (
-            f"AC[{index}] should be the L1-d-prepended template entry; got {ac[index]!r}"
-        )
-    # The user's original AC remains present after the template.
-    assert "`habit list` prints stable stdout containing created habits" in ac_descriptions
+    assert ac_descriptions == ["`habit list` prints stable stdout containing created habits"]
+    assert not set(TASK_CLASS_CATALOG[TaskClass.CLI].default_ac_template) & set(ac_descriptions)
+
+
+@pytest.mark.asyncio
+async def test_envelope_fills_genuinely_empty_contract_on_single_match(tmp_path) -> None:
+    """Task-class defaults remain available when generation produced no ACs."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_envelope_empty")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    async def generate_seed(_session_id: str) -> Seed:
+        return _build_seed(ac=())
+
+    state = AutoPipelineState(goal="Build a habit-tracker CLI tool", cwd=str(tmp_path))
+    ledger = _cli_ledger()
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        skip_run=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.active_task_class == TaskClass.CLI.value
+    ac_descriptions = [
+        item.get("description", "") if isinstance(item, dict) else item
+        for item in state.seed_artifact["acceptance_criteria"]
+    ]
+    assert ac_descriptions == list(TASK_CLASS_CATALOG[TaskClass.CLI].default_ac_template)
 
 
 @pytest.mark.asyncio
