@@ -6633,9 +6633,15 @@ class ParallelACExecutor:
         semantic_ac_key: str,
         investment_spec: InvestmentSpec | None = None,
         ac_spec: AcceptanceCriterionSpec | None = None,
+        capsule_success_contract: ACSuccessContract | None = None,
     ) -> ACExecutionResult:
         """Dispatch one finalized split through the shared recursive child path."""
         sub_acs = [child.description for child in decision.children]
+        active_success_spec = self._active_success_contract_spec(
+            ac_content=ac_content,
+            ac_spec=ac_spec,
+            capsule_success_contract=capsule_success_contract,
+        )
         # A prior round's gate-anchored attestation (Task 1) poisons THIS root
         # AC's future retries: once a decomposition round is proven untrustworthy
         # by re-running the parent's own verify gate, a fresh (unverified) SPLIT
@@ -6648,7 +6654,7 @@ class ParallelACExecutor:
             decision=decision,
             semantic_ac_key=semantic_ac_key,
             seed_goal=seed_goal,
-            ac_spec=ac_spec,
+            ac_spec=active_success_spec,
             execution_id=execution_id,
         )
         prior_attestation = await self._load_decomposition_attestation(
@@ -6707,15 +6713,15 @@ class ParallelACExecutor:
         # un-creditable, never evidence.
         artifact_oracle_active = (
             self._run_verify_commands
-            and isinstance(ac_spec, AcceptanceCriterionSpec)
-            and bool(ac_spec.expected_artifacts)
+            and isinstance(active_success_spec, AcceptanceCriterionSpec)
+            and bool(active_success_spec.expected_artifacts)
             and len(decision.children) == len(sub_acs)
         )
         artifact_cwd = ""
         child_artifact_slices: tuple[tuple[str, ...], ...] = tuple(() for _ in sub_acs)
         if artifact_oracle_active:
-            assert ac_spec is not None  # narrowed by artifact_oracle_active
-            parent_artifact_set = frozenset(ac_spec.expected_artifacts)
+            assert active_success_spec is not None  # narrowed by artifact_oracle_active
+            parent_artifact_set = frozenset(active_success_spec.expected_artifacts)
             child_artifact_slices = tuple(
                 tuple(path for path in child.expected_artifacts if path in parent_artifact_set)
                 for child in decision.children
@@ -6909,7 +6915,7 @@ class ParallelACExecutor:
         attestation, parent_verify_gate_outcome = await self._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
-            ac_spec=ac_spec,
+            ac_spec=active_success_spec,
             child_artifact_attributions=tuple(child_artifact_attributions),
         )
         self._decomposition_attestations[node_identity.node_id] = attestation
@@ -7456,6 +7462,7 @@ class ParallelACExecutor:
         start_time: datetime,
         semantic_ac_key: str,
         investment_spec: InvestmentSpec | None = None,
+        capsule_success_contract: ACSuccessContract | None = None,
     ) -> tuple[ACExecutionResult | None, DecompositionDecisionRecord | None]:
         """Run cause-matched bounce recovery before alternate-harness fallback."""
         # Infra-fatal means the runtime itself failed.  It is neither evidence
@@ -7467,7 +7474,15 @@ class ParallelACExecutor:
         if previous is not None and previous.source is DecompositionSource.BOUNCE:
             return None, previous
 
-        trace = self._build_decomposition_trace_summary(result=result, ac_spec=ac_spec)
+        active_success_spec = self._active_success_contract_spec(
+            ac_content=ac_content,
+            ac_spec=ac_spec,
+            capsule_success_contract=capsule_success_contract,
+        )
+        trace = self._build_decomposition_trace_summary(
+            result=result,
+            ac_spec=active_success_spec,
+        )
         classification = await self._classify_bounce_result(result=result, trace=trace)
         verdict = result.atomic_verifier_verdict
         retry_admission = (
@@ -7517,7 +7532,8 @@ class ParallelACExecutor:
             execution_id=execution_id,
             retry_attempt=retry_attempt,
             depth=depth,
-            ac_spec=ac_spec,
+            ac_spec=active_success_spec,
+            capsule_success_contract=capsule_success_contract,
             source=DecompositionSource.BOUNCE,
             cause=BounceCause.TOO_BIG,
             trace_summary=trace.summary,
@@ -7559,6 +7575,7 @@ class ParallelACExecutor:
                 semantic_ac_key=semantic_ac_key,
                 investment_spec=investment_spec,
                 ac_spec=ac_spec,
+                capsule_success_contract=capsule_success_contract,
             )
             return recovered, decision
         return None, decision
@@ -7699,6 +7716,7 @@ class ParallelACExecutor:
                     retry_attempt=retry_attempt,
                     depth=depth,
                     ac_spec=ac_spec,
+                    capsule_success_contract=capsule_success_contract,
                     source=DecompositionSource.PREFLIGHT,
                 )
                 node_decision = self._coerce_decomposition_decision(
@@ -7739,6 +7757,7 @@ class ParallelACExecutor:
                 semantic_ac_key=semantic_ac_key,
                 investment_spec=investment_spec,
                 ac_spec=ac_spec,
+                capsule_success_contract=capsule_success_contract,
             )
 
         if (
@@ -7859,6 +7878,7 @@ class ParallelACExecutor:
                         start_time=start_time,
                         semantic_ac_key=semantic_ac_key,
                         investment_spec=investment_spec,
+                        capsule_success_contract=capsule_success_contract,
                     )
                     if bounce_decision is not None:
                         node_decision = bounce_decision
@@ -8376,6 +8396,31 @@ class ParallelACExecutor:
             return None, attestation_reasons
         return proposal, attestation_reasons
 
+    @staticmethod
+    def _active_success_contract_spec(
+        *,
+        ac_content: str,
+        ac_spec: AcceptanceCriterionSpec | None,
+        capsule_success_contract: ACSuccessContract | None,
+    ) -> AcceptanceCriterionSpec | None:
+        """Project the contract owned by the current recursive AC node.
+
+        ``ac_spec`` remains the root Seed record used for semantic identity and
+        prompt context. Once a decomposition child receives an explicit capsule
+        contract, however, that child-local contract is the only acceptance
+        authority its descendants may partition or attest. An explicitly empty
+        child contract must therefore stay empty instead of falling back to the
+        root AC's broader gate.
+        """
+        if capsule_success_contract is None:
+            return ac_spec
+        return AcceptanceCriterionSpec(
+            description=ac_content,
+            verify_command=capsule_success_contract.verify_command,
+            expected_artifacts=capsule_success_contract.expected_artifacts,
+            output_assertion=capsule_success_contract.output_assertion,
+        )
+
     async def _try_decompose_ac(
         self,
         ac_content: str,
@@ -8389,6 +8434,7 @@ class ParallelACExecutor:
         retry_attempt: int = 0,
         depth: int = 0,
         ac_spec: AcceptanceCriterionSpec | None = None,
+        capsule_success_contract: ACSuccessContract | None = None,
         source: DecompositionSource = DecompositionSource.PREFLIGHT,
         cause: BounceCause | None = None,
         trace_summary: str = "",
@@ -8399,8 +8445,15 @@ class ParallelACExecutor:
         # The PARENT's own seed-authored expected_artifacts (fixed before the
         # decomposer ever runs) is the only material a proposal may partition
         # into per-child artifact slices -- see validate_decomposition_proposal.
+        active_success_spec = self._active_success_contract_spec(
+            ac_content=ac_content,
+            ac_spec=ac_spec,
+            capsule_success_contract=capsule_success_contract,
+        )
         parent_expected_artifacts: tuple[str, ...] = (
-            tuple(ac_spec.expected_artifacts) if ac_spec is not None else ()
+            tuple(active_success_spec.expected_artifacts)
+            if active_success_spec is not None
+            else ()
         )
         ac_label = (
             f"AC #{node_identity.display_path}"

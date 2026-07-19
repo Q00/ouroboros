@@ -1016,6 +1016,65 @@ class TestPerChildArtifactSliceOracle:
         )
 
     @pytest.mark.asyncio
+    async def test_nested_split_keeps_the_current_child_contract(self, tmp_path) -> None:
+        """A child that decomposes again must never regain its root sibling's gate."""
+        executor = _make_live_artifact_executor(
+            tmp_path,
+            writes_per_dispatch=[("out_a.txt",), ()],
+        )
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="exec-art-nested",
+            ac_index=0,
+        ).child(0)
+        decision = _artifact_split_decision(
+            node_identity.node_id,
+            slices=(("out_a.txt",), ()),
+        )
+        root_spec = AcceptanceCriterionSpec(
+            description="root AC",
+            expected_artifacts=("out_a.txt", "out_b.txt"),
+        )
+
+        result = await executor._execute_decomposition_children(
+            **_decomposition_children_kwargs(
+                node_identity,
+                decision,
+                root_spec,
+                "exec-art-nested",
+            ),
+            capsule_success_contract=ACSuccessContract(
+                expected_artifacts=("out_a.txt",),
+            ),
+        )
+
+        assert result.verify_gate_outcome is not None
+        assert result.verify_gate_outcome.passed is True
+        assert "out_b.txt" not in (result.verify_gate_outcome.reason or "")
+
+        capsule_events = [
+            event
+            for event in executor._test_appended_events  # type: ignore[attr-defined]
+            if event.type == "execution.ac.capsule.compiled"
+        ]
+        assert len(capsule_events) == 2
+        root_contract = ACSuccessContract(
+            expected_artifacts=("out_a.txt", "out_b.txt"),
+        )
+        root_contract_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                root_contract.to_contract_data(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        assert all(
+            event.data["capsule_manifest"]["success_contract_digest"]
+            != root_contract_digest
+            for event in capsule_events
+        )
+
+    @pytest.mark.asyncio
     async def test_children_creating_their_slices_earn_trustworthy(self, tmp_path) -> None:
         """The whole point of the feature: a real decomposition round where
         every child genuinely creates its assigned artifacts (and the parent's
