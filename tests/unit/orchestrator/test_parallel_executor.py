@@ -960,6 +960,7 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
 
 def _compile_test_capsule(
     *,
+    executor: ParallelACExecutor,
     ac_index: int,
     ac_content: str,
     session_id: str,
@@ -977,7 +978,17 @@ def _compile_test_capsule(
         execution_id=session_id,
         semantic_ac_key=derive_semantic_ac_key(ac_content),
         workspace=os.path.realpath(workspace),
-        authority_scope=f"execution:{session_id}",
+        authority_scope=executor._build_ac_capsule_authority_scope(
+            execution_context_id=session_id,
+            tools=["Read", "Edit"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+            is_sub_ac=False,
+            decomposition_trustworthy=False,
+            force_frontier_routing=False,
+            investment_spec=None,
+        ),
         seed_goal=seed_goal,
         ac_content=ac_content,
         ac_spec=None,
@@ -4514,19 +4525,18 @@ class TestParallelACExecutor:
 
         runtime = _Runtime()
         event_store, appended_events = _make_replaying_event_store()
-        persisted_capsule = compile_ac_execution_capsule(
-            runtime_identity=build_ac_runtime_identity(
-                0,
-                execution_context_id="session-capsule-mismatch",
-                retry_attempt=0,
-            ),
-            execution_id="session-capsule-mismatch",
-            semantic_ac_key="semantic-key",
-            workspace=os.path.realpath("/tmp/project"),
-            authority_scope="execution:session-capsule-mismatch",
-            seed_goal="Ship",
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
             ac_content="Original AC authority",
-            ac_spec=None,
+            session_id="session-capsule-mismatch",
+            seed_goal="Ship",
         )
         appended_events.append(
             BaseEvent(
@@ -4541,13 +4551,6 @@ class TestParallelACExecutor:
                 },
             )
         )
-        executor = ParallelACExecutor(
-            adapter=runtime,
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-        )
-
         with pytest.raises(ValueError, match="capsule fingerprint disagrees"):
             await executor._execute_atomic_ac(
                 ac_index=0,
@@ -4558,7 +4561,53 @@ class TestParallelACExecutor:
                 seed_goal="Ship",
                 depth=0,
                 start_time=datetime.now(UTC),
-                semantic_ac_key="semantic-key",
+            )
+
+        assert runtime.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_refuses_dispatch_authority_drift_before_resume(self) -> None:
+        """Tools, prompt, runtime, and routing authority are capsule identity."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Implement the AC",
+            session_id="session-capsule-dispatch-drift",
+            seed_goal="Ship",
+        )
+        appended_events.append(_compiled_capsule_event(runtime_identity, persisted_capsule))
+
+        with pytest.raises(ValueError, match="capsule fingerprint disagrees"):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Implement the AC",
+                session_id="session-capsule-dispatch-drift",
+                tools=["Read", "Edit"],
+                system_prompt="changed-system-prompt",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
             )
 
         assert runtime.calls == 0
@@ -4581,20 +4630,18 @@ class TestParallelACExecutor:
 
         runtime = _Runtime()
         event_store, appended_events = _make_replaying_event_store()
-        runtime_identity = build_ac_runtime_identity(
-            0,
-            execution_context_id="session-capsule-resume",
-            retry_attempt=0,
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
         )
-        persisted_capsule = compile_ac_execution_capsule(
-            runtime_identity=runtime_identity,
-            execution_id="session-capsule-resume",
-            semantic_ac_key="semantic-key",
-            workspace=os.path.realpath("/tmp/project"),
-            authority_scope="execution:session-capsule-resume",
-            seed_goal="Ship",
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
             ac_content="Implement the AC",
-            ac_spec=None,
+            session_id="session-capsule-resume",
+            seed_goal="Ship",
         )
         persisted_handle = RuntimeHandle(
             backend="codex_cli",
@@ -4632,13 +4679,6 @@ class TestParallelACExecutor:
                 ),
             ]
         )
-        executor = ParallelACExecutor(
-            adapter=runtime,
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-        )
-
         await executor._execute_atomic_ac(
             ac_index=0,
             ac_content="Implement the AC",
@@ -4648,7 +4688,6 @@ class TestParallelACExecutor:
             seed_goal="Ship",
             depth=0,
             start_time=datetime.now(UTC),
-            semantic_ac_key="semantic-key",
         )
 
         assert runtime.resume_handles[0] is not None
@@ -4737,7 +4776,20 @@ class TestParallelACExecutor:
     @pytest.mark.asyncio
     async def test_capsule_resume_rejects_foreign_workspace_handle(self) -> None:
         """A matching fingerprint cannot authorize continuity from another checkout."""
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
         runtime_identity, capsule = _compile_test_capsule(
+            executor=executor,
             ac_index=0,
             ac_content="Implement the AC",
             session_id="session-capsule-foreign-workspace",
@@ -4754,7 +4806,6 @@ class TestParallelACExecutor:
                 "ac_capsule_fingerprint": capsule.fingerprint,
             },
         )
-        event_store = AsyncMock()
         event_store.replay.return_value = [
             _compiled_capsule_event(runtime_identity, capsule),
             BaseEvent(
@@ -4767,18 +4818,6 @@ class TestParallelACExecutor:
                 },
             ),
         ]
-        runtime = SimpleNamespace(
-            runtime_backend="codex_cli",
-            working_directory="/tmp/project",
-            permission_mode="acceptEdits",
-        )
-        executor = ParallelACExecutor(
-            adapter=runtime,
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-        )
-
         with pytest.raises(ValueError, match="workspace authority changed"):
             await executor._load_persisted_ac_runtime_handle(
                 0,
@@ -11039,8 +11078,17 @@ class TestParallelACExecutor:
                     resume_handle=resume_handle,
                 )
 
+        runtime = _StubPersistedResumeRuntime()
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
         ac_content = "Resume the interrupted AC implementation session"
         runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
             ac_index=1,
             ac_content=ac_content,
             session_id="orch_123",
@@ -11060,7 +11108,6 @@ class TestParallelACExecutor:
                 "ac_session_origin": "fresh",
             },
         )
-        event_store = AsyncMock()
         event_store.replay = AsyncMock(
             return_value=[
                 _compiled_capsule_event(runtime_identity, persisted_capsule),
@@ -11080,13 +11127,6 @@ class TestParallelACExecutor:
             ]
         )
         event_store.append = AsyncMock()
-        runtime = _StubPersistedResumeRuntime()
-        executor = ParallelACExecutor(
-            adapter=runtime,
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-        )
 
         result = await executor._execute_atomic_ac(
             ac_index=1,
@@ -11277,8 +11317,17 @@ class TestParallelACExecutor:
                     resume_handle=resume_handle,
                 )
 
+        runtime = _StubResumedHandleRuntime()
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
         ac_content = "Resume the latest persisted implementation session"
         runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
             ac_index=1,
             ac_content=ac_content,
             session_id="orch_123",
@@ -11312,7 +11361,6 @@ class TestParallelACExecutor:
                 "ac_session_origin": "restored_same_attempt",
             },
         )
-        event_store = AsyncMock()
         event_store.replay = AsyncMock(
             return_value=[
                 _compiled_capsule_event(runtime_identity, persisted_capsule),
@@ -11345,13 +11393,6 @@ class TestParallelACExecutor:
             ]
         )
         event_store.append = AsyncMock()
-        runtime = _StubResumedHandleRuntime()
-        executor = ParallelACExecutor(
-            adapter=runtime,
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-        )
 
         result = await executor._execute_atomic_ac(
             ac_index=1,
@@ -12884,8 +12925,17 @@ class TestParallelACExecutor:
                     resume_handle=resume_handle,
                 )
 
+        runtime = _StubResumeAfterInvalidRuntime()
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
         ac_content = "Resume after skipping invalid persisted event"
         runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
             ac_index=1,
             ac_content=ac_content,
             session_id="orch_123",
@@ -12905,7 +12955,6 @@ class TestParallelACExecutor:
                 "ac_session_origin": "fresh",
             },
         )
-        event_store = AsyncMock()
         event_store.replay = AsyncMock(
             return_value=[
                 _compiled_capsule_event(runtime_identity, persisted_capsule),
@@ -12944,13 +12993,6 @@ class TestParallelACExecutor:
             ]
         )
         event_store.append = AsyncMock()
-        runtime = _StubResumeAfterInvalidRuntime()
-        executor = ParallelACExecutor(
-            adapter=runtime,
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-        )
 
         result = await executor._execute_atomic_ac(
             ac_index=1,

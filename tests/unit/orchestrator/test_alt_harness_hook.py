@@ -16,7 +16,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator import cross_harness_redispatch as chr
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.parallel_executor_models import ACExecutionResult
 
@@ -118,6 +120,98 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
 
     assert result is not None and result.success is True
     assert created_kwargs["permission_mode"] == "bypassPermissions"
+
+
+@pytest.mark.asyncio
+async def test_alternate_runtime_executes_through_fresh_capsule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real throwaway executor must compile, persist, and dispatch a fresh capsule."""
+    events: list[BaseEvent] = []
+    event_store = AsyncMock()
+
+    async def _append(event: BaseEvent) -> None:
+        events.append(event)
+
+    async def _replay(aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+        return [
+            event
+            for event in events
+            if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
+        ]
+
+    event_store.append.side_effect = _append
+    event_store.replay.side_effect = _replay
+    parent_adapter = MagicMock()
+    parent_adapter.runtime_backend = "claude"
+    parent_adapter.working_directory = "/tmp/work"
+    parent_adapter.permission_mode = "acceptEdits"
+    parent_adapter.self_governs_rate_limit = True
+    executor = ParallelACExecutor(
+        adapter=parent_adapter,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        cross_harness_redispatch=True,
+    )
+
+    class _AltRuntime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/work"
+        permission_mode = "bypassPermissions"
+        self_governs_rate_limit = True
+
+        def __init__(self) -> None:
+            self.resume_handles: list[RuntimeHandle | None] = []
+
+        async def execute_task(
+            self,
+            prompt: str,
+            tools: list[str] | None = None,
+            system_prompt: str | None = None,
+            resume_handle: RuntimeHandle | None = None,
+            resume_session_id: str | None = None,
+        ):
+            del prompt, tools, system_prompt, resume_session_id
+            self.resume_handles.append(resume_handle)
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE]",
+                data={"subtype": "success"},
+                resume_handle=resume_handle,
+            )
+
+    alt_runtime = _AltRuntime()
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_factory.create_agent_runtime",
+        lambda **_kwargs: alt_runtime,
+    )
+
+    result = await executor._run_single_ac_on_backend(
+        "codex_cli",
+        rerun_kwargs=_rerun_kwargs(),
+        retry_attempt=1,
+        decision=chr.AltHarnessDecision(
+            should_redispatch=True,
+            from_backend="claude",
+            to_backend="codex_cli",
+            policy=None,
+            reason="test",
+        ),
+        runtime_identity=executor._resolve_ac_runtime_identity(
+            0,
+            execution_context_id="exec-1",
+        ),
+        failure_class="fabrication_suspected",
+    )
+
+    assert result is not None and result.success is True
+    assert alt_runtime.resume_handles[0] is not None
+    assert alt_runtime.resume_handles[0].native_session_id is None
+    assert alt_runtime.resume_handles[0].metadata["ac_session_origin"] == "fresh"
+    capsule_event = next(event for event in events if event.type == "execution.ac.capsule.compiled")
+    assert capsule_event.data["session_origin"] == "fresh"
+    assert capsule_event.data["capsule_fingerprint"].startswith("sha256:")
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,24 @@ def _validate_sha256_digest(value: object, *, field: str) -> str:
     return value
 
 
+def build_ac_dispatch_authority_scope(
+    *,
+    base_scope: str,
+    dispatch_contract: Mapping[str, object],
+    execution_policy: Mapping[str, object],
+) -> str:
+    """Fingerprint every authority-bearing input that can change AC dispatch."""
+    if not isinstance(base_scope, str) or not base_scope:
+        raise ValueError("AC dispatch authority base scope is missing")
+    payload = {
+        "version": 1,
+        "base_scope": base_scope,
+        "dispatch_contract": dict(dispatch_contract),
+        "execution_policy": dict(execution_policy),
+    }
+    return _sha256_text(_canonical_json(payload))
+
+
 class ACContextReferenceKind(StrEnum):
     """External context source named by an execution capsule."""
 
@@ -672,5 +690,6 @@ __all__ = [
     "ACExecutionCapsuleManifest",
     "ACSuccessContract",
     "bind_capsule_to_runtime_handle",
+    "build_ac_dispatch_authority_scope",
     "compile_ac_execution_capsule",
 ]

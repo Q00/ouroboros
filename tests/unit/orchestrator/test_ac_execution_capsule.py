@@ -13,6 +13,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACContextReferenceKind,
     ACExecutionCapsuleManifest,
     bind_capsule_to_runtime_handle,
+    build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
 )
 from ouroboros.orchestrator.adapter import RuntimeHandle
@@ -124,6 +125,47 @@ def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None
     )
 
     assert changed.fingerprint != capsule.fingerprint
+
+
+@pytest.mark.parametrize(
+    ("section", "replacement"),
+    [
+        ("dispatch", {"tools": ["Read"]}),
+        ("dispatch", {"system_prompt": {"identity": "sha256:changed"}}),
+        ("dispatch", {"runtime": {"backend": "codex", "permission_mode": "bypass"}}),
+        ("policy", {"reasoning_effort": "xhigh"}),
+        ("policy", {"force_frontier_routing": True}),
+    ],
+)
+def test_dispatch_authority_scope_changes_with_execution_inputs(
+    section: str,
+    replacement: dict[str, object],
+) -> None:
+    dispatch = {
+        "tools": ["Read", "Edit"],
+        "system_prompt": {"identity": "sha256:original"},
+        "runtime": {"backend": "claude", "permission_mode": "acceptEdits"},
+    }
+    policy = {"reasoning_effort": "high", "force_frontier_routing": False}
+    original = build_ac_dispatch_authority_scope(
+        base_scope="execution:1",
+        dispatch_contract=dispatch,
+        execution_policy=policy,
+    )
+
+    changed_dispatch = dict(dispatch)
+    changed_policy = dict(policy)
+    if section == "dispatch":
+        changed_dispatch.update(replacement)
+    else:
+        changed_policy.update(replacement)
+    changed = build_ac_dispatch_authority_scope(
+        base_scope="execution:1",
+        dispatch_contract=changed_dispatch,
+        execution_policy=changed_policy,
+    )
+
+    assert changed != original
 
 
 def test_context_reference_rejects_prompt_control_characters() -> None:

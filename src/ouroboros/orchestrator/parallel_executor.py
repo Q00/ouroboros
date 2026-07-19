@@ -89,6 +89,7 @@ from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_execution_capsule import (
     bind_capsule_to_runtime_handle,
+    build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
 )
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
@@ -2395,6 +2396,44 @@ class ParallelACExecutor:
                 else {"mode": "direct", "identity": self._prompt_identity(system_prompt)}
             ),
         }
+
+    def _build_ac_capsule_authority_scope(
+        self,
+        *,
+        execution_context_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext] | None,
+        is_sub_ac: bool,
+        decomposition_trustworthy: bool,
+        force_frontier_routing: bool,
+        investment_spec: InvestmentSpec | None,
+    ) -> str:
+        """Bind a capsule to the exact provider dispatch authority in force."""
+        dispatch_contract = self._build_checkpoint_dispatch_contract(
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            system_prompt_builder=None,
+            reconciled_level_contexts=level_contexts,
+        )
+        execution_policy: dict[str, object] = {
+            "reasoning_effort": self._reasoning_effort,
+            "is_sub_ac": is_sub_ac,
+            "decomposition_trustworthy": decomposition_trustworthy,
+            "force_frontier_routing": force_frontier_routing,
+            "investment_spec": (
+                investment_spec.model_dump(mode="json") if investment_spec is not None else None
+            ),
+        }
+        return build_ac_dispatch_authority_scope(
+            base_scope=(
+                self._decomposition_attestation_scope or f"execution:{execution_context_id}"
+            ),
+            dispatch_contract=dispatch_contract,
+            execution_policy=execution_policy,
+        )
 
     @staticmethod
     def _checkpoint_dispatch_contract_malformed(
@@ -8988,8 +9027,16 @@ Respond with either ATOMIC or the structured JSON object only.
             workspace=(
                 self._task_cwd or getattr(self._adapter, "working_directory", None) or os.getcwd()
             ),
-            authority_scope=(
-                self._decomposition_attestation_scope or f"execution:{execution_context_id}"
+            authority_scope=self._build_ac_capsule_authority_scope(
+                execution_context_id=execution_context_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                is_sub_ac=is_sub_ac,
+                decomposition_trustworthy=decomposition_trustworthy,
+                force_frontier_routing=force_frontier_routing,
+                investment_spec=investment_spec,
             ),
             seed_goal=seed_goal,
             ac_content=ac_content,
