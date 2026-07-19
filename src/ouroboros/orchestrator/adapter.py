@@ -138,7 +138,10 @@ _DISPATCH_RECOVERY_PAYLOAD_KEYS = frozenset(
         "previous_response_id",
     }
 )
-_MAX_DISPATCH_RECOVERY_PAYLOAD_CHARS = 65_536
+# 64 KiB measured in UTF-8 bytes (the on-the-wire/persisted size), not Unicode
+# code points — a payload of multi-byte characters must be bounded by its actual
+# encoded size.
+_MAX_DISPATCH_RECOVERY_PAYLOAD_BYTES = 65_536
 
 _RUNTIME_TERMINAL_STATES = frozenset({"cancelled", "completed", "failed", "terminated"})
 _RUNTIME_LIFECYCLE_STATE_BY_EVENT_TYPE = {
@@ -735,7 +738,7 @@ class RuntimeHandle:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        if len(encoded) > _MAX_DISPATCH_RECOVERY_PAYLOAD_CHARS:
+        if len(encoded.encode("utf-8")) > _MAX_DISPATCH_RECOVERY_PAYLOAD_BYTES:
             raise ValueError("dispatch recovery handle exceeds the size limit")
         return payload
 
@@ -761,7 +764,7 @@ class RuntimeHandle:
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("dispatch recovery handle is not serializable") from exc
-        if len(encoded) > _MAX_DISPATCH_RECOVERY_PAYLOAD_CHARS:
+        if len(encoded.encode("utf-8")) > _MAX_DISPATCH_RECOVERY_PAYLOAD_BYTES:
             raise ValueError("dispatch recovery handle exceeds the size limit")
         return cls.from_dict(value)
 

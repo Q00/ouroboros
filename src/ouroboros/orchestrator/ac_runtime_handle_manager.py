@@ -70,6 +70,11 @@ _AC_EFFECT_EVENT_TYPES = frozenset(
 #: without it), so recovery never infers a new phase for legacy records.
 _AC_DISPATCH_KINDS = frozenset({"primary", "session_signal_followup"})
 
+#: Seal marker for a completed provider turn a follow-up dispatch is about to
+#: supersede. A sealed dispatch that ends up the active recovery head (i.e. its
+#: follow-up never durably completed) fails closed instead of replaying the AC.
+_AC_DISPATCH_SEALED_EVENT = "execution.ac.dispatch.sealed"
+
 
 class AmbiguousACExecutionError(RuntimeError):
     """A prior AC attempt may have external effects but cannot be resumed safely."""
@@ -816,11 +821,17 @@ class ACRuntimeHandleManager:
             dispatch_events: dict[str, Any] = {}
             dispatch_predecessors: dict[str, str | None] = {}
             dispatch_kinds: dict[str, str] = {}
+            sealed_dispatch_ids: set[str] = set()
             for event in attempt_events:
                 event_data = event.data if isinstance(event.data, dict) else {}
                 if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
                     continue
                 matching_events.append(event)
+                if event.type == _AC_DISPATCH_SEALED_EVENT:
+                    sealed_id = self._event_ac_dispatch_id(event_data)
+                    if sealed_id is not None:
+                        sealed_dispatch_ids.add(sealed_id)
+                    continue
                 if event.type != _AC_ATTEMPT_DISPATCHED_EVENT:
                     continue
                 dispatch_id = self._event_ac_dispatch_id(event_data)
@@ -1182,6 +1193,18 @@ class ACRuntimeHandleManager:
                         f"({active_dispatch_kind}) as the active dispatch head; refusing to "
                         "resume because replaying the original AC prompt would repeat "
                         "acceptance work in the wrong phase"
+                    )
+                # A sealed head is a completed provider turn that a follow-up
+                # dispatch tried to supersede without durably completing (the
+                # completed/failed terminal check above already returned for a
+                # cleanly finalized attempt). Resuming it would replay the
+                # original AC prompt over already-done work, so fail closed.
+                if active_dispatch_id in sealed_dispatch_ids:
+                    raise AmbiguousACExecutionError(
+                        "AC recovery resolved a sealed provider-entry phase as the active "
+                        "dispatch head; refusing to resume because a follow-up superseded it "
+                        "without a durable terminal outcome and replaying the AC prompt would "
+                        "repeat completed work"
                     )
                 active_dispatch_candidates = candidate_handles[active_dispatch_id]
                 if not active_dispatch_candidates:

@@ -212,6 +212,110 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_ac_dispatch_sealed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
+        execution_id: str,
+        session_id: str,
+        capsule_fingerprint: str,
+    ) -> None:
+        """Durably seal a completed provider turn before a follow-up supersedes it.
+
+        A SessionSignal follow-up dispatch reuses the same provider session as its
+        (already-completed) predecessor. If the follow-up's own dispatch record
+        fails to persist, recovery would otherwise resume the predecessor as a
+        reusable, non-terminal chain head and replay the ORIGINAL AC prompt,
+        duplicating completed primary work. Sealing the predecessor first makes
+        recovery fail closed on it unless a terminal completion is also durable.
+        Persistence failure propagates and prevents the follow-up.
+        """
+        if len(dispatch_id) != 32 or any(
+            character not in "0123456789abcdef" for character in dispatch_id
+        ):
+            raise ValueError("AC dispatch id is invalid")
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.dispatch.sealed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "ac_dispatch_id": dispatch_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "capsule_fingerprint": capsule_fingerprint,
+                },
+            )
+        )
+
+    async def emit_ac_verify_intent(
+        self,
+        *,
+        aggregate_id: str,
+        verify_key: str,
+        command_digest: str,
+        execution_id: str,
+        session_id: str,
+        identity_metadata: dict[str, Any],
+    ) -> None:
+        """Durably record that a non-idempotent verify command is about to run.
+
+        A verify command is an acceptance effect. Persisting the INTENT before it
+        runs — and its outcome after — makes the command single-shot across crash
+        recovery: a durable intent with no matching outcome means the command may
+        already have run, so recovery must fail closed instead of running it
+        again. Persistence failure propagates and prevents the command.
+        """
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.verify.intent",
+                aggregate_type="execution",
+                aggregate_id=aggregate_id,
+                data={
+                    **identity_metadata,
+                    "verify_key": verify_key,
+                    "verify_command_digest": command_digest,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                },
+            )
+        )
+
+    async def emit_ac_verify_outcome(
+        self,
+        *,
+        aggregate_id: str,
+        verify_key: str,
+        command_digest: str,
+        execution_id: str,
+        session_id: str,
+        identity_metadata: dict[str, Any],
+        verify_gate_outcome: dict[str, Any],
+    ) -> None:
+        """Durably record a verify command's outcome, keyed to its intent.
+
+        Recovery consumes this instead of re-running the command. The
+        ``verify_command_digest`` binds the outcome to the exact command/contract
+        that produced it, so a changed contract never consumes a stale outcome.
+        """
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.verify.outcome",
+                aggregate_type="execution",
+                aggregate_id=aggregate_id,
+                data={
+                    **identity_metadata,
+                    "verify_key": verify_key,
+                    "verify_command_digest": command_digest,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "verify_gate_outcome": verify_gate_outcome,
+                },
+            )
+        )
+
     async def emit_decomposition_decision_finalized(
         self,
         *,

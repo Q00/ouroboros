@@ -1066,6 +1066,24 @@ def _dispatched_capsule_event(
     )
 
 
+def _sealed_dispatch_event(
+    identity: ACRuntimeIdentity,
+    capsule: ACExecutionCapsule,
+    *,
+    dispatch_id: str,
+) -> BaseEvent:
+    return BaseEvent(
+        type="execution.ac.dispatch.sealed",
+        aggregate_type="execution",
+        aggregate_id=identity.session_scope_id,
+        data={
+            **identity.to_metadata(),
+            "ac_dispatch_id": dispatch_id,
+            "capsule_fingerprint": capsule.fingerprint,
+        },
+    )
+
+
 def _dispatch_lifecycle_event(
     identity: ACRuntimeIdentity,
     event_type: str,
@@ -1108,6 +1126,61 @@ _GLOBAL_VERIFIER_PASS = True
 
 def _global_state_verifier(**_kwargs: Any) -> VerifierVerdict:
     return VerifierVerdict(passed=_GLOBAL_VERIFIER_PASS)
+
+
+def test_capsule_authority_binds_subprocess_executable_path() -> None:
+    """R2 blocker #3: which binary the runtime launches is part of authority.
+
+    Two otherwise-identical adapters whose ``cli_path`` points at different
+    executables must produce different capsule dispatch authority, so a restart
+    cannot resume the same capsule under a different executable.
+    """
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+        def __init__(self, cli_path: str) -> None:
+            self._cli_path = cli_path
+
+    def _authority(cli_path: str) -> dict[str, object]:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(cli_path),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        return executor._build_capsule_dispatch_authority_contract(
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+        )
+
+    true_authority = _authority("/bin/true")
+    false_authority = _authority("/bin/false")
+
+    true_executable = true_authority["runtime"]["executable"]  # type: ignore[index]
+    false_executable = false_authority["runtime"]["executable"]  # type: ignore[index]
+    assert true_executable["observed"] is True
+    assert true_executable["executable"]["path"] == "/bin/true"
+    assert false_executable["executable"]["path"] == "/bin/false"
+    # The whole dispatch authority contract — the fingerprint input — must differ.
+    assert true_authority != false_authority
+
+
+def test_runtime_executable_identity_binds_zcode_launcher() -> None:
+    """R2 blocker #3: the Electron/Node launcher is part of what executes."""
+
+    class _ZcodeLike:
+        _cli_path = "/opt/zcode/cli.js"
+        _electron_node_path = "/opt/zcode/node"
+
+    identity = ParallelACExecutor._runtime_executable_identity(_ZcodeLike())
+    assert identity["observed"] is True
+    assert identity["executable"]["path"] == "/opt/zcode/cli.js"
+    assert identity["launcher"]["path"] == "/opt/zcode/node"
 
 
 def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
@@ -5709,6 +5782,80 @@ class TestParallelACExecutor:
             await executor._load_persisted_ac_runtime_handle(
                 0,
                 execution_context_id="session-signal-followup-corrupt",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_fails_closed_on_sealed_primary_head(self) -> None:
+        """A sealed primary whose follow-up write never landed must not replay.
+
+        R2 blocker #1: after the primary provider turn completes, a SessionSignal
+        follow-up seals the primary and then persists its own dispatch. If that
+        follow-up write fails (or a crash lands before the follow-up terminal),
+        the primary is the chain head again — but it is sealed, so recovery must
+        fail closed instead of resuming it and replaying the original AC prompt.
+        """
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Do not replay a sealed primary after a lost follow-up write",
+            session_id="session-sealed-primary-head",
+            seed_goal="Ship",
+        )
+        primary_dispatch_id = "1" * 32
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-sealed-primary",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
+            },
+        )
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=primary_dispatch_id,
+                dispatch_kind="primary",
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=primary_dispatch_id,
+                runtime_handle=handle,
+            ),
+            # The follow-up sealed the primary but its own dispatch write was lost.
+            _sealed_dispatch_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=primary_dispatch_id,
+            ),
+        ]
+
+        with pytest.raises(AmbiguousACExecutionError, match="sealed provider-entry phase"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-sealed-primary-head",
                 retry_attempt=0,
                 expected_capsule_fingerprint=persisted_capsule.fingerprint,
                 expected_capsule_workspace=persisted_capsule.workspace,
@@ -12817,6 +12964,108 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error == _STALL_SENTINEL
         assert runtime.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_verify_gate_single_shot_consumes_durable_outcome_on_recovery(self) -> None:
+        """R2 blocker #2: a recovered verify gate consumes its outcome, never reruns.
+
+        The first gate persists an intent and outcome and runs the (non-idempotent)
+        command once. A second run for the SAME attempt/key — the crash-recovery
+        case — consumes the durable outcome and must not run the command again.
+        """
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        run_count = 0
+
+        async def _counting_gate(*, spec: Any, cwd: str) -> _VerifyGateOutcome:
+            nonlocal run_count
+            run_count += 1
+            return _VerifyGateOutcome(passed=True, reason=None, output_tail="ok")
+
+        executor._run_ac_verify_gate = _counting_gate  # type: ignore[method-assign]
+        spec = AcceptanceCriterionSpec(description="AC", verify_command="./deploy.sh")
+
+        kwargs: dict[str, Any] = {
+            "spec": spec,
+            "cwd": "/tmp/project",
+            "aggregate_id": "exec-verify-oracle",
+            "verify_key": "atomic:ac-0:attempt-0:0",
+            "execution_id": "exec-verify-oracle",
+            "session_id": "sess",
+            "identity_metadata": {"ac_id": "ac-0"},
+        }
+
+        first = await executor._run_verify_gate_single_shot(**kwargs)
+        assert first.passed is True
+        assert run_count == 1
+
+        # Crash-recovery re-entry: same key + store → consume the durable outcome.
+        second = await executor._run_verify_gate_single_shot(**kwargs)
+        assert second.passed is True
+        assert run_count == 1  # command did NOT run again
+
+    @pytest.mark.asyncio
+    async def test_verify_gate_single_shot_fails_closed_on_intent_without_outcome(self) -> None:
+        """R2 blocker #2: a crash after the command ran but before the outcome
+        persisted leaves an intent with no outcome; recovery must fail closed
+        rather than replay a possibly-executed non-idempotent command."""
+        from ouroboros.events.base import BaseEvent
+
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        spec = AcceptanceCriterionSpec(description="AC", verify_command="./deploy.sh")
+        command_digest = executor._verify_gate_command_digest(spec)
+        # Simulate a durable intent whose outcome write never landed.
+        await event_store.append(
+            BaseEvent(
+                type="execution.ac.verify.intent",
+                aggregate_type="execution",
+                aggregate_id="exec-verify-orphan",
+                data={
+                    "verify_key": "atomic:ac-0:attempt-0:0",
+                    "verify_command_digest": command_digest,
+                },
+            )
+        )
+
+        run_count = 0
+
+        async def _counting_gate(*, spec: Any, cwd: str) -> _VerifyGateOutcome:
+            nonlocal run_count
+            run_count += 1
+            return _VerifyGateOutcome(passed=True, reason=None, output_tail="ok")
+
+        executor._run_ac_verify_gate = _counting_gate  # type: ignore[method-assign]
+
+        with pytest.raises(AmbiguousACExecutionError, match="never recorded"):
+            await executor._run_verify_gate_single_shot(
+                spec=spec,
+                cwd="/tmp/project",
+                aggregate_id="exec-verify-orphan",
+                verify_key="atomic:ac-0:attempt-0:0",
+                execution_id="exec-verify-orphan",
+                session_id="sess",
+                identity_metadata={"ac_id": "ac-0"},
+            )
+        assert run_count == 0  # the possibly-executed command was NOT run again
 
     @pytest.mark.asyncio
     async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:

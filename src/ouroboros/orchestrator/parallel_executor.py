@@ -2571,6 +2571,43 @@ class ParallelACExecutor:
         return contexts
 
     @staticmethod
+    def _runtime_executable_identity(adapter: object) -> dict[str, object]:
+        """Bind the actual subprocess executable and launcher into capsule authority.
+
+        Backend, model, and the adapter's execution-identity contract do not
+        capture WHICH binary the runtime launches: two otherwise-identical
+        adapters pointing ``cli_path`` at different executables (or a wrapper
+        launcher such as Zcode's Electron/Node host) produce identical authority
+        otherwise, so a restart could resume the same capsule under a different
+        executable. Record the canonical executable and launcher paths (raw and
+        realpath, so both a path change and a symlink swap change authority) as a
+        provider-neutral field every subprocess runtime contributes.
+        """
+
+        def _resolve(value: object) -> dict[str, str] | None:
+            if isinstance(value, os.PathLike):
+                value = os.fspath(value)
+            if not isinstance(value, str) or not value:
+                return None
+            expanded = os.path.expanduser(value)
+            return {"path": value, "realpath": os.path.realpath(expanded)}
+
+        # ``cli_path`` is exposed both as a property (Codex) and as a private
+        # attribute (most subprocess runtimes); probe the public form first.
+        executable = _resolve(getattr(adapter, "cli_path", None)) or _resolve(
+            getattr(adapter, "_cli_path", None)
+        )
+        # Zcode launches its CLI through an Electron/Node host; that launcher is
+        # part of what actually executes and must be bound too.
+        launcher = _resolve(getattr(adapter, "_electron_node_path", None))
+        return {
+            "version": 1,
+            "observed": executable is not None or launcher is not None,
+            "executable": executable,
+            "launcher": launcher,
+        }
+
+    @staticmethod
     def _runtime_capabilities_contract(adapter: object) -> dict[str, Any] | None:
         capabilities = getattr(adapter, "capabilities", None)
         if not isinstance(capabilities, RuntimeCapabilities):
@@ -2711,6 +2748,7 @@ class ParallelACExecutor:
                 ),
                 "capabilities": self._runtime_capabilities_contract(self._adapter),
                 "execution": self._runtime_execution_authority,
+                "executable": self._runtime_executable_identity(self._adapter),
             },
             "model_routing": serialize_model_router(self._model_router),
             "execution_profile": serialize_execution_profile(self._execution_profile),
@@ -7330,6 +7368,9 @@ class ParallelACExecutor:
             node_identity=node_identity,
             final_sub_results=final_sub_results,
             ac_spec=active_success_spec,
+            execution_id=execution_id,
+            session_id=session_id,
+            retry_attempt=retry_attempt,
             child_artifact_attributions=tuple(child_artifact_attributions),
         )
         self._decomposition_attestations[node_identity.node_id] = attestation
@@ -7504,6 +7545,9 @@ class ParallelACExecutor:
         node_identity: ExecutionNodeIdentity,
         final_sub_results: list[ACExecutionResult],
         ac_spec: AcceptanceCriterionSpec | None,
+        execution_id: str,
+        session_id: str,
+        retry_attempt: int,
         child_artifact_attributions: tuple[tuple[bool, bool | None, str], ...] | None = None,
     ) -> tuple[DecompositionAttestation, _VerifyGateOutcome | None]:
         """Gate-anchor one finished decomposition round (Task 1).
@@ -7643,7 +7687,15 @@ class ParallelACExecutor:
         if parent_has_contract and self._run_verify_commands:
             assert ac_spec is not None  # narrowed by parent_has_contract
             cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-            parent_verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+            parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
+                spec=ac_spec,
+                cwd=cwd,
+                aggregate_id=execution_id or session_id,
+                verify_key=f"decomposed_parent:{node_identity.node_id}:{retry_attempt}",
+                execution_id=execution_id,
+                session_id=session_id,
+                identity_metadata=node_identity.to_event_metadata(),
+            )
             parent = ParentVerifyOutcome(
                 has_verify_command=True,
                 passed=parent_verify_gate_outcome.passed,
@@ -10064,6 +10116,19 @@ Respond with either ATOMIC or the structured JSON object only.
                             retry_attempt=retry_attempt,
                         )
                     try:
+                        # Seal the (already-completed) predecessor dispatch before
+                        # persisting the follow-up. If the follow-up dispatch write
+                        # then fails — or a crash lands between it and the
+                        # follow-up's terminal completion — recovery finds the
+                        # predecessor sealed and fails closed instead of resuming
+                        # it and replaying the original AC prompt.
+                        await self._event_emitter.emit_ac_dispatch_sealed(
+                            runtime_identity=runtime_identity,
+                            dispatch_id=dispatch_id,
+                            execution_id=execution_context_id,
+                            session_id=session_id,
+                            capsule_fingerprint=capsule.fingerprint,
+                        )
                         await self._event_emitter.emit_ac_attempt_dispatched(
                             runtime_identity=runtime_identity,
                             dispatch_id=signal_dispatch_id,
@@ -10276,7 +10341,18 @@ Respond with either ATOMIC or the structured JSON object only.
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-                verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+                verify_gate_outcome = await self._run_verify_gate_single_shot(
+                    spec=ac_spec,
+                    cwd=cwd,
+                    aggregate_id=execution_context_id,
+                    verify_key=(
+                        f"atomic:{runtime_identity.ac_id}:"
+                        f"{runtime_identity.session_attempt_id}:{retry_attempt}"
+                    ),
+                    execution_id=execution_context_id,
+                    session_id=session_id,
+                    identity_metadata=runtime_identity.to_metadata(),
+                )
 
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
@@ -10800,6 +10876,158 @@ Respond with either ATOMIC or the structured JSON object only.
         except EvidenceError as exc:
             return None, None, str(exc)
         return record, validation, None
+
+    def _verify_gate_command_digest(self, spec: AcceptanceCriterionSpec) -> str:
+        """Bind a durable verify outcome to the exact command/contract that ran.
+
+        A persisted outcome may only be consumed for the identical command,
+        expected artifacts, and output assertion — a changed contract must run a
+        fresh gate rather than reuse a stale, unrelated result.
+        """
+        return self._authority_digest(
+            {
+                "verify_command": spec.verify_command,
+                "expected_artifacts": list(spec.expected_artifacts or ()),
+                "output_assertion": spec.output_assertion,
+            },
+            field="AC verify command identity",
+        )
+
+    async def _load_persisted_verify_decision(
+        self,
+        *,
+        aggregate_id: str,
+        verify_key: str,
+        command_digest: str,
+    ) -> tuple[_VerifyGateOutcome | None, bool]:
+        """Return ``(durable_outcome, intent_without_outcome)`` for a verify gate.
+
+        Replays the execution aggregate for this exact verify key and command
+        digest. A recorded outcome is returned so recovery consumes it instead of
+        re-running the (non-idempotent) command; an intent with no matching
+        outcome reports ``intent_without_outcome=True`` so recovery fails closed
+        rather than replaying a command that may already have run.
+
+        If history cannot be read at all, single-shot execution cannot be
+        guaranteed, so this fails closed (consistent with the runtime-handle
+        recovery loader, which also raises on replay failure) rather than
+        risking a duplicate non-idempotent command.
+        """
+        try:
+            events = await self._event_store.replay("execution", aggregate_id)
+        except Exception as exc:
+            raise AmbiguousACExecutionError(
+                "could not read durable verify history; refusing to run a non-idempotent "
+                "verify command without a single-shot guarantee"
+            ) from exc
+        intent_seen = False
+        durable_outcome: _VerifyGateOutcome | None = None
+        conflicting = False
+        for event in events:
+            data = event.data if isinstance(event.data, dict) else {}
+            if data.get("verify_key") != verify_key:
+                continue
+            if data.get("verify_command_digest") != command_digest:
+                # A different command under the same key means the contract
+                # changed; that stale record cannot authorize skipping THIS
+                # command, and its presence makes the gate ambiguous.
+                if event.type in {
+                    "execution.ac.verify.intent",
+                    "execution.ac.verify.outcome",
+                }:
+                    conflicting = True
+                continue
+            if event.type == "execution.ac.verify.intent":
+                intent_seen = True
+            elif event.type == "execution.ac.verify.outcome":
+                projected = _recovered_verify_gate_outcome(data.get("verify_gate_outcome"))
+                if projected is None:
+                    raise AmbiguousACExecutionError(
+                        "durable verify outcome record is malformed; refusing to replay "
+                        "a non-idempotent verify command"
+                    )
+                if durable_outcome is not None and (
+                    durable_outcome.passed != projected.passed
+                    or durable_outcome.reason != projected.reason
+                ):
+                    conflicting = True
+                durable_outcome = projected
+        if conflicting:
+            raise AmbiguousACExecutionError(
+                "durable verify records for this attempt disagree; refusing to replay or "
+                "trust an ambiguous non-idempotent verify command"
+            )
+        if durable_outcome is not None:
+            return durable_outcome, False
+        return None, intent_seen
+
+    async def _run_verify_gate_single_shot(
+        self,
+        *,
+        spec: AcceptanceCriterionSpec,
+        cwd: str,
+        aggregate_id: str,
+        verify_key: str,
+        execution_id: str,
+        session_id: str,
+        identity_metadata: dict[str, Any],
+    ) -> _VerifyGateOutcome:
+        """Run the verify gate exactly once across crash recovery.
+
+        For a pure expected-artifacts contract (no ``verify_command``) the gate is
+        idempotent, so it runs directly. When a ``verify_command`` is present it
+        is an acceptance effect that must never replay: a durable intent is
+        persisted before it runs and its outcome after, and recovery consumes the
+        outcome (or fails closed on an intent without an outcome) instead of
+        running the command again. Applies to both atomic and decomposed-parent
+        gates.
+        """
+        if not spec.verify_command:
+            return await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+
+        command_digest = self._verify_gate_command_digest(spec)
+        durable_outcome, intent_without_outcome = await self._load_persisted_verify_decision(
+            aggregate_id=aggregate_id,
+            verify_key=verify_key,
+            command_digest=command_digest,
+        )
+        if durable_outcome is not None:
+            # Consume the recorded outcome without rerunning the command, but
+            # revalidate the artifact leg — sibling ACs may have removed a file
+            # after the command passed.
+            return _revalidate_cached_verify_gate_outcome(
+                spec=spec, cwd=cwd, outcome=durable_outcome
+            )
+        if intent_without_outcome:
+            raise AmbiguousACExecutionError(
+                "a verify command was durably attempted but its outcome was never recorded; "
+                "refusing to replay a possibly-executed non-idempotent verify command"
+            )
+
+        await self._event_emitter.emit_ac_verify_intent(
+            aggregate_id=aggregate_id,
+            verify_key=verify_key,
+            command_digest=command_digest,
+            execution_id=execution_id,
+            session_id=session_id,
+            identity_metadata=identity_metadata,
+        )
+        outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+        await self._event_emitter.emit_ac_verify_outcome(
+            aggregate_id=aggregate_id,
+            verify_key=verify_key,
+            command_digest=command_digest,
+            execution_id=execution_id,
+            session_id=session_id,
+            identity_metadata=identity_metadata,
+            verify_gate_outcome={
+                "passed": outcome.passed,
+                "reason": outcome.reason,
+                "output_tail": outcome.output_tail,
+                "missing_artifacts": list(outcome.missing_artifacts),
+            },
+        )
+        return outcome
 
     async def _run_ac_verify_gate(
         self, *, spec: AcceptanceCriterionSpec, cwd: str

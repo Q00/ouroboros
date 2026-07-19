@@ -132,12 +132,23 @@ that provider invocation.
 |-------|------|-------------|
 | `ac_dispatch_id` | `string` | Unique correlation id for this exact provider entry |
 | `previous_ac_dispatch_id` | `string \| null` | Exact predecessor boundary in the same attempt; `null` only for the chain root |
+| `dispatch_kind` | `string` | Provider-entry phase: `"primary"` replays the AC prompt, `"session_signal_followup"` replays a Synapse signal turn. Absent on legacy records is treated as `"primary"`. |
+| `signal_id` | `string \| null` | SessionSignal id (follow-up dispatches only) |
+| `signal_mode` | `string \| null` | Effective signal mode, e.g. `"inform"`/`"after_turn"` (follow-up dispatches only) |
+| `follow_up_input_digest` | `string \| null` | `sha256:` digest of the exact rendered follow-up prompt (follow-up dispatches only) |
 | `execution_id` | `string` | Durable execution/run anchor |
 | `session_id` | `string` | Orchestrator session id |
 | `capsule_fingerprint` | `string` | Capsule authority used for this dispatch |
 | `session_origin` | `string` | `"fresh"` or `"restored_same_attempt"` |
 | `runtime_backend` | `string \| null` | Provider-neutral runtime selector |
 | `runtime` | `object \| null` | Minimal reconnect/authority handle; excludes cwd, transcript, tool catalog, capability graph, control plane, and arbitrary metadata |
+
+A non-primary (`session_signal_followup`) head fails closed on recovery: the
+exact follow-up phase is not reconstructed from persisted metadata, so replaying
+the original AC prompt is refused rather than risking repeated acceptance work.
+Capsule authority also binds the actual subprocess `executable` (canonical path
+and realpath) and any launcher (e.g. a Zcode Electron/Node host), so a restart
+cannot resume the same capsule under a different binary.
 
 Lifecycle events carry the same `ac_dispatch_id`. Dispatch events form one
 validated predecessor chain, and recovery considers only its unique head; it
@@ -158,8 +169,43 @@ such a linkage, conflicting session ids or equally authoritative response-chain
 cursors remain ambiguous and fail closed.
 
 The recovery handle contract is exact-shape, metadata-allowlisted, and bounded
-to 64 KiB before deserialization. Persisted payloads cannot smuggle excluded
-runtime context back into replay through unknown fields.
+to 64 KiB (measured in UTF-8 bytes) before deserialization. Persisted payloads
+cannot smuggle excluded runtime context back into replay through unknown fields.
+
+### execution.ac.dispatch.sealed
+
+Seals an already-completed provider turn immediately before a SessionSignal
+follow-up dispatch supersedes it. If the follow-up's own dispatch record fails
+to persist — or a crash lands before the follow-up reaches a terminal outcome —
+the predecessor becomes the chain head again. A sealed head with no durable
+terminal completion fails closed on recovery instead of resuming and replaying
+the original AC prompt over already-completed work.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ac_dispatch_id` | `string` | The predecessor dispatch being sealed |
+| `execution_id` | `string` | Durable execution/run anchor |
+| `session_id` | `string` | Orchestrator session id |
+| `capsule_fingerprint` | `string` | Capsule authority of the sealed dispatch |
+
+### execution.ac.verify.intent / execution.ac.verify.outcome
+
+Make a non-idempotent `verify_command` single-shot across crash recovery. The
+intent is persisted immediately before the command runs and the outcome
+immediately after; both are keyed to a stable `verify_key` (the AC/node identity
+plus retry attempt) and a `verify_command_digest` binding the exact command and
+contract. On recovery the orchestrator consumes a recorded outcome instead of
+re-running the command; an intent with no matching outcome — the command may
+already have run — fails closed rather than replaying it. Applies to both atomic
+and decomposed-parent verify gates.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `verify_key` | `string` | Stable per-attempt gate identity (`atomic:…` or `decomposed_parent:…`) |
+| `verify_command_digest` | `string` | Digest of the exact command, expected artifacts, and output assertion |
+| `execution_id` | `string` | Durable execution/run anchor |
+| `session_id` | `string` | Orchestrator session id |
+| `verify_gate_outcome` | `object` | (outcome only) Bounded exact-shape gate result: `passed`, `reason`, `output_tail`, `missing_artifacts` |
 
 ### mcp.job.cancelled
 

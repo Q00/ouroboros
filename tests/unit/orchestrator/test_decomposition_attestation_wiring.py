@@ -35,10 +35,36 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 
 
+def _make_replaying_event_store() -> AsyncMock:
+    """Event-store mock whose ``replay`` returns previously appended events.
+
+    The single-shot verify oracle replays the execution aggregate to decide
+    whether a verify command already ran, so a bare ``AsyncMock`` (whose
+    ``replay`` returns a non-iterable mock) is insufficient.
+    """
+    store = AsyncMock()
+    appended: list[object] = []
+
+    async def _append(event: object) -> None:
+        appended.append(event)
+
+    async def _replay(aggregate_type: str, aggregate_id: str) -> list[object]:
+        return [
+            event
+            for event in appended
+            if getattr(event, "aggregate_type", None) == aggregate_type
+            and getattr(event, "aggregate_id", None) == aggregate_id
+        ]
+
+    store.append.side_effect = _append
+    store.replay.side_effect = _replay
+    return store
+
+
 def _make_executor(event_store: object | None = None) -> ParallelACExecutor:
     executor = ParallelACExecutor(
         adapter=MagicMock(),
-        event_store=event_store if event_store is not None else AsyncMock(),
+        event_store=event_store if event_store is not None else _make_replaying_event_store(),
         console=MagicMock(),
         enable_decomposition=False,
     )
@@ -105,6 +131,9 @@ class TestAttestDecompositionRound:
         attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
+            execution_id="exec-1",
+            session_id="sess-1",
+            retry_attempt=0,
             ac_spec=None,
         )
 
@@ -132,6 +161,9 @@ class TestAttestDecompositionRound:
         attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
+            execution_id="exec-1",
+            session_id="sess-1",
+            retry_attempt=0,
             ac_spec=ac_spec,
         )
 
@@ -161,6 +193,9 @@ class TestAttestDecompositionRound:
         attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
+            execution_id="exec-1",
+            session_id="sess-1",
+            retry_attempt=0,
             ac_spec=ac_spec,
         )
 
@@ -193,6 +228,9 @@ class TestAttestDecompositionRound:
         attestation, parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
+            execution_id="exec-1",
+            session_id="sess-1",
+            retry_attempt=0,
             ac_spec=ac_spec,
         )
 
@@ -223,6 +261,9 @@ class TestAttestDecompositionRound:
         attestation, _parent_outcome = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
+            execution_id="exec-1",
+            session_id="sess-1",
+            retry_attempt=0,
             ac_spec=ac_spec,
         )
 
@@ -1424,6 +1465,9 @@ class TestPerChildArtifactSliceOracle:
         attestation, _parent = await executor._attest_decomposition_round(
             node_identity=node_identity,
             final_sub_results=final_sub_results,
+            execution_id="exec-1",
+            session_id="sess-1",
+            retry_attempt=0,
             ac_spec=ac_spec,
             child_artifact_attributions=(
                 (True, True, "artifact leg passed"),  # conflicts with failing gate leg
@@ -1850,8 +1894,12 @@ class TestDecompositionAttestationFailsClosedOnReplayFailure:
                 node_identity=node_identity,
                 start_time=datetime.now(UTC),
                 semantic_ac_key="key",
+                # This test isolates attestation-trust fail-closed behavior under a
+                # broken event store; use a pure artifact contract so the parent
+                # gate does not additionally engage the single-shot verify oracle
+                # (which legitimately requires a readable event store).
                 ac_spec=AcceptanceCriterionSpec(
-                    description="parent AC", verify_command="pytest -q"
+                    description="parent AC", expected_artifacts=("out.txt",)
                 ),
             )
 
