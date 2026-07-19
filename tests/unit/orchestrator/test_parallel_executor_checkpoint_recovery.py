@@ -4164,17 +4164,24 @@ class TestCheckpointDispatchContract:
     async def test_rebuildable_prompt_contract_rebuilds_after_recovery(
         self, tmp_path: Path
     ) -> None:
+        stable_prompt = "stable rebuilt prompt"
         seed, ckpt_path, _ = await self._crash_after_first_stage(
             tmp_path,
             tools=["Read"],
-            system_prompt="original prebuilt prompt",
-            system_prompt_builder=lambda **_kwargs: "original rebuilt prompt",
+            system_prompt=stable_prompt,
+            system_prompt_builder=lambda **_kwargs: stable_prompt,
         )
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["dispatch_contract"]["system_prompt"] == {
+            "mode": "rebuildable",
+            "identity": ParallelACExecutor._prompt_identity(stable_prompt),
+        }
         recovered = _executor(
             event_store=AsyncMock(),
             checkpoint_store=CheckpointStore(base_path=ckpt_path),
         )
-        builder = MagicMock(return_value="recovered rebuilt prompt")
+        builder = MagicMock(return_value=stable_prompt)
         captured: dict[str, object] = {}
 
         async def _finish(**kwargs: object) -> list[ACExecutionResult]:
@@ -4194,7 +4201,40 @@ class TestCheckpointDispatchContract:
 
         assert result.all_succeeded
         builder.assert_called_once()
-        assert captured["system_prompt"] == "recovered rebuilt prompt"
+        assert captured["system_prompt"] == stable_prompt
+
+    @pytest.mark.asyncio
+    async def test_changed_rebuildable_prompt_is_rejected_before_dispatch(
+        self, tmp_path: Path
+    ) -> None:
+        stable_prompt = "original rebuilt prompt"
+        seed, ckpt_path, checkpoint_before = await self._crash_after_first_stage(
+            tmp_path,
+            tools=["Read"],
+            system_prompt=stable_prompt,
+            system_prompt_builder=lambda **_kwargs: stable_prompt,
+        )
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        recovered._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(CheckpointDispatchMismatchError, match="exact prompt identity"):
+            await recovered.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=["Read"],
+                system_prompt="stale current-process prompt",
+                execution_plan=self._plan(),
+                system_prompt_builder=lambda **_kwargs: "changed rebuilt prompt",
+            )
+
+        recovered._run_batch_with_verify_and_retry.assert_not_awaited()
+        checkpoint_after = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert checkpoint_after.is_ok
+        assert checkpoint_after.value.to_dict() == checkpoint_before
 
 
 class TestRecoveredPromptReflectsOriginalRunSemantics:
@@ -4214,7 +4254,12 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
     }
 
     async def _crash_original_run(
-        self, seed: Seed, ckpt_path: Path, **executor_overrides: object
+        self,
+        seed: Seed,
+        ckpt_path: Path,
+        *,
+        expected_system_prompt: str = "original-process prompt",
+        **executor_overrides: object,
     ) -> None:
         store = CheckpointStore(base_path=ckpt_path)
         store.initialize()
@@ -4232,9 +4277,9 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
                 session_id="session-original",
                 execution_id="exec-original",
                 tools=[],
-                system_prompt="original-process prompt",
+                system_prompt=expected_system_prompt,
                 execution_plan=_plan(),
-                system_prompt_builder=lambda **_kwargs: "original-process prompt",
+                system_prompt_builder=lambda **_kwargs: expected_system_prompt,
             )
 
     @pytest.mark.asyncio
@@ -4251,6 +4296,7 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
         await self._crash_original_run(
             seed,
             ckpt_path,
+            expected_system_prompt="REBUILT-FROM-RESTORED-SETTINGS",
             fat_harness_mode=True,
             context_pack_enabled=False,
             prompt_guidance_contract=self._GUIDANCE,
@@ -4319,6 +4365,7 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
         await self._crash_original_run(
             seed,
             ckpt_path,
+            expected_system_prompt="restored-profile-prompt",
             execution_profile=original_profile,
         )
 
@@ -5865,7 +5912,7 @@ class TestRunnerAuditRecordsRestoredExecutionSettings:
 
         from ouroboros.core.types import Result
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-        from ouroboros.orchestrator.runner import OrchestratorRunner
+        from ouroboros.orchestrator.runner import OrchestratorRunner, build_system_prompt
         from ouroboros.orchestrator.session import SessionTracker
 
         seed = Seed(
@@ -5893,6 +5940,11 @@ class TestRunnerAuditRecordsRestoredExecutionSettings:
             execution_levels=((0,), (1,)),
         )
         ckpt_path = tmp_path / "checkpoints"
+        audit_system_prompt = build_system_prompt(
+            seed,
+            repo_root=tmp_path,
+            context_pack_enabled=None,
+        )
 
         # --- Original run: dispatched under workers=4 / depth=5, crashes
         # during level 2, leaving a checkpoint that persists those
@@ -5921,9 +5973,9 @@ class TestRunnerAuditRecordsRestoredExecutionSettings:
                 execution_id="exec-original",
                 tools=["Read"],
                 tool_catalog=assemble_session_tool_catalog(["Read"]).tools,
-                system_prompt="system",
+                system_prompt=audit_system_prompt,
                 execution_plan=plan,
-                system_prompt_builder=lambda **_kwargs: "system",
+                system_prompt_builder=lambda **_kwargs: audit_system_prompt,
             )
         saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert saved.is_ok
@@ -5986,7 +6038,7 @@ class TestRunnerAuditRecordsRestoredExecutionSettings:
                 tracker=tracker,
                 merged_tools=["Read"],
                 tool_catalog=assemble_session_tool_catalog(["Read"]),
-                system_prompt="system",
+                system_prompt=audit_system_prompt,
                 start_time=tracker.start_time,
             )
 

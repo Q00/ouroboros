@@ -2304,9 +2304,9 @@ class ParallelACExecutor:
         """Canonicalize the actual dispatch authority used by this run.
 
         Runner-owned prompts are rebuildable from the separately persisted
-        profile/guidance/context-pack semantics, so their identity is the
-        presence of that fail-closed builder.  Direct callers have no such
-        reconstruction contract and therefore pin the exact prompt digest.
+        profile/guidance/context-pack semantics, but the rebuilt text must still
+        match the exact prompt the interrupted run dispatched. Direct callers
+        likewise pin the exact prompt digest without a reconstruction callback.
         """
         from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
 
@@ -2336,7 +2336,7 @@ class ParallelACExecutor:
                 "definitions": serialize_tool_catalog(tool_catalog or ()),
             },
             "system_prompt": (
-                {"mode": "rebuildable"}
+                {"mode": "rebuildable", "identity": self._prompt_identity(system_prompt)}
                 if system_prompt_builder is not None
                 else {"mode": "direct", "identity": self._prompt_identity(system_prompt)}
             ),
@@ -2500,10 +2500,7 @@ class ParallelACExecutor:
         if not isinstance(raw_prompt, Mapping):
             return "dispatch_contract.system_prompt is not a mapping"
         prompt_mode = raw_prompt.get("mode")
-        if prompt_mode == "rebuildable":
-            if set(raw_prompt) != {"mode"}:
-                return "rebuildable system-prompt identity has unknown fields"
-        elif prompt_mode == "direct":
+        if prompt_mode in {"rebuildable", "direct"}:
             identity = raw_prompt.get("identity")
             if (
                 set(raw_prompt) != {"mode", "identity"}
@@ -2512,7 +2509,7 @@ class ParallelACExecutor:
                 or len(identity) != 71
                 or any(char not in "0123456789abcdef" for char in identity[7:])
             ):
-                return "direct system-prompt identity is malformed"
+                return f"{prompt_mode} system-prompt identity is malformed"
         else:
             return f"dispatch_contract.system_prompt mode is unknown: {prompt_mode!r}"
         return None
@@ -2551,6 +2548,19 @@ class ParallelACExecutor:
                 "externally_satisfied_ac_indices"
             )
             current["reconciled_level_contexts"] = saved.get("reconciled_level_contexts")
+            saved_prompt = saved.get("system_prompt")
+            current_prompt = current.get("system_prompt")
+            if (
+                isinstance(saved_prompt, Mapping)
+                and saved_prompt.get("mode") == "rebuildable"
+                and isinstance(current_prompt, Mapping)
+                and current_prompt.get("mode") == "rebuildable"
+            ):
+                # The current-process prompt was built before checkpoint
+                # semantics were restored and may legitimately differ. Pin the
+                # saved digest here, then verify the callback's rebuilt output
+                # against it immediately after restoration and before dispatch.
+                current["system_prompt"] = dict(saved_prompt)
         if saved == current:
             return None
         return (
@@ -5633,6 +5643,20 @@ class ParallelACExecutor:
                 guidance_contract=restored_prompt_guidance,
                 execution_profile=self._execution_profile,
             )
+            saved_prompt_contract = dispatch_contract.get("system_prompt")
+            expected_prompt_identity = (
+                saved_prompt_contract.get("identity")
+                if isinstance(saved_prompt_contract, Mapping)
+                else None
+            )
+            if (
+                not isinstance(system_prompt, str)
+                or self._prompt_identity(system_prompt) != expected_prompt_identity
+            ):
+                raise CheckpointDispatchMismatchError(
+                    "the restored system-prompt builder did not reproduce the "
+                    "interrupted run's exact prompt identity"
+                )
 
         # Validation: check all AC indices are present in dependency graph
         expected_indices = set(range(total_acs))
