@@ -419,27 +419,47 @@ class KiroAgentAdapter:
                 # retried forever. Same convention as worker_runtime.py
                 # (WorkerTurn.error) and pi_runtime.py (errorMessage).
                 #
-                # ONLY for exit codes OUTSIDE ``_RETRYABLE_EXIT_CODES``
-                # though: exit 1/137 is this adapter's own established
-                # "ordinary, probably-recoverable failure" signal (see
-                # ``_is_retryable``), and Kiro is an AGENTIC CLI whose
-                # stderr routinely forwards sub-tool output — an incidental
-                # "no such file or directory"/"unauthorized" from a task's
-                # own failing shell command, not from Kiro's runtime.
-                # Scanning that chatty, largely-unstructured stream (up to
-                # ``_max_stderr_lines`` lines) on ordinary retryable exits
-                # reintroduced exactly the false-positive infra-fatal class
-                # an earlier round removed from ``message.content``
-                # scanning, wrongly skipping real retry/escalation
-                # opportunities.
-                mirror_stderr = proc.returncode not in _RETRYABLE_EXIT_CODES
+                # Round-6 narrowed this to exit codes OUTSIDE
+                # ``_RETRYABLE_EXIT_CODES``: exit 1/137 is this adapter's
+                # own established "ordinary, probably-recoverable failure"
+                # signal (see ``_is_retryable``), and Kiro is an AGENTIC CLI
+                # whose stderr routinely forwards sub-tool output — an
+                # incidental "no such file or directory" from a task's own
+                # failing shell command, not from Kiro's runtime. Scanning
+                # that chatty, largely-unstructured stream (up to
+                # ``_max_stderr_lines`` lines) against the BROAD pattern
+                # list on ordinary retryable exits reintroduced exactly the
+                # false-positive infra-fatal class an earlier round removed
+                # from ``message.content`` scanning.
+                #
+                # Round-13 finding #4 (BLOCKING): round 6's cure made the
+                # OTHER mandate direction fail — Kiro has no auth-specific
+                # exit code, so a genuine "Unauthorized: invalid API key"
+                # failure legitimately exits 1 and became permanently
+                # invisible to the classifier, looping in retry/escalation
+                # forever instead of failing immediately. Resolution for
+                # both sides: retryable exits DO mirror stderr now, but
+                # tagged ``error_pattern_scope: "auth"`` so the classifier
+                # scans ONLY the narrow credential-failure phrases
+                # (``_INFRA_FATAL_AUTH_CONTENT_PATTERNS`` — "invalid api
+                # key", "authentication failed", ... — vanishingly unlikely
+                # as incidental forwarded-tool text), never the broad
+                # filesystem/command/model phrases that plausibly ARE such
+                # noise. Non-retryable exits keep the full broad list, as
+                # before.
+                retryable_exit = proc.returncode in _RETRYABLE_EXIT_CODES
                 yield AgentMessage(
                     type="result",
                     content=f"Kiro CLI failed (exit {proc.returncode}): {stderr_text}",
                     data={
                         "subtype": "error",
                         "exit_code": proc.returncode,
-                        **({"error": stderr_text} if stderr_text and mirror_stderr else {}),
+                        **({"error": stderr_text} if stderr_text else {}),
+                        **(
+                            {"error_pattern_scope": "auth"}
+                            if stderr_text and retryable_exit
+                            else {}
+                        ),
                     },
                     resume_handle=current_handle,
                 )

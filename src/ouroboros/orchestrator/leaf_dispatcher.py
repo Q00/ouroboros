@@ -147,19 +147,27 @@ _INFRA_FATAL_ERROR_TYPES = frozenset(
     }
 )
 
-_INFRA_FATAL_CONTENT_PATTERNS = (
-    "cli not found",
-    "command not found",
-    "no such file or directory",
+# Round-13 finding #4 (BLOCKING): the auth/credential subset of the
+# infra-fatal patterns, split out so adapters can opt an error message into
+# a NARROWER scan. Kiro has no auth-specific exit code — a genuine
+# "Unauthorized: invalid API key" failure can exit 1, the same code as an
+# ordinary retryable task failure — so round 6's fix (which stopped
+# mirroring exit-1/137 stderr entirely, to keep incidental forwarded
+# tool-output phrases like "no such file or directory" from
+# false-positiving) made genuine auth failures on those exits permanently
+# invisible and they looped in retry/escalation forever. These phrases are
+# specific enough to credential failure that they are vanishingly unlikely
+# as incidental text in an ordinary chatty task-failure stderr (unlike the
+# generic filesystem/command/model phrases below, which stay restricted to
+# the broad list): a message tagged ``error_pattern_scope: "auth"`` is
+# scanned against ONLY this subset.
+_INFRA_FATAL_AUTH_CONTENT_PATTERNS = (
     "unauthorized",
     "authentication failed",
     "invalid api key",
     "api key not valid",
     "401 unauthorized",
     "403 forbidden",
-    "model not found",
-    "unknown model",
-    "no such model",
     # Round-4 fix: the shapes below are the REAL auth/authorization failure
     # strings Pi's underlying provider libraries produce, verified against
     # the installed @earendil-works/pi-ai provider sources -- none of the
@@ -185,6 +193,20 @@ _INFRA_FATAL_CONTENT_PATTERNS = (
     "invalid x-api-key",
 )
 
+_INFRA_FATAL_CONTENT_PATTERNS = (
+    # Broad environment/binary/model phrases: genuinely infra-fatal when
+    # they describe the runtime itself, but plausible as INCIDENTAL text in
+    # forwarded tool output — only applied to messages without a narrowed
+    # ``error_pattern_scope``.
+    "cli not found",
+    "command not found",
+    "no such file or directory",
+    "model not found",
+    "unknown model",
+    "no such model",
+    *_INFRA_FATAL_AUTH_CONTENT_PATTERNS,
+)
+
 
 def _is_infra_fatal_error_message(message: AgentMessage) -> bool:
     """Classify a FINAL error message's KIND rather than its raise/return site.
@@ -207,7 +229,19 @@ def _is_infra_fatal_error_message(message: AgentMessage) -> bool:
     if not isinstance(error_detail, str) or not error_detail:
         return False
     content = error_detail.lower()
-    return any(pattern in content for pattern in _INFRA_FATAL_CONTENT_PATTERNS)
+    # Round-13 finding #4: an adapter that mirrors a chatty, unstructured
+    # stream (Kiro's exit-1/137 stderr, which routinely forwards sub-tool
+    # output) tags it ``error_pattern_scope: "auth"`` so only the narrow
+    # credential-failure phrases are scanned — a genuine auth failure with
+    # no distinguishing exit code still fails immediately, while the broad
+    # filesystem/command/model phrases (plausible incidental noise there)
+    # cannot false-positive an ordinary retryable failure into infra-fatal.
+    patterns = (
+        _INFRA_FATAL_AUTH_CONTENT_PATTERNS
+        if message.data.get("error_pattern_scope") == "auth"
+        else _INFRA_FATAL_CONTENT_PATTERNS
+    )
+    return any(pattern in content for pattern in patterns)
 
 
 def _correlated_tool_result_name(

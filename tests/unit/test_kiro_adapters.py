@@ -702,8 +702,9 @@ class TestKiroAgentAdapterExecuteTask:
         """Negative control for the round-6 fix: an ordinary task failure
         that happens to exit nonzero (e.g. failing tests) must NOT be
         classified infra-fatal — it still deserves retry/escalation. Exit 1
-        is in the adapter's own retryable set, so its stderr is no longer
-        mirrored into the pattern-scanned field at all."""
+        is in the adapter's own retryable set; its stderr is mirrored under
+        the narrowed auth-only scan scope (round-13 finding #4), which an
+        ordinary failure message never matches."""
         from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
 
         proc = _make_proc(stdout=b"", stderr=b"2 tests failed", returncode=1)
@@ -718,7 +719,8 @@ class TestKiroAgentAdapterExecuteTask:
 
         result = messages[-1]
         assert result.is_error
-        assert "error" not in result.data
+        assert result.data["error"] == "2 tests failed"
+        assert result.data["error_pattern_scope"] == "auth"
         # The free-text content still carries the detail for humans/retry
         # classification ("exit 1" keeps _is_retryable True).
         assert "2 tests failed" in result.content
@@ -730,14 +732,15 @@ class TestKiroAgentAdapterExecuteTask:
         self, retryable_exit_code: int
     ) -> None:
         """Adversarial-review Bug #3, the negative control the round-6 suite
-        was missing: Kiro is an agentic CLI whose stderr can forward a
-        sub-tool's own output — an incidental "no such file or directory"
-        (or "unauthorized") from a task's failing shell command, for an
-        entirely ordinary, non-infra reason. On the adapter's own
-        ordinary-retryable exit codes (``_RETRYABLE_EXIT_CODES`` = 1, 137)
-        that chatty stream must NOT be mirrored into the pattern-scanned
-        ``data["error"]`` field: the phrase being present must not flip the
-        failure to infra-fatal and skip real retry/escalation."""
+        was missing (and round-13 finding #4 must preserve): Kiro is an
+        agentic CLI whose stderr can forward a sub-tool's own output — an
+        incidental "no such file or directory" from a task's failing shell
+        command, for an entirely ordinary, non-infra reason. On the
+        adapter's own ordinary-retryable exit codes
+        (``_RETRYABLE_EXIT_CODES`` = 1, 137) that chatty stream is mirrored
+        ONLY under the narrowed auth-only scan scope: the broad
+        filesystem/command phrase being present must not flip the failure
+        to infra-fatal and skip real retry/escalation."""
         from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
 
         forwarded_tool_stderr = (
@@ -758,11 +761,78 @@ class TestKiroAgentAdapterExecuteTask:
         result = messages[-1]
         assert result.is_error
         assert result.data["exit_code"] == retryable_exit_code
-        # The infra-sounding phrase IS present in the raw stderr...
+        # The infra-sounding phrase IS present in the raw stderr and the
+        # mirrored structured field...
         assert "no such file or directory" in result.content.lower()
-        # ...but never reaches the structured field the classifier scans.
-        assert "error" not in result.data
+        assert "no such file or directory" in result.data["error"].lower()
+        # ...but the auth-only scope keeps the broad pattern from firing.
+        assert result.data["error_pattern_scope"] == "auth"
         assert _is_infra_fatal_error_message(result) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retryable_exit_code", [1, 137])
+    async def test_retryable_exit_genuine_auth_failure_is_infra_fatal(
+        self, retryable_exit_code: int
+    ) -> None:
+        """Round-13 finding #4 (BLOCKING): Kiro has no auth-specific exit
+        code — a genuine authentication failure legitimately exits 1, the
+        SAME code as an ordinary retryable task failure. Round 6's fix
+        stopped mirroring exit-1/137 stderr entirely, so such a failure was
+        permanently invisible to the classifier and looped in
+        retry/escalation forever instead of failing immediately (the OTHER
+        forbidden mandate direction). Before this fix
+        ``_is_infra_fatal_error_message`` returned False here; the narrow
+        auth-only scan scope now catches it without re-opening the broad
+        false-positive class the parametrized negative control above
+        protects."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"Unauthorized: invalid API key", returncode=retryable_exit_code
+        )
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("fail")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["exit_code"] == retryable_exit_code
+        assert result.data["error"] == "Unauthorized: invalid API key"
+        assert result.data["error_pattern_scope"] == "auth"
+        assert _is_infra_fatal_error_message(result) is True
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_exit_keeps_full_broad_pattern_list(self) -> None:
+        """Round-13 finding #4 regression guard for the already-correct
+        behavior: exit codes OUTSIDE ``_RETRYABLE_EXIT_CODES`` keep the
+        FULL broad pattern list — a genuine environment failure ("no such
+        file or directory" describing the runtime itself) on an unusual
+        exit code still fails immediately, exactly as before the auth-scope
+        narrowing."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"exec: kiro-helper: no such file or directory", returncode=2
+        )
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("fail")]
+
+        result = messages[-1]
+        assert result.is_error
+        # No narrowed scope on non-retryable exits: the full list applies.
+        assert "error_pattern_scope" not in result.data
+        assert _is_infra_fatal_error_message(result) is True
 
     @pytest.mark.asyncio
     async def test_respects_cwd(self) -> None:
