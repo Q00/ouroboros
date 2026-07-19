@@ -640,6 +640,36 @@ class TestRootAcTerminalStateMatchesLiveDispatch:
         assert terminal is True
 
     @pytest.mark.asyncio
+    async def test_claude_effort_vocabulary_uses_max_as_runtime_ceiling(self) -> None:
+        from ouroboros.orchestrator.adapter import CLAUDE_REASONING_EFFORT_LEVELS
+
+        executor = _make_executor()
+        executor._reasoning_effort = "xhigh"
+        executor._adapter.capabilities.model_override_support = ParamSupport.IGNORED
+        executor._adapter.capabilities.reasoning_effort_support = ParamSupport.NATIVE
+        executor._adapter.capabilities.enforceable_reasoning_efforts = (
+            CLAUDE_REASONING_EFFORT_LEVELS
+        )
+
+        terminal_at_xhigh = await executor._root_ac_terminal_state(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=0,
+        )
+        terminal_at_forced_ceiling = await executor._root_ac_terminal_state(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=0,
+            force_frontier_routing=True,
+        )
+
+        assert executor._enforced_effort_ceiling() == "max"
+        assert terminal_at_xhigh is False
+        assert terminal_at_forced_ceiling is True
+
+    @pytest.mark.asyncio
     async def test_sparse_router_zero_budget_still_reaches_lateral_breakthrough(self) -> None:
         executor = _make_executor()
         executor._lateral_escalation_enabled = True
@@ -2209,7 +2239,7 @@ class TestLadderRedispatchForcesFrontierRouting:
         """End-to-end through ``_execute_atomic_ac``: with a ``medium``
         effort base and a standard-tier router, a ladder-owned dispatch
         (``force_frontier_routing=True``) must hand the runtime
-        ``reasoning_effort="xhigh"`` and the FRONTIER model — while the
+        ``reasoning_effort="max"`` and the FRONTIER model — while the
         ordinary incremental path at the same retry attempt only reaches
         ``high`` (one notch), reproducing the exact reported gap."""
         from datetime import UTC, datetime
@@ -2318,7 +2348,7 @@ class TestLadderRedispatchForcesFrontierRouting:
             force_frontier_routing=True,
         )
         assert result.success is True
-        assert runtime.captured == [{"reasoning_effort": "xhigh", "model": "claude-frontier"}]
+        assert runtime.captured == [{"reasoning_effort": "max", "model": "claude-frontier"}]
 
         # Control — the ordinary incremental path at the SAME retry attempt:
         # effort reaches only ONE notch above base ("high", never "xhigh")

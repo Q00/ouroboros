@@ -46,6 +46,7 @@ from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.model_routing import ModelRouter, serialize_model_router
 from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
     ACExecutionResult,
     CheckpointCorruptError,
     CheckpointDispatchMismatchError,
@@ -3924,9 +3925,7 @@ class TestCheckpointDispatchContract:
         async def _crash_downstream(**kwargs: object) -> list[ACExecutionResult]:
             batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
             if batch == [1]:
-                return [
-                    ACExecutionResult(ac_index=1, ac_content="Executed setup", success=True)
-                ]
+                return [ACExecutionResult(ac_index=1, ac_content="Executed setup", success=True)]
             raise RuntimeError("crash after mixed stage checkpoint")
 
         original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crash_downstream)
@@ -3950,9 +3949,7 @@ class TestCheckpointDispatchContract:
         async def _finish_downstream(**kwargs: object) -> list[ACExecutionResult]:
             batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
             dispatched.append(batch)
-            return [
-                ACExecutionResult(ac_index=2, ac_content="Downstream work", success=True)
-            ]
+            return [ACExecutionResult(ac_index=2, ac_content="Downstream work", success=True)]
 
         recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish_downstream)
         result = await recovered.execute_parallel(
