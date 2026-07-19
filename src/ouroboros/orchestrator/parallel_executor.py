@@ -38,7 +38,8 @@ import os
 from pathlib import Path
 import re
 import socket
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+import uuid
 
 import anyio
 from rich.console import Console
@@ -1034,6 +1035,28 @@ class CheckpointOwnershipError(OuroborosError):
     """
 
 
+class ConcurrentSeedExecutionError(OuroborosError):
+    """Another invocation IN THIS PROCESS is already executing this seed.
+
+    Round-14 finding #1 (BLOCKING): the round-12 ownership gate
+    (:class:`CheckpointOwnershipError`) probes the checkpoint owner's PID —
+    which by design treats ``pid == os.getpid()`` as NON-conflicting
+    ("this very process wrote it"). That is correct for the cross-process
+    double-launch shape, but this codebase also runs as a long-lived MCP
+    server process that can drive MULTIPLE concurrent executions (separate
+    asyncio tasks sharing one OS pid). Two near-simultaneous invocations of
+    the SAME seed inside that one process both pass the PID probe, both
+    adopt/write the same seed-keyed checkpoint, and race the same
+    execution aggregate — the exact double-dispatch/state-corruption the
+    round-12 gate exists to prevent, one layer down. Coroutines in one
+    process share memory, so the precise probe here is an in-memory lease
+    (``ParallelACExecutor._ACTIVE_SEED_LEASES``), not an OS PID probe.
+    Like the round-12 refusal, this is an infra-fatal launch conflict
+    raised before any AC work starts — no AC ever surfaces FAILED over it,
+    and retrying cannot help while the first invocation is still running.
+    """
+
+
 def _pid_alive(pid: int) -> bool:
     """Best-effort same-host liveness probe (mirrors ``core.worktree``).
 
@@ -1067,6 +1090,52 @@ _CHECKPOINT_OWNER_FRESHNESS = timedelta(minutes=15)
 
 class ParallelACExecutor:
     """Executes ACs in parallel based on dependency graph."""
+
+    #: Round-14 finding #1 (BLOCKING): in-process lease registry mapping the
+    #: stable checkpoint ``seed_id`` to the token of the ONE invocation of
+    #: :meth:`execute_parallel` currently allowed to run it. Class-level (not
+    #: instance-level) on purpose: the runner constructs a FRESH executor per
+    #: run invocation, so instance state can never see a sibling invocation —
+    #: while every executor in the process shares this one dict. Purely
+    #: in-memory on purpose: it guards same-process concurrency only (two
+    #: coroutines sharing ``os.getpid()``, invisible to the round-12 PID
+    #: probe); process death releases it implicitly, and the durable
+    #: cross-process ownership marker keeps guarding across processes.
+    #: Mutated only in synchronous (no-await) sections, so asyncio's
+    #: cooperative scheduling makes check-then-set atomic without a lock.
+    _ACTIVE_SEED_LEASES: ClassVar[dict[str, str]] = {}
+
+    @classmethod
+    def _acquire_seed_execution_lease(cls, seed_id: str) -> str:
+        """Claim the process-wide right to execute ``seed_id``, or refuse.
+
+        Raises :class:`ConcurrentSeedExecutionError` (infra-fatal launch
+        conflict, before any AC work) when another in-process invocation
+        already holds the lease. Returns an opaque token that ONLY the
+        acquiring invocation may use to release.
+        """
+        if seed_id in cls._ACTIVE_SEED_LEASES:
+            raise ConcurrentSeedExecutionError(
+                f"Another execution of seed '{seed_id}' is already running "
+                "in this process. Two concurrent invocations must not share "
+                "one seed's checkpoint and execution aggregate — wait for "
+                "the active run to finish (or cancel it) before launching "
+                "this seed again."
+            )
+        token = uuid.uuid4().hex
+        cls._ACTIVE_SEED_LEASES[seed_id] = token
+        return token
+
+    @classmethod
+    def _release_seed_execution_lease(cls, seed_id: str, token: str) -> None:
+        """Release the lease iff ``token`` is the current holder's.
+
+        Token-guarded so a stale/foreign release can never free a lease a
+        DIFFERENT live invocation holds (the same reason the checkpoint
+        ownership marker is pid-guarded, transposed in-process).
+        """
+        if cls._ACTIVE_SEED_LEASES.get(seed_id) == token:
+            del cls._ACTIVE_SEED_LEASES[seed_id]
 
     def __init__(
         self,
@@ -2711,7 +2780,20 @@ class ParallelACExecutor:
         unattested-round state. The ``finally`` here gives those writes the
         same bounded final shot on EVERY exit path out of the run, normal or
         exceptional.
+
+        Round-14 finding #1 (BLOCKING): before anything else — before
+        checkpoint recovery can even consult the round-12 PID-based
+        ownership gate — claim the IN-PROCESS lease for this seed. The PID
+        gate deliberately trusts ``pid == os.getpid()``, so two concurrent
+        invocations of the same seed inside one long-lived MCP server
+        process would both pass it and race one checkpoint/aggregate. The
+        lease makes the second in-process claimant fail loudly here (an
+        infra-fatal launch conflict, zero AC work started) and is released
+        in the same every-exit-path ``finally`` that drains durable writes,
+        so a crash/cancel can never leave the seed permanently walled off.
         """
+        lease_seed_id = self._checkpoint_seed_id(seed, session_id)
+        lease_token = self._acquire_seed_execution_lease(lease_seed_id)
         try:
             return await self._execute_parallel_impl(
                 seed,
@@ -2726,6 +2808,7 @@ class ParallelACExecutor:
                 externally_satisfied_acs=externally_satisfied_acs,
             )
         finally:
+            self._release_seed_execution_lease(lease_seed_id, lease_token)
             # Bounded (never the full parked-cadence budget), and safe to run
             # twice: the happy path drains before aggregating results, leaving
             # nothing pending for this second call.

@@ -14,6 +14,7 @@ Covers the two production gaps found by adversarial review on PR #1648:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
@@ -1990,3 +1991,130 @@ class TestActiveCheckpointNeverSilentlyAdopted:
         durable ladder history (mirrors ``core.worktree._is_lock_stale``
         treating unreadable timestamps as claimable)."""
         assert self._conflict(owner) is None
+
+
+class TestInProcessConcurrentSeedExecutionRefused:
+    """Round-14 finding #1 (BLOCKING): the round-12 PID gate treats
+    ``pid == os.getpid()`` as automatically non-conflicting, so two
+    CONCURRENT invocations of the same seed inside ONE long-lived MCP
+    server process (separate asyncio tasks, one shared pid) both pass it
+    and race the same seed-keyed checkpoint and execution aggregate. The
+    in-process lease must make the second concurrent claimant fail loudly
+    before any AC work, while the first completes normally — and the lease
+    must be released on EVERY exit path so the seed is never permanently
+    walled off."""
+
+    @pytest.mark.asyncio
+    async def test_second_concurrent_invocation_refused_first_completes(
+        self, tmp_path: Path
+    ) -> None:
+        """The exact review scenario: two near-simultaneous in-flight
+        executions of the SAME seed in one test process (real concurrent
+        asyncio tasks, not sequential). The loser gets a clear conflict
+        error with zero dispatch; the winner finishes normally; the lease
+        is then free again for a genuinely sequential relaunch."""
+        from ouroboros.orchestrator.parallel_executor import ConcurrentSeedExecutionError
+
+        seed = _seed("Same-process concurrent launch")
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+
+        first_in_flight = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def _blocking_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            first_in_flight.set()
+            await release_first.wait()
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        # Two SEPARATE executor instances, exactly the runner's shape (a
+        # fresh executor per invocation) — the lease must still connect
+        # them, because it is process-wide, not per-instance.
+        run1 = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        run1._run_batch_with_verify_and_retry = AsyncMock(side_effect=_blocking_stage_runner)
+        run2 = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+
+        async def _launch(
+            executor: ParallelACExecutor, session_id: str, execution_id: str
+        ) -> object:
+            return await executor.execute_parallel(
+                seed,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+
+        task1 = asyncio.create_task(_launch(run1, "session-a", "exec-a"))
+        # Only race the second launch once the first is GENUINELY mid-AC:
+        # past recovery, past the run-start checkpoint save, inside its
+        # dispatched batch.
+        await asyncio.wait_for(first_in_flight.wait(), timeout=10)
+        with pytest.raises(ConcurrentSeedExecutionError, match="already running"):
+            await _launch(run2, "session-b", "exec-b")
+        # Fail-closed: the loser dispatched nothing.
+        run2._run_batch_with_verify_and_retry.assert_not_awaited()
+        # The winner is unharmed by the refused claimant.
+        release_first.set()
+        result = await asyncio.wait_for(task1, timeout=10)
+        assert result.all_succeeded
+        # Lease released on completion: a sequential relaunch of the same
+        # seed must acquire it cleanly (no permanent wall-off).
+        run3 = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run3._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+        sequel = await _launch(run3, "session-c", "exec-c")
+        assert sequel.all_succeeded
+
+    @pytest.mark.asyncio
+    async def test_lease_released_when_invocation_crashes(self, tmp_path: Path) -> None:
+        """An exception escaping the run body must still release the lease
+        (same every-exit-path ``finally`` as the durable-write drain) —
+        otherwise a crashed run would permanently wall off its own seed
+        from the legitimate crash-restart the checkpoint exists to serve."""
+        seed = _seed("Crash releases in-process lease")
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+
+        crashed = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        crashed._run_batch_with_verify_and_retry = AsyncMock(
+            side_effect=RuntimeError("simulated interruption")
+        )
+        with pytest.raises(BaseException):
+            await crashed.execute_parallel(
+                seed,
+                session_id="session-crash",
+                execution_id="exec-crash",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+        assert seed.metadata.seed_id not in ParallelACExecutor._ACTIVE_SEED_LEASES
+
+        restart = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        restart._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+        result = await restart.execute_parallel(
+            seed,
+            session_id="session-restart",
+            execution_id="exec-restart",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        assert result.all_succeeded
