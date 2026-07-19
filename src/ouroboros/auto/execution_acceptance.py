@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import re
 
-from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
+from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
+    Seed,
+    ac_text,
+)
 
 _AUTO_WRAPPER_CRITERIA = frozenset(
     {
@@ -213,19 +218,52 @@ def _restore_surviving_acceptance_specs(
     filtered: tuple[str, ...],
     original: tuple[tuple[AcceptanceCriterionInput, str], ...],
 ) -> tuple[AcceptanceCriterionInput, ...]:
-    """Keep structured contracts for criteria that survive normalization unchanged."""
-    original_by_text: dict[str, list[AcceptanceCriterionInput]] = {}
-    for criterion, text in original:
-        original_by_text.setdefault(text, []).append(criterion)
+    """Keep structured contracts when surviving criteria are canonicalized.
 
+    Normalization may rewrite a known-equivalent hello_auto criterion rather
+    than preserving its text verbatim.  That description-only rewrite must not
+    discard the criterion's semantic identity or verification evidence.
+    """
+    remaining = list(original)
     restored: list[AcceptanceCriterionInput] = []
     for text in filtered:
-        matches = original_by_text.get(text)
-        if matches:
-            restored.append(matches.pop(0))
-        else:
-            restored.append(text)
+        exact_index = next(
+            (
+                index
+                for index, (_criterion, original_text) in enumerate(remaining)
+                if original_text == text
+            ),
+            None,
+        )
+        if exact_index is not None:
+            criterion, _original_text = remaining.pop(exact_index)
+            restored.append(criterion)
+            continue
+
+        canonical_sources = [
+            (index, criterion)
+            for index, (criterion, original_text) in enumerate(remaining)
+            if isinstance(criterion, AcceptanceCriterionSpec)
+            and _structured_criterion_normalizes_to(original_text, text)
+        ]
+        if len(canonical_sources) == 1:
+            index, criterion = canonical_sources[0]
+            remaining.pop(index)
+            restored.append(criterion.model_copy(update={"description": text}))
+            continue
+
+        restored.append(text)
     return tuple(restored)
+
+
+def _structured_criterion_normalizes_to(original_text: str, normalized_text: str) -> bool:
+    """Return whether one structured hello_auto AC became ``normalized_text``."""
+    subject = _unwrap_seed_repairer_original_requirement(original_text).strip()
+    if _normalize_known_observation_execution_line(subject) == normalized_text:
+        return True
+    return normalized_text.startswith(
+        "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+    ) and _is_hello_auto_observation_unit_line(original_text)
 
 
 def normalize_observation_execution_criteria(
