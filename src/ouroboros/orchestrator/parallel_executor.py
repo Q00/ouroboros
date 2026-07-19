@@ -91,6 +91,7 @@ from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleMana
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    RuntimeCapabilities,
     RuntimeHandle,
 )
 from ouroboros.orchestrator.atomic_prompt_builder import (
@@ -2196,9 +2197,31 @@ class ParallelACExecutor:
     def _prompt_identity(system_prompt: str) -> str:
         return "sha256:" + hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
 
-    @classmethod
+    @staticmethod
+    def _runtime_capabilities_contract(adapter: object) -> dict[str, Any] | None:
+        capabilities = getattr(adapter, "capabilities", None)
+        if not isinstance(capabilities, RuntimeCapabilities):
+            return None
+        return {
+            "skill_dispatch": capabilities.skill_dispatch,
+            "targeted_resume": capabilities.targeted_resume,
+            "structured_output": capabilities.structured_output,
+            "system_prompt_support": capabilities.system_prompt_support.value,
+            "tool_restriction_support": capabilities.tool_restriction_support.value,
+            "permission_mode_support": capabilities.permission_mode_support.value,
+            "reasoning_effort_support": capabilities.reasoning_effort_support.value,
+            "enforceable_reasoning_efforts": (
+                sorted(capabilities.enforceable_reasoning_efforts)
+                if capabilities.enforceable_reasoning_efforts is not None
+                else None
+            ),
+            "model_override_support": capabilities.model_override_support.value,
+            "subagent_orchestration": capabilities.subagent_orchestration.value,
+            "session_signals": capabilities.session_signals.to_event_data(),
+        }
+
     def _build_checkpoint_dispatch_contract(
-        cls,
+        self,
         *,
         tools: list[str],
         tool_catalog: tuple[MCPToolDefinition, ...] | None,
@@ -2214,8 +2237,24 @@ class ParallelACExecutor:
         """
         from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
 
+        workspace = self._task_cwd or getattr(self._adapter, "working_directory", None)
+        workspace_identity = os.path.realpath(os.path.expanduser(workspace or os.getcwd()))
+        runtime_backend = getattr(self._adapter, "runtime_backend", None)
+        permission_mode = getattr(self._adapter, "permission_mode", None)
+        constructor_model = getattr(self._adapter, "_model", None)
         return {
             "version": 1,
+            "workspace": workspace_identity,
+            "runtime": {
+                "backend": runtime_backend if isinstance(runtime_backend, str) else None,
+                "permission_mode": permission_mode if isinstance(permission_mode, str) else None,
+                "constructor_model": (
+                    constructor_model if isinstance(constructor_model, str) else None
+                ),
+                "capabilities": self._runtime_capabilities_contract(self._adapter),
+            },
+            "model_routing": serialize_model_router(self._model_router),
+            "execution_profile": serialize_execution_profile(self._execution_profile),
             "tools": list(tools),
             "tool_catalog": {
                 "present": tool_catalog is not None,
@@ -2224,7 +2263,7 @@ class ParallelACExecutor:
             "system_prompt": (
                 {"mode": "rebuildable"}
                 if system_prompt_builder is not None
-                else {"mode": "direct", "identity": cls._prompt_identity(system_prompt)}
+                else {"mode": "direct", "identity": self._prompt_identity(system_prompt)}
             ),
         }
 
@@ -2238,6 +2277,10 @@ class ParallelACExecutor:
         raw = state.get("dispatch_contract")
         if not isinstance(raw, Mapping) or set(raw) != {
             "version",
+            "workspace",
+            "runtime",
+            "model_routing",
+            "execution_profile",
             "tools",
             "tool_catalog",
             "system_prompt",
@@ -2245,6 +2288,83 @@ class ParallelACExecutor:
             return "dispatch_contract has an invalid top-level shape"
         if raw.get("version") != 1:
             return f"dispatch_contract version is not 1: {raw.get('version')!r}"
+        raw_workspace = raw.get("workspace")
+        if (
+            not isinstance(raw_workspace, str)
+            or not raw_workspace
+            or not os.path.isabs(raw_workspace)
+            or os.path.realpath(raw_workspace) != raw_workspace
+        ):
+            return "dispatch_contract.workspace is not a canonical absolute path"
+        raw_runtime = raw.get("runtime")
+        if not isinstance(raw_runtime, Mapping) or set(raw_runtime) != {
+            "backend",
+            "permission_mode",
+            "constructor_model",
+            "capabilities",
+        }:
+            return "dispatch_contract.runtime has an invalid shape"
+        if any(
+            value is not None and not isinstance(value, str)
+            for value in (
+                raw_runtime.get("backend"),
+                raw_runtime.get("permission_mode"),
+                raw_runtime.get("constructor_model"),
+            )
+        ):
+            return "dispatch_contract.runtime contains invalid scalar values"
+        raw_capabilities = raw_runtime.get("capabilities")
+        if raw_capabilities is not None:
+            if not isinstance(raw_capabilities, Mapping) or set(raw_capabilities) != {
+                "skill_dispatch",
+                "targeted_resume",
+                "structured_output",
+                "system_prompt_support",
+                "tool_restriction_support",
+                "permission_mode_support",
+                "reasoning_effort_support",
+                "enforceable_reasoning_efforts",
+                "model_override_support",
+                "subagent_orchestration",
+                "session_signals",
+            }:
+                return "dispatch_contract.runtime capabilities have an invalid shape"
+            if any(
+                not isinstance(raw_capabilities.get(key), bool)
+                for key in ("skill_dispatch", "targeted_resume", "structured_output")
+            ):
+                return "dispatch_contract.runtime capabilities contain invalid booleans"
+            support_values = {support.value for support in ParamSupport}
+            if any(
+                raw_capabilities.get(key) not in support_values
+                for key in (
+                    "system_prompt_support",
+                    "tool_restriction_support",
+                    "permission_mode_support",
+                    "reasoning_effort_support",
+                    "model_override_support",
+                )
+            ):
+                return "dispatch_contract.runtime capabilities contain invalid support modes"
+            raw_efforts = raw_capabilities.get("enforceable_reasoning_efforts")
+            if raw_efforts is not None and (
+                not isinstance(raw_efforts, list)
+                or any(not isinstance(level, str) for level in raw_efforts)
+            ):
+                return "dispatch_contract.runtime capabilities contain invalid effort levels"
+            if not isinstance(raw_capabilities.get("subagent_orchestration"), str):
+                return "dispatch_contract.runtime capabilities contain invalid orchestration"
+            raw_signals = raw_capabilities.get("session_signals")
+            if not isinstance(raw_signals, Mapping) or any(
+                not isinstance(value, bool) for value in raw_signals.values()
+            ):
+                return "dispatch_contract.runtime signal capabilities are invalid"
+        recognized_router, _ = deserialize_model_router(raw.get("model_routing"))
+        if not recognized_router:
+            return "dispatch_contract.model_routing is not recognized"
+        recognized_profile, _ = deserialize_execution_profile(raw.get("execution_profile"))
+        if not recognized_profile:
+            return "dispatch_contract.execution_profile is not recognized"
         raw_tools = raw.get("tools")
         if not isinstance(raw_tools, list) or any(not isinstance(tool, str) for tool in raw_tools):
             return "dispatch_contract.tools is not a list of strings"
@@ -2285,9 +2405,8 @@ class ParallelACExecutor:
             return f"dispatch_contract.system_prompt mode is unknown: {prompt_mode!r}"
         return None
 
-    @classmethod
     def _checkpoint_dispatch_contract_mismatch(
-        cls,
+        self,
         cp: Any,
         *,
         tools: list[str],
@@ -2296,17 +2415,27 @@ class ParallelACExecutor:
         system_prompt_builder: Callable[..., str] | None,
     ) -> str | None:
         saved = cp.state.get("dispatch_contract")
-        current = cls._build_checkpoint_dispatch_contract(
+        current = self._build_checkpoint_dispatch_contract(
             tools=tools,
             tool_catalog=tool_catalog,
             system_prompt=system_prompt,
             system_prompt_builder=system_prompt_builder,
         )
+        # Router/profile are restorable versioned contracts.  Their dispatch
+        # snapshots must agree with the checkpoint's semantic groups, while
+        # workspace/runtime/constructor authority must match the live process.
+        if isinstance(saved, Mapping):
+            current["model_routing"] = cp.state.get("model_routing")
+            current["execution_profile"] = cp.state.get("execution_profile")
+            if saved.get("model_routing") != cp.state.get("model_routing"):
+                return "dispatch contract model routing disagrees with checkpoint semantics"
+            if saved.get("execution_profile") != cp.state.get("execution_profile"):
+                return "dispatch contract execution profile disagrees with checkpoint semantics"
         if saved == current:
             return None
         return (
-            "the current tools, canonical tool catalog, or direct system-prompt "
-            "identity differs from the interrupted run"
+            "the current workspace, runtime authority, tools, canonical tool catalog, "
+            "or direct system-prompt identity differs from the interrupted run"
         )
 
     @staticmethod

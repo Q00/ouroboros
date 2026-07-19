@@ -3457,12 +3457,22 @@ class TestCheckpointDispatchContract:
         tool_catalog: object = None,
         system_prompt: str = "direct-v1",
         system_prompt_builder: object = None,
+        workspace: str = "/tmp/project",
+        runtime_backend: str = "claude",
+        permission_mode: str | None = None,
+        constructor_model: str | None = None,
+        capabilities: object = None,
     ) -> tuple[Seed, Path, dict[str, object]]:
         seed = self._seed()
         ckpt_path = tmp_path / "checkpoints"
         store = CheckpointStore(base_path=ckpt_path)
         store.initialize()
         original = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        original._task_cwd = workspace
+        original._adapter.runtime_backend = runtime_backend
+        original._adapter.permission_mode = permission_mode
+        original._adapter._model = constructor_model
+        original._adapter.capabilities = capabilities
 
         async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
             batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
@@ -3567,6 +3577,75 @@ class TestCheckpointDispatchContract:
         checkpoint_after = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert checkpoint_after.is_ok
         assert checkpoint_after.value.to_dict() == checkpoint_before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "drift",
+        ["workspace", "runtime_backend", "permission_mode", "constructor_model", "capabilities"],
+    )
+    async def test_runtime_authority_drift_is_rejected_before_dispatch(
+        self, tmp_path: Path, drift: str
+    ) -> None:
+        from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+
+        original_workspace = str(tmp_path / "workspace-a")
+        resumed_workspace = original_workspace
+        original_backend = resumed_backend = "claude"
+        original_permission = resumed_permission = "acceptEdits"
+        original_model = resumed_model = "model-a"
+        original_capabilities = resumed_capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        if drift == "workspace":
+            resumed_workspace = str(tmp_path / "workspace-b")
+        elif drift == "runtime_backend":
+            resumed_backend = "codex_cli"
+        elif drift == "permission_mode":
+            resumed_permission = "bypassPermissions"
+        elif drift == "constructor_model":
+            resumed_model = "model-b"
+        else:
+            resumed_capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.IGNORED,
+            )
+
+        seed, ckpt_path, _checkpoint_before = await self._crash_after_first_stage(
+            tmp_path,
+            tools=["Read"],
+            workspace=original_workspace,
+            runtime_backend=original_backend,
+            permission_mode=original_permission,
+            constructor_model=original_model,
+            capabilities=original_capabilities,
+        )
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        recovered._task_cwd = resumed_workspace
+        recovered._adapter.runtime_backend = resumed_backend
+        recovered._adapter.permission_mode = resumed_permission
+        recovered._adapter._model = resumed_model
+        recovered._adapter.capabilities = resumed_capabilities
+        recovered._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(CheckpointDispatchMismatchError):
+            await recovered.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=["Read"],
+                system_prompt="direct-v1",
+                execution_plan=self._plan(),
+            )
+
+        recovered._run_batch_with_verify_and_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_identical_direct_contract_resumes_only_unfinished_work(
