@@ -474,6 +474,13 @@ class PMInterviewEngine:
 
         Idempotent — if already installed, replaces previous wrapper to prevent
         stacking across multiple start/resume calls on the same engine instance.
+
+        The wrapper preserves the inner engine's prompt-budget contract: the
+        steering prefix is charged against the caller-supplied ``max_chars``
+        (or the engine's default system-prompt cap) instead of being prepended
+        on top of an already-capped prompt, so the combined prompt never
+        exceeds the budget the caller computed against the serialized-prompt
+        safety ceiling.
         """
         self._pm_steering = getattr(self, "_pm_steering", _PM_SYSTEM_PROMPT_PREFIX)
 
@@ -483,9 +490,23 @@ class PMInterviewEngine:
 
         original_build = self._original_build_system_prompt
 
-        def _pm_build_system_prompt(state: InterviewState, *args, **kwargs) -> str:
-            base = original_build(state, *args, **kwargs)
-            return self._pm_steering + "\n\n" + base
+        def _pm_build_system_prompt(
+            state: InterviewState,
+            initial_context: str | None = None,
+            max_chars: int | None = None,
+        ) -> str:
+            steering_block = self._pm_steering + "\n\n"
+            cap = max_chars or self.inner._MAX_SYSTEM_PROMPT_CHARS
+            # Never pass 0 down: the inner builder treats falsy max_chars as
+            # "use the default cap", which would blow the budget again.
+            inner_budget = max(1, cap - len(steering_block))
+            base = original_build(
+                state,
+                initial_context=initial_context,
+                max_chars=inner_budget,
+            )
+            # Hard cap as final safety net (degenerate tiny-cap case).
+            return (steering_block + base)[:cap]
 
         self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]
 

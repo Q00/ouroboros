@@ -55,6 +55,76 @@ class TestPMUncertaintyGuidance:
         assert "decide_later_items" in _EXTRACTION_SYSTEM_PROMPT
 
 
+class TestPMSuccessCriteriaBoundary:
+    """Regression coverage for the PRD success-criteria boundary (#1663).
+
+    The steering prefix must frame the PRD as a PM-developer contract whose
+    success criteria describe the delivered feature's behavior and policy,
+    and must place post-launch outcome tracking outside that contract.
+    """
+
+    @staticmethod
+    def _flattened_prefix() -> str:
+        """Steering prefix with line wraps collapsed for phrase assertions."""
+        return " ".join(_PM_SYSTEM_PROMPT_PREFIX.split())
+
+    def test_steering_defines_prd_as_pm_developer_contract(self) -> None:
+        prefix = self._flattened_prefix()
+        assert "contract between the PM and the developers" in prefix
+        assert "accept it as built" in prefix
+        assert "behavior and policy" in prefix
+
+    def test_steering_excludes_post_launch_outcomes_from_the_contract(self) -> None:
+        prefix = self._flattened_prefix()
+        assert "Post-launch outcomes" in prefix
+        assert "not obligations the developers can deliver on" in prefix
+        assert "no place in this contract" in prefix
+
+
+class TestPMSteeringPromptBudget:
+    """Regression: steering is charged against the prompt budget, not stacked on top.
+
+    The inner engine computes ``max_chars`` against the serialized-prompt
+    safety ceiling before calling ``_build_system_prompt``; the PM wrapper
+    must return a prompt within that same cap.
+    """
+
+    def _steered_engine(self, tmp_path: Path) -> PMInterviewEngine:
+        engine = _make_engine(tmp_path=tmp_path)
+        engine._install_pm_steering()
+        return engine
+
+    def test_default_cap_holds_with_steering_installed(self, tmp_path: Path) -> None:
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_default",
+            initial_context="Build a task manager",
+        )
+        prompt = engine.inner._build_system_prompt(state)
+        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
+        assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+
+    def test_caller_supplied_cap_holds_with_steering_installed(self, tmp_path: Path) -> None:
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_caller",
+            initial_context="A" * 4_000,
+        )
+        cap = 2_000
+        prompt = engine.inner._build_system_prompt(state, max_chars=cap)
+        assert len(prompt) <= cap
+        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
+
+    def test_tiny_cap_is_never_exceeded(self, tmp_path: Path) -> None:
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_tiny",
+            initial_context="Build a task manager",
+        )
+        prompt = engine.inner._build_system_prompt(state, max_chars=200)
+        assert len(prompt) <= 200
+
+
 def _mock_completion(content: str = "What problem does this solve?") -> CompletionResponse:
     """Create a mock completion response."""
     return CompletionResponse(

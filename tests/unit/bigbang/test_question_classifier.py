@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.bigbang.question_classifier import (
+    _CLASSIFICATION_SYSTEM_PROMPT,
     _DEFAULT_PLACEHOLDER,
     ClassificationResult,
     ClassifierOutputType,
@@ -31,6 +32,40 @@ def _mock_completion(content: str) -> CompletionResponse:
         usage=UsageInfo(prompt_tokens=50, completion_tokens=30, total_tokens=80),
         finish_reason="stop",
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# Classification prompt contract
+# ──────────────────────────────────────────────────────────────
+
+
+def _prompt_section(start: str, end: str) -> str:
+    """Extract the classification-prompt text between two markers."""
+    return _CLASSIFICATION_SYSTEM_PROMPT.split(start)[1].split(end)[0]
+
+
+class TestClassificationPromptPostLaunchBoundary:
+    """Regression coverage for the post-launch measurement boundary (#1663).
+
+    PLANNING must ask for delivered-behavior acceptance criteria, and
+    post-launch outcome measurement must be routed to DECIDE_LATER instead
+    of passing through as a PM planning question.
+    """
+
+    def test_planning_lists_acceptance_criteria_not_kpis(self) -> None:
+        planning = _prompt_section("**PLANNING**", "**DEVELOPMENT**")
+        assert "Acceptance criteria" in planning
+        assert "delivered behavior" in planning
+        assert "KPI" not in planning
+        assert "Success metrics" not in planning
+
+    def test_decide_later_covers_post_launch_outcome_measurement(self) -> None:
+        decide_later = _prompt_section("**DECIDE_LATER**", "## Rules")
+        assert "Post-launch outcome measurement" in decide_later
+        assert "conversion uplift" in decide_later
+        assert "KPI targets" in decide_later
+        assert "adoption goals" in decide_later
+        assert "observation windows" in decide_later
 
 
 # ──────────────────────────────────────────────────────────────
