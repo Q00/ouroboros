@@ -47,6 +47,7 @@ from ouroboros.orchestrator.model_routing import ModelRouter, serialize_model_ro
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
     CheckpointCorruptError,
+    CheckpointDispatchMismatchError,
     CheckpointPersistenceError,
     CheckpointPlanMismatchError,
     CheckpointUnreadableError,
@@ -3249,6 +3250,222 @@ class TestInProcessConcurrentSeedExecutionRefused:
         assert second.all_succeeded
 
 
+class TestCheckpointDispatchContract:
+    """Recovery may only continue under the original dispatch authority."""
+
+    @staticmethod
+    def _seed() -> Seed:
+        return Seed(
+            goal="Dispatch-contract recovery",
+            constraints=(),
+            acceptance_criteria=("Prepare workspace", "Apply change"),
+            ontology_schema=OntologySchema(name="DispatchContract", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        )
+
+    @staticmethod
+    def _plan() -> StagedExecutionPlan:
+        return StagedExecutionPlan(
+            nodes=(
+                ACNode(index=0, content="Prepare workspace"),
+                ACNode(index=1, content="Apply change", depends_on=(0,)),
+            ),
+            stages=(
+                ExecutionStage(index=0, ac_indices=(0,)),
+                ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ),
+        )
+
+    async def _crash_after_first_stage(
+        self,
+        tmp_path: Path,
+        *,
+        tools: list[str],
+        tool_catalog: object = None,
+        system_prompt: str = "direct-v1",
+        system_prompt_builder: object = None,
+    ) -> tuple[Seed, Path, dict[str, object]]:
+        seed = self._seed()
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        original = _executor(event_store=AsyncMock(), checkpoint_store=store)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [
+                    ACExecutionResult(
+                        ac_index=0,
+                        ac_content="Prepare workspace",
+                        success=True,
+                    )
+                ]
+            raise RuntimeError("simulated crash under original dispatch authority")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException, match="original dispatch authority|unhandled errors"):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=tools,
+                tool_catalog=tool_catalog,  # type: ignore[arg-type]
+                system_prompt=system_prompt,
+                execution_plan=self._plan(),
+                system_prompt_builder=system_prompt_builder,  # type: ignore[arg-type]
+            )
+
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["completed_levels"] == 1
+        return seed, ckpt_path, saved.value.to_dict()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("drift", ["tools", "description", "schema", "prompt"])
+    async def test_dispatch_authority_drift_is_rejected_before_dispatch(
+        self, tmp_path: Path, drift: str
+    ) -> None:
+        from ouroboros.mcp.types import MCPToolDefinition, MCPToolParameter, ToolInputType
+
+        original_tools = ["Read"]
+        resumed_tools = ["Read"]
+        original_catalog: tuple[MCPToolDefinition, ...] | None = None
+        resumed_catalog: tuple[MCPToolDefinition, ...] | None = None
+        original_prompt = "direct-v1"
+        resumed_prompt = "direct-v1"
+
+        if drift == "tools":
+            original_tools = ["Read", "Write"]
+        elif drift in {"description", "schema"}:
+            original_tools = resumed_tools = ["custom_tool"]
+            original_catalog = (
+                MCPToolDefinition(
+                    name="custom_tool",
+                    description="Original authority",
+                    parameters=(MCPToolParameter(name="path", type=ToolInputType.STRING),),
+                    server_name="test-server",
+                ),
+            )
+            resumed_catalog = (
+                MCPToolDefinition(
+                    name="custom_tool",
+                    description=(
+                        "Changed authority" if drift == "description" else "Original authority"
+                    ),
+                    parameters=(
+                        MCPToolParameter(
+                            name="path",
+                            type=(
+                                ToolInputType.INTEGER if drift == "schema" else ToolInputType.STRING
+                            ),
+                        ),
+                    ),
+                    server_name="test-server",
+                ),
+            )
+        else:
+            resumed_prompt = "direct-v2"
+
+        seed, ckpt_path, checkpoint_before = await self._crash_after_first_stage(
+            tmp_path,
+            tools=original_tools,
+            tool_catalog=original_catalog,
+            system_prompt=original_prompt,
+        )
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        recovered._run_batch_with_verify_and_retry = AsyncMock()
+
+        with pytest.raises(CheckpointDispatchMismatchError):
+            await recovered.execute_parallel(
+                seed,
+                session_id="session-restarted",
+                execution_id="exec-restarted",
+                tools=resumed_tools,
+                tool_catalog=resumed_catalog,
+                system_prompt=resumed_prompt,
+                execution_plan=self._plan(),
+            )
+
+        recovered._run_batch_with_verify_and_retry.assert_not_awaited()
+        checkpoint_after = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert checkpoint_after.is_ok
+        assert checkpoint_after.value.to_dict() == checkpoint_before
+
+    @pytest.mark.asyncio
+    async def test_identical_direct_contract_resumes_only_unfinished_work(
+        self, tmp_path: Path
+    ) -> None:
+        seed, ckpt_path, _ = await self._crash_after_first_stage(
+            tmp_path,
+            tools=["Read"],
+            system_prompt="direct-v1",
+        )
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _finish(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [ACExecutionResult(ac_index=1, ac_content="Apply change", success=True)]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=["Read"],
+            system_prompt="direct-v1",
+            execution_plan=self._plan(),
+        )
+
+        assert dispatched == [[1]]
+        assert result.execution_id == "exec-original"
+        assert result.all_succeeded
+
+    @pytest.mark.asyncio
+    async def test_rebuildable_prompt_contract_rebuilds_after_recovery(
+        self, tmp_path: Path
+    ) -> None:
+        seed, ckpt_path, _ = await self._crash_after_first_stage(
+            tmp_path,
+            tools=["Read"],
+            system_prompt="original prebuilt prompt",
+            system_prompt_builder=lambda **_kwargs: "original rebuilt prompt",
+        )
+        recovered = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        builder = MagicMock(return_value="recovered rebuilt prompt")
+        captured: dict[str, object] = {}
+
+        async def _finish(**kwargs: object) -> list[ACExecutionResult]:
+            captured["system_prompt"] = kwargs["system_prompt"]
+            return [ACExecutionResult(ac_index=1, ac_content="Apply change", success=True)]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_finish)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=["Read"],
+            system_prompt="different stale prebuilt prompt",
+            execution_plan=self._plan(),
+            system_prompt_builder=builder,
+        )
+
+        assert result.all_succeeded
+        builder.assert_called_once()
+        assert captured["system_prompt"] == "recovered rebuilt prompt"
+
+
 class TestRecoveredPromptReflectsOriginalRunSemantics:
     """Round-14 finding #3 (BLOCKING): the runner builds the system prompt
     BEFORE ``execute_parallel`` can run RC3 checkpoint recovery, so the
@@ -3286,6 +3503,7 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
                 tools=[],
                 system_prompt="original-process prompt",
                 execution_plan=_plan(),
+                system_prompt_builder=lambda **_kwargs: "original-process prompt",
             )
 
     @pytest.mark.asyncio
@@ -4166,9 +4384,11 @@ class TestRunnerAuditRecordsRestoredExecutionSettings:
                 seed,
                 session_id="session-original",
                 execution_id="exec-original",
-                tools=[],
+                tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]).tools,
                 system_prompt="system",
                 execution_plan=plan,
+                system_prompt_builder=lambda **_kwargs: "system",
             )
         saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
         assert saved.is_ok

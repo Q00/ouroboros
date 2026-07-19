@@ -1087,6 +1087,10 @@ class CheckpointPlanMismatchError(OuroborosError):
     """The re-derived execution plan differs from the interrupted run's plan."""
 
 
+class CheckpointDispatchMismatchError(OuroborosError):
+    """The live tools/prompt authority differs from the interrupted run."""
+
+
 class CheckpointPersistenceError(OuroborosError):
     """The mandatory pre-dispatch recovery anchor could not be persisted."""
 
@@ -2178,6 +2182,123 @@ class ParallelACExecutor:
             "the current dependency analysis produced a different execution "
             "plan from the interrupted run; applying old AC outcomes to new "
             "dependency edges/stages could reorder shared-workspace writes"
+        )
+
+    @staticmethod
+    def _prompt_identity(system_prompt: str) -> str:
+        return "sha256:" + hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _build_checkpoint_dispatch_contract(
+        cls,
+        *,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        system_prompt_builder: Callable[..., str] | None,
+    ) -> dict[str, Any]:
+        """Canonicalize the actual dispatch authority used by this run.
+
+        Runner-owned prompts are rebuildable from the separately persisted
+        profile/guidance/context-pack semantics, so their identity is the
+        presence of that fail-closed builder.  Direct callers have no such
+        reconstruction contract and therefore pin the exact prompt digest.
+        """
+        from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
+
+        return {
+            "version": 1,
+            "tools": list(tools),
+            "tool_catalog": {
+                "present": tool_catalog is not None,
+                "definitions": serialize_tool_catalog(tool_catalog or ()),
+            },
+            "system_prompt": (
+                {"mode": "rebuildable"}
+                if system_prompt_builder is not None
+                else {"mode": "direct", "identity": cls._prompt_identity(system_prompt)}
+            ),
+        }
+
+    @staticmethod
+    def _checkpoint_dispatch_contract_malformed(cp: Any) -> str | None:
+        state = cp.state
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        if "dispatch_contract" not in state:
+            return "dispatch_contract is missing"
+        raw = state.get("dispatch_contract")
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "version",
+            "tools",
+            "tool_catalog",
+            "system_prompt",
+        }:
+            return "dispatch_contract has an invalid top-level shape"
+        if raw.get("version") != 1:
+            return f"dispatch_contract version is not 1: {raw.get('version')!r}"
+        raw_tools = raw.get("tools")
+        if not isinstance(raw_tools, list) or any(not isinstance(tool, str) for tool in raw_tools):
+            return "dispatch_contract.tools is not a list of strings"
+        raw_catalog = raw.get("tool_catalog")
+        if not isinstance(raw_catalog, Mapping) or set(raw_catalog) != {
+            "present",
+            "definitions",
+        }:
+            return "dispatch_contract.tool_catalog has an invalid shape"
+        if not isinstance(raw_catalog.get("present"), bool) or not isinstance(
+            raw_catalog.get("definitions"), list
+        ):
+            return "dispatch_contract.tool_catalog contains invalid values"
+        if any(not isinstance(item, Mapping) for item in raw_catalog["definitions"]):
+            return "dispatch_contract.tool_catalog definitions are not mappings"
+        try:
+            json.dumps(raw_catalog["definitions"], sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError):
+            return "dispatch_contract.tool_catalog definitions are not canonical JSON"
+        raw_prompt = raw.get("system_prompt")
+        if not isinstance(raw_prompt, Mapping):
+            return "dispatch_contract.system_prompt is not a mapping"
+        prompt_mode = raw_prompt.get("mode")
+        if prompt_mode == "rebuildable":
+            if set(raw_prompt) != {"mode"}:
+                return "rebuildable system-prompt identity has unknown fields"
+        elif prompt_mode == "direct":
+            identity = raw_prompt.get("identity")
+            if (
+                set(raw_prompt) != {"mode", "identity"}
+                or not isinstance(identity, str)
+                or not identity.startswith("sha256:")
+                or len(identity) != 71
+                or any(char not in "0123456789abcdef" for char in identity[7:])
+            ):
+                return "direct system-prompt identity is malformed"
+        else:
+            return f"dispatch_contract.system_prompt mode is unknown: {prompt_mode!r}"
+        return None
+
+    @classmethod
+    def _checkpoint_dispatch_contract_mismatch(
+        cls,
+        cp: Any,
+        *,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        system_prompt_builder: Callable[..., str] | None,
+    ) -> str | None:
+        saved = cp.state.get("dispatch_contract")
+        current = cls._build_checkpoint_dispatch_contract(
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            system_prompt_builder=system_prompt_builder,
+        )
+        if saved == current:
+            return None
+        return (
+            "the current tools, canonical tool catalog, or direct system-prompt "
+            "identity differs from the interrupted run"
         )
 
     @staticmethod
@@ -3387,6 +3508,7 @@ class ParallelACExecutor:
         completed_levels: int,
         plan_total_stages: int,
         execution_plan: StagedExecutionPlan,
+        dispatch_contract: Mapping[str, Any],
         ac_statuses: dict[int, str],
         failed_indices: set[int],
         completed_count: int,
@@ -3442,6 +3564,7 @@ class ParallelACExecutor:
                     # resume can reject drift before combining old outcomes
                     # with a materially different write ordering.
                     "execution_plan": self._serialize_execution_plan(execution_plan),
+                    "dispatch_contract": dict(dispatch_contract),
                     "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                     "failed_indices": sorted(failed_indices),
                     "completed_count": completed_count,
@@ -3801,6 +3924,12 @@ class ParallelACExecutor:
             "messages_count": 0,
             "tool_calls_count": 0,
         }
+        dispatch_contract = self._build_checkpoint_dispatch_contract(
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            system_prompt_builder=system_prompt_builder,
+        )
 
         # Track AC statuses for TUI updates
         ac_statuses: dict[int, str] = dict.fromkeys(range(total_acs), "pending")
@@ -3965,6 +4094,47 @@ class ParallelACExecutor:
                             f"{plan_malformed}. Refusing to run fresh over work "
                             "whose side effects may already exist."
                         )
+                    elif cp.phase == "parallel_execution" and (
+                        dispatch_malformed := self._checkpoint_dispatch_contract_malformed(cp)
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.dispatch_contract_malformed",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=dispatch_malformed,
+                        )
+                        self._console.print(
+                            "[red]Refusing to start: this seed's persisted "
+                            "checkpoint has a missing or malformed dispatch "
+                            f"contract ({dispatch_malformed}). It was preserved "
+                            "for operator repair.[/red]"
+                        )
+                        raise CheckpointCorruptError(
+                            "Checkpoint dispatch contract is malformed: "
+                            f"{dispatch_malformed}. Refusing to run fresh over "
+                            "an interrupted execution."
+                        )
+                    elif cp.phase == "parallel_execution" and (
+                        dispatch_mismatch := self._checkpoint_dispatch_contract_mismatch(
+                            cp,
+                            tools=tools,
+                            tool_catalog=tool_catalog,
+                            system_prompt=system_prompt,
+                            system_prompt_builder=system_prompt_builder,
+                        )
+                    ):
+                        log.error(
+                            "parallel_executor.recovery.dispatch_contract_mismatch",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=dispatch_mismatch,
+                        )
+                        self._console.print(
+                            "[red]Refusing to resume: the live tools, tool "
+                            "schemas, or prompt authority differ from the "
+                            "interrupted run.[/red]"
+                        )
+                        raise CheckpointDispatchMismatchError(dispatch_mismatch)
                     elif cp.phase == "parallel_execution" and (
                         plan_mismatch := self._checkpoint_plan_mismatch(
                             cp, execution_plan=execution_plan
@@ -4313,6 +4483,7 @@ class ParallelACExecutor:
                         restored_prompt_guidance = cp.state.get("prompt_guidance")
             except (
                 CheckpointCorruptError,
+                CheckpointDispatchMismatchError,
                 CheckpointOwnershipError,
                 CheckpointPlanMismatchError,
                 CheckpointUnreadableError,
@@ -4488,6 +4659,7 @@ class ParallelACExecutor:
             completed_levels=resume_from_level,
             plan_total_stages=total_levels,
             execution_plan=execution_plan,
+            dispatch_contract=dispatch_contract,
             ac_statuses=ac_statuses,
             failed_indices=failed_indices,
             completed_count=completed_count,
@@ -4969,6 +5141,7 @@ class ParallelACExecutor:
                     completed_levels=level_idx + 1,
                     plan_total_stages=total_levels,
                     execution_plan=execution_plan,
+                    dispatch_contract=dispatch_contract,
                     ac_statuses=ac_statuses,
                     failed_indices=failed_indices,
                     completed_count=completed_count,
