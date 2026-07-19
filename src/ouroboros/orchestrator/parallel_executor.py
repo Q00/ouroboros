@@ -3568,9 +3568,10 @@ class ParallelACExecutor:
         completed_count = 0
         resume_from_level = 0
         # Round-16 finding #1: ACs the adopted checkpoint recorded as
-        # RESOLVED (completed/failed/skipped), keyed by stable AC index.
-        # This — not the plan-relative ``completed_levels`` count — is what
-        # decides which ACs are skipped on resume.
+        # RESOLVED (completed/failed), keyed by stable AC index. This — not
+        # the plan-relative ``completed_levels`` count — is what decides
+        # which ACs are skipped on resume. Round-17 finding #2: "skipped"
+        # is deliberately NOT resolved — see the restore loop below.
         checkpoint_resolved: dict[int, str] = {}
         # Round-14 finding #3: only a FULLY adopted recovery may trigger the
         # post-restoration prompt rebuild below; a partially restored state
@@ -3802,7 +3803,24 @@ class ParallelACExecutor:
                             execution_id = saved_execution_id
                         saved_completed_levels = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
-                            ac_statuses[int(idx)] = status
+                            # Round-17 finding #2 (BLOCKING): "skipped" is
+                            # not a terminal outcome of the AC itself — the
+                            # AC never ran; it was withheld because an
+                            # UPSTREAM dependency of the ORIGINAL run's plan
+                            # failed. That is a plan-structure-relative fact,
+                            # and the plan is re-derived on every launch
+                            # (exactly the class of stale plan-relative state
+                            # round-16 #1 stopped trusting for level counts).
+                            # Restore it as "pending" so THIS launch's
+                            # dependency cascade re-decides it under the
+                            # CURRENT plan: a still-failed dependency re-skips
+                            # it identically (``failed_indices`` is restored
+                            # below), while a vanished edge or a dependency
+                            # that succeeds this time gives it the genuine
+                            # dispatch it never had — an AC must never stay
+                            # permanently "failed-shaped" off a dependency
+                            # snapshot that no longer describes this run.
+                            ac_statuses[int(idx)] = "pending" if status == "skipped" else status
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
@@ -3829,10 +3847,17 @@ class ParallelACExecutor:
                         # run never resolved gets dispatched normally,
                         # whatever level this launch's plan re-grouped it
                         # into.
+                        # Round-17 finding #2: only outcomes the AC earned on
+                        # its OWN merits are terminal — "completed" and
+                        # "failed" ACs actually ran (or were definitively
+                        # rejected). "skipped" never appears here: the
+                        # restore loop above already re-opened it as
+                        # "pending" for the current plan's cascade to
+                        # re-decide.
                         checkpoint_resolved = {
                             idx: status
                             for idx, status in ac_statuses.items()
-                            if 0 <= idx < total_acs and status in ("completed", "failed", "skipped")
+                            if 0 <= idx < total_acs and status in ("completed", "failed")
                         }
                         resume_from_level = 0
                         for planned_stage in execution_plan.stages:
@@ -3933,11 +3958,14 @@ class ParallelACExecutor:
                         # NOT by slicing this launch's (possibly re-grouped)
                         # stages: an AC with no terminal status in the
                         # checkpoint gets NO restored result here and is
-                        # dispatched by the level loop below.
+                        # dispatched by the level loop below. (Round-17 #2:
+                        # "skipped" ACs are never reconstructed — they are
+                        # re-evaluated by the level loop's dependency
+                        # cascade, which re-skips or dispatches them under
+                        # the CURRENT plan.)
                         for ac_idx in sorted(checkpoint_resolved):
                             status = checkpoint_resolved[ac_idx]
                             is_completed = status == "completed"
-                            is_skipped = status == "skipped"
                             all_results.append(
                                 ACExecutionResult(
                                     ac_index=ac_idx,
@@ -3947,9 +3975,7 @@ class ParallelACExecutor:
                                         "[Restored from checkpoint]" if is_completed else ""
                                     ),
                                     error=(
-                                        "Skipped: dependency failed"
-                                        if is_skipped
-                                        else None
+                                        None
                                         if is_completed
                                         else "Failed (restored from checkpoint)"
                                     ),

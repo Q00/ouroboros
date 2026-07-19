@@ -3742,6 +3742,204 @@ class TestResumeSurvivesPlanRegrouping:
         assert await executor._checkpoint_from_terminal_run(cp, total_levels=3) is True
 
 
+def _seed_four_acs(goal: str = "Skipped AC re-evaluation") -> Seed:
+    return Seed(
+        goal=goal,
+        constraints=(),
+        acceptance_criteria=(
+            "Build base",
+            "Integrate feature",
+            "Independent work",
+            "Final verification",
+        ),
+        ontology_schema=OntologySchema(name="SkipCascade", description="Test schema"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+
+
+def _skip_cascade_plan(*, feature_depends_on_base: bool) -> StagedExecutionPlan:
+    """Stage shape [0], [1, 2], [3]; the 1->0 dependency edge (the one that
+    caused the original cascade skip) is present or dropped per the flag —
+    modelling a re-derived plan whose dependency structure changed."""
+    return StagedExecutionPlan(
+        nodes=(
+            ACNode(index=0, content="Build base"),
+            ACNode(
+                index=1,
+                content="Integrate feature",
+                depends_on=(0,) if feature_depends_on_base else (),
+            ),
+            ACNode(index=2, content="Independent work"),
+            ACNode(index=3, content="Final verification"),
+        ),
+        stages=(
+            ExecutionStage(index=0, ac_indices=(0,)),
+            ExecutionStage(index=1, ac_indices=(1, 2), depends_on_stages=(0,)),
+            ExecutionStage(index=2, ac_indices=(3,), depends_on_stages=(1,)),
+        ),
+    )
+
+
+class TestSkippedACsReevaluatedOnResume:
+    """Round-17 finding #2 (BLOCKING): an AC recorded as ``skipped`` never
+    RAN — it was withheld purely because an upstream dependency of the
+    ORIGINAL run's plan failed. That is a plan-structure-relative fact,
+    and the plan is re-derived by dependency analysis on every launch
+    (round-16 #1 already established plan-relative checkpoint state is
+    unsafe to trust across a re-derived plan). Treating ``skipped`` as a
+    permanently-resolved terminal state let a resumed run surface a
+    failed-shaped "Skipped: dependency failed" result with ZERO dispatch
+    even when the re-derived plan no longer contains the edge that caused
+    the skip — the forbidden outcome. ``skipped`` must be re-opened on
+    restore so the CURRENT plan's dependency cascade re-decides it: a
+    still-failed dependency re-skips it identically, a vanished edge (or
+    a dependency that succeeds this time) gives it the genuine dispatch
+    it never had."""
+
+    async def _crash_after_skip_recorded(self, tmp_path: Path, seed: Seed) -> Path:
+        """Run 1 under the edge-bearing plan: AC0 fails (level 1), so AC1 is
+        cascade-skipped while AC2 succeeds (level 2 completes — its
+        checkpoint durably records AC1 as ``skipped``), then the process
+        crashes dispatching AC3 (level 3)."""
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+        original_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await original_events.initialize()
+        original_ckpt = CheckpointStore(base_path=ckpt_path)
+        original_ckpt.initialize()
+        original = _executor(event_store=original_events, checkpoint_store=original_ckpt)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [
+                    ACExecutionResult(
+                        ac_index=0,
+                        ac_content="Build base",
+                        success=False,
+                        error="base build failed",
+                    )
+                ]
+            if batch == [2]:
+                return [ACExecutionResult(ac_index=2, ac_content="Independent work", success=True)]
+            raise RuntimeError("simulated process crash during level 3")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException, match="simulated process crash|unhandled errors"):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_skip_cascade_plan(feature_depends_on_base=True),
+            )
+        await original_events.close()
+
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        # The review's precondition: the cascade skip IS durably recorded.
+        assert saved.value.state["ac_statuses"] == {
+            "0": "failed",
+            "1": "skipped",
+            "2": "completed",
+            "3": "pending",
+        }
+        assert saved.value.state["failed_indices"] == [0]
+        return ckpt_path
+
+    async def _resume(
+        self, tmp_path: Path, ckpt_path: Path, seed: Seed, plan: StagedExecutionPlan
+    ) -> tuple[list[list[int]], object]:
+        recovered_events = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+        await recovered_events.initialize()
+        recovered = _executor(
+            event_store=recovered_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.append(batch)
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=str(seed.acceptance_criteria[idx]),
+                    success=True,
+                )
+                for idx in batch
+            ]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+        await recovered_events.close()
+        return dispatched, result
+
+    @pytest.mark.asyncio
+    async def test_skipped_ac_is_dispatched_when_replan_drops_the_failed_edge(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact scenario: AC1 was skipped ONLY because run 1's
+        plan made it depend on the failed AC0. The resumed launch re-derived
+        a plan WITHOUT that edge, so AC1's prerequisite no longer exists —
+        it must get the genuine dispatch it never had (and here succeeds),
+        never stay permanently skipped off the stale dependency snapshot."""
+        seed = _seed_four_acs()
+        ckpt_path = await self._crash_after_skip_recorded(tmp_path, seed)
+
+        dispatched, result = await self._resume(
+            tmp_path, ckpt_path, seed, _skip_cascade_plan(feature_depends_on_base=False)
+        )
+
+        # AC1 (previously skipped) and AC3 (never reached) are dispatched;
+        # AC0 (genuinely failed) and AC2 (genuinely completed) are not.
+        assert dispatched == [[1], [3]]
+        by_index = {r.ac_index: r for r in result.results}
+        assert by_index[1].success is True
+        assert by_index[1].error is None
+        # Pre-fix, AC1 was reconstructed as a terminal failed-shaped result
+        # with zero dispatch: error="Skipped: dependency failed".
+        assert by_index[0].error == "Failed (restored from checkpoint)"
+        assert by_index[2].success is True
+        assert by_index[2].final_message == "[Restored from checkpoint]"
+        assert by_index[3].success is True
+        # Recovery still rejoined the ORIGINAL run's aggregate.
+        assert result.execution_id == "exec-original"
+
+    @pytest.mark.asyncio
+    async def test_skipped_ac_is_reskipped_identically_when_dependency_still_failed(
+        self, tmp_path: Path
+    ) -> None:
+        """Control: when the re-derived plan KEEPS the 1->0 edge and AC0 is
+        still terminally failed, re-evaluating AC1 under the current plan's
+        cascade re-skips it identically — re-opening ``skipped`` never
+        re-dispatches a genuinely-still-blocked AC."""
+        seed = _seed_four_acs()
+        ckpt_path = await self._crash_after_skip_recorded(tmp_path, seed)
+
+        dispatched, result = await self._resume(
+            tmp_path, ckpt_path, seed, _skip_cascade_plan(feature_depends_on_base=True)
+        )
+
+        # Only AC3 (never reached by run 1) is dispatched; AC1 is freshly
+        # re-skipped by the cascade, not dispatched.
+        assert dispatched == [[3]]
+        by_index = {r.ac_index: r for r in result.results}
+        assert by_index[1].success is False
+        assert by_index[1].error == "Skipped: dependency failed"
+        assert by_index[0].error == "Failed (restored from checkpoint)"
+        assert by_index[3].success is True
+        assert result.execution_id == "exec-original"
+
+
 class _SwitchableFailStore(CheckpointStore):
     """Real store whose ``save`` outages are toggled by the test; successful
     saves record a deep copy of the persisted state and signal ``landed``."""
