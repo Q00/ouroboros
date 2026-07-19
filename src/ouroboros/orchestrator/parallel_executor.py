@@ -1101,6 +1101,9 @@ class ParallelACExecutor:
     #: coroutines sharing ``os.getpid()``, invisible to the round-12 PID
     #: probe); process death releases it implicitly, and the durable
     #: cross-process ownership marker keeps guarding across processes.
+    #: Only claimed for checkpoint-store-backed executions — the raced
+    #: object is the seed-keyed checkpoint; store-less invocations keep
+    #: their own execution aggregates and stay concurrency-safe by design.
     #: Mutated only in synchronous (no-await) sections, so asyncio's
     #: cooperative scheduling makes check-then-set atomic without a lock.
     _ACTIVE_SEED_LEASES: ClassVar[dict[str, str]] = {}
@@ -2844,9 +2847,21 @@ class ParallelACExecutor:
         infra-fatal launch conflict, zero AC work started) and is released
         in the same every-exit-path ``finally`` that drains durable writes,
         so a crash/cancel can never leave the seed permanently walled off.
+
+        Scoped to checkpoint-store-backed executions, exactly like the
+        round-10/12 gates it complements (both live inside ``if
+        self._checkpoint_store``): the object being raced is the SEED-KEYED
+        checkpoint and the execution-aggregate adoption it drives. Without
+        a checkpoint store each invocation keeps its own execution_id and
+        aggregate — concurrent same-seed sessions are then isolated by
+        design (a shape the session layer explicitly supports), and there
+        is no shared seed-keyed durable object for the lease to protect.
         """
-        lease_seed_id = self._checkpoint_seed_id(seed, session_id)
-        lease_token = self._acquire_seed_execution_lease(lease_seed_id)
+        lease_seed_id: str | None = None
+        lease_token: str | None = None
+        if self._checkpoint_store:
+            lease_seed_id = self._checkpoint_seed_id(seed, session_id)
+            lease_token = self._acquire_seed_execution_lease(lease_seed_id)
         try:
             return await self._execute_parallel_impl(
                 seed,
@@ -2862,7 +2877,8 @@ class ParallelACExecutor:
                 system_prompt_builder=system_prompt_builder,
             )
         finally:
-            self._release_seed_execution_lease(lease_seed_id, lease_token)
+            if lease_seed_id is not None and lease_token is not None:
+                self._release_seed_execution_lease(lease_seed_id, lease_token)
             # Bounded (never the full parked-cadence budget), and safe to run
             # twice: the happy path drains before aggregating results, leaving
             # nothing pending for this second call.

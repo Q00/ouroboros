@@ -2122,6 +2122,66 @@ class TestInProcessConcurrentSeedExecutionRefused:
         )
         assert result.all_succeeded
 
+    @pytest.mark.asyncio
+    async def test_storeless_concurrent_same_seed_executions_stay_allowed(self) -> None:
+        """The lease is scoped to checkpoint-store-backed executions (like
+        the round-10/12 gates it complements): without a store there is no
+        seed-keyed checkpoint to race — each invocation keeps its own
+        execution aggregate, the concurrent-session isolation the session
+        layer explicitly supports (see
+        ``test_concurrent_session_isolation`` in the e2e suite). Both
+        concurrent invocations must succeed."""
+        seed = _seed("Store-less concurrency stays allowed")
+
+        gate = asyncio.Event()
+        started = asyncio.Event()
+
+        async def _blocking_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            started.set()
+            await gate.wait()
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        run1 = ParallelACExecutor(
+            adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            cross_harness_redispatch=False,
+        )
+        run1._run_batch_with_verify_and_retry = AsyncMock(side_effect=_blocking_stage_runner)
+        run2 = ParallelACExecutor(
+            adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            cross_harness_redispatch=False,
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+        )
+
+        task1 = asyncio.create_task(
+            run1.execute_parallel(
+                seed,
+                session_id="session-a",
+                execution_id="exec-a",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=10)
+        second = await run2.execute_parallel(
+            seed,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        gate.set()
+        first = await asyncio.wait_for(task1, timeout=10)
+        assert first.all_succeeded
+        assert second.all_succeeded
+
 
 class TestRecoveredPromptReflectsOriginalRunSemantics:
     """Round-14 finding #3 (BLOCKING): the runner builds the system prompt
