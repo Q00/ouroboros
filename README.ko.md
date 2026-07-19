@@ -37,7 +37,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/b212f0e7-e722-4e50-8bca-3ae3f7b373c2" controls muted autoplay loop playsinline width="820"></video>
+  <video src="https://github.com/user-attachments/assets/52533fbb-bc39-4238-a0ad-6f89b0159968" controls muted autoplay loop playsinline width="820"></video>
   <br/>
   <sub><em>단 한 줄 &mdash; <code>ooo interview</code> &mdash; 이 막연한 아이디어를 검증된 명세로 바꾸는 전문 에이전트 팀을 펼쳐냅니다.</em></sub>
 </p>

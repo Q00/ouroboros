@@ -38,7 +38,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/b212f0e7-e722-4e50-8bca-3ae3f7b373c2" controls muted autoplay loop playsinline width="820"></video>
+  <video src="https://github.com/user-attachments/assets/52533fbb-bc39-4238-a0ad-6f89b0159968" controls muted autoplay loop playsinline width="820"></video>
   <br/>
   <sub><em>One line &mdash; <code>ooo interview</code> &mdash; fans out a team of specialist agents that turn a vague idea into a verified spec.</em></sub>
 </p>
