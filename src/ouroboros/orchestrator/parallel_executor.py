@@ -9268,6 +9268,16 @@ Respond with either ATOMIC or the structured JSON object only.
             expected_backend=getattr(self._adapter, "runtime_backend", None),
             expected_approval_mode=getattr(self._adapter, "permission_mode", None),
         )
+        runtime_handle = self._remember_ac_runtime_handle(
+            ac_index,
+            runtime_handle,
+            execution_context_id=execution_context_id,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            node_identity=node_identity,
+            retry_attempt=retry_attempt,
+        )
         await self._event_emitter.emit_ac_capsule_compiled(
             runtime_identity=runtime_identity,
             session_id=session_id,

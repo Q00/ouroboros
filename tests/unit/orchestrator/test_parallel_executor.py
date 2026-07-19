@@ -3152,7 +3152,6 @@ class TestInfraFatalExemption:
             console=MagicMock(),
             enable_decomposition=False,
         )
-
         result = await executor._execute_atomic_ac(
             ac_index=0,
             ac_content="Implement AC 1",
@@ -4553,6 +4552,100 @@ class TestParallelACExecutor:
         assert result.session_id == "opencode-session-1"
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == "opencode-session-1"
+
+    @pytest.mark.asyncio
+    async def test_provider_handle_keeps_capsule_metadata_when_runtime_returns_none(self) -> None:
+        """Bare provider handles inherit the bound same-attempt authority metadata."""
+
+        class _BareHandleRuntime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            async def execute_task(self, **_kwargs: object):
+                yield AgentMessage(
+                    type="system",
+                    content="session ready",
+                    data={"session_id": "bare-provider-session"},
+                    resume_handle=RuntimeHandle(
+                        backend="codex_cli",
+                        kind="agent_runtime",
+                        native_session_id="bare-provider-session",
+                        cwd="/tmp/project",
+                        approval_mode="acceptEdits",
+                        metadata={},
+                    ),
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_BareHandleRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        node_identity = ExecutionNodeIdentity.root(
+            execution_context_id="session-bare-provider",
+            ac_index=0,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Preserve capsule authority on provider handles",
+            session_id="session-bare-provider",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+            node_identity=node_identity,
+        )
+
+        assert result.runtime_handle is not None
+        fingerprint = result.runtime_handle.metadata["ac_capsule_fingerprint"]
+        expected_identity = build_ac_runtime_identity(
+            0,
+            execution_context_id="session-bare-provider",
+            node_identity=node_identity,
+            retry_attempt=0,
+        )
+        assert (
+            result.runtime_handle.metadata["session_attempt_id"]
+            == expected_identity.session_attempt_id
+        )
+        started = next(
+            event for event in appended_events if event.type == "execution.session.started"
+        )
+        assert started.data["runtime"]["metadata"]["ac_capsule_fingerprint"] == fingerprint
+
+        replay_store, replay_events = _make_replaying_event_store()
+        replay_events.extend(
+            event
+            for event in appended_events
+            if event.type in {"execution.ac.capsule.compiled", "execution.session.started"}
+        )
+        restarted = ParallelACExecutor(
+            adapter=_BareHandleRuntime(),
+            event_store=replay_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        restored = await restarted._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-bare-provider",
+            retry_attempt=0,
+            node_identity=node_identity,
+            expected_capsule_fingerprint=fingerprint,
+            expected_capsule_workspace=os.path.realpath("/tmp/project"),
+        )
+        assert restored is not None
+        assert restored.native_session_id == "bare-provider-session"
+        assert restored.metadata["ac_capsule_fingerprint"] == fingerprint
 
     @pytest.mark.asyncio
     async def test_atomic_ac_does_not_dispatch_when_capsule_persistence_fails(self) -> None:

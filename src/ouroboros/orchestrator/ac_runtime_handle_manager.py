@@ -943,7 +943,14 @@ class ACRuntimeHandleManager:
         previous_handle: RuntimeHandle | None,
     ) -> RuntimeHandle:
         """Carry forward logical turn state and record same-attempt recovery linkage."""
-        metadata = dict(runtime_handle.metadata)
+        metadata = (
+            {
+                **dict(previous_handle.metadata),
+                **dict(runtime_handle.metadata),
+            }
+            if previous_handle is not None
+            else dict(runtime_handle.metadata)
+        )
         metadata.setdefault("turn_number", cls._runtime_turn_number(runtime_handle))
         metadata.setdefault(
             "turn_id",
