@@ -4878,6 +4878,89 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         assert recovered is None
 
     @pytest.mark.asyncio
+    async def test_same_attempt_contradictory_finalized_markers_fail_closed(self) -> None:
+        """One attempt cannot durably finalize as both success and failure."""
+        from ouroboros.events.base import BaseEvent
+
+        def _marker(*, success: bool, outcome: str) -> BaseEvent:
+            return BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-original",
+                data={
+                    "execution_id": "exec-original",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "ac_index": 0,
+                    "retry_attempt": 0,
+                    "success": success,
+                    "outcome": outcome,
+                    "is_decomposed": False,
+                    "forced_frontier_routing": False,
+                    "context_summary": None,
+                },
+            )
+
+        event_store = AsyncMock()
+        event_store.replay.return_value = [
+            _marker(success=True, outcome="succeeded"),
+            _marker(success=False, outcome="failed"),
+        ]
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        recovered = await executor._reconstruct_finalized_outcomes(
+            execution_id="exec-original",
+            total_acs=1,
+        )
+
+        assert recovered is None
+
+    @pytest.mark.asyncio
+    async def test_same_attempt_identical_finalized_markers_are_idempotent(self) -> None:
+        """A retried append of the same durable marker is harmless."""
+        from ouroboros.events.base import BaseEvent
+
+        marker = BaseEvent(
+            type="execution.ac.outcome_finalized",
+            aggregate_type="execution",
+            aggregate_id="exec-original",
+            data={
+                "execution_id": "exec-original",
+                "session_id": "s1",
+                "root_ac_index": 0,
+                "ac_index": 0,
+                "retry_attempt": 0,
+                "success": True,
+                "outcome": "succeeded",
+                "is_decomposed": False,
+                "forced_frontier_routing": False,
+                "context_summary": None,
+            },
+        )
+        event_store = AsyncMock()
+        event_store.replay.return_value = [marker, marker]
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        recovered = await executor._reconstruct_finalized_outcomes(
+            execution_id="exec-original",
+            total_acs=1,
+        )
+
+        assert recovered is not None
+        assert recovered[0].success is True
+        assert recovered[0].retry_attempt == 0
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "corruption",
         [

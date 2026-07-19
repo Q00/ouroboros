@@ -4198,16 +4198,45 @@ class ParallelACExecutor:
             )
             if not context_valid:
                 return None
+            candidate = _RecoveredFinalizedOutcome(
+                retry_attempt=attempt,
+                success=success,
+                outcome=outcome,
+                is_decomposed=is_decomposed,
+                forced_frontier_routing=forced_frontier_routing,
+                context_summary=context_summary,
+            )
             previous = latest.get(ac_idx)
-            if previous is None or attempt >= previous.retry_attempt:
-                latest[ac_idx] = _RecoveredFinalizedOutcome(
-                    retry_attempt=attempt,
-                    success=success,
-                    outcome=outcome,
-                    is_decomposed=is_decomposed,
-                    forced_frontier_routing=forced_frontier_routing,
-                    context_summary=context_summary,
-                )
+            if previous is not None and attempt == previous.retry_attempt:
+                # Durable retries and mixed-version writers can append the same
+                # attempt more than once. Core outcome fields must agree; no log
+                # ordering can make a success and failure for one attempt both
+                # authoritative. Context is backward-compatible: a legacy marker
+                # may omit it, but the latest compatible marker remains
+                # authoritative so a newer context-less writer cannot silently
+                # inherit evidence it did not persist.
+                if (
+                    candidate.success,
+                    candidate.outcome,
+                    candidate.is_decomposed,
+                    candidate.forced_frontier_routing,
+                ) != (
+                    previous.success,
+                    previous.outcome,
+                    previous.is_decomposed,
+                    previous.forced_frontier_routing,
+                ):
+                    return None
+                if (
+                    candidate.context_summary is not None
+                    and previous.context_summary is not None
+                    and candidate.context_summary != previous.context_summary
+                ):
+                    return None
+                latest[ac_idx] = candidate
+                continue
+            if previous is None or attempt > previous.retry_attempt:
+                latest[ac_idx] = candidate
 
         for ac_idx, recovered in tuple(latest.items()):
             if (ac_idx, recovered.retry_attempt) in exhausted_attempts:
