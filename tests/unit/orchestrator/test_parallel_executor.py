@@ -5178,8 +5178,7 @@ class TestParallelACExecutor:
                 matching = [
                     event
                     for event in self.events
-                    if event.aggregate_type == aggregate_type
-                    and event.aggregate_id == aggregate_id
+                    if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
                 ]
                 new_events = matching[last_row_id:]
                 self.returned_events += len(new_events)

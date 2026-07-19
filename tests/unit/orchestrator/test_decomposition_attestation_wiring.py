@@ -1060,17 +1060,19 @@ class TestPerChildArtifactSliceOracle:
         root_contract = ACSuccessContract(
             expected_artifacts=("out_a.txt", "out_b.txt"),
         )
-        root_contract_digest = "sha256:" + hashlib.sha256(
-            json.dumps(
-                root_contract.to_contract_data(),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
-        ).hexdigest()
+        root_contract_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    root_contract.to_contract_data(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
         assert all(
-            event.data["capsule_manifest"]["success_contract_digest"]
-            != root_contract_digest
+            event.data["capsule_manifest"]["success_contract_digest"] != root_contract_digest
             for event in capsule_events
         )
 
