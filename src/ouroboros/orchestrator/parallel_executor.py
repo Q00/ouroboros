@@ -1915,6 +1915,7 @@ class ParallelACExecutor:
         retry_attempt: int = 0,
         expected_capsule_fingerprint: str | None = None,
         expected_capsule_workspace: str | None = None,
+        runtime_attests_realtime_effects: bool = False,
     ) -> RuntimeHandle | None:
         return await self._ac_runtime_handle_manager._load_persisted_ac_runtime_handle(
             ac_index,
@@ -1926,6 +1927,7 @@ class ParallelACExecutor:
             retry_attempt=retry_attempt,
             expected_capsule_fingerprint=expected_capsule_fingerprint,
             expected_capsule_workspace=expected_capsule_workspace,
+            runtime_attests_realtime_effects=runtime_attests_realtime_effects,
         )
 
     def _remember_ac_runtime_handle(
@@ -3003,12 +3005,18 @@ class ParallelACExecutor:
             ),
             "runtime_execution_authority": self._runtime_execution_authority,
             "atomic_verifier_authority": self._atomic_verifier_authority,
-            # Whether Synapse signal delivery is wired in. An executor WITH a hub
-            # registers/replays durable signals and may run provider follow-up
-            # turns; one WITHOUT it never does. That changes acceptance-affecting
-            # execution semantics, so it must change authority — otherwise a
-            # restart could resume the same capsule under different signal policy.
-            "session_signal_hub_enabled": self._session_signal_hub is not None,
+            # Synapse signal delivery policy. A hub changes acceptance-affecting
+            # semantics (it may run provider follow-up turns), and — critically —
+            # only a hub with a DURABLE event store replays cross-process queued
+            # signals on restart, so the durable-relay mode must participate in
+            # authority, not merely whether a hub is present.
+            "session_signal_hub": {
+                "enabled": self._session_signal_hub is not None,
+                "durable_relay": (
+                    self._session_signal_hub is not None
+                    and getattr(self._session_signal_hub, "event_store", None) is not None
+                ),
+            },
             # Effective sibling concurrency is shared-workspace execution
             # semantics: concurrency 1 vs 8 interleave sibling mutations
             # differently, so a resume must not silently change it.
@@ -9877,6 +9885,16 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             expected_capsule_fingerprint=capsule.fingerprint,
             expected_capsule_workspace=capsule.workspace,
+            # Only a runtime that streams tool effects in real time makes the
+            # loader's recorded-effect check authoritative; an opaque runtime's
+            # active head must fail closed rather than resume-and-resend.
+            runtime_attests_realtime_effects=bool(
+                getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "realtime_tool_effect_visibility",
+                    False,
+                )
+            ),
         )
         if persisted_runtime_handle is not None:
             persisted_runtime_handle = bind_capsule_to_runtime_handle(

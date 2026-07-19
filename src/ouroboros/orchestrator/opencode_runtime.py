@@ -260,6 +260,44 @@ class OpenCodeRuntime:
         """
         return self._runtime_handle_backend
 
+    def execution_identity_contract(self) -> dict[str, Any]:
+        """Return OpenCode dispatch identity that controls PRE-provider routing.
+
+        ``opencode_mode`` and ``llm_backend`` choose how skills resolve and whether
+        MCP/plugin dispatch is used, ``skills_dir`` selects which custom skills are
+        available, and a custom ``skill_dispatcher`` replaces the default handler —
+        all before the provider runs. These must participate in capsule authority
+        so a resume cannot execute through a different handler/provider route under
+        the same capsule. A custom dispatcher contributes a bounded, process-local
+        identity (its own ``identity()`` if provided, else its type).
+        """
+
+        def _text(value: object) -> str | None:
+            return value.strip() if isinstance(value, str) and value.strip() else None
+
+        dispatcher = self._skill_dispatcher
+        dispatcher_identity: object | None = None
+        if dispatcher is not None:
+            identity_fn = getattr(dispatcher, "identity", None)
+            if callable(identity_fn):
+                try:
+                    dispatcher_identity = identity_fn()
+                except Exception:
+                    dispatcher_identity = None
+            if dispatcher_identity is None:
+                dispatcher_identity = {
+                    "type": f"{type(dispatcher).__module__}.{type(dispatcher).__qualname__}"
+                }
+
+        return {
+            "kind": "opencode_v1",
+            "constructor_model": self._normalize_model(self._model),
+            "opencode_mode": _text(self._opencode_mode),
+            "llm_backend": _text(self._llm_backend),
+            "skills_dir": str(self._skills_dir) if self._skills_dir else None,
+            "skill_dispatcher": dispatcher_identity,
+        }
+
     @property
     def capabilities(self) -> RuntimeCapabilities:
         # OpenCode composes the system prompt and tool guidance into the user

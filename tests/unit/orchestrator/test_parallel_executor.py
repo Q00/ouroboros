@@ -1555,6 +1555,66 @@ def test_watchdog_identity_binds_total_turn_timeout() -> None:
     assert fast != slow
 
 
+def test_opencode_execution_identity_contract_binds_dispatch_policy() -> None:
+    """R12 blocker #2: OpenCode pre-provider dispatch policy participates in identity."""
+    from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
+
+    plugin = OpenCodeRuntime(opencode_mode="plugin", llm_backend="x")
+    default = OpenCodeRuntime(opencode_mode="default", llm_backend="x")
+    assert plugin.execution_identity_contract()["opencode_mode"] == "plugin"
+    assert plugin.execution_identity_contract() != default.execution_identity_contract()
+
+    # A custom skill dispatcher contributes a bounded, process-local identity.
+    class _Dispatcher:
+        pass
+
+    with_dispatcher = OpenCodeRuntime(
+        opencode_mode="plugin", llm_backend="x", skill_dispatcher=_Dispatcher()
+    )
+    contract = with_dispatcher.execution_identity_contract()
+    assert contract["skill_dispatcher"] is not None
+    assert "_Dispatcher" in contract["skill_dispatcher"]["type"]
+
+
+def test_capsule_authority_binds_signal_hub_durable_relay_mode() -> None:
+    """R12 blocker #3: a durable-relay hub differs in authority from a non-durable one.
+
+    Only a hub with a durable event store replays cross-process queued signals, so
+    it must not share a capsule fingerprint with a hub that cannot.
+    """
+    from ouroboros.orchestrator.synapse import SessionSignalHub
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+    def _scope(hub: object | None) -> str:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            session_signal_hub=hub,
+        )
+        return executor._build_ac_capsule_authority_scope(
+            execution_context_id="exec-1",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+            is_sub_ac=False,
+            decomposition_trustworthy=False,
+            force_frontier_routing=False,
+            investment_spec=None,
+        )
+
+    non_durable = _scope(SessionSignalHub(event_store=None))
+    durable = _scope(SessionSignalHub(event_store=MagicMock()))
+    assert non_durable != durable
+    assert non_durable != _scope(None)
+
+
 def test_capsule_authority_binds_execution_semantic_policy() -> None:
     """R11: every declared execution-semantic knob participates in capsule authority."""
 
@@ -5567,6 +5627,7 @@ class TestParallelACExecutor:
             node_identity=node_identity,
             expected_capsule_fingerprint=fingerprint,
             expected_capsule_workspace=os.path.realpath("/tmp/project"),
+            runtime_attests_realtime_effects=True,
         )
         assert restored is not None
         assert restored.native_session_id == "bare-provider-session"
@@ -5856,6 +5917,7 @@ class TestParallelACExecutor:
             retry_attempt=0,
             expected_capsule_fingerprint=persisted_capsule.fingerprint,
             expected_capsule_workspace=persisted_capsule.workspace,
+            runtime_attests_realtime_effects=True,
         )
 
         assert restored is not None
@@ -5916,6 +5978,7 @@ class TestParallelACExecutor:
             retry_attempt=0,
             expected_capsule_fingerprint=persisted_capsule.fingerprint,
             expected_capsule_workspace=persisted_capsule.workspace,
+            runtime_attests_realtime_effects=True,
         )
 
         assert restored is not None
@@ -6177,6 +6240,7 @@ class TestParallelACExecutor:
             retry_attempt=0,
             expected_capsule_fingerprint=persisted_capsule.fingerprint,
             expected_capsule_workspace=persisted_capsule.workspace,
+            runtime_attests_realtime_effects=True,
         )
 
         assert restored is not None
@@ -6528,6 +6592,87 @@ class TestParallelACExecutor:
             )
 
     @pytest.mark.asyncio
+    async def test_capsule_loader_fails_closed_on_opaque_active_resume(self) -> None:
+        """R12 blocker #1: an opaque runtime cannot resume an active head.
+
+        With NO recorded effect but a resumable handle, an opaque runtime
+        (default ``realtime_tool_effect_visibility=False``) may still have applied
+        an effect before any event was emitted, so resuming (which resends the AC
+        prompt) fails closed; an attesting runtime resumes.
+        """
+        runtime = SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            executor=executor,
+            ac_index=0,
+            ac_content="Opaque active head must not resume",
+            session_id="session-opaque-active",
+            seed_goal="Ship",
+        )
+        dispatch_id = "4" * 32
+        handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-opaque",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
+            },
+        )
+        # Resumable active head, NO recorded tool effect.
+        event_store.replay.return_value = [
+            _compiled_capsule_event(runtime_identity, persisted_capsule),
+            _dispatched_capsule_event(
+                runtime_identity,
+                persisted_capsule,
+                dispatch_id=dispatch_id,
+                dispatch_kind="primary",
+            ),
+            _dispatch_lifecycle_event(
+                runtime_identity,
+                "execution.session.started",
+                dispatch_id=dispatch_id,
+                runtime_handle=handle,
+            ),
+        ]
+
+        # Opaque runtime (no attestation) → fail closed.
+        with pytest.raises(AmbiguousACExecutionError, match="does not attest real-time"):
+            await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="session-opaque-active",
+                retry_attempt=0,
+                expected_capsule_fingerprint=persisted_capsule.fingerprint,
+                expected_capsule_workspace=persisted_capsule.workspace,
+            )
+
+        # A runtime that attests real-time effect visibility resumes.
+        restored = await executor._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="session-opaque-active",
+            retry_attempt=0,
+            expected_capsule_fingerprint=persisted_capsule.fingerprint,
+            expected_capsule_workspace=persisted_capsule.workspace,
+            runtime_attests_realtime_effects=True,
+        )
+        assert restored is not None
+        assert restored.native_session_id == "codex-opaque"
+
+    @pytest.mark.asyncio
     async def test_capsule_loader_follows_explicit_recovery_session_successor(self) -> None:
         """A durable recovered linkage supersedes its failed provider session."""
 
@@ -6601,6 +6746,7 @@ class TestParallelACExecutor:
             retry_attempt=0,
             expected_capsule_fingerprint=persisted_capsule.fingerprint,
             expected_capsule_workspace=persisted_capsule.workspace,
+            runtime_attests_realtime_effects=True,
         )
 
         assert restored is not None
@@ -6675,6 +6821,7 @@ class TestParallelACExecutor:
                 retry_attempt=0,
                 expected_capsule_fingerprint=persisted_capsule.fingerprint,
                 expected_capsule_workspace=persisted_capsule.workspace,
+                runtime_attests_realtime_effects=True,
             )
 
     @pytest.mark.asyncio
@@ -6972,6 +7119,7 @@ class TestParallelACExecutor:
                 retry_attempt=0,
                 expected_capsule_fingerprint=persisted_capsule.fingerprint,
                 expected_capsule_workspace=persisted_capsule.workspace,
+                runtime_attests_realtime_effects=True,
             )
 
     @pytest.mark.asyncio
@@ -14890,6 +15038,10 @@ class TestParallelACExecutor:
         """A fresh executor should rehydrate the same-attempt runtime handle from events."""
 
         class _StubPersistedResumeRuntime:
+            # Attests real-time tool-effect visibility so an active head may resume
+            # (the opaque-runtime guard fails such resumes closed otherwise).
+            capabilities = replace(FULL_CAPABILITIES, realtime_tool_effect_visibility=True)
+
             def __init__(self) -> None:
                 self.calls: list[dict[str, object]] = []
                 self._runtime_handle_backend = "opencode"
@@ -15246,6 +15398,7 @@ class TestParallelACExecutor:
                 retry_attempt=0,
                 expected_capsule_fingerprint=persisted_capsule.fingerprint,
                 expected_capsule_workspace=persisted_capsule.workspace,
+                runtime_attests_realtime_effects=True,
             )
 
     @pytest.mark.asyncio

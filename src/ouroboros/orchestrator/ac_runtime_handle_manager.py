@@ -660,6 +660,7 @@ class ACRuntimeHandleManager:
         retry_attempt: int = 0,
         expected_capsule_fingerprint: str | None = None,
         expected_capsule_workspace: str | None = None,
+        runtime_attests_realtime_effects: bool = False,
     ) -> RuntimeHandle | None:
         """Load the latest reusable AC-scoped runtime handle from execution events."""
         runtime_identity = self._resolve_ac_runtime_identity(
@@ -1277,6 +1278,21 @@ class ACRuntimeHandleManager:
                         "non-idempotent effects"
                     )
                 active_dispatch_candidates = candidate_handles[active_dispatch_id]
+                # Opaque runtimes (no real-time tool-effect visibility) may have
+                # applied a non-idempotent effect BEFORE any event was emitted, so
+                # the absence of a recorded effect above does not prove none
+                # occurred. Resuming an active head resends the original AC prompt
+                # as a new turn, so unless the runtime attests it streams effects in
+                # real time (letting the effect-check above be authoritative), an
+                # active, resumable head must fail closed rather than risk a
+                # duplicate turn.
+                if active_dispatch_candidates and not runtime_attests_realtime_effects:
+                    raise AmbiguousACExecutionError(
+                        "AC active dispatch head is resumable on a runtime that does not attest "
+                        "real-time tool-effect visibility; refusing to resume because an opaque "
+                        "effect may already have occurred and replaying the AC prompt would "
+                        "start another provider turn"
+                    )
                 if not active_dispatch_candidates:
                     if active_dispatch_id in failed_dispatches:
                         raise AmbiguousACExecutionError(

@@ -111,33 +111,28 @@ def bound_verify_gate_outcome(outcome: Mapping[str, Any]) -> dict[str, Any]:
     # fields are already char-capped well under the byte cap, so a base outcome
     # with no artifacts always fits.
     prior_and_char_dropped = (len(raw_missing) - len(bounded_missing)) + prior_omitted
-    base: dict[str, Any] = {
-        "passed": passed,
-        "reason": bounded_reason,
-        "output_tail": bounded_output,
-        "missing_artifacts": [],
-        # Reserve room for the counter so adding it later cannot overflow.
-        "missing_artifacts_omitted": prior_and_char_dropped + len(bounded_missing),
-    }
-    used = _byte_size(base)
+
+    def _build(included: list[str]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "passed": passed,
+            "reason": bounded_reason,
+            "output_tail": bounded_output,
+            "missing_artifacts": included,
+        }
+        omitted = prior_and_char_dropped + (len(bounded_missing) - len(included))
+        if omitted > 0:
+            payload["missing_artifacts_omitted"] = omitted
+        return payload
+
+    # Add entries one at a time, measuring the ACTUAL serialized payload each time
+    # (including the omission counter) rather than a per-entry estimate — an
+    # estimate could admit one entry too many and overrun the byte cap by a byte.
     included: list[str] = []
     for entry in bounded_missing:
-        entry_bytes = len(json.dumps(entry, ensure_ascii=False).encode("utf-8")) + 1
-        if used + entry_bytes > _MAX_VERIFY_OUTCOME_BYTES:
+        if _byte_size(_build([*included, entry])) > _MAX_VERIFY_OUTCOME_BYTES:
             break
         included.append(entry)
-        used += entry_bytes
-
-    total_omitted = prior_and_char_dropped + (len(bounded_missing) - len(included))
-    result: dict[str, Any] = {
-        "passed": passed,
-        "reason": bounded_reason,
-        "output_tail": bounded_output,
-        "missing_artifacts": included,
-    }
-    if total_omitted > 0:
-        result["missing_artifacts_omitted"] = total_omitted
-    return result
+    return _build(included)
 
 
 class ExecutionEventEmitter:
