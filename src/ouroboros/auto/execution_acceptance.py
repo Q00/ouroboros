@@ -227,6 +227,25 @@ def _restore_surviving_acceptance_specs(
     remaining = list(original)
     restored: list[AcceptanceCriterionInput] = []
     for text in filtered:
+        canonical_sources = [
+            (index, criterion)
+            for index, (criterion, original_text) in enumerate(remaining)
+            if isinstance(criterion, AcceptanceCriterionSpec)
+            and _structured_criterion_normalizes_to(original_text, text)
+        ]
+        if canonical_sources:
+            # A canonical hello_auto AC can represent several source criteria.
+            # Keep one structured entry per source, in source order: the model
+            # has scalar evidence fields, so collapsing them would necessarily
+            # discard contracts or invent an unsafe merge policy.
+            for index, _criterion in reversed(canonical_sources):
+                remaining.pop(index)
+            restored.extend(
+                criterion.model_copy(update={"description": text})
+                for _index, criterion in canonical_sources
+            )
+            continue
+
         exact_index = next(
             (
                 index
@@ -238,18 +257,6 @@ def _restore_surviving_acceptance_specs(
         if exact_index is not None:
             criterion, _original_text = remaining.pop(exact_index)
             restored.append(criterion)
-            continue
-
-        canonical_sources = [
-            (index, criterion)
-            for index, (criterion, original_text) in enumerate(remaining)
-            if isinstance(criterion, AcceptanceCriterionSpec)
-            and _structured_criterion_normalizes_to(original_text, text)
-        ]
-        if len(canonical_sources) == 1:
-            index, criterion = canonical_sources[0]
-            remaining.pop(index)
-            restored.append(criterion.model_copy(update={"description": text}))
             continue
 
         restored.append(text)

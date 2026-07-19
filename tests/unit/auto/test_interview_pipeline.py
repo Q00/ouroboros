@@ -1270,24 +1270,45 @@ async def test_pipeline_preserves_structured_contract_through_normalization(tmp_
         "hello_auto returns exactly hello from ooo auto and "
         "uv run pytest tests/test_hello_auto.py passes."
     )
-    criterion = AcceptanceCriterionSpec(
-        description=(
-            "A command/API check returns stable observable output or artifacts proving "
-            "the original requirement for `hello_auto.py` defines `hello_auto() -> str` "
-            "returning exactly `hello from ooo auto`."
-        ),
-        semantic_ac_key="ac_0123456789abcdef",
-        verify_command="uv run pytest tests/test_hello_auto.py",
-        expected_artifacts=("hello_auto.py", "tests/test_hello_auto.py"),
-        output_assertion="1 passed",
-        investment=InvestmentSpec(
-            difficulty="low",
-            stakes="medium",
-            provenance="declared",
-            confidence="high",
-        ),
+    criteria = tuple(
+        AcceptanceCriterionSpec(
+            description=description,
+            semantic_ac_key=semantic_ac_key,
+            verify_command=verify_command,
+            expected_artifacts=expected_artifacts,
+            output_assertion=output_assertion,
+            investment=InvestmentSpec(
+                difficulty="low",
+                stakes="medium",
+                provenance="declared",
+                confidence="high",
+            ),
+        )
+        for description, semantic_ac_key, verify_command, expected_artifacts, output_assertion in (
+            (
+                "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+                "ac_0123456789abcdef",
+                "python -m pytest tests/test_return.py",
+                ("hello_auto.py",),
+                "return value matches",
+            ),
+            (
+                "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+                "ac_1123456789abcdef",
+                "python -m pytest tests/test_import.py",
+                ("tests/test_hello_auto.py",),
+                "import assertion passes",
+            ),
+            (
+                "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+                "ac_2123456789abcdef",
+                "uv run pytest tests/test_hello_auto.py",
+                (".pytest_cache",),
+                "1 passed",
+            ),
+        )
     )
-    generated_seed = _seed(ac=(criterion,)).model_copy(
+    generated_seed = _seed(ac=criteria).model_copy(
         update={"goal": goal, "constraints": ("Only edit the two hello_auto files",)}
     )
     executed: list[Seed] = []
@@ -1352,13 +1373,15 @@ async def test_pipeline_preserves_structured_contract_through_normalization(tmp_
 
     assert result.status == "complete", result.blocker
     assert len(executed) == 1
-    normalized = executed[0].acceptance_criteria[0]
-    assert isinstance(normalized, AcceptanceCriterionSpec)
-    assert normalized.semantic_ac_key == criterion.semantic_ac_key
-    assert normalized.verify_command == criterion.verify_command
-    assert normalized.expected_artifacts == criterion.expected_artifacts
-    assert normalized.output_assertion == criterion.output_assertion
-    assert normalized.investment == criterion.investment
+    normalized_criteria = executed[0].acceptance_criteria
+    assert len(normalized_criteria) == len(criteria)
+    for normalized, original in zip(normalized_criteria, criteria, strict=True):
+        assert isinstance(normalized, AcceptanceCriterionSpec)
+        assert normalized.semantic_ac_key == original.semantic_ac_key
+        assert normalized.verify_command == original.verify_command
+        assert normalized.expected_artifacts == original.expected_artifacts
+        assert normalized.output_assertion == original.output_assertion
+        assert normalized.investment == original.investment
 
 
 def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
