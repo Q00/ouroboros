@@ -1236,9 +1236,11 @@ class OrchestratorRunner:
 
         ``orchestrator.session.started`` is the authoritative ownership record for
         ``seed_id``, canonical project/workspace, protocol version, and resolved
-        routing fingerprint. EventStore returns newest first, so selected prior
-        runs are the most recent comparable experiment runs. Any missing legacy
-        metadata falls back to current-only rather than mixing a global DB cohort.
+        routing fingerprint. ``execution.plan.created`` adds the resolved execution
+        plan and forced-sequential identity that is unavailable when the session
+        starts. EventStore returns newest first, so selected prior runs are the most
+        recent comparable experiment runs. Any missing legacy metadata falls back
+        to current-only rather than mixing a global DB cohort.
         """
         query_events = getattr(self._event_store, "query_events", None)
         if not callable(query_events):
@@ -1274,6 +1276,27 @@ class OrchestratorRunner:
             if active_identity != current_identity:
                 return current_seed_id, (execution_id,)
 
+        plan_events = await query_events(
+            event_type="execution.plan.created",
+            limit=FRUGALITY_PROOF_SESSION_LOOKBACK,
+        )
+        if not isinstance(plan_events, (list, tuple)):
+            return current_seed_id, (execution_id,)
+        plan_identities: dict[str, tuple[str, bool]] = {}
+        for event in plan_events:
+            data = getattr(event, "data", None)
+            if not isinstance(data, Mapping):
+                continue
+            candidate = data.get("execution_id")
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            plan_identity = self._proof_plan_identity(data)
+            if plan_identity is not None:
+                plan_identities.setdefault(candidate.strip(), plan_identity)
+        current_plan_identity = plan_identities.get(execution_id)
+        if current_plan_identity is None:
+            return current_seed_id, (execution_id,)
+
         cohort: list[str] = [execution_id]
         seen = {execution_id}
         for event in session_starts:
@@ -1286,6 +1309,8 @@ class OrchestratorRunner:
             if not isinstance(candidate, str) or not candidate.strip():
                 continue
             normalized = candidate.strip()
+            if plan_identities.get(normalized) != current_plan_identity:
+                continue
             if normalized in seen:
                 continue
             cohort.append(normalized)
@@ -2468,10 +2493,16 @@ class OrchestratorRunner:
         execution_id: str,
         session_id: str,
         execution_plan: Any,
+        forced_sequential: bool = False,
     ) -> None:
         """Persist one bounded whole-run plan before the first level starts."""
         from ouroboros.events.base import BaseEvent
 
+        plan_contract = self._execution_plan_contract(
+            execution_plan,
+            forced_sequential=forced_sequential,
+        )
+        plan_fingerprint = self._execution_plan_fingerprint(plan_contract)
         levels: list[dict[str, Any]] = []
         for stage in execution_plan.stages:
             indices = [
@@ -2501,6 +2532,9 @@ class OrchestratorRunner:
                     "schema_version": 1,
                     "execution_id": execution_id,
                     "session_id": session_id,
+                    "plan_fingerprint": plan_fingerprint,
+                    "forced_sequential": forced_sequential,
+                    "plan_contract": plan_contract,
                     "total_acs": len(seed.acceptance_criteria),
                     "total_levels": execution_plan.total_stages,
                     "parallelizable": execution_plan.is_parallelizable,
@@ -2510,6 +2544,172 @@ class OrchestratorRunner:
                 },
             )
         )
+
+    @staticmethod
+    def _execution_plan_contract(
+        execution_plan: Any,
+        *,
+        forced_sequential: bool,
+    ) -> dict[str, Any]:
+        """Return the canonical resolved-plan semantics used for proof cohorts."""
+        nodes = sorted(execution_plan.nodes, key=lambda node: node.index)
+        return {
+            "version": 1,
+            "forced_sequential": forced_sequential,
+            "nodes": [
+                {
+                    "ac_index": node.index,
+                    "depends_on": list(node.depends_on),
+                    "can_run_independently": node.can_run_independently,
+                    "requires_serial_stage": node.requires_serial_stage,
+                    "serialization_reasons": list(node.serialization_reasons),
+                }
+                for node in nodes
+            ],
+            # Preserve tuple order: the executor iterates stages in this exact
+            # order, so reordering equal-index objects is still a semantic drift.
+            "stages": [
+                {
+                    "stage_index": stage.index,
+                    "ac_indices": list(stage.ac_indices),
+                    "depends_on_stages": list(stage.depends_on_stages),
+                }
+                for stage in execution_plan.stages
+            ],
+        }
+
+    @staticmethod
+    def _execution_plan_fingerprint(plan_contract: Mapping[str, Any]) -> str:
+        encoded = json.dumps(
+            plan_contract,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _valid_execution_plan_contract(plan_contract: object) -> bool:
+        if not isinstance(plan_contract, Mapping) or set(plan_contract) != {
+            "version",
+            "forced_sequential",
+            "nodes",
+            "stages",
+        }:
+            return False
+        forced_sequential = plan_contract.get("forced_sequential")
+        nodes = plan_contract.get("nodes")
+        stages = plan_contract.get("stages")
+        if (
+            plan_contract.get("version") != 1
+            or not isinstance(forced_sequential, bool)
+            or not isinstance(nodes, list)
+            or not isinstance(stages, list)
+        ):
+            return False
+
+        node_indices: set[int] = set()
+        for node in nodes:
+            if not isinstance(node, Mapping) or set(node) != {
+                "ac_index",
+                "depends_on",
+                "can_run_independently",
+                "requires_serial_stage",
+                "serialization_reasons",
+            }:
+                return False
+            ac_index = node.get("ac_index")
+            depends_on = node.get("depends_on")
+            reasons = node.get("serialization_reasons")
+            if (
+                isinstance(ac_index, bool)
+                or not isinstance(ac_index, int)
+                or ac_index < 0
+                or ac_index in node_indices
+                or not isinstance(depends_on, list)
+                or any(
+                    isinstance(dependency, bool)
+                    or not isinstance(dependency, int)
+                    or dependency < 0
+                    for dependency in depends_on
+                )
+                or not isinstance(node.get("can_run_independently"), bool)
+                or not isinstance(node.get("requires_serial_stage"), bool)
+                or not isinstance(reasons, list)
+                or any(not isinstance(reason, str) for reason in reasons)
+            ):
+                return False
+            node_indices.add(ac_index)
+
+        stage_indices: set[int] = set()
+        staged_ac_indices: list[int] = []
+        for stage in stages:
+            if not isinstance(stage, Mapping) or set(stage) != {
+                "stage_index",
+                "ac_indices",
+                "depends_on_stages",
+            }:
+                return False
+            stage_index = stage.get("stage_index")
+            ac_indices = stage.get("ac_indices")
+            dependencies = stage.get("depends_on_stages")
+            if (
+                isinstance(stage_index, bool)
+                or not isinstance(stage_index, int)
+                or stage_index < 0
+                or stage_index in stage_indices
+                or not isinstance(ac_indices, list)
+                or any(
+                    isinstance(ac_index, bool) or not isinstance(ac_index, int) or ac_index < 0
+                    for ac_index in ac_indices
+                )
+                or not isinstance(dependencies, list)
+                or any(
+                    isinstance(dependency, bool)
+                    or not isinstance(dependency, int)
+                    or dependency < 0
+                    for dependency in dependencies
+                )
+            ):
+                return False
+            stage_indices.add(stage_index)
+            staged_ac_indices.extend(ac_indices)
+
+        if len(staged_ac_indices) != len(set(staged_ac_indices)):
+            return False
+        if set(staged_ac_indices) != node_indices:
+            return False
+        if any(
+            dependency not in node_indices for node in nodes for dependency in node["depends_on"]
+        ):
+            return False
+        return not any(
+            dependency not in stage_indices
+            for stage in stages
+            for dependency in stage["depends_on_stages"]
+        )
+
+    @staticmethod
+    def _proof_plan_identity(event_data: Mapping[str, Any]) -> tuple[str, bool] | None:
+        """Extract and re-verify the exact resolved-plan cohort identity."""
+        plan_fingerprint = event_data.get("plan_fingerprint")
+        forced_sequential = event_data.get("forced_sequential")
+        plan_contract = event_data.get("plan_contract")
+        if (
+            not isinstance(plan_fingerprint, str)
+            or len(plan_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in plan_fingerprint)
+            or not isinstance(forced_sequential, bool)
+            or not OrchestratorRunner._valid_execution_plan_contract(plan_contract)
+        ):
+            return None
+        assert isinstance(plan_contract, Mapping)
+        if plan_contract.get("forced_sequential") is not forced_sequential:
+            return None
+        if plan_fingerprint != OrchestratorRunner._execution_plan_fingerprint(plan_contract):
+            return None
+        return plan_fingerprint, forced_sequential
 
     def _validate_legacy_resume_identity(
         self,
@@ -5320,6 +5520,7 @@ class OrchestratorRunner:
             execution_id=exec_id,
             session_id=tracker.session_id,
             execution_plan=execution_plan,
+            forced_sequential=force_sequential_levels,
         )
 
         # Log execution plan

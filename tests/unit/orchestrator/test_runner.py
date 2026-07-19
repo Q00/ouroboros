@@ -3381,6 +3381,16 @@ class TestOrchestratorRunner:
         assert execution_plan.get_dependencies(0) == ()
         assert execution_plan.get_dependencies(1) == (0,)
         assert execution_plan.get_dependencies(2) == (0, 1)
+        plan_event = next(
+            call.args[0]
+            for call in runner._event_store.append.await_args_list
+            if call.args[0].type == "execution.plan.created"
+        )
+        assert plan_event.data["forced_sequential"] is True
+        assert runner._proof_plan_identity(plan_event.data) == (
+            plan_event.data["plan_fingerprint"],
+            True,
+        )
 
     @pytest.mark.asyncio
     async def test_execute_parallel_builds_dependency_analyzer_with_llm_adapter(

@@ -1168,6 +1168,31 @@ def _consumer_runner(fabricated: list) -> tuple[OrchestratorRunner, list, MagicM
     return runner, appended, console
 
 
+def _plan_created_event(
+    runner: OrchestratorRunner,
+    execution_id: str,
+    execution_plan: object,
+    *,
+    forced_sequential: bool,
+) -> BaseEvent:
+    plan_contract = runner._execution_plan_contract(  # type: ignore[arg-type]
+        execution_plan,
+        forced_sequential=forced_sequential,
+    )
+    return BaseEvent(
+        type="execution.plan.created",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            "schema_version": 1,
+            "execution_id": execution_id,
+            "plan_fingerprint": runner._execution_plan_fingerprint(plan_contract),
+            "forced_sequential": forced_sequential,
+            "plan_contract": plan_contract,
+        },
+    )
+
+
 class TestFrugalityProofConsumer:
     @pytest.mark.asyncio
     async def test_same_seed_recent_runs_form_cohort_without_mixing_other_seed(self) -> None:
@@ -1205,7 +1230,7 @@ class TestFrugalityProofConsumer:
                 }
             )
         )
-        store.query_events.return_value = [
+        session_events = [
             BaseEvent(
                 type="orchestrator.session.started",
                 aggregate_type="session",
@@ -1283,6 +1308,29 @@ class TestFrugalityProofConsumer:
                 },
             ),
         ]
+        proof_plan = DependencyGraph(
+            nodes=(ACNode(index=0, content="Measure the same workload"),),
+            execution_levels=((0,),),
+        ).to_execution_plan()
+        plan_events = [
+            _plan_created_event(
+                runner,
+                f"run-{run}",
+                proof_plan,
+                forced_sequential=False,
+            )
+            for run in (2, 1, 0)
+        ]
+
+        async def _query_events(*, event_type: str, limit: int) -> list[BaseEvent]:
+            del limit
+            if event_type == "orchestrator.session.started":
+                return session_events
+            if event_type == "execution.plan.created":
+                return plan_events
+            return []
+
+        store.query_events.side_effect = _query_events
         events_by_execution: dict[str, list[dict]] = {}
         for run in range(3):
             events_by_execution[f"run-{run}"] = [
@@ -1336,6 +1384,81 @@ class TestFrugalityProofConsumer:
             }
             for call in store.query_execution_related_events.await_args_list
         )
+
+    @pytest.mark.asyncio
+    async def test_cohort_excludes_forced_sequential_plan_with_same_routing_contract(
+        self,
+    ) -> None:
+        runner, _appended, _console = _consumer_runner([])
+        seed = Seed(
+            goal="Plan-sensitive proof cohort",
+            acceptance_criteria=("Prepare", "Apply"),
+            ontology_schema=OntologySchema(name="PlanProof", description="Proof cohort"),
+            metadata=SeedMetadata(seed_id="seed-plan-proof"),
+        )
+        contract = runner._build_execution_contract(seed=seed)
+        session_events = [
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=f"session-{execution_id}",
+                data={
+                    "execution_id": execution_id,
+                    "seed_id": seed.metadata.seed_id,
+                    "execution_contract": contract,
+                },
+            )
+            for execution_id in ("run-current", "run-forced", "run-same")
+        ]
+        parallel_plan = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Prepare"),
+                ACNode(index=1, content="Apply"),
+            ),
+            execution_levels=((0, 1),),
+        ).to_execution_plan()
+        forced_plan = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="Prepare"),
+                ACNode(index=1, content="Apply", depends_on=(0,)),
+            ),
+            execution_levels=((0,), (1,)),
+        ).to_execution_plan()
+        plan_events = [
+            _plan_created_event(
+                runner,
+                "run-current",
+                parallel_plan,
+                forced_sequential=False,
+            ),
+            _plan_created_event(
+                runner,
+                "run-forced",
+                forced_plan,
+                forced_sequential=True,
+            ),
+            _plan_created_event(
+                runner,
+                "run-same",
+                parallel_plan,
+                forced_sequential=False,
+            ),
+        ]
+
+        async def _query_events(*, event_type: str, limit: int) -> list[BaseEvent]:
+            del limit
+            if event_type == "orchestrator.session.started":
+                return session_events
+            if event_type == "execution.plan.created":
+                return plan_events
+            return []
+
+        runner._event_store.query_events.side_effect = _query_events
+
+        seed_id, cohort = await runner._frugality_proof_cohort("run-current")
+
+        assert seed_id == seed.metadata.seed_id
+        assert cohort == ("run-current", "run-same")
 
     @pytest.mark.asyncio
     async def test_missing_current_proof_identity_is_current_only(self) -> None:
