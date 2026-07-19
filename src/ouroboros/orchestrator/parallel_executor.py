@@ -2452,11 +2452,29 @@ class ParallelACExecutor:
         events = await self._replay_with_retry("execution", saved_execution_id)
         if events is None:
             completed_levels = cp.state.get("completed_levels")
+            # Round-16 finding #1: ``completed_levels`` counts stages of the
+            # plan the CHECKPOINTED run derived — but the plan is re-derived
+            # by LLM dependency analysis on every launch, so THIS launch's
+            # ``total_levels`` may group the same ACs differently (or
+            # collapse them into one level via the analyzer fallback).
+            # "Did the run finish its last level?" is a question about the
+            # checkpoint's OWN plan, so compare against the plan size the
+            # checkpoint itself recorded; the current plan's size remains
+            # only a legacy fallback for checkpoints predating
+            # ``plan_total_stages``.
+            saved_plan_total = cp.state.get("plan_total_stages")
+            own_plan_total = (
+                saved_plan_total
+                if isinstance(saved_plan_total, int)
+                and not isinstance(saved_plan_total, bool)
+                and saved_plan_total > 0
+                else total_levels
+            )
             claims_full_completion = (
                 isinstance(completed_levels, int)
                 and not isinstance(completed_levels, bool)
-                and total_levels > 0
-                and completed_levels >= total_levels
+                and own_plan_total > 0
+                and completed_levels >= own_plan_total
             )
             if claims_full_completion:
                 log.error(
@@ -2789,6 +2807,7 @@ class ParallelACExecutor:
         session_id: str,
         execution_id: str,
         completed_levels: int,
+        plan_total_stages: int,
         ac_statuses: dict[int, str],
         failed_indices: set[int],
         completed_count: int,
@@ -2834,6 +2853,7 @@ class ParallelACExecutor:
             "session_id": session_id,
             "execution_id": execution_id,
             "completed_levels": completed_levels,
+            "plan_total_stages": plan_total_stages,
             "ac_statuses": ac_statuses,
             "failed_indices": failed_indices,
             "completed_count": completed_count,
@@ -2857,6 +2877,13 @@ class ParallelACExecutor:
                     # any progress (see ``_checkpoint_seed_content_mismatch``).
                     "seed_fingerprint": self._seed_semantic_fingerprint(seed),
                     "completed_levels": completed_levels,
+                    # Round-16 finding #1 (BLOCKING): ``completed_levels`` is
+                    # relative to the plan THIS run derived — record that
+                    # plan's stage count alongside it so recovery-time
+                    # consumers (the round-13 full-completion tiebreaker)
+                    # never interpret the count against a differently-grouped
+                    # re-derived plan.
+                    "plan_total_stages": plan_total_stages,
                     "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                     "failed_indices": sorted(failed_indices),
                     "completed_count": completed_count,
@@ -3218,6 +3245,11 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int] = dict.fromkeys(range(total_acs), 0)
         completed_count = 0
         resume_from_level = 0
+        # Round-16 finding #1: ACs the adopted checkpoint recorded as
+        # RESOLVED (completed/failed/skipped), keyed by stable AC index.
+        # This — not the plan-relative ``completed_levels`` count — is what
+        # decides which ACs are skipped on resume.
+        checkpoint_resolved: dict[int, str] = {}
         # Round-14 finding #3: only a FULLY adopted recovery may trigger the
         # post-restoration prompt rebuild below; a partially restored state
         # that hit the generic "recovery failed, run fresh" path keeps the
@@ -3341,12 +3373,75 @@ class ParallelACExecutor:
                         saved_execution_id = cp.state.get("execution_id")
                         if isinstance(saved_execution_id, str) and saved_execution_id:
                             execution_id = saved_execution_id
-                        resume_from_level = cp.state.get("completed_levels", 0)
+                        saved_completed_levels = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
                             ac_statuses[int(idx)] = status
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
+                        # Round-16 finding #1 (BLOCKING): ``completed_levels``
+                        # is an integer relative to the ORIGINAL run's plan
+                        # STRUCTURE, but the plan is re-derived by LLM
+                        # dependency analysis on every launch — including a
+                        # documented deterministic fallback that collapses
+                        # ALL ACs into one single level when the analysis
+                        # fails — so the same fingerprint-matching seed
+                        # content can legitimately arrive here with a
+                        # DIFFERENT stage grouping. Interpreting the stale
+                        # count against THIS plan's stages skipped whole
+                        # levels of never-dispatched ACs and reconstructed
+                        # them below as "Failed (restored from checkpoint)":
+                        # FAILED with zero dispatch and zero escalation, the
+                        # forbidden outcome. Resume is therefore keyed off
+                        # the checkpoint's per-AC statuses — AC index is a
+                        # stable identity across replans (the fingerprint
+                        # gate above proved the AC list itself is unchanged)
+                        # — and ``resume_from_level`` is RE-DERIVED against
+                        # the CURRENT plan as the count of leading stages
+                        # made entirely of resolved ACs. An AC the original
+                        # run never resolved gets dispatched normally,
+                        # whatever level this launch's plan re-grouped it
+                        # into.
+                        checkpoint_resolved = {
+                            idx: status
+                            for idx, status in ac_statuses.items()
+                            if 0 <= idx < total_acs and status in ("completed", "failed", "skipped")
+                        }
+                        resume_from_level = 0
+                        for planned_stage in execution_plan.stages:
+                            planned_indices = [
+                                idx
+                                for idx in self._get_stage_ac_indices(planned_stage)
+                                if 0 <= idx < total_acs
+                            ]
+                            if all(idx in checkpoint_resolved for idx in planned_indices):
+                                resume_from_level += 1
+                            else:
+                                break
+                        if resume_from_level != saved_completed_levels:
+                            log.warning(
+                                "parallel_executor.recovery.plan_shape_diverged",
+                                detail=(
+                                    "the re-derived execution plan groups "
+                                    "this seed's ACs differently from the "
+                                    "plan the checkpointed run used; the "
+                                    "checkpoint's level count does not apply "
+                                    "to this plan, so resume falls back to "
+                                    "its per-AC statuses (unresolved ACs are "
+                                    "re-dispatched, never marked failed)"
+                                ),
+                                checkpoint_completed_levels=saved_completed_levels,
+                                derived_resume_from_level=resume_from_level,
+                                total_levels=total_levels,
+                                resolved_ac_indices=sorted(checkpoint_resolved),
+                            )
+                            self._console.print(
+                                "[yellow]Recovered checkpoint was saved "
+                                "under a different execution-plan shape; "
+                                "resuming from its per-AC progress instead "
+                                "of its level count (unfinished ACs will be "
+                                "re-dispatched).[/yellow]"
+                            )
                         # Restore level contexts so subsequent levels
                         # have access to completed levels' output
                         saved_contexts = cp.state.get("level_contexts", [])
@@ -3406,32 +3501,34 @@ class ParallelACExecutor:
                             execution_id=execution_id,
                             restored_contexts=len(level_contexts),
                         )
-                        # Reconstruct all_results for completed/failed/skipped ACs.
-                        for prev_stage in execution_plan.stages[:resume_from_level]:
-                            for ac_idx in self._get_stage_ac_indices(prev_stage):
-                                if ac_idx >= total_acs:
-                                    continue
-                                status = ac_statuses.get(ac_idx, "pending")
-                                is_completed = status == "completed"
-                                is_skipped = status == "skipped"
-                                all_results.append(
-                                    ACExecutionResult(
-                                        ac_index=ac_idx,
-                                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
-                                        success=is_completed,
-                                        final_message=(
-                                            "[Restored from checkpoint]" if is_completed else ""
-                                        ),
-                                        error=(
-                                            "Skipped: dependency failed"
-                                            if is_skipped
-                                            else None
-                                            if is_completed
-                                            else "Failed (restored from checkpoint)"
-                                        ),
-                                        retry_attempt=ac_retry_attempts.get(ac_idx, 0),
-                                    )
+                        # Reconstruct results for every AC the checkpoint
+                        # recorded as resolved — keyed by stable AC index,
+                        # NOT by slicing this launch's (possibly re-grouped)
+                        # stages: an AC with no terminal status in the
+                        # checkpoint gets NO restored result here and is
+                        # dispatched by the level loop below.
+                        for ac_idx in sorted(checkpoint_resolved):
+                            status = checkpoint_resolved[ac_idx]
+                            is_completed = status == "completed"
+                            is_skipped = status == "skipped"
+                            all_results.append(
+                                ACExecutionResult(
+                                    ac_index=ac_idx,
+                                    ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                                    success=is_completed,
+                                    final_message=(
+                                        "[Restored from checkpoint]" if is_completed else ""
+                                    ),
+                                    error=(
+                                        "Skipped: dependency failed"
+                                        if is_skipped
+                                        else None
+                                        if is_completed
+                                        else "Failed (restored from checkpoint)"
+                                    ),
+                                    retry_attempt=ac_retry_attempts.get(ac_idx, 0),
                                 )
+                            )
                         self._console.print(
                             f"[cyan]Resuming from level {resume_from_level + 1} "
                             f"(checkpoint recovered, "
@@ -3455,6 +3552,17 @@ class ParallelACExecutor:
                 # degraded read must not degrade into running fresh either.
                 raise
             except Exception as e:
+                # Round-16 finding #1: a PARTIAL restore must not leak into
+                # the fresh run below. A half-adopted skip horizon or
+                # failed/resolved markers could suppress dispatch of ACs
+                # that never ran (the forbidden FAILED-without-dispatch
+                # shape) — reset every dispatch-gating field to its
+                # fresh-run value before proceeding.
+                resume_from_level = 0
+                checkpoint_resolved = {}
+                failed_indices.clear()
+                ac_statuses.update(dict.fromkeys(range(total_acs), "pending"))
+                completed_count = 0
                 log.warning(
                     "parallel_executor.recovery.failed",
                     error=str(e),
@@ -3588,6 +3696,7 @@ class ParallelACExecutor:
             session_id=session_id,
             execution_id=execution_id,
             completed_levels=resume_from_level,
+            plan_total_stages=total_levels,
             ac_statuses=ac_statuses,
             failed_indices=failed_indices,
             completed_count=completed_count,
@@ -3640,7 +3749,13 @@ class ParallelACExecutor:
                 stage_batches = self._get_stage_batches(stage)
                 level_num = level_idx + 1
 
-                # RC3: Skip already-completed levels on recovery
+                # RC3: Skip already-completed levels on recovery.
+                # Round-16 finding #1: ``resume_from_level`` is re-derived
+                # at adoption time from the checkpoint's per-AC statuses
+                # against THIS plan's stages (never the checkpoint's raw
+                # plan-relative level count), so a wholesale skip here is
+                # only ever taken for stages made entirely of ACs the
+                # checkpoint actually recorded as resolved.
                 if level_idx < resume_from_level:
                     log.info(
                         "parallel_executor.recovery.skipping_level",
@@ -3660,6 +3775,15 @@ class ParallelACExecutor:
                 for ac_idx in level:
                     # Skip invalid indices
                     if ac_idx < 0 or ac_idx >= total_acs:
+                        continue
+
+                    # Round-16 finding #1: an AC the adopted checkpoint
+                    # recorded as resolved is skipped by its stable AC
+                    # index — its restored result is already in
+                    # ``all_results`` — regardless of which level this
+                    # launch's re-derived plan grouped it into. Unresolved
+                    # ACs fall through and are dispatched normally.
+                    if ac_idx in checkpoint_resolved:
                         continue
 
                     # Always validate dependencies first — even externally
@@ -4067,6 +4191,7 @@ class ParallelACExecutor:
                     session_id=session_id,
                     execution_id=execution_id,
                     completed_levels=level_idx + 1,
+                    plan_total_stages=total_levels,
                     ac_statuses=ac_statuses,
                     failed_indices=failed_indices,
                     completed_count=completed_count,

@@ -29,6 +29,7 @@ import pytest
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.orchestrator.dependency_analyzer import (
     ACNode,
+    DependencyGraph,
     ExecutionStage,
     StagedExecutionPlan,
 )
@@ -2887,3 +2888,189 @@ class TestRecoveredPromptReflectsOriginalRunSemantics:
                 system_prompt_builder=_refusing_builder,
             )
         restart._run_batch_with_verify_and_retry.assert_not_awaited()
+
+
+def _seed_three_acs(goal: str = "Plan regrouping resume") -> Seed:
+    return Seed(
+        goal=goal,
+        constraints=(),
+        acceptance_criteria=("Build core", "Add API", "Write docs"),
+        ontology_schema=OntologySchema(name="Replan", description="Test schema"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+
+
+def _three_level_plan() -> StagedExecutionPlan:
+    return StagedExecutionPlan(
+        nodes=(
+            ACNode(index=0, content="Build core"),
+            ACNode(index=1, content="Add API", depends_on=(0,)),
+            ACNode(index=2, content="Write docs", depends_on=(1,)),
+        ),
+        stages=(
+            ExecutionStage(index=0, ac_indices=(0,)),
+            ExecutionStage(index=1, ac_indices=(1,), depends_on_stages=(0,)),
+            ExecutionStage(index=2, ac_indices=(2,), depends_on_stages=(1,)),
+        ),
+    )
+
+
+def _collapsed_fallback_plan(seed: Seed) -> StagedExecutionPlan:
+    """The EXACT plan shape the runner's dependency-analysis failure
+    fallback produces: every AC collapsed into ONE single level, no
+    dependencies (see ``runner.py`` ``dependency_analysis_failed``)."""
+    all_indices = tuple(range(len(seed.acceptance_criteria)))
+    graph = DependencyGraph(
+        nodes=tuple(
+            ACNode(index=i, content=str(ac), depends_on=())
+            for i, ac in enumerate(seed.acceptance_criteria)
+        ),
+        execution_levels=(all_indices,) if all_indices else (),
+    )
+    return graph.to_execution_plan()
+
+
+class TestResumeSurvivesPlanRegrouping:
+    """Round-16 finding #1 (BLOCKING): ``completed_levels`` is an integer
+    relative to the ORIGINAL run's plan STRUCTURE, but the plan is re-derived
+    by LLM dependency analysis on every launch — including a documented
+    deterministic fallback that collapses ALL ACs into one single level when
+    the analysis fails. The round-15 seed fingerprint deliberately excludes
+    plan structure (the plan may legitimately differ across a genuine
+    resume), so recovery could adopt ``completed_levels`` from a 3-level run
+    and apply it against a 1-level re-derived plan: the entire collapsed
+    plan was skipped wholesale and every never-dispatched AC was
+    reconstructed as "Failed (restored from checkpoint)" — FAILED with zero
+    dispatch and zero escalation, the forbidden outcome. Resume must key off
+    per-AC statuses (stable AC index), not a plan-relative level count."""
+
+    @pytest.mark.asyncio
+    async def test_collapsed_replan_dispatches_unfinished_acs_instead_of_failing_them(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact scenario: original 3-level plan, crash after
+        level 1 (``completed_levels=1`` checkpointed), resume of the SAME
+        (fingerprint-matching) seed content under the analyzer-fallback's
+        single collapsed level. ACs 1 and 2 were never dispatched by the
+        original run — they must be dispatched on resume, never surfaced as
+        FAILED from checkpoint bookkeeping alone."""
+        seed = _seed_three_acs()
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Original run: 3-level plan; level 1 completes (checkpoint
+        # saved with completed_levels=1), then the process crashes during
+        # level 2.
+        original_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await original_events.initialize()
+        original_ckpt = CheckpointStore(base_path=ckpt_path)
+        original_ckpt.initialize()
+        original = _executor(event_store=original_events, checkpoint_store=original_ckpt)
+
+        async def _crashing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Build core", success=True)]
+            raise RuntimeError("simulated process crash during level 2")
+
+        original._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crashing_stage_runner)
+        with pytest.raises(BaseException):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_three_level_plan(),
+            )
+        await original_events.close()
+
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        assert saved.value.state["completed_levels"] == 1
+        assert saved.value.state["ac_statuses"] == {
+            "0": "completed",
+            "1": "pending",
+            "2": "pending",
+        }
+
+        # --- Resume: SAME seed content (the round-15 fingerprint gate
+        # passes), but this launch's dependency analysis fell back to the
+        # single collapsed level.
+        collapsed = _collapsed_fallback_plan(seed)
+        assert collapsed.total_stages == 1
+
+        recovered_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await recovered_events.initialize()
+        recovered = _executor(
+            event_store=recovered_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[int] = []
+
+        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.extend(batch)
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=str(seed.acceptance_criteria[idx]),
+                    success=True,
+                )
+                for idx in batch
+            ]
+
+        recovered._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
+        result = await recovered.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=collapsed,
+        )
+        await recovered_events.close()
+
+        # The ACs the original run never dispatched MUST be dispatched on
+        # resume. Pre-fix, the stale completed_levels=1 skipped the entire
+        # collapsed single-level plan (1 >= 1 stage) and reconstructed ACs
+        # 1 and 2 as "Failed (restored from checkpoint)" with zero dispatch.
+        assert sorted(dispatched) == [1, 2]
+        # AC 0 was genuinely completed by the original run: restored, not
+        # re-dispatched.
+        assert 0 not in dispatched
+        by_index = {r.ac_index: r for r in result.results}
+        assert by_index[0].success and by_index[0].final_message == "[Restored from checkpoint]"
+        assert all(r.error != "Failed (restored from checkpoint)" for r in result.results)
+        assert result.all_succeeded
+        # Recovery still rejoined the ORIGINAL run's aggregate.
+        assert result.execution_id == "exec-original"
+
+    @pytest.mark.asyncio
+    async def test_indeterminate_replay_full_completion_judged_against_original_plan_shape(
+        self, tmp_path: Path
+    ) -> None:
+        """The round-13 full-completion tiebreaker is the same class of
+        defect: it compared the checkpoint's ``completed_levels`` against
+        THIS launch's re-derived stage count. A finished 1-level run's
+        leftover checkpoint (delete failed) must stay refused on an
+        indeterminate replay even when this launch re-derived a plan with
+        MORE stages — the checkpoint's own recorded plan size is the
+        authoritative comparand."""
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+
+        async def _indeterminate(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        executor._replay_with_retry = _indeterminate  # type: ignore[method-assign]
+        cp = SimpleNamespace(
+            phase="parallel_execution",
+            state={
+                "execution_id": "exec-finished",
+                "completed_levels": 1,
+                "plan_total_stages": 1,
+            },
+        )
+        assert await executor._checkpoint_from_terminal_run(cp, total_levels=3) is True
