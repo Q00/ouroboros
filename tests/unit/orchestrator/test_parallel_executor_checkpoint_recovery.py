@@ -970,6 +970,236 @@ class TestDegradedCheckpointReadFailsClosed:
         executor._run_batch_with_verify_and_retry.assert_not_called()
 
 
+def _seed_with_id(seed_id: str, *, goal: str, ac: str) -> Seed:
+    return Seed(
+        goal=goal,
+        constraints=(),
+        acceptance_criteria=(ac,),
+        ontology_schema=OntologySchema(name="Checkpoint", description="Test schema"),
+        metadata=SeedMetadata(ambiguity_score=0.05, seed_id=seed_id),
+    )
+
+
+def _plan_for(seed: Seed) -> StagedExecutionPlan:
+    return StagedExecutionPlan(
+        nodes=tuple(
+            ACNode(index=i, content=str(ac)) for i, ac in enumerate(seed.acceptance_criteria)
+        ),
+        stages=(ExecutionStage(index=0, ac_indices=tuple(range(len(seed.acceptance_criteria)))),),
+    )
+
+
+class TestCheckpointAdoptionValidatesSeedContent:
+    """Round-15 finding #1 (BLOCKING): adoption validated nothing but the
+    ``seed_id`` KEY — a random uuid naming an object, not its content. A
+    Seed whose goal AND acceptance criteria were changed under the same
+    seed_id adopted the old content's completed_levels/ac_statuses
+    wholesale: recovery dispatched NOTHING and reported SUCCESS while
+    describing the CHANGED AC content as "restored" — attributing progress
+    to work that never executed. The checkpoint now carries a semantic
+    content fingerprint (goal + per-AC ``derive_semantic_ac_key``) that
+    must match the currently-supplied Seed before ANY progress is
+    adopted."""
+
+    @staticmethod
+    async def _complete_run_and_leave_checkpoint(tmp_path: Path, seed: Seed) -> Path:
+        """Run seed to full completion, leaving its checkpoint behind (the
+        runner-side terminal delete never ran — this is the executor-only
+        shape every test in this file uses)."""
+        ckpt_path = tmp_path / "checkpoints"
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        run = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        run._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=0, ac_content=str(seed.acceptance_criteria[0]), success=True
+                )
+            ]
+        )
+        await run.execute_parallel(
+            seed,
+            session_id="session-a",
+            execution_id="exec-a",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed),
+        )
+        assert CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id).is_ok
+        return ckpt_path
+
+    @pytest.mark.asyncio
+    async def test_changed_seed_content_same_seed_id_is_not_silently_adopted(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact probe: checkpoint saved for content A, then
+        recovery attempted with DIFFERENT content B under the SAME seed_id.
+        B must NOT inherit A's progress: no false "already done" skip, no
+        false success, no "[Restored from checkpoint]" attribution of B's
+        content to A's work."""
+        seed_a = _seed_with_id("seed_shared_id", goal="Ship feature A", ac="Implement feature A")
+        ckpt_path = await self._complete_run_and_leave_checkpoint(tmp_path, seed_a)
+
+        seed_b = _seed_with_id(
+            "seed_shared_id",
+            goal="Ship an entirely different feature B",
+            ac="Implement the unrelated feature B",
+        )
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[list[int]] = []
+
+        async def _fresh_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            dispatched.append(list(kwargs["batch_executable"]))  # type: ignore[call-overload]
+            return [
+                ACExecutionResult(
+                    ac_index=0, ac_content="Implement the unrelated feature B", success=True
+                )
+            ]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_fresh_stage_runner)
+        result = await run2.execute_parallel(
+            seed_b,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed_b),
+        )
+        await run2_events.close()
+
+        # B's work actually RAN — no silent "already done" skip.
+        assert dispatched == [[0]]
+        # Nothing was misattributed as restored from A's progress.
+        assert all(r.final_message != "[Restored from checkpoint]" for r in result.results)
+        # And this is a genuinely FRESH run, not a continuation of A's:
+        # the caller's execution_id was kept, not A's restored one.
+        assert result.execution_id == "exec-b"
+        # The mismatched checkpoint was discarded and re-keyed to B's
+        # content: the new durable checkpoint now belongs to exec-b.
+        reloaded = CheckpointStore(base_path=ckpt_path).load("seed_shared_id")
+        assert reloaded.is_ok
+        assert reloaded.value.state["execution_id"] == "exec-b"
+
+    @pytest.mark.asyncio
+    async def test_same_seed_content_still_adopts(self, tmp_path: Path) -> None:
+        """Control: an identical-content Seed under the same seed_id is a
+        genuine resume — adoption must keep working (the round-9 #2
+        escalation guarantee depends on it)."""
+        seed_a = _seed_with_id("seed_shared_id", goal="Ship feature A", ac="Implement feature A")
+        ckpt_path = await self._complete_run_and_leave_checkpoint(tmp_path, seed_a)
+        seed_same = _seed_with_id("seed_shared_id", goal="Ship feature A", ac="Implement feature A")
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        result = await run2.execute_parallel(
+            seed_same,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed_same),
+        )
+        await run2_events.close()
+        # Adopted: the completed level was skipped and the ORIGINAL run's
+        # execution_id restored — the pre-existing genuine-resume behavior.
+        run2._run_batch_with_verify_and_retry.assert_not_called()
+        assert result.execution_id == "exec-a"
+        assert result.results[0].final_message == "[Restored from checkpoint]"
+
+    @pytest.mark.asyncio
+    async def test_legacy_checkpoint_without_fingerprint_keeps_adopt_posture(
+        self, tmp_path: Path
+    ) -> None:
+        """One-time migration: a checkpoint written before the fingerprint
+        existed must stay resumable (the convention every other restored
+        field follows)."""
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed_a = _seed_with_id("seed_shared_id", goal="Ship feature A", ac="Implement feature A")
+        ckpt_path = await self._complete_run_and_leave_checkpoint(tmp_path, seed_a)
+        store = CheckpointStore(base_path=ckpt_path)
+        legacy_state = dict(store.load("seed_shared_id").value.state)
+        del legacy_state["seed_fingerprint"]
+        assert store.save(
+            CheckpointData.create(
+                seed_id="seed_shared_id", phase="parallel_execution", state=legacy_state
+            )
+        ).is_ok
+
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock()
+        result = await run2.execute_parallel(
+            seed_a,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed_a),
+        )
+        await run2_events.close()
+        run2._run_batch_with_verify_and_retry.assert_not_called()
+        assert result.execution_id == "exec-a"
+
+    @pytest.mark.asyncio
+    async def test_malformed_fingerprint_fails_closed_to_fresh_run(self, tmp_path: Path) -> None:
+        """A present-but-unverifiable fingerprint must refuse adoption
+        (fresh run, loudly) — adopting unverifiable progress risks the
+        silent-false-success direction."""
+        from ouroboros.persistence.checkpoint import CheckpointData
+
+        seed_a = _seed_with_id("seed_shared_id", goal="Ship feature A", ac="Implement feature A")
+        ckpt_path = await self._complete_run_and_leave_checkpoint(tmp_path, seed_a)
+        store = CheckpointStore(base_path=ckpt_path)
+        broken_state = dict(store.load("seed_shared_id").value.state)
+        broken_state["seed_fingerprint"] = 12345
+        assert store.save(
+            CheckpointData.create(
+                seed_id="seed_shared_id", phase="parallel_execution", state=broken_state
+            )
+        ).is_ok
+
+        db_path = tmp_path / "events.db"
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        run2._run_batch_with_verify_and_retry = AsyncMock(
+            return_value=[
+                ACExecutionResult(ac_index=0, ac_content="Implement feature A", success=True)
+            ]
+        )
+        result = await run2.execute_parallel(
+            seed_a,
+            session_id="session-b",
+            execution_id="exec-b",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan_for(seed_a),
+        )
+        await run2_events.close()
+        run2._run_batch_with_verify_and_retry.assert_called_once()
+        assert result.execution_id == "exec-b"
+
+
 class TestIndeterminateReplayWithCompletedCheckpoint:
     """Round-13 finding #2 (BLOCKING): the terminal-staleness gate's
     indeterminate-replay tiebreaker ("a surviving checkpoint is itself

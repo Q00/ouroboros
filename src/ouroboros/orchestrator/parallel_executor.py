@@ -32,6 +32,7 @@ from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import math
 import os
@@ -2554,16 +2555,106 @@ class ParallelACExecutor:
                 )
         return None
 
-    def _discard_stale_checkpoint(self, seed_id: str, *, saved_execution_id: object) -> None:
-        """Drop a checkpoint left behind by an already-terminal run.
+    @staticmethod
+    def _seed_semantic_fingerprint(seed: Any) -> str:
+        """A stable hash of the Seed's SEMANTIC content (round-15 finding #1).
 
-        Best-effort: a failed delete only means the (already loud) staleness
-        gate fires again on the next run — never worth failing the current
-        fresh run over.
+        ``seed_id`` is a random uuid minted at Seed creation — it names an
+        object, not its content, so a Seed whose goal/AC content was edited
+        keeps the same ``seed_id`` and would silently adopt the pre-edit
+        run's checkpoint. This fingerprint captures what the checkpointed
+        progress was actually progress OF: the goal text plus each AC's
+        semantic identity (``derive_semantic_ac_key`` — the codebase's
+        existing per-AC content digest, which already excludes volatile
+        metadata/session identity), in order. The execution-plan structure
+        is deliberately EXCLUDED: the plan is re-derived by LLM dependency
+        analysis on every launch, so its grouping can legitimately differ
+        across a genuine crash-restart of identical content — including it
+        would discard genuine resumes (re-opening the round-9 #2 lost-
+        escalation regression) without any content having changed.
+        """
+        criteria = getattr(seed, "acceptance_criteria", ()) or ()
+        payload = json.dumps(
+            {
+                "goal": str(getattr(seed, "goal", "")),
+                "acceptance_criteria": [derive_semantic_ac_key(c) for c in criteria],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return f"v1:{hashlib.sha256(payload).hexdigest()}"
+
+    def _checkpoint_seed_content_mismatch(self, cp: Any, seed: Any) -> str | None:
+        """Return a mismatch description when the checkpoint's progress does
+        not describe THIS Seed's content, else ``None`` (round-15 finding #1,
+        BLOCKING).
+
+        Adoption used to validate nothing but the ``seed_id`` key itself: a
+        Seed whose goal AND acceptance criteria were changed under the same
+        ``seed_id`` adopted the old content's ``completed_levels``/
+        ``ac_statuses`` wholesale — recovery dispatched NOTHING and reported
+        SUCCESS while describing the NEW content as "restored", attributing
+        progress to AC content that never executed (a silent false success,
+        the forbidden direction).
+
+        Postures, following the established conventions:
+        - Absent fingerprint (legacy checkpoint): adopt — the one-time
+          migration posture every other restored field follows.
+        - Present but malformed: fail closed — refuse adoption. Adopting on
+          an unverifiable fingerprint risks the silent-false-success
+          direction; discarding merely re-runs and re-verifies, loudly.
+        - Present and mismatched: refuse adoption (the round-10 staleness
+          treatment — discard, run fresh, loud operator warning).
+        """
+        saved = cp.state.get("seed_fingerprint")
+        if saved is None:
+            log.info(
+                "parallel_executor.recovery.seed_fingerprint_migrated",
+                detail=(
+                    "checkpoint predates the seed content fingerprint; "
+                    "keeping the pre-fix adopt posture for this one-time "
+                    "migration"
+                ),
+            )
+            return None
+        if not isinstance(saved, str) or not saved.startswith("v1:"):
+            return (
+                f"checkpoint carries a malformed seed content fingerprint "
+                f"({saved!r}); it cannot be verified against the current "
+                "Seed, and adopting unverifiable progress risks a silent "
+                "false success"
+            )
+        current = self._seed_semantic_fingerprint(seed)
+        if saved != current:
+            return (
+                "checkpoint was saved for a Seed whose goal/acceptance-"
+                "criteria content differs from the currently-supplied Seed "
+                "(same seed_id, different semantic content) — its recorded "
+                "progress describes work that is NOT this Seed's work"
+            )
+        return None
+
+    def _discard_stale_checkpoint(
+        self,
+        seed_id: str,
+        *,
+        saved_execution_id: object,
+        detail: str | None = None,
+        console_message: str | None = None,
+    ) -> None:
+        """Drop a checkpoint this launch must not resume.
+
+        Default messaging covers the round-10 case (a checkpoint left behind
+        by an already-terminal run); the round-15 content-mismatch gate
+        passes its own ``detail``/``console_message``. Best-effort: a failed
+        delete only means the (already loud) gate fires again on the next
+        run — never worth failing the current fresh run over.
         """
         log.warning(
             "parallel_executor.recovery.stale_checkpoint_discarded",
-            detail=(
+            detail=detail
+            or (
                 "checkpoint belongs to a run that already reached a "
                 "non-resumable terminal state; running fresh instead of "
                 "resuming it"
@@ -2572,8 +2663,11 @@ class ParallelACExecutor:
             checkpoint_execution_id=saved_execution_id,
         )
         self._console.print(
-            "[yellow]Found a checkpoint from an already-finished run of this "
-            "seed — starting fresh (stale checkpoint discarded).[/yellow]"
+            console_message
+            or (
+                "[yellow]Found a checkpoint from an already-finished run of "
+                "this seed — starting fresh (stale checkpoint discarded).[/yellow]"
+            )
         )
         try:
             delete = getattr(self._checkpoint_store, "delete", None)
@@ -2725,6 +2819,12 @@ class ParallelACExecutor:
                 state={
                     "session_id": session_id,
                     "execution_id": execution_id,
+                    # Round-15 finding #1 (BLOCKING): what this progress is
+                    # progress OF. ``seed_id`` is a random uuid, not a
+                    # content identity — recovery validates this fingerprint
+                    # against the CURRENTLY-supplied Seed before adopting
+                    # any progress (see ``_checkpoint_seed_content_mismatch``).
+                    "seed_fingerprint": self._seed_semantic_fingerprint(seed),
                     "completed_levels": completed_levels,
                     "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                     "failed_indices": sorted(failed_indices),
@@ -3111,7 +3211,9 @@ class ParallelACExecutor:
                             seed_id,
                             saved_execution_id=cp.state.get("execution_id"),
                         )
-                    elif cp.phase == "parallel_execution":
+                    elif cp.phase == "parallel_execution" and (
+                        owner_conflict := self._checkpoint_owner_conflict(cp)
+                    ):
                         # Round-12 finding #3 (BLOCKING): before adopting a
                         # NON-terminal checkpoint, make sure its writer is
                         # not still alive. Two live claimants on one seed
@@ -3121,32 +3223,70 @@ class ParallelACExecutor:
                         # silently converge on the same execution aggregate.
                         # Refusing is loud and immediate — an infra-fatal
                         # launch conflict raised before any AC work starts,
-                        # so no AC ever surfaces FAILED over it.
-                        owner_conflict = self._checkpoint_owner_conflict(cp)
-                        if owner_conflict is not None:
-                            log.error(
-                                "parallel_executor.recovery.active_checkpoint_conflict",
-                                seed_id=seed_id,
-                                checkpoint_execution_id=cp.state.get("execution_id"),
-                                conflict=owner_conflict,
-                            )
-                            self._console.print(
-                                "[red]Refusing to start: an existing run of "
-                                "this seed appears to still be active or "
-                                f"paused ({owner_conflict}).[/red]"
-                            )
-                            raise CheckpointOwnershipError(
-                                "An RC3 checkpoint for seed "
-                                f"'{seed_id}' appears to belong to a run that "
-                                f"is still active or paused: {owner_conflict}. "
-                                "Refusing to adopt it — two live processes "
-                                "must not share one execution's durable "
-                                "state. If that run has finished or been "
-                                "stopped, simply relaunch (a dead owner is "
-                                "adopted automatically); otherwise wait for "
-                                "it or cancel it first, or start a different "
-                                "seed/session to run fresh."
-                            )
+                        # so no AC ever surfaces FAILED over it. Checked
+                        # BEFORE the round-15 content gate below: even a
+                        # content-mismatched checkpoint must never be
+                        # DISCARDED out from under a still-live owner.
+                        log.error(
+                            "parallel_executor.recovery.active_checkpoint_conflict",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            conflict=owner_conflict,
+                        )
+                        self._console.print(
+                            "[red]Refusing to start: an existing run of "
+                            "this seed appears to still be active or "
+                            f"paused ({owner_conflict}).[/red]"
+                        )
+                        raise CheckpointOwnershipError(
+                            "An RC3 checkpoint for seed "
+                            f"'{seed_id}' appears to belong to a run that "
+                            f"is still active or paused: {owner_conflict}. "
+                            "Refusing to adopt it — two live processes "
+                            "must not share one execution's durable "
+                            "state. If that run has finished or been "
+                            "stopped, simply relaunch (a dead owner is "
+                            "adopted automatically); otherwise wait for "
+                            "it or cancel it first, or start a different "
+                            "seed/session to run fresh."
+                        )
+                    elif cp.phase == "parallel_execution" and (
+                        content_mismatch := self._checkpoint_seed_content_mismatch(cp, seed)
+                    ):
+                        # Round-15 finding #1 (BLOCKING): the checkpoint key
+                        # (``seed_id``) names an OBJECT, not its content — a
+                        # Seed whose goal/AC content was edited under the
+                        # same seed_id used to adopt the pre-edit run's
+                        # progress wholesale: recovery dispatched NOTHING
+                        # and reported SUCCESS while attributing the NEW
+                        # content as "restored" from work that never ran on
+                        # it. Treat it like the round-10 staleness case:
+                        # this is not a genuine resume of the same logical
+                        # run — discard, run every level fresh, and say so
+                        # loudly. (A malformed fingerprint takes this same
+                        # refuse-adoption branch — fail closed; a LEGACY
+                        # checkpoint without one keeps the adopt posture as
+                        # a one-time migration.)
+                        log.error(
+                            "parallel_executor.recovery.seed_content_mismatch",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=content_mismatch,
+                        )
+                        self._discard_stale_checkpoint(
+                            seed_id,
+                            saved_execution_id=cp.state.get("execution_id"),
+                            detail=content_mismatch,
+                            console_message=(
+                                "[red]WARNING: found a checkpoint under this "
+                                "seed's id, but it was saved for DIFFERENT "
+                                "goal/acceptance-criteria content. Refusing "
+                                "to adopt its progress (that could falsely "
+                                "report this Seed's work as already done) — "
+                                "running all levels fresh instead.[/red]"
+                            ),
+                        )
+                    elif cp.phase == "parallel_execution":
                         # Restore the ORIGINAL run's execution_id. A crash-
                         # restart run is created with a fresh execution_id,
                         # but every durable-state loader keyed off
