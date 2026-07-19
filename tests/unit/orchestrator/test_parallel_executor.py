@@ -1410,6 +1410,59 @@ def test_bound_verify_gate_outcome_rejects_type_coercion() -> None:
     assert bound_verify_gate_outcome(base) == base
 
 
+def test_capsule_authority_binds_watchdog_timeout_policy() -> None:
+    """R7 blocker #3: watchdog timeouts change termination semantics → authority.
+
+    Two runtimes differing only in their stdout-idle watchdog timeout must not
+    share a capsule fingerprint.
+    """
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+        def __init__(self, idle_timeout: float) -> None:
+            self._idle_timeout = idle_timeout
+
+        def watchdog_identity_contract(self) -> dict[str, float | None]:
+            return {
+                "startup_output_timeout_seconds": 60.0,
+                "stdout_idle_timeout_seconds": self._idle_timeout,
+                "process_shutdown_timeout_seconds": 5.0,
+                "completed_process_group_shutdown_timeout_seconds": 0.2,
+            }
+
+    def _authority(idle_timeout: float) -> dict[str, object]:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(idle_timeout),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        return executor._build_capsule_dispatch_authority_contract(
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+        )
+
+    fast = _authority(1.0)
+    slow = _authority(999.0)
+    assert fast["runtime"]["watchdog"]["observed"] is True  # type: ignore[index]
+    assert fast != slow
+
+
+def test_codex_runtime_watchdog_identity_reflects_timeouts() -> None:
+    """R7 blocker #3: the real Codex runtime surfaces its effective watchdog policy."""
+    from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+    runtime = CodexCliRuntime(stdout_idle_timeout_seconds=1.0)
+    contract = runtime.watchdog_identity_contract()
+    assert contract["stdout_idle_timeout_seconds"] == 1.0
+    assert "startup_output_timeout_seconds" in contract
+
+
 def test_runtime_capabilities_contract_includes_realtime_effect_visibility() -> None:
     """R6 blocker #1: the stall-affecting capability participates in authority."""
     from ouroboros.orchestrator.adapter import FULL_CAPABILITIES

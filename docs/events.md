@@ -152,7 +152,10 @@ cannot resume the same capsule under a different binary. For a runtime that wrap
 a transport (e.g. `LeaderDrivenWorkerRuntime`), the transport's delegated
 `executable_identity_contract()` also contributes its command-affecting policy
 (e.g. Claude's `--add-dir` / `--disallowedTools`), so a change in launched-binary
-access changes authority too.
+access changes authority too. A runtime's effective watchdog/termination policy
+(startup-output and stdout-idle timeouts, process-shutdown grace), surfaced via
+`watchdog_identity_contract()`, is likewise bound, so a restart cannot resume the
+same capsule under changed interruption semantics.
 
 Lifecycle events carry the same `ac_dispatch_id`. Dispatch events form one
 validated predecessor chain, and recovery considers only its unique head; it

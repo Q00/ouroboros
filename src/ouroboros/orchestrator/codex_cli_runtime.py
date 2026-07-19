@@ -570,6 +570,25 @@ class CodexCliRuntime:
             "resume_handle_selector": self.resume_handle_execution_identity_contract(None),
         }
 
+    def watchdog_identity_contract(self) -> dict[str, float | None]:
+        """Return the effective watchdog/termination timeouts for capsule authority.
+
+        These decide WHEN a provider turn is interrupted (no startup output, then
+        stdout idle) and how long process shutdown is awaited, so two runtimes
+        with different values have different interruption semantics and must not
+        resume the same capsule. Values are the resolved effective settings (a
+        non-positive constructor input has already been normalized to ``None`` =
+        no watchdog).
+        """
+        return {
+            "startup_output_timeout_seconds": self._startup_output_timeout_seconds,
+            "stdout_idle_timeout_seconds": self._stdout_idle_timeout_seconds,
+            "process_shutdown_timeout_seconds": self._process_shutdown_timeout_seconds,
+            "completed_process_group_shutdown_timeout_seconds": (
+                self._completed_process_group_shutdown_timeout_seconds
+            ),
+        }
+
     def resume_handle_execution_identity_contract(
         self,
         runtime_handle: RuntimeHandle | None,

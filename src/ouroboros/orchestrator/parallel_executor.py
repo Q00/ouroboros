@@ -2682,6 +2682,27 @@ class ParallelACExecutor:
         }
 
     @staticmethod
+    def _runtime_watchdog_identity(adapter: object) -> dict[str, object]:
+        """Bind the effective watchdog/termination policy into capsule authority.
+
+        Startup- and stdout-idle watchdog timeouts (and process-shutdown grace)
+        change WHEN a provider turn is interrupted, so two runtimes with different
+        timeouts have materially different termination semantics and must not
+        share a capsule fingerprint. A runtime that owns a watchdog exposes a
+        provider-neutral ``watchdog_identity_contract()``; absent it, the policy
+        is recorded as unobserved.
+        """
+        contract = getattr(adapter, "watchdog_identity_contract", None)
+        if callable(contract):
+            try:
+                declared = contract()
+            except Exception:
+                declared = None
+            if isinstance(declared, Mapping):
+                return {"version": 1, "observed": True, "policy": dict(declared)}
+        return {"version": 1, "observed": False, "policy": None}
+
+    @staticmethod
     def _runtime_capabilities_contract(adapter: object) -> dict[str, Any] | None:
         capabilities = getattr(adapter, "capabilities", None)
         if not isinstance(capabilities, RuntimeCapabilities):
@@ -2829,6 +2850,7 @@ class ParallelACExecutor:
                 "executable": self._runtime_executable_identity(
                     self._adapter, cwd=workspace_identity
                 ),
+                "watchdog": self._runtime_watchdog_identity(self._adapter),
             },
             "model_routing": serialize_model_router(self._model_router),
             "execution_profile": serialize_execution_profile(self._execution_profile),
@@ -8680,6 +8702,14 @@ class ParallelACExecutor:
                 runtime_identity=runtime_identity,
                 failure_class=failure.value if failure is not None else None,
             )
+        except AmbiguousACExecutionError:
+            # The alternate ran in the SAME shared workspace and may already have
+            # applied non-idempotent effects; swallowing this to ``None`` would let
+            # the caller finalize/escalate from the stale pre-redispatch state.
+            # Propagate the ambiguity so it fails closed (the fallback below is only
+            # for failures proven to occur before any provider entry).
+            self._alt_harness_status_by_root[root_ac_index] = "failed"
+            raise
         except Exception as exc:  # never make a failure worse
             self._alt_harness_status_by_root[root_ac_index] = "failed"
             log.warning(
@@ -11286,6 +11316,16 @@ Respond with either ATOMIC or the structured JSON object only.
 
         command = spec.verify_command
         if not command:
+            # Defense in depth (the schema already forbids this): an
+            # ``output_assertion`` with no command has no authoritative output to
+            # assert against, so it can never be satisfied — fail closed rather
+            # than silently PASS an unevaluated acceptance field.
+            if spec.output_assertion:
+                return _VerifyGateOutcome(
+                    passed=False,
+                    reason="output_assertion has no verify_command to assert against",
+                    output_tail="",
+                )
             return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
         subprocess_kwargs: dict[str, Any] = {}
         if os.name != "nt":

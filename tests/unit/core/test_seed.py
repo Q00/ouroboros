@@ -451,6 +451,20 @@ class TestSeed:
         assert ok.output_assertion == "OK"
         assert pytest_literal.output_assertion == "5 passed"
 
+    def test_output_assertion_requires_verify_command(self) -> None:
+        """R7 blocker #2: an output_assertion with no verify_command is rejected.
+
+        A standalone output_assertion has no authoritative output to assert
+        against; allowing it let an output-only contract pass without evaluation.
+        """
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="output_assertion requires a verify_command"):
+            AcceptanceCriterionSpec(
+                description="Asserts on output that no command produces",
+                output_assertion="OK",
+            )
+
     def test_seed_acceptance_criteria_materialize_semantic_keys(self) -> None:
         """Legacy description-only ACs gain deterministic persisted identities."""
         seed = Seed(

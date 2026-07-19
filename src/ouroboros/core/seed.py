@@ -290,6 +290,21 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             return tuple(str(item).strip() for item in value if str(item).strip())
         return value
 
+    @model_validator(mode="after")
+    def _require_command_for_output_assertion(self) -> AcceptanceCriterionSpec:
+        """Reject an ``output_assertion`` with no ``verify_command`` to assert on.
+
+        ``output_assertion`` is only meaningful against the output of a
+        ``verify_command``. Allowing it standalone let an output-only contract
+        report a success contract while the verify gate returned PASS without ever
+        evaluating the assertion — an unenforced acceptance field. Requiring the
+        command closes that gap at the schema, so no downstream path can accept an
+        unevaluated assertion.
+        """
+        if self.output_assertion and not self.verify_command:
+            raise ValueError("output_assertion requires a verify_command to assert against")
+        return self
+
     @property
     def has_success_contract(self) -> bool:
         """Return True when explicit evidence fields are populated."""

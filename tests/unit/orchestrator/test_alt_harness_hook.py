@@ -369,6 +369,33 @@ async def test_rerun_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_alt_ambiguity_propagates_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R7 blocker #1: an alternate that raises ambiguity must not fall back to None.
+
+    The alternate ran in the shared workspace and may have applied non-idempotent
+    effects; swallowing the ambiguity would let the caller finalize/escalate from
+    stale pre-redispatch state. The ambiguity must propagate (fail closed).
+    """
+    from ouroboros.orchestrator.ac_runtime_handle_manager import AmbiguousACExecutionError
+
+    executor = _make_executor(enabled=True)
+    monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
+
+    async def _ambiguous(backend: str, **kwargs: Any) -> ACExecutionResult:
+        raise AmbiguousACExecutionError("alternate may have mutated the shared workspace")
+
+    executor._run_single_ac_on_backend = _ambiguous  # type: ignore[method-assign]
+    with pytest.raises(AmbiguousACExecutionError, match="shared workspace"):
+        await executor._maybe_redispatch_alt_harness(
+            result=_failed(),
+            execution_context_id="exec-1",
+            rerun_kwargs=_rerun_kwargs(),
+            atomic_retry_attempt=0,
+            stall_retries_exhausted=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_alt_failure_is_surfaced_as_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
     """A FAILED alternate that ran in the workspace is surfaced, not discarded.
 
