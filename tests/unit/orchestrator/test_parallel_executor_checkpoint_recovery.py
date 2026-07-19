@@ -3074,3 +3074,187 @@ class TestResumeSurvivesPlanRegrouping:
             },
         )
         assert await executor._checkpoint_from_terminal_run(cp, total_levels=3) is True
+
+
+class _SwitchableFailStore(CheckpointStore):
+    """Real store whose ``save`` outages are toggled by the test; successful
+    saves record a deep copy of the persisted state and signal ``landed``."""
+
+    def __init__(self, base_path: Path, *, landed: asyncio.Event) -> None:
+        super().__init__(base_path=base_path)
+        self.failing = True
+        self.landed = landed
+        self.persisted_states: list[dict[str, object]] = []
+
+    def save(self, checkpoint):  # type: ignore[no-untyped-def]
+        if self.failing:
+            from ouroboros.core.errors import PersistenceError
+            from ouroboros.core.types import Result
+
+            return Result.err(
+                PersistenceError(
+                    "simulated checkpoint store outage",
+                    operation="write",
+                    details={"seed_id": checkpoint.seed_id},
+                )
+            )
+        import copy
+
+        self.persisted_states.append(copy.deepcopy(checkpoint.state))
+        result = super().save(checkpoint)
+        self.landed.set()
+        return result
+
+
+class TestDeferredAnchorRetryPersistsCoherentSnapshot:
+    """Round-16 finding #2 (BLOCKING): ``_latest_checkpoint_save_args``
+    froze the SCALARS (``completed_levels``, ``completed_count``) at the
+    moment a save was last ATTEMPTED but held LIVE references to the
+    mutable collections (``ac_statuses``, ``failed_indices``,
+    ``level_contexts``), which the deferred anchor retry serialized at
+    WRITE time — after ongoing execution had mutated them further. The
+    retry could persist a torn snapshot: ``completed_levels=1`` (frozen at
+    the level-1 attempt) combined with a ``failed_indices`` entry for an
+    AC that only failed DURING level 2 — a state that never existed at any
+    single point in time. On recovery, level 2 re-dispatches that AC (it
+    may genuinely succeed), but ``failed_indices`` is add-only, so its
+    dependents are blocked as "dependency failed" without ever being
+    dispatched or escalated — the forbidden outcome. Every save attempt
+    must record a coherent point-in-time snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_retry_never_mixes_stale_level_count_with_later_failures(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact scenario: (1) the run-start anchor save fails
+        and schedules a deferred retry; (2) level 1 completes but its own
+        best-effort save ALSO fails (updating the tracked args to
+        ``completed_levels=1``); (3) mid-level-2 an AC terminally fails —
+        ``failed_indices`` mutates; (4) the store recovers and the deferred
+        retry finally fires INSIDE that window. The persisted checkpoint
+        must describe the level-1 boundary it claims (no level-2 failure
+        markers), and a crash-restart resume from it must give the level-2
+        AC — and its dependent — a genuine re-run."""
+        seed = _seed_three_acs("Torn anchor snapshot")
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        run_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run_events.initialize()
+        landed = asyncio.Event()
+        store = _SwitchableFailStore(ckpt_path, landed=landed)
+        store.initialize()
+        executor = _executor(
+            event_store=run_events,
+            checkpoint_store=store,
+            parked_retry_backoff_seconds=60.0,
+        )
+
+        # The deferred retry's first (immediate) attempt fails against the
+        # still-broken store; its next attempt then parks on this gate so
+        # the test controls exactly when it fires.
+        retry_gate = asyncio.Event()
+
+        async def _gated_sleep(_delay: float) -> None:
+            await asyncio.wait_for(retry_gate.wait(), timeout=10)
+
+        executor._sleep = _gated_sleep  # type: ignore[method-assign]
+
+        real_emit_level_completed = executor._emit_level_completed
+
+        async def _hooked_emit_level_completed(**kwargs: object) -> None:
+            if kwargs.get("level") == 2:
+                # The review's window: level 2's terminal failure has just
+                # been recorded in the LIVE failed_indices/ac_statuses, but
+                # the level-2 save attempt has not yet re-frozen the
+                # scalars. The store recovers and the deferred anchor retry
+                # fires exactly here.
+                store.failing = False
+                retry_gate.set()
+                await asyncio.wait_for(landed.wait(), timeout=10)
+                # No LATER correct save lands (the review's step 5): the
+                # per-level level-2 save stays best-effort and fails.
+                store.failing = True
+            await real_emit_level_completed(**kwargs)
+
+        executor._emit_level_completed = _hooked_emit_level_completed  # type: ignore[method-assign]
+
+        async def _stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            if batch == [0]:
+                return [ACExecutionResult(ac_index=0, ac_content="Build core", success=True)]
+            assert batch == [1]
+            return [
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Add API",
+                    success=False,
+                    error="terminal failure after ladder exhausted",
+                )
+            ]
+
+        executor._run_batch_with_verify_and_retry = AsyncMock(side_effect=_stage_runner)
+        result = await executor.execute_parallel(
+            seed,
+            session_id="session-original",
+            execution_id="exec-original",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_three_level_plan(),
+        )
+        await run_events.close()
+        # Sanity: this run saw AC 1 fail and AC 2 blocked in-memory.
+        assert result.failure_count == 1
+        assert result.blocked_count == 1
+
+        # Exactly one save landed: the deferred anchor retry, fired inside
+        # the mutation window. It must be a COHERENT point-in-time snapshot
+        # of the state at the level-1 save ATTEMPT it re-persists — never
+        # the frozen level count mixed with the later-mutated collections.
+        assert len(store.persisted_states) == 1
+        state = store.persisted_states[0]
+        assert state["completed_levels"] == 1
+        # AC 1's failure happened AFTER the level-1 attempt: it must not
+        # appear in the persisted snapshot alongside completed_levels=1.
+        assert state["failed_indices"] == []
+        assert state["ac_statuses"] == {"0": "completed", "1": "pending", "2": "pending"}
+
+        # --- Crash-restart resume from that checkpoint: AC 1 gets a
+        # genuine re-run (succeeding this time), so its dependent AC 2 must
+        # be dispatched too. Pre-fix, the torn snapshot restored AC 1 as
+        # already terminally failed, so BOTH surfaced success=False with
+        # zero dispatch and zero escalation.
+        resumed_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await resumed_events.initialize()
+        resumed = _executor(
+            event_store=resumed_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+        )
+        dispatched: list[int] = []
+
+        async def _resumed_runner(**kwargs: object) -> list[ACExecutionResult]:
+            batch = list(kwargs["batch_executable"])  # type: ignore[call-overload]
+            dispatched.extend(batch)
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=str(seed.acceptance_criteria[idx]),
+                    success=True,
+                )
+                for idx in batch
+            ]
+
+        resumed._run_batch_with_verify_and_retry = AsyncMock(side_effect=_resumed_runner)
+        resumed_result = await resumed.execute_parallel(
+            seed,
+            session_id="session-restarted",
+            execution_id="exec-restarted",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_three_level_plan(),
+        )
+        await resumed_events.close()
+
+        assert sorted(dispatched) == [1, 2]
+        assert resumed_result.all_succeeded
+        assert resumed_result.execution_id == "exec-original"

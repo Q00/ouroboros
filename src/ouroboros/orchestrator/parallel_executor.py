@@ -1359,9 +1359,13 @@ class ParallelACExecutor:
         # anchor save uses them to (a) stand down once any newer per-level
         # save has landed (that checkpoint strictly supersedes the anchor)
         # and (b) never overwrite a newer durable checkpoint with staler
-        # state. ``_latest_checkpoint_save_args`` keeps the most recent save
-        # call's arguments so the deferred retry persists the FRESHEST known
-        # progress instead of a stale run-start snapshot.
+        # state. ``_latest_checkpoint_save_args`` keeps a point-in-time
+        # SNAPSHOT of the most recent save call's arguments (round-16
+        # finding #2: mutable collections are copied at attempt time, never
+        # stored as live references) so the deferred retry persists the
+        # freshest ATTEMPTED state — a state that genuinely existed at one
+        # moment — instead of a stale run-start snapshot or a torn mix of
+        # two different moments.
         self._checkpoint_save_seq: int = 0
         self._checkpoint_persisted_seq: int = 0
         self._latest_checkpoint_save_args: dict[str, Any] | None = None
@@ -2843,6 +2847,23 @@ class ParallelACExecutor:
         deferred retry can both stand down once a newer save has landed and
         re-persist the freshest attempted state rather than a stale
         run-start snapshot.
+
+        Round-16 finding #2 (BLOCKING): the recorded arguments are a
+        point-in-time SNAPSHOT — the mutable collections (``ac_statuses``,
+        ``failed_indices``, ``level_contexts``) are copied HERE, at the
+        moment this attempt describes, never stored as live references.
+        Storing live references let the deferred anchor retry serialize
+        them at WRITE time, after ongoing execution had mutated them
+        further, persisting a torn checkpoint: the frozen
+        ``completed_levels`` of one moment combined with failure markers
+        from a LATER moment (e.g. "level 1 done" plus a ``failed_indices``
+        entry for an AC that only failed during level 2 — a state that
+        never existed). On recovery that AC is re-dispatched by the level
+        replay and may genuinely succeed, but the restored add-only
+        ``failed_indices`` still blocks its dependents as
+        "dependency failed" with zero dispatch and zero escalation — the
+        forbidden outcome. Shallow copies suffice: statuses are str->str,
+        indices are ints, and ``LevelContext`` is a frozen dataclass.
         """
         if not self._checkpoint_store:
             return True
@@ -2854,10 +2875,10 @@ class ParallelACExecutor:
             "execution_id": execution_id,
             "completed_levels": completed_levels,
             "plan_total_stages": plan_total_stages,
-            "ac_statuses": ac_statuses,
-            "failed_indices": failed_indices,
+            "ac_statuses": dict(ac_statuses),
+            "failed_indices": set(failed_indices),
             "completed_count": completed_count,
-            "level_contexts": level_contexts,
+            "level_contexts": list(level_contexts),
             "checkpoint_point": checkpoint_point,
         }
         try:
@@ -3687,8 +3708,11 @@ class ParallelACExecutor:
         # (rounds 6-13): keep retrying at the parked cadence in the
         # background, and surface a terminal give-up through
         # ``unconfirmed_durable_writes``. The retry re-persists the FRESHEST
-        # attempted checkpoint state (progress dicts are mutated in place
-        # and ``_latest_checkpoint_save_args`` tracks each later attempt),
+        # attempted checkpoint state (each save attempt — including every
+        # later per-level attempt — records a coherent point-in-time
+        # snapshot of its arguments in ``_latest_checkpoint_save_args``;
+        # round-16 finding #2: never live references that ongoing execution
+        # could mutate between the attempt and the retry's actual write),
         # and stands down as soon as any newer save has landed — it must
         # never roll a newer durable checkpoint back to staler progress.
         anchor_persisted = self._save_execution_checkpoint(
