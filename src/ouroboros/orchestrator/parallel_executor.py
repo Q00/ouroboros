@@ -2042,6 +2042,76 @@ class ParallelACExecutor:
             return seed_id
         return session_id
 
+    @classmethod
+    def _retry_policy_malformed(cls, raw_policy: object) -> str | None:
+        """Return why a checkpointed retry policy cannot be adopted, else
+        ``None`` (round-17 finding #3).
+
+        ``None`` payload means the checkpoint predates the field — a
+        genuine one-time migration shape, not corruption. These rules are
+        the single source of truth shared by the pre-adoption gate
+        (``_checkpoint_semantics_malformed``) and
+        ``_restore_checkpoint_retry_policy``, so the gate and the restore
+        helper can never drift apart. They mirror the runner's
+        ``_valid_retry_policy_contract`` (round-9 #2) plus the round-11 #2
+        execution-semantic fields (``reasoning_effort`` governs ladder
+        terminal eligibility; the verify-gate pair governs whether
+        attestation can be evaluated at all): a key ABSENT from the
+        mapping is the forward-compat migration shape (keep the current
+        value for that field only); a key PRESENT but type-mangled is
+        corruption.
+        """
+        if raw_policy is None:
+            return None
+        if not isinstance(raw_policy, Mapping):
+            return f"retry_policy is not a mapping: {type(raw_policy).__name__}"
+        enabled = raw_policy.get("lateral_escalation_enabled")
+        if not isinstance(enabled, bool):
+            return f"retry_policy.lateral_escalation_enabled is not a bool: {enabled!r}"
+        backoff = raw_policy.get("parked_retry_backoff_seconds")
+        if (
+            not isinstance(backoff, (int, float))
+            or isinstance(backoff, bool)
+            or not math.isfinite(backoff)
+            or backoff < 1.0
+        ):
+            return (
+                "retry_policy.parked_retry_backoff_seconds is not a finite "
+                f"number >= 1.0: {backoff!r}"
+            )
+        retry_attempts = raw_policy.get("ac_retry_attempts")
+        if (
+            not isinstance(retry_attempts, int)
+            or isinstance(retry_attempts, bool)
+            or retry_attempts < 0
+        ):
+            return f"retry_policy.ac_retry_attempts is not a non-negative int: {retry_attempts!r}"
+        if "reasoning_effort" in raw_policy:
+            effort = raw_policy["reasoning_effort"]
+            if effort is not None and (
+                not isinstance(effort, str) or effort not in {"low", "medium", "high", "xhigh"}
+            ):
+                return f"retry_policy.reasoning_effort is not a routing effort: {effort!r}"
+        if "run_verify_commands" in raw_policy and not isinstance(
+            raw_policy["run_verify_commands"], bool
+        ):
+            return (
+                "retry_policy.run_verify_commands is not a bool: "
+                f"{raw_policy['run_verify_commands']!r}"
+            )
+        if "verify_command_timeout_seconds" in raw_policy:
+            verify_timeout = raw_policy["verify_command_timeout_seconds"]
+            if (
+                not isinstance(verify_timeout, int)
+                or isinstance(verify_timeout, bool)
+                or verify_timeout < 1
+            ):
+                return (
+                    "retry_policy.verify_command_timeout_seconds is not an "
+                    f"int >= 1: {verify_timeout!r}"
+                )
+        return None
+
     def _restore_checkpoint_retry_policy(self, raw_policy: object) -> None:
         """Restore the checkpointed run's retry/termination policy (round-9 #2).
 
@@ -2066,58 +2136,20 @@ class ParallelACExecutor:
             enabled = raw_policy.get("lateral_escalation_enabled")
             backoff = raw_policy.get("parked_retry_backoff_seconds")
             retry_attempts = raw_policy.get("ac_retry_attempts")
-            # Round-11 finding #2 (BLOCKING): the three round-9 #4 fields are
-            # execution-semantic inputs the ladder/attestation state machine
-            # depends on (``reasoning_effort`` governs ladder terminal
-            # eligibility via the frontier-effort checks; the verify-gate pair
-            # governs whether attestation can be evaluated at all). The
-            # runner-level durable contract already pins them for the
-            # session-resume path; this CHECKPOINT-level restore (the
-            # executor-internal RC3 crash-recovery path) must pin them too, or
-            # a crash-restart executes the restored level under different
-            # effort/verify-gate semantics than the original run. Validation
-            # mirrors ``_valid_retry_policy_contract`` exactly: effort is the
-            # routing vocabulary or ``None`` (dormant axis); the verify flag
-            # is a plain bool; the timeout mirrors ``ExecutionConfig``'s
-            # ``ge=1`` int contract. A key ABSENT from the persisted policy is
-            # the one-time migration shape (checkpoint written before this
-            # fix): keep the current config's value for that field only,
-            # mirroring the ``raw_policy is None`` posture above. A key
-            # PRESENT but malformed is corruption/tampering and takes the
-            # whole policy down the fail-closed branch below.
+            # Round-11 finding #2 (BLOCKING) / round-17 finding #3: the full
+            # validation rules (including the three round-9 #4
+            # execution-semantic fields) live in ``_retry_policy_malformed``,
+            # shared with the caller's pre-adoption gate so the RC3 recovery
+            # path rejects the WHOLE checkpoint before this helper ever runs
+            # on a malformed payload. The fallback branch below stays as
+            # defense-in-depth for any other caller.
             effort_present = "reasoning_effort" in raw_policy
             verify_flag_present = "run_verify_commands" in raw_policy
             timeout_present = "verify_command_timeout_seconds" in raw_policy
             effort = raw_policy.get("reasoning_effort")
             verify_flag = raw_policy.get("run_verify_commands")
             verify_timeout = raw_policy.get("verify_command_timeout_seconds")
-            round9_fields_valid = (
-                (
-                    not effort_present
-                    or effort is None
-                    or (isinstance(effort, str) and effort in {"low", "medium", "high", "xhigh"})
-                )
-                and (not verify_flag_present or isinstance(verify_flag, bool))
-                and (
-                    not timeout_present
-                    or (
-                        isinstance(verify_timeout, int)
-                        and not isinstance(verify_timeout, bool)
-                        and verify_timeout >= 1
-                    )
-                )
-            )
-            if (
-                isinstance(enabled, bool)
-                and isinstance(backoff, (int, float))
-                and not isinstance(backoff, bool)
-                and math.isfinite(backoff)
-                and backoff >= 1.0
-                and isinstance(retry_attempts, int)
-                and not isinstance(retry_attempts, bool)
-                and retry_attempts >= 0
-                and round9_fields_valid
-            ):
+            if self._retry_policy_malformed(raw_policy) is None and isinstance(enabled, bool):
                 if (
                     enabled != self._lateral_escalation_enabled
                     or float(backoff) != self._parked_retry_backoff_seconds
@@ -2170,6 +2202,24 @@ class ParallelACExecutor:
             ),
         )
         self._lateral_escalation_enabled = True
+
+    @staticmethod
+    def _model_routing_malformed(raw_routing: object) -> str | None:
+        """Return why a checkpointed model-routing contract cannot be
+        adopted, else ``None`` (round-17 finding #3).
+
+        ``None`` payload means the checkpoint predates the field (one-time
+        migration). Recognition is delegated to the SAME versioned
+        contract ``_restore_checkpoint_model_router`` restores through
+        (``deserialize_model_router``), so the pre-adoption gate and the
+        restore helper can never disagree about what is adoptable.
+        """
+        if raw_routing is None:
+            return None
+        recognized, _ = deserialize_model_router(raw_routing)
+        if not recognized:
+            return f"model_routing is not a recognized serialized router contract: {raw_routing!r}"
+        return None
 
     def _restore_checkpoint_model_router(self, raw_routing: object) -> None:
         """Restore the checkpointed run's resolved model router (round-12 #2).
@@ -2228,6 +2278,53 @@ class ParallelACExecutor:
 
     #: The closed vocabulary ``__init__`` accepts for ``decomposition_mode``.
     _DECOMPOSITION_MODES = frozenset({"preflight", "bounce_only", "off"})
+
+    @classmethod
+    def _execution_semantics_malformed(cls, raw_semantics: object) -> str | None:
+        """Return why a checkpointed execution-semantics mapping cannot be
+        adopted, else ``None`` (round-17 finding #3).
+
+        ``None`` payload means the checkpoint predates the field (one-time
+        migration); a key ABSENT from a present mapping is the
+        forward-compat migration shape. These rules are the single source
+        of truth shared by the pre-adoption gate
+        (``_checkpoint_semantics_malformed``) and
+        ``_restore_checkpoint_execution_semantics``, so the gate and the
+        restore helper can never drift apart.
+        """
+        if raw_semantics is None:
+            return None
+        if not isinstance(raw_semantics, Mapping):
+            return f"execution_semantics is not a mapping: {type(raw_semantics).__name__}"
+        if "decomposition_mode" in raw_semantics:
+            mode = raw_semantics["decomposition_mode"]
+            if mode not in cls._DECOMPOSITION_MODES:
+                return f"execution_semantics.decomposition_mode is not a known mode: {mode!r}"
+        if "max_decomposition_depth" in raw_semantics:
+            depth = raw_semantics["max_decomposition_depth"]
+            if not isinstance(depth, int) or isinstance(depth, bool) or depth < 0:
+                return (
+                    "execution_semantics.max_decomposition_depth is not a "
+                    f"non-negative int: {depth!r}"
+                )
+        for flag_key in (
+            "fat_harness_mode",
+            "cross_harness_redispatch_enabled",
+            "shadow_replay_enabled",
+        ):
+            if flag_key in raw_semantics and not isinstance(raw_semantics[flag_key], bool):
+                return f"execution_semantics.{flag_key} is not a bool: {raw_semantics[flag_key]!r}"
+        if "context_pack_enabled" in raw_semantics:
+            cpack = raw_semantics["context_pack_enabled"]
+            # ``None`` is a legitimate persisted value here (a run whose
+            # runner never resolved the flag), not corruption.
+            if cpack is not None and not isinstance(cpack, bool):
+                return f"execution_semantics.context_pack_enabled is not a bool or None: {cpack!r}"
+        if "max_concurrent" in raw_semantics:
+            workers = raw_semantics["max_concurrent"]
+            if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
+                return f"execution_semantics.max_concurrent is not an int >= 1: {workers!r}"
+        return None
 
     def _restore_checkpoint_execution_semantics(self, raw_semantics: object) -> None:
         """Restore the remaining execution-semantic scalars (round-12 #2).
@@ -2288,23 +2385,13 @@ class ParallelACExecutor:
             shadow = raw_semantics.get("shadow_replay_enabled")
             cpack = raw_semantics.get("context_pack_enabled")
             workers = raw_semantics.get("max_concurrent")
-            if (
-                (not mode_present or mode in self._DECOMPOSITION_MODES)
-                and (
-                    not depth_present
-                    or (isinstance(depth, int) and not isinstance(depth, bool) and depth >= 0)
-                )
-                and (not fat_present or isinstance(fat, bool))
-                and (not cross_present or isinstance(cross, bool))
-                and (not shadow_present or isinstance(shadow, bool))
-                # ``None`` is a legitimate persisted value here (a run whose
-                # runner never resolved the flag), not corruption.
-                and (not cpack_present or cpack is None or isinstance(cpack, bool))
-                and (
-                    not workers_present
-                    or (isinstance(workers, int) and not isinstance(workers, bool) and workers >= 1)
-                )
-            ):
+            # Round-17 finding #3: the per-field validation rules live in
+            # ``_execution_semantics_malformed``, shared with the caller's
+            # pre-adoption gate so the RC3 recovery path rejects the WHOLE
+            # checkpoint before this helper ever runs on a malformed
+            # payload. The fallback branch below stays as defense-in-depth
+            # for any other caller.
+            if self._execution_semantics_malformed(raw_semantics) is None:
                 if (
                     (mode_present and mode != self._decomposition_mode)
                     or (depth_present and depth != self._max_decomposition_depth)
@@ -2858,6 +2945,48 @@ class ParallelACExecutor:
             raw_contexts = state["level_contexts"]
             if not isinstance(raw_contexts, list | tuple):
                 return f"level_contexts is not a list: {raw_contexts!r}"
+        return None
+
+    @classmethod
+    def _checkpoint_semantics_malformed(cls, cp: Any) -> str | None:
+        """Return a description of the FIRST malformed execution-semantic
+        payload in the checkpoint, else ``None`` (round-17 finding #3,
+        BLOCKING).
+
+        The three semantic restore helpers
+        (``_restore_checkpoint_retry_policy``,
+        ``_restore_checkpoint_model_router``,
+        ``_restore_checkpoint_execution_semantics``) each validate their
+        OWN payload atomically, but their malformed branches used to log,
+        force the escalation gates open, and silently return — without
+        ever signalling the RC3 recovery caller. The caller then marked
+        the checkpoint ADOPTED with a cross-group MIX of semantics: the
+        groups that validated ran under the ORIGINAL run's settings while
+        the malformed group silently ran under the CURRENT process's —
+        the same torn-recovery class round-16 #3 closed for the progress
+        fields, one level up.
+
+        A type-mangled semantic payload came from the same writer/store
+        as every other field, so it means the checkpoint as a whole
+        cannot be trusted. Validate every semantic group atomically and
+        BEFORE any restoration mutates executor state, and route any
+        failure through the SAME fail-closed path malformed progress
+        takes: discard the checkpoint as corrupt, run every level fresh,
+        warn loudly — never adopt a partially-trustworthy mixture.
+        ``None``/absent payloads are the legacy migration shape, not
+        corruption (identical to ``_checkpoint_progress_malformed``'s
+        convention).
+        """
+        state = cp.state
+        if not isinstance(state, Mapping):
+            return f"checkpoint state is not a mapping: {type(state).__name__}"
+        for reason in (
+            cls._retry_policy_malformed(state.get("retry_policy")),
+            cls._model_routing_malformed(state.get("model_routing")),
+            cls._execution_semantics_malformed(state.get("execution_semantics")),
+        ):
+            if reason is not None:
+                return reason
         return None
 
     def _discard_stale_checkpoint(
@@ -3591,6 +3720,51 @@ class ParallelACExecutor:
                                 "seed, but its recorded progress state is "
                                 "malformed/corrupt "
                                 f"({progress_malformed}). Refusing to adopt "
+                                "any of it — running all levels fresh "
+                                "instead.[/red]"
+                            ),
+                        )
+                    elif cp.phase == "parallel_execution" and (
+                        semantics_malformed := self._checkpoint_semantics_malformed(cp)
+                    ):
+                        # Round-17 finding #3 (BLOCKING): a checkpoint whose
+                        # retry-policy / model-routing / execution-semantics
+                        # payload is type-mangled used to be ADOPTED anyway —
+                        # the restore helper for the malformed group logged,
+                        # forced the escalation gates open, and silently kept
+                        # the CURRENT process's values while the OTHER groups
+                        # restored the ORIGINAL run's, so the recovered run
+                        # executed under a torn mixture of two runs'
+                        # semantics. Every semantic group was just validated
+                        # atomically above, BEFORE any restoration mutated
+                        # executor state; any failure means the checkpoint as
+                        # a whole is corrupt and takes the SAME fail-closed
+                        # path malformed progress takes: discard as stale,
+                        # run every level fresh, warn the operator loudly.
+                        log.error(
+                            "parallel_executor.recovery.semantic_state_malformed",
+                            seed_id=seed_id,
+                            checkpoint_execution_id=cp.state.get("execution_id"),
+                            detail=semantics_malformed,
+                        )
+                        self._discard_stale_checkpoint(
+                            seed_id,
+                            saved_execution_id=cp.state.get("execution_id"),
+                            detail=(
+                                "checkpoint execution-semantic state is "
+                                "malformed and cannot be applied as a "
+                                f"coherent whole ({semantics_malformed}); "
+                                "adopting the rest of the checkpoint around "
+                                "it would run under a mixture of the "
+                                "original run's and the current process's "
+                                "semantics, so the checkpoint is treated as "
+                                "corrupt"
+                            ),
+                            console_message=(
+                                "[red]WARNING: found a checkpoint for this "
+                                "seed, but its recorded execution-semantic "
+                                "state is malformed/corrupt "
+                                f"({semantics_malformed}). Refusing to adopt "
                                 "any of it — running all levels fresh "
                                 "instead.[/red]"
                             ),
