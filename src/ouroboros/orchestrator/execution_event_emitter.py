@@ -148,6 +148,37 @@ class ExecutionEventEmitter:
             )
         )
 
+    async def emit_decomposition_attestation_registered(
+        self,
+        *,
+        attestation_key: str,
+        execution_id: str,
+        session_id: str,
+        node_identity: ExecutionNodeIdentity,
+        attestation: DecompositionAttestation,
+    ) -> bool:
+        """Register an attested semantic split for later executions.
+
+        A gate verdict is only known after the children finish, so it cannot
+        lower the tier of the dispatch that produced it. The registry gives
+        an identical future semantic split a real consumer while keeping the
+        execution-scoped event above as the audit/projection source.
+        """
+        return await self._safe_emit_event(
+            BaseEvent(
+                type="decomposition.attestation.registered",
+                aggregate_type="decomposition_attestation",
+                aggregate_id=attestation_key,
+                data={
+                    **attestation.to_event_data(),
+                    "attestation_key": attestation_key,
+                    "source_node_id": node_identity.node_id,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                },
+            )
+        )
+
     async def emit_ac_parked_for_operator(
         self,
         *,

@@ -1420,6 +1420,13 @@ class ParallelACExecutor:
         # so a prior round's untrustworthy verdict keeps conditioning THIS
         # root AC's next retry even after the executor re-decomposes it.
         self._decomposition_attestations: dict[str, DecompositionAttestation] = {}
+        # Cross-execution attestation registry, keyed by the canonical
+        # semantic split contract rather than execution/node identity. A
+        # first successful round can only establish trust after its children
+        # finish; this registry lets a later identical split actually consume
+        # that durable verdict and makes the child-tier saving reachable.
+        self._reusable_decomposition_attestations: dict[str, DecompositionAttestation] = {}
+        self._decomposition_attestation_scope: str | None = None
         # Lateral-persona escalation ladder (Task 2): per-root-AC state, keyed
         # by ``ac_index``. Injectable sleep so tests never wait through a real
         # backoff duration.
@@ -4967,6 +4974,11 @@ class ParallelACExecutor:
         stage_results: list[ParallelExecutionStageResult] = []
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
+        # Scope reusable trust to the exact unchanged Seed. Similar-looking
+        # ACs in another project/Seed cannot inherit this run's verdict.
+        self._decomposition_attestation_scope = (
+            f"{self._checkpoint_seed_id(seed, session_id)}:{self._seed_semantic_fingerprint(seed)}"
+        )
         level_contexts = self._normalize_reconciled_level_contexts(
             reconciled_level_contexts,
             total_acs=total_acs,
@@ -6575,9 +6587,21 @@ class ParallelACExecutor:
         # loader, not the raw in-memory dict, so a fresh executor after a
         # resume/restart reconstructs a prior UNTRUSTWORTHY verdict instead
         # of silently forgetting it and re-admitting the discount.
+        attestation_key = self._decomposition_attestation_key(
+            decision=decision,
+            semantic_ac_key=semantic_ac_key,
+            seed_goal=seed_goal,
+            ac_spec=ac_spec,
+            execution_id=execution_id,
+        )
         prior_attestation = await self._load_decomposition_attestation(
             node_identity.node_id, execution_id=execution_id, session_id=session_id
         )
+        if prior_attestation is None:
+            prior_attestation = await self._load_reusable_decomposition_attestation(
+                attestation_key,
+                node_id=node_identity.node_id,
+            )
         # Proposal-time structure/semantic checks are not execution evidence.
         # The first decomposition round therefore runs at the parent/base tier;
         # only a durable gate-anchored attestation from an earlier round may
@@ -6925,6 +6949,27 @@ class ParallelACExecutor:
                 node_id=node_identity.node_id,
                 execution_id=execution_id,
             )
+        else:
+            registry_persisted = (
+                await self._event_emitter.emit_decomposition_attestation_registered(
+                    attestation_key=attestation_key,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    node_identity=node_identity,
+                    attestation=attestation,
+                )
+            )
+            if registry_persisted:
+                self._reusable_decomposition_attestations[attestation_key] = attestation
+            else:
+                # Reuse is an optimization. Failure must withhold the future
+                # discount, never change this round's already-attested result.
+                log.warning(
+                    "parallel_executor.decomposition_attestation.registry_write_failed",
+                    attestation_key=attestation_key,
+                    node_id=node_identity.node_id,
+                    execution_id=execution_id,
+                )
 
         return ACExecutionResult(
             ac_index=ac_index,
@@ -10704,6 +10749,105 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         self._decomposition_attestations[node_id] = attestation
         return attestation
+
+    def _decomposition_attestation_key(
+        self,
+        *,
+        decision: DecompositionDecisionRecord,
+        semantic_ac_key: str,
+        seed_goal: str,
+        ac_spec: AcceptanceCriterionSpec | None,
+        execution_id: str,
+    ) -> str:
+        """Return a stable identity for one reusable semantic split.
+
+        The key excludes execution/node ids and includes every input that can
+        change the split or its gate contract. A different child partition,
+        parent verification contract, goal, or execution profile cannot
+        inherit an older verdict accidentally.
+        """
+        payload = {
+            "schema_version": 1,
+            "seed_scope": self._decomposition_attestation_scope or f"execution:{execution_id}",
+            "semantic_ac_key": semantic_ac_key,
+            "seed_goal": seed_goal,
+            "children": [child.to_dict() for child in decision.children],
+            "parent_contract": (ac_spec.model_dump(mode="json") if ac_spec is not None else None),
+            "execution_profile": (
+                serialize_execution_profile(self._execution_profile)
+                if self._execution_profile is not None
+                else None
+            ),
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return f"v1:{hashlib.sha256(canonical).hexdigest()}"
+
+    async def _load_reusable_decomposition_attestation(
+        self,
+        attestation_key: str,
+        *,
+        node_id: str,
+    ) -> DecompositionAttestation | None:
+        """Load the latest durable verdict for an identical semantic split."""
+
+        def _for_current_node(attestation: DecompositionAttestation) -> DecompositionAttestation:
+            return DecompositionAttestation(
+                node_id=node_id,
+                verdict=attestation.verdict,
+                failed_axis=attestation.failed_axis,
+                failed_sibling_id=attestation.failed_sibling_id,
+                reason=attestation.reason,
+            )
+
+        cached = self._reusable_decomposition_attestations.get(attestation_key)
+        if cached is not None:
+            return _for_current_node(cached)
+
+        events = await self._replay_with_retry(
+            "decomposition_attestation",
+            attestation_key,
+        )
+        if events is None:
+            return DecompositionAttestation(
+                node_id=node_id,
+                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason=(
+                    "reusable attestation replay failed after retries; failing closed "
+                    "rather than authorizing a child-tier discount"
+                ),
+            )
+
+        latest_data: Mapping[str, Any] | None = None
+        for event in events:
+            if getattr(event, "type", None) != "decomposition.attestation.registered":
+                continue
+            data = getattr(event, "data", None)
+            if isinstance(data, Mapping) and data.get("attestation_key") == attestation_key:
+                latest_data = data
+        if latest_data is None:
+            return None
+
+        attestation = _decomposition_attestation_from_event_data(latest_data)
+        if attestation is None:
+            return DecompositionAttestation(
+                node_id=node_id,
+                verdict=DecompositionTrustVerdict.UNTRUSTWORTHY,
+                failed_axis=None,
+                failed_sibling_id=None,
+                reason=(
+                    "reusable attestation payload is malformed; failing closed "
+                    "rather than authorizing a child-tier discount"
+                ),
+            )
+        self._reusable_decomposition_attestations[attestation_key] = attestation
+        return _for_current_node(attestation)
 
     async def _load_lateral_escalation_state(
         self, ac_idx: int, *, execution_id: str

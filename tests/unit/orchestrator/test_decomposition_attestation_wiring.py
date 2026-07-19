@@ -32,10 +32,10 @@ from ouroboros.orchestrator.parallel_executor import (
 )
 
 
-def _make_executor() -> ParallelACExecutor:
+def _make_executor(event_store: object | None = None) -> ParallelACExecutor:
     executor = ParallelACExecutor(
         adapter=MagicMock(),
-        event_store=AsyncMock(),
+        event_store=event_store if event_store is not None else AsyncMock(),
         console=MagicMock(),
         enable_decomposition=False,
     )
@@ -285,6 +285,197 @@ class TestExecuteDecompositionChildrenWiring:
         assert result.dispatched_decomposition_trustworthy is False
         assert result.decomposition_attestation is not None
         assert result.decomposition_attestation.trustworthy is True
+
+    @pytest.mark.asyncio
+    async def test_fresh_execution_consumes_registered_trust_for_identical_split(
+        self,
+    ) -> None:
+        """A naturally produced attestation authorizes a real later dispatch."""
+        from datetime import UTC, datetime
+
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _make_replaying_event_store,
+        )
+
+        event_store, events = _make_replaying_event_store()
+        ac_spec = AcceptanceCriterionSpec(description="parent AC", verify_command="pytest -q")
+
+        async def _run(*, execution_id: str, captured_trust_flags: list[bool]) -> ACExecutionResult:
+            executor = _make_executor(event_store)
+            executor._decomposition_attestation_scope = "seed-shared:v2:test"
+            executor._run_ac_verify_gate = AsyncMock(
+                return_value=_VerifyGateOutcome(passed=True, reason=None, output_tail="")
+            )
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id,
+                ac_index=0,
+            )
+            decision = _trustworthy_split_decision(node_identity.node_id)
+
+            async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+                captured_trust_flags.append(bool(kwargs["decomposition_trustworthy"]))
+                return _child_result(
+                    0,
+                    verify_gate_outcome=_VerifyGateOutcome(
+                        passed=True,
+                        reason=None,
+                        output_tail="",
+                    ),
+                )
+
+            executor._execute_single_ac = AsyncMock(side_effect=fake_execute_single_ac)
+            return await executor._execute_decomposition_children(
+                decision=decision,
+                ac_index=0,
+                ac_content="parent AC",
+                session_id=f"session-{execution_id}",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="",
+                seed_goal="goal",
+                depth=0,
+                execution_id=execution_id,
+                level_contexts=None,
+                retry_attempt=0,
+                execution_counters=None,
+                node_identity=node_identity,
+                start_time=datetime.now(UTC),
+                semantic_ac_key="stable-parent-key",
+                ac_spec=ac_spec,
+            )
+
+        first_flags: list[bool] = []
+        first_result = await _run(execution_id="exec-first", captured_trust_flags=first_flags)
+        assert first_flags and all(flag is False for flag in first_flags)
+        assert first_result.decomposition_attestation is not None
+        assert first_result.decomposition_attestation.trustworthy is True
+        assert any(event.type == "decomposition.attestation.registered" for event in events)
+
+        second_flags: list[bool] = []
+        second_result = await _run(
+            execution_id="exec-second",
+            captured_trust_flags=second_flags,
+        )
+        assert second_flags and all(flag is True for flag in second_flags)
+        assert second_result.dispatched_decomposition_trustworthy is True
+
+    @pytest.mark.asyncio
+    async def test_registered_trust_dispatches_real_children_at_lower_tier(
+        self,
+        tmp_path,
+    ) -> None:
+        """The reusable verdict reaches the enforced runtime model argument."""
+        from datetime import UTC, datetime
+        from pathlib import Path
+
+        from ouroboros.orchestrator.adapter import (
+            AgentMessage,
+            ParamSupport,
+            RuntimeCapabilities,
+        )
+        from tests.unit.orchestrator.test_model_routing_wiring import _claude_router
+        from tests.unit.orchestrator.test_parallel_executor import (
+            _make_replaying_event_store,
+        )
+
+        class _ArtifactRuntime:
+            runtime_backend = "claude"
+            permission_mode = "acceptEdits"
+            capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.NATIVE,
+            )
+
+            def __init__(self, cwd: Path) -> None:
+                self.working_directory = str(cwd)
+                self.models: list[str | None] = []
+
+            async def execute_task(self, *, prompt: str, model: str | None = None, **_kwargs):
+                self.models.append(model)
+                artifact = "child-0.txt" if "child 0" in prompt else "child-1.txt"
+                (Path(self.working_directory) / artifact).write_text("done")
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                )
+
+        children = tuple(
+            DecompositionChild(
+                description=f"child {index}",
+                coverage_claims=(f"distinct scope {index}",),
+                verification_hint=f"check {index}",
+                expected_artifacts=(f"child-{index}.txt",),
+            )
+            for index in range(2)
+        )
+        ac_spec = AcceptanceCriterionSpec(
+            description="parent AC",
+            expected_artifacts=("child-0.txt", "child-1.txt"),
+        )
+        event_store, _events = _make_replaying_event_store()
+
+        async def _run(execution_id: str, cwd: Path) -> tuple[ACExecutionResult, list[str | None]]:
+            cwd.mkdir()
+            runtime = _ArtifactRuntime(cwd)
+            executor = ParallelACExecutor(
+                adapter=runtime,
+                event_store=event_store,
+                console=MagicMock(),
+                enable_decomposition=False,
+                task_cwd=str(cwd),
+                model_router=_claude_router(),
+            )
+            executor._decomposition_attestation_scope = "seed-real-shared:v2:test"
+            executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+            executor._emit_workflow_progress = AsyncMock()
+            executor._emit_level_started = AsyncMock()
+            executor._emit_level_completed = AsyncMock()
+            executor._emit_subtask_event = AsyncMock()
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id,
+                ac_index=0,
+            )
+            decision = DecompositionDecisionRecord(
+                node_id=node_identity.node_id,
+                source=DecompositionSource.PREFLIGHT,
+                disposition=DecompositionDisposition.SPLIT,
+                children=children,
+                structural_status=StructuralCheckStatus.PASSED,
+                semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                trustworthy=True,
+            )
+            result = await executor._execute_decomposition_children(
+                decision=decision,
+                ac_index=0,
+                ac_content="parent AC",
+                session_id=f"session-{execution_id}",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="",
+                seed_goal="goal",
+                depth=0,
+                execution_id=execution_id,
+                level_contexts=None,
+                retry_attempt=0,
+                execution_counters=None,
+                node_identity=node_identity,
+                start_time=datetime.now(UTC),
+                semantic_ac_key="stable-parent-key",
+                ac_spec=ac_spec,
+            )
+            return result, runtime.models
+
+        first_result, first_models = await _run("exec-real-first", tmp_path / "first")
+        assert first_result.decomposition_attestation is not None
+        assert first_result.decomposition_attestation.trustworthy is True
+        assert first_models == ["sonnet-x", "sonnet-x"]
+
+        second_result, second_models = await _run("exec-real-second", tmp_path / "second")
+        assert second_result.dispatched_decomposition_trustworthy is True
+        assert second_models == ["haiku-x", "haiku-x"]
 
     @pytest.mark.asyncio
     async def test_attestation_cached_and_event_emitted(self) -> None:
