@@ -18,10 +18,12 @@ from ouroboros.core.seed import (
     OntologySchema,
     Seed,
     SeedMetadata,
+    derive_semantic_ac_key,
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.ac_execution_capsule import (
+    ACExecutionCapsule,
     ACExecutionCapsuleManifest,
     compile_ac_execution_capsule,
 )
@@ -38,6 +40,7 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import (
+    ACRuntimeIdentity,
     ExecutionNodeIdentity,
     build_ac_runtime_identity,
 )
@@ -953,6 +956,49 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
     event_store.append.side_effect = _append
     event_store.replay.side_effect = _replay
     return event_store, appended_events
+
+
+def _compile_test_capsule(
+    *,
+    ac_index: int,
+    ac_content: str,
+    session_id: str,
+    seed_goal: str,
+    retry_attempt: int = 0,
+    workspace: str = "/tmp/project",
+) -> tuple[ACRuntimeIdentity, ACExecutionCapsule]:
+    identity = build_ac_runtime_identity(
+        ac_index,
+        execution_context_id=session_id,
+        retry_attempt=retry_attempt,
+    )
+    capsule = compile_ac_execution_capsule(
+        runtime_identity=identity,
+        execution_id=session_id,
+        semantic_ac_key=derive_semantic_ac_key(ac_content),
+        workspace=os.path.realpath(workspace),
+        authority_scope=f"execution:{session_id}",
+        seed_goal=seed_goal,
+        ac_content=ac_content,
+        ac_spec=None,
+    )
+    return identity, capsule
+
+
+def _compiled_capsule_event(
+    identity: ACRuntimeIdentity,
+    capsule: ACExecutionCapsule,
+) -> BaseEvent:
+    return BaseEvent(
+        type="execution.ac.capsule.compiled",
+        aggregate_type="execution",
+        aggregate_id=identity.session_scope_id,
+        data={
+            **identity.to_metadata(),
+            "capsule_fingerprint": capsule.fingerprint,
+            "capsule_manifest": capsule.manifest.to_contract_data(),
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -4516,6 +4562,177 @@ class TestParallelACExecutor:
             )
 
         assert runtime.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_resumes_only_with_matching_durable_capsule(self) -> None:
+        """A native handle may resume only after the exact capsule is durable."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.resume_handles: list[RuntimeHandle | None] = []
+
+            async def execute_task(self, **kwargs: object):
+                self.resume_handles.append(kwargs.get("resume_handle"))
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        runtime_identity = build_ac_runtime_identity(
+            0,
+            execution_context_id="session-capsule-resume",
+            retry_attempt=0,
+        )
+        persisted_capsule = compile_ac_execution_capsule(
+            runtime_identity=runtime_identity,
+            execution_id="session-capsule-resume",
+            semantic_ac_key="semantic-key",
+            workspace=os.path.realpath("/tmp/project"),
+            authority_scope="execution:session-capsule-resume",
+            seed_goal="Ship",
+            ac_content="Implement the AC",
+            ac_spec=None,
+        )
+        persisted_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="codex-same-attempt",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                **runtime_identity.to_metadata(),
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
+            },
+        )
+        appended_events.extend(
+            [
+                BaseEvent(
+                    type="execution.ac.capsule.compiled",
+                    aggregate_type="execution",
+                    aggregate_id=runtime_identity.session_scope_id,
+                    data={
+                        **runtime_identity.to_metadata(),
+                        "capsule_fingerprint": persisted_capsule.fingerprint,
+                        "capsule_manifest": persisted_capsule.manifest.to_contract_data(),
+                    },
+                ),
+                BaseEvent(
+                    type="execution.session.started",
+                    aggregate_type="execution",
+                    aggregate_id=runtime_identity.session_scope_id,
+                    data={
+                        **runtime_identity.to_metadata(),
+                        "runtime": persisted_handle.to_dict(),
+                    },
+                ),
+            ]
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the AC",
+            session_id="session-capsule-resume",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+            semantic_ac_key="semantic-key",
+        )
+
+        assert runtime.resume_handles[0] is not None
+        assert runtime.resume_handles[0].native_session_id == "codex-same-attempt"
+        compiled_events = [
+            event for event in appended_events if event.type == "execution.ac.capsule.compiled"
+        ]
+        assert compiled_events[-1].data["session_origin"] == "restored_same_attempt"
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_does_not_resume_legacy_handle_without_capsule(self) -> None:
+        """Pre-capsule runtime history can seed no provider continuity."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.resume_handles: list[RuntimeHandle | None] = []
+
+            async def execute_task(self, **kwargs: object):
+                self.resume_handles.append(kwargs.get("resume_handle"))
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        current_identity = build_ac_runtime_identity(
+            0,
+            execution_context_id="session-capsule-legacy",
+            retry_attempt=1,
+        )
+        legacy_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            native_session_id="legacy-retry-session",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                "ac_id": current_identity.ac_id,
+                "scope": "ac",
+                "session_role": "implementation",
+                "ac_index": 0,
+                "session_scope_id": current_identity.session_scope_id,
+            },
+        )
+        appended_events.append(
+            BaseEvent(
+                type="execution.session.started",
+                aggregate_type="execution",
+                aggregate_id=current_identity.session_scope_id,
+                data={
+                    "ac_id": current_identity.ac_id,
+                    "session_scope_id": current_identity.session_scope_id,
+                    "runtime": legacy_handle.to_dict(),
+                },
+            )
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the AC",
+            session_id="session-capsule-legacy",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+            retry_attempt=1,
+            semantic_ac_key="semantic-key",
+        )
+
+        assert runtime.resume_handles[0] is not None
+        assert runtime.resume_handles[0].native_session_id is None
+        compiled_event = next(
+            event for event in appended_events if event.type == "execution.ac.capsule.compiled"
+        )
+        assert compiled_event.data["session_origin"] == "fresh"
 
     @pytest.mark.asyncio
     async def test_atomic_ac_refuses_dispatch_when_capsule_replay_is_unreadable(self) -> None:
@@ -10768,27 +10985,31 @@ class TestParallelACExecutor:
                     resume_handle=resume_handle,
                 )
 
+        ac_content = "Resume the interrupted AC implementation session"
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            ac_index=1,
+            ac_content=ac_content,
+            session_id="orch_123",
+            seed_goal="Ship the feature",
+        )
         persisted_handle = RuntimeHandle(
             backend="opencode",
             kind="implementation_session",
             native_session_id="opencode-session-9",
             cwd="/tmp/project",
-            approval_mode="acceptEdits",
+            approval_mode="bypassPermissions",
             metadata={
-                "scope": "ac",
-                "session_role": "implementation",
-                "retry_attempt": 0,
-                "ac_index": 1,
-                "session_scope_id": "orch_123_ac_2",
-                "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
-                ),
+                **runtime_identity.to_metadata(),
                 "server_session_id": "server-99",
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
             },
         )
         event_store = AsyncMock()
         event_store.replay = AsyncMock(
             return_value=[
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
@@ -10801,7 +11022,7 @@ class TestParallelACExecutor:
                         ),
                         "runtime": persisted_handle.to_dict(),
                     },
-                )
+                ),
             ]
         )
         event_store.append = AsyncMock()
@@ -10815,7 +11036,7 @@ class TestParallelACExecutor:
 
         result = await executor._execute_atomic_ac(
             ac_index=1,
-            ac_content="Resume the interrupted AC implementation session",
+            ac_content=ac_content,
             session_id="orch_123",
             tools=["Read", "Edit"],
             system_prompt="system",
@@ -11002,6 +11223,13 @@ class TestParallelACExecutor:
                     resume_handle=resume_handle,
                 )
 
+        ac_content = "Resume the latest persisted implementation session"
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            ac_index=1,
+            ac_content=ac_content,
+            session_id="orch_123",
+            seed_goal="Ship the feature",
+        )
         started_handle = RuntimeHandle(
             backend="opencode",
             kind="implementation_session",
@@ -11009,15 +11237,11 @@ class TestParallelACExecutor:
             cwd="/tmp/project",
             approval_mode="acceptEdits",
             metadata={
-                "scope": "ac",
-                "session_role": "implementation",
-                "retry_attempt": 0,
-                "ac_index": 1,
-                "session_scope_id": "orch_123_ac_2",
-                "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
-                ),
+                **runtime_identity.to_metadata(),
                 "server_session_id": "server-started",
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
             },
         )
         resumed_handle = RuntimeHandle(
@@ -11027,20 +11251,17 @@ class TestParallelACExecutor:
             cwd="/tmp/project",
             approval_mode="acceptEdits",
             metadata={
-                "scope": "ac",
-                "session_role": "implementation",
-                "retry_attempt": 0,
-                "ac_index": 1,
-                "session_scope_id": "orch_123_ac_2",
-                "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
-                ),
+                **runtime_identity.to_metadata(),
                 "server_session_id": "server-resumed",
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "restored_same_attempt",
             },
         )
         event_store = AsyncMock()
         event_store.replay = AsyncMock(
             return_value=[
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
                 BaseEvent(
                     type="execution.session.started",
                     aggregate_type="execution",
@@ -11080,7 +11301,7 @@ class TestParallelACExecutor:
 
         result = await executor._execute_atomic_ac(
             ac_index=1,
-            ac_content="Resume the latest persisted implementation session",
+            ac_content=ac_content,
             session_id="orch_123",
             tools=["Read", "Edit"],
             system_prompt="system",
@@ -12609,6 +12830,13 @@ class TestParallelACExecutor:
                     resume_handle=resume_handle,
                 )
 
+        ac_content = "Resume after skipping invalid persisted event"
+        runtime_identity, persisted_capsule = _compile_test_capsule(
+            ac_index=1,
+            ac_content=ac_content,
+            session_id="orch_123",
+            seed_goal="Ship the feature",
+        )
         valid_handle = RuntimeHandle(
             backend="opencode",
             kind="implementation_session",
@@ -12616,20 +12844,17 @@ class TestParallelACExecutor:
             cwd="/tmp/project",
             approval_mode="acceptEdits",
             metadata={
-                "scope": "ac",
-                "session_role": "implementation",
-                "retry_attempt": 0,
-                "ac_index": 1,
-                "session_scope_id": "orch_123_ac_2",
-                "session_state_path": (
-                    "execution.workflows.orch_123.acceptance_criteria.ac_2.implementation_session"
-                ),
+                **runtime_identity.to_metadata(),
                 "server_session_id": "server-valid",
+                "ac_capsule_version": persisted_capsule.version,
+                "ac_capsule_fingerprint": persisted_capsule.fingerprint,
+                "ac_session_origin": "fresh",
             },
         )
         event_store = AsyncMock()
         event_store.replay = AsyncMock(
             return_value=[
+                _compiled_capsule_event(runtime_identity, persisted_capsule),
                 # First event: valid handle
                 BaseEvent(
                     type="execution.session.started",
@@ -12675,7 +12900,7 @@ class TestParallelACExecutor:
 
         result = await executor._execute_atomic_ac(
             ac_index=1,
-            ac_content="Resume after skipping invalid persisted event",
+            ac_content=ac_content,
             session_id="orch_123",
             tools=["Read", "Edit"],
             system_prompt="system",

@@ -456,7 +456,7 @@ class ACRuntimeHandleManager:
         )
         if cached_runtime_handle is not None and cached_handle is None:
             self.runtime_handles.pop(runtime_identity.cache_key, None)
-        if cached_handle is not None:
+        if cached_handle is not None and expected_capsule_fingerprint is None:
             return cached_handle
 
         candidate_scope_ids = (
@@ -483,6 +483,7 @@ class ACRuntimeHandleManager:
                     raise
                 continue
 
+            capsule_authorized = expected_capsule_fingerprint is None
             if expected_capsule_fingerprint is not None:
                 for event in events:
                     if event.type != "execution.ac.capsule.compiled":
@@ -516,6 +517,21 @@ class ACRuntimeHandleManager:
                         raise ValueError(
                             "durable AC capsule fingerprint disagrees with the current dispatch"
                         )
+                    capsule_authorized = True
+
+            if not capsule_authorized:
+                continue
+
+            if cached_handle is not None:
+                cached_fingerprint = cached_handle.metadata.get("ac_capsule_fingerprint")
+                cached_attempt_id = cached_handle.metadata.get("session_attempt_id")
+                if (
+                    cached_fingerprint == expected_capsule_fingerprint
+                    and cached_attempt_id == runtime_identity.session_attempt_id
+                ):
+                    return cached_handle
+                self.runtime_handles.pop(runtime_identity.cache_key, None)
+                cached_handle = None
 
             for event in reversed(events):
                 event_data = event.data if isinstance(event.data, dict) else {}
@@ -552,6 +568,18 @@ class ACRuntimeHandleManager:
                     continue
                 if runtime_handle is None:
                     continue
+                if expected_capsule_fingerprint is not None:
+                    runtime_fingerprint = runtime_handle.metadata.get("ac_capsule_fingerprint")
+                    runtime_attempt_id = runtime_handle.metadata.get("session_attempt_id")
+                    if runtime_fingerprint not in {None, expected_capsule_fingerprint}:
+                        raise ValueError(
+                            "persisted runtime handle disagrees with the durable AC capsule"
+                        )
+                    if (
+                        runtime_fingerprint is None
+                        or runtime_attempt_id != runtime_identity.session_attempt_id
+                    ):
+                        continue
                 runtime_handle = self._normalize_ac_runtime_handle(
                     runtime_handle,
                     runtime_scope=runtime_identity.runtime_scope,
