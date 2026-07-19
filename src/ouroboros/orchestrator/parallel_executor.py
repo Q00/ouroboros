@@ -121,6 +121,7 @@ from ouroboros.orchestrator.decomposition_policy import (
 )
 from ouroboros.orchestrator.effort_routing import (
     DEFAULT_EFFORT_CEILING,
+    EFFORT_LADDER,
     assess_investment,
     resolve_execute_effort,
 )
@@ -8067,6 +8068,19 @@ Respond with either ATOMIC or the structured JSON object only.
             return tier_from_profile_hint(self._execution_profile.suggested_model_tier.value)
         return None
 
+    def _enforced_effort_ceiling(self) -> str | None:
+        """Return the strongest reasoning level this runtime can enforce."""
+        capabilities = getattr(self._adapter, "capabilities", None)
+        if (
+            getattr(capabilities, "reasoning_effort_support", ParamSupport.IGNORED)
+            is not ParamSupport.NATIVE
+        ):
+            return None
+        enforceable = getattr(capabilities, "enforceable_reasoning_efforts", None)
+        if enforceable is None:
+            return DEFAULT_EFFORT_CEILING
+        return next((level for level in reversed(EFFORT_LADDER) if level in enforceable), None)
+
     async def _execute_atomic_ac(
         self,
         ac_index: int,
@@ -8220,7 +8234,7 @@ Respond with either ATOMIC or the structured JSON object only.
         effort_decision, execute_effort_kwargs = resolve_execute_effort(
             self._adapter,
             base_effort=(
-                DEFAULT_EFFORT_CEILING
+                self._enforced_effort_ceiling()
                 if force_frontier_routing and self._reasoning_effort
                 else self._reasoning_effort
             ),
@@ -9737,10 +9751,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 else self._suggested_model_tier_hint()
             ),
         )
+        model_ceiling_decision, _model_ceiling_kwargs = resolve_execute_model(
+            self._adapter,
+            router=self._model_router,
+            is_decomposed_child=False,
+            retry_attempt=0,
+            suggested_tier=DEFAULT_TIER_CEILING,
+        )
+        effort_ceiling = (
+            self._enforced_effort_ceiling() if self._reasoning_effort is not None else None
+        )
         effort_decision, _effort_kwargs = resolve_execute_effort(
             self._adapter,
             base_effort=(
-                DEFAULT_EFFORT_CEILING
+                effort_ceiling
                 if force_frontier_routing and self._reasoning_effort
                 else self._reasoning_effort
             ),
@@ -9760,6 +9784,12 @@ Respond with either ATOMIC or the structured JSON object only.
             # axis genuinely ran at its ceiling.
             model_tier=(model_decision.tier if model_decision.is_enforced else None),
             effort_level=(effort_decision.level if effort_decision.is_enforced else None),
+            tier_ceiling=(
+                model_ceiling_decision.tier
+                if model_ceiling_decision.is_enforced and model_ceiling_decision.tier is not None
+                else DEFAULT_TIER_CEILING
+            ),
+            effort_ceiling=effort_ceiling or DEFAULT_EFFORT_CEILING,
         )
 
     async def _load_decomposition_attestation(

@@ -594,6 +594,92 @@ class TestRootAcTerminalStateMatchesLiveDispatch:
 
         assert terminal is True
 
+    @pytest.mark.asyncio
+    async def test_sparse_router_uses_strongest_runnable_tier_as_ceiling(self) -> None:
+        """A standard-only router has no unavailable frontier step to spend."""
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._model_router = ModelRouter(
+            tier_models={"standard": "model-standard"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=0,
+        )
+        executor._adapter.runtime_backend = "claude"
+
+        terminal = await executor._root_ac_terminal_state(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=0,
+            force_frontier_routing=True,
+        )
+
+        assert terminal is True
+
+    @pytest.mark.asyncio
+    async def test_sparse_effort_vocabulary_uses_high_as_runtime_ceiling(self) -> None:
+        executor = _make_executor()
+        executor._reasoning_effort = "medium"
+        executor._adapter.capabilities.model_override_support = ParamSupport.IGNORED
+        executor._adapter.capabilities.reasoning_effort_support = ParamSupport.NATIVE
+        executor._adapter.capabilities.enforceable_reasoning_efforts = frozenset(
+            {"low", "medium", "high"}
+        )
+
+        terminal = await executor._root_ac_terminal_state(
+            seed=_make_seed(),
+            ac_idx=0,
+            result=_failed_result(),
+            retry_attempt=0,
+            force_frontier_routing=True,
+        )
+
+        assert executor._enforced_effort_ceiling() == "high"
+        assert terminal is True
+
+    @pytest.mark.asyncio
+    async def test_sparse_router_zero_budget_still_reaches_lateral_breakthrough(self) -> None:
+        executor = _make_executor()
+        executor._lateral_escalation_enabled = True
+        executor._ac_retry_attempts = 0
+        executor._model_router = ModelRouter(
+            tier_models={"standard": "model-standard"},
+            runtime_backend="claude",
+            child_tier="frugal",
+            base_tier="standard",
+            escalation_retry_threshold=0,
+        )
+        executor._adapter.runtime_backend = "claude"
+        dispatches: list[bool] = []
+
+        async def fake_execute_ac_batch(**kwargs: object) -> list[ACExecutionResult]:
+            dispatches.append(bool(kwargs.get("force_frontier_routing", False)))
+            return [_failed_result()] if len(dispatches) == 1 else [_success_result()]
+
+        executor._execute_ac_batch = AsyncMock(side_effect=fake_execute_ac_batch)
+        executor._apply_verify_gate = AsyncMock(side_effect=lambda **kwargs: kwargs["result"])
+        executor._emit_recovery_exhausted = AsyncMock()
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=_make_seed(),
+            batch_executable=[0],
+            session_id="s1",
+            execution_id="exec-sparse",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert isinstance(results[0], ACExecutionResult)
+        assert results[0].success is True
+        assert dispatches == [False, True]
+        executor._emit_recovery_exhausted.assert_not_awaited()
+
 
 class TestLateralEscalationStateDurability:
     """Fix 6 (BLOCKING, PR #1648 review): a process restart/resume recreates
