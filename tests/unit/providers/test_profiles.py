@@ -51,7 +51,9 @@ def test_resolve_completion_profile_preserves_codex_xhigh_effort() -> None:
     )
 
     with patch("ouroboros.providers.profiles.load_config", return_value=config):
-        resolved = resolve_completion_profile(CompletionConfig(model="default", role="qa"), backend="codex")
+        resolved = resolve_completion_profile(
+            CompletionConfig(model="default", role="qa"), backend="codex"
+        )
 
     assert resolved.config.reasoning_effort == "xhigh"
 

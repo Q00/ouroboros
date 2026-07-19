@@ -131,7 +131,7 @@ def test_codex_setup_gate_accepts_reordered_yaml_and_quoted_toml_mcp_key(tmp_pat
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('CODEX_HOME_DIR=', setup_gate_start)
+    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
     gate = skill[start : skill.index("\n```", start)]
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_READY"

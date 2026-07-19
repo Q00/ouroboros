@@ -640,12 +640,8 @@ def test_codex_profile_reasoning_effort_drift_is_rejected_before_command_build(
     original_profile: dict[str, object] = {"reasoning_effort": "high"}
     drifted_profile: dict[str, object] = {"reasoning_effort": "low"}
     if original_provider_effort is not None:
-        original_profile["providers"] = {
-            "codex": {"reasoning_effort": original_provider_effort}
-        }
-        drifted_profile["providers"] = {
-            "codex": {"reasoning_effort": drifted_provider_effort}
-        }
+        original_profile["providers"] = {"codex": {"reasoning_effort": original_provider_effort}}
+        drifted_profile["providers"] = {"codex": {"reasoning_effort": drifted_provider_effort}}
 
     original_config = OuroborosConfig(
         llm_profiles={"implementation": original_profile},
