@@ -57,7 +57,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v3.0.1
         with:
           files: dist/*
           draft: false
@@ -126,7 +126,7 @@ jobs:
           merge-multiple: true
 
       - name: Attach binaries to release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v3.0.1
         with:
           files: ouroboros-tui-*
         env:
