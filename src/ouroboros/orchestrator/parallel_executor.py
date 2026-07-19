@@ -3185,7 +3185,134 @@ class ParallelACExecutor:
         return None
 
     @classmethod
-    def _checkpoint_progress_malformed(cls, cp: Any) -> str | None:
+    def _checkpoint_level_contexts_malformed(
+        cls,
+        raw_contexts: object,
+        *,
+        total_acs: int | None,
+        plan_total_stages: int | None,
+    ) -> str | None:
+        """Validate the nested dataclass tree before deserialization."""
+        if not isinstance(raw_contexts, list | tuple):
+            return f"level_contexts is not a list: {raw_contexts!r}"
+        seen_levels: set[int] = set()
+        seen_ac_indices: set[int] = set()
+        required_ac_fields = {
+            "ac_index",
+            "ac_content",
+            "success",
+            "tools_used",
+            "files_modified",
+            "key_output",
+            "public_api",
+        }
+        for context_position, raw_context in enumerate(raw_contexts):
+            if not isinstance(raw_context, Mapping):
+                return f"level_contexts[{context_position}] is not a mapping"
+            level_number = raw_context.get("level_number")
+            completed_acs = raw_context.get("completed_acs")
+            if (
+                isinstance(level_number, bool)
+                or not isinstance(level_number, int)
+                or level_number < 0
+                or level_number in seen_levels
+                or (plan_total_stages is not None and level_number > plan_total_stages)
+                or not isinstance(completed_acs, list | tuple)
+            ):
+                return f"level_contexts[{context_position}] contains invalid level values"
+            seen_levels.add(level_number)
+
+            for ac_position, raw_ac in enumerate(completed_acs):
+                if not isinstance(raw_ac, Mapping) or not required_ac_fields.issubset(raw_ac):
+                    return (
+                        f"level_contexts[{context_position}].completed_acs[{ac_position}] "
+                        "has an invalid shape"
+                    )
+                ac_index = raw_ac.get("ac_index")
+                tools_used = raw_ac.get("tools_used")
+                files_modified = raw_ac.get("files_modified")
+                if (
+                    isinstance(ac_index, bool)
+                    or not isinstance(ac_index, int)
+                    or ac_index < 0
+                    or (total_acs is not None and ac_index >= total_acs)
+                    or ac_index in seen_ac_indices
+                    or not isinstance(raw_ac.get("ac_content"), str)
+                    or not isinstance(raw_ac.get("success"), bool)
+                    or not isinstance(tools_used, list | tuple)
+                    or any(not isinstance(tool, str) for tool in tools_used)
+                    or not isinstance(files_modified, list | tuple)
+                    or any(not isinstance(path, str) for path in files_modified)
+                    or not isinstance(raw_ac.get("key_output"), str)
+                    or not isinstance(raw_ac.get("public_api"), str)
+                ):
+                    return (
+                        f"level_contexts[{context_position}].completed_acs[{ac_position}] "
+                        "contains invalid values"
+                    )
+                seen_ac_indices.add(ac_index)
+
+            raw_review = raw_context.get("coordinator_review")
+            if raw_review is None:
+                continue
+            if not isinstance(raw_review, Mapping):
+                return f"level_contexts[{context_position}].coordinator_review is not a mapping"
+            review_level = raw_review.get("level_number")
+            conflicts = raw_review.get("conflicts_detected")
+            fixes = raw_review.get("fixes_applied")
+            warnings = raw_review.get("warnings_for_next_level")
+            duration = raw_review.get("duration_seconds")
+            session_id = raw_review.get("session_id")
+            if (
+                isinstance(review_level, bool)
+                or not isinstance(review_level, int)
+                or review_level < 0
+                or not isinstance(conflicts, list | tuple)
+                or not isinstance(raw_review.get("review_summary"), str)
+                or not isinstance(fixes, list | tuple)
+                or any(not isinstance(item, str) for item in fixes)
+                or not isinstance(warnings, list | tuple)
+                or any(not isinstance(item, str) for item in warnings)
+                or not isinstance(duration, int | float)
+                or isinstance(duration, bool)
+                or not math.isfinite(duration)
+                or duration < 0
+                or (session_id is not None and not isinstance(session_id, str))
+            ):
+                return f"level_contexts[{context_position}].coordinator_review has invalid values"
+            for conflict_position, raw_conflict in enumerate(conflicts):
+                if not isinstance(raw_conflict, Mapping):
+                    return (
+                        f"level_contexts[{context_position}].coordinator_review."
+                        f"conflicts_detected[{conflict_position}] is not a mapping"
+                    )
+                conflict_indices = raw_conflict.get("ac_indices")
+                if (
+                    not isinstance(raw_conflict.get("file_path"), str)
+                    or not isinstance(conflict_indices, list | tuple)
+                    or any(
+                        isinstance(index, bool)
+                        or not isinstance(index, int)
+                        or index < 0
+                        or (total_acs is not None and index >= total_acs)
+                        for index in conflict_indices
+                    )
+                    or not isinstance(raw_conflict.get("resolved"), bool)
+                    or not isinstance(raw_conflict.get("resolution_description"), str)
+                ):
+                    return (
+                        f"level_contexts[{context_position}].coordinator_review."
+                        f"conflicts_detected[{conflict_position}] has invalid values"
+                    )
+        return None
+
+    @classmethod
+    def _checkpoint_progress_malformed(
+        cls,
+        cp: Any,
+        *,
+        total_acs: int | None = None,
+    ) -> str | None:
         """Return a description of the FIRST malformed progress field in the
         checkpoint, else ``None`` (round-16 finding #3, BLOCKING).
 
@@ -3218,6 +3345,7 @@ class ParallelACExecutor:
                 isinstance(saved_execution_id, str) and saved_execution_id
             ):
                 return f"execution_id is not a non-empty string: {saved_execution_id!r}"
+        completed_levels: int | None = None
         if "completed_levels" in state:
             completed_levels = state["completed_levels"]
             if (
@@ -3226,6 +3354,7 @@ class ParallelACExecutor:
                 or completed_levels < 0
             ):
                 return f"completed_levels is not a non-negative integer: {completed_levels!r}"
+        plan_total_stages: int | None = None
         if "plan_total_stages" in state:
             plan_total_stages = state["plan_total_stages"]
             if (
@@ -3234,22 +3363,45 @@ class ParallelACExecutor:
                 or plan_total_stages < 0
             ):
                 return f"plan_total_stages is not a non-negative integer: {plan_total_stages!r}"
+        normalized_statuses: dict[int, str] | None = None
         if "ac_statuses" in state:
             raw_statuses = state["ac_statuses"]
             if not isinstance(raw_statuses, Mapping):
                 return f"ac_statuses is not a mapping: {raw_statuses!r}"
+            normalized_statuses = {}
             for key, status in raw_statuses.items():
-                if cls._checkpoint_index_value(key) is None:
+                normalized_index = cls._checkpoint_index_value(key)
+                if normalized_index is None:
                     return f"ac_statuses key is not an integer AC index: {key!r}"
+                if normalized_index < 0 or (
+                    total_acs is not None and normalized_index >= total_acs
+                ):
+                    return f"ac_statuses key is outside the Seed AC range: {key!r}"
+                if normalized_index in normalized_statuses:
+                    return f"ac_statuses contains duplicate normalized AC index: {key!r}"
                 if status not in cls._CHECKPOINT_AC_STATUS_VALUES:
                     return f"ac_statuses[{key!r}] is not a known AC status: {status!r}"
+                normalized_statuses[normalized_index] = status
+            if total_acs is not None and set(normalized_statuses) != set(range(total_acs)):
+                return "ac_statuses does not cover every Seed AC exactly once"
+        normalized_failed: set[int] | None = None
         if "failed_indices" in state:
             raw_failed = state["failed_indices"]
             if not isinstance(raw_failed, list | tuple):
                 return f"failed_indices is not a list: {raw_failed!r}"
+            normalized_failed = set()
             for entry in raw_failed:
-                if cls._checkpoint_index_value(entry) is None:
+                normalized_index = cls._checkpoint_index_value(entry)
+                if normalized_index is None:
                     return f"failed_indices entry is not an integer AC index: {entry!r}"
+                if normalized_index < 0 or (
+                    total_acs is not None and normalized_index >= total_acs
+                ):
+                    return f"failed_indices entry is outside the Seed AC range: {entry!r}"
+                if normalized_index in normalized_failed:
+                    return f"failed_indices contains duplicate AC index: {entry!r}"
+                normalized_failed.add(normalized_index)
+        completed_count: int | None = None
         if "completed_count" in state:
             completed_count = state["completed_count"]
             if (
@@ -3258,10 +3410,40 @@ class ParallelACExecutor:
                 or completed_count < 0
             ):
                 return f"completed_count is not a non-negative integer: {completed_count!r}"
+            if total_acs is not None and completed_count > total_acs:
+                return f"completed_count exceeds the Seed AC count: {completed_count!r}"
+
+        raw_plan = state.get("execution_plan")
+        raw_stages = raw_plan.get("stages") if isinstance(raw_plan, Mapping) else None
+        if plan_total_stages is not None and isinstance(raw_stages, list):
+            if plan_total_stages != len(raw_stages):
+                return "plan_total_stages does not match execution_plan.stages"
+        if (
+            completed_levels is not None
+            and plan_total_stages is not None
+            and completed_levels > plan_total_stages
+        ):
+            return "completed_levels exceeds plan_total_stages"
+        if normalized_statuses is not None and normalized_failed is not None:
+            failed_status_indices = {
+                index for index, status in normalized_statuses.items() if status == "failed"
+            }
+            if normalized_failed != failed_status_indices:
+                return "failed_indices does not match failed ac_statuses"
+        if normalized_statuses is not None and completed_count is not None:
+            completed_status_count = sum(
+                status == "completed" for status in normalized_statuses.values()
+            )
+            if completed_count != completed_status_count:
+                return "completed_count does not match completed ac_statuses"
         if "level_contexts" in state:
-            raw_contexts = state["level_contexts"]
-            if not isinstance(raw_contexts, list | tuple):
-                return f"level_contexts is not a list: {raw_contexts!r}"
+            contexts_malformed = cls._checkpoint_level_contexts_malformed(
+                state["level_contexts"],
+                total_acs=total_acs,
+                plan_total_stages=plan_total_stages,
+            )
+            if contexts_malformed is not None:
+                return contexts_malformed
         return None
 
     @classmethod
@@ -4154,7 +4336,10 @@ class ParallelACExecutor:
                         )
                         raise CheckpointPlanMismatchError(plan_mismatch)
                     elif cp.phase == "parallel_execution" and (
-                        progress_malformed := self._checkpoint_progress_malformed(cp)
+                        progress_malformed := self._checkpoint_progress_malformed(
+                            cp,
+                            total_acs=total_acs,
+                        )
                     ):
                         # Round-16 finding #3 (BLOCKING): a hash-valid
                         # checkpoint whose PROGRESS fields are type-mangled

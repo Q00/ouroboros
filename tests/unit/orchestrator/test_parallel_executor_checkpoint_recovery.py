@@ -1445,6 +1445,27 @@ class TestMalformedCheckpointProgressFailsClosed:
             {"failed_indices": ["one"]},
             # A type-mangled completed count.
             {"completed_count": "2"},
+            # Nested context elements must be typed mappings, not merely be
+            # wrapped by a list that passes the outer shape check.
+            {"level_contexts": [42]},
+            {
+                "level_contexts": [
+                    {
+                        "level_number": 1,
+                        "completed_acs": [42],
+                        "coordinator_review": None,
+                    }
+                ]
+            },
+            # AC indices are normalized before uniqueness/range checks.
+            {"ac_statuses": {"0": "completed", "00": "completed", "1": "pending"}},
+            {"ac_statuses": {"0": "completed", "2": "pending"}},
+            {"failed_indices": [0, "0"]},
+            # Relational corruption across otherwise well-typed fields.
+            {"failed_indices": [0]},
+            {"completed_count": 0},
+            {"completed_levels": 3},
+            {"plan_total_stages": 3},
         ],
         ids=[
             "string_completed_levels",
@@ -1452,6 +1473,15 @@ class TestMalformedCheckpointProgressFailsClosed:
             "unknown_ac_status_value",
             "non_integer_failed_index",
             "string_completed_count",
+            "non_mapping_level_context",
+            "non_mapping_completed_ac_context",
+            "duplicate_normalized_ac_status_key",
+            "out_of_range_ac_status_key",
+            "duplicate_failed_index",
+            "failed_indices_status_mismatch",
+            "completed_count_status_mismatch",
+            "completed_levels_exceeds_plan",
+            "plan_stage_count_mismatch",
         ],
     )
     @pytest.mark.asyncio
@@ -1510,7 +1540,7 @@ class TestMalformedCheckpointProgressFailsClosed:
             "level_contexts": [],
         }
         cp = SimpleNamespace(state=state)
-        assert ParallelACExecutor._checkpoint_progress_malformed(cp) is None
+        assert ParallelACExecutor._checkpoint_progress_malformed(cp, total_acs=2) is None
         # Legacy shape: progress keys absent entirely — adopt posture kept.
         assert ParallelACExecutor._checkpoint_progress_malformed(SimpleNamespace(state={})) is None
         # Integer keys (in-process relaunch, no JSON round-trip) are valid.
@@ -1531,12 +1561,54 @@ class TestMalformedCheckpointProgressFailsClosed:
             ({"failed_indices": [1.5]}, "failed_indices"),
             ({"completed_count": None}, "completed_count"),
             ({"level_contexts": "corrupt"}, "level_contexts"),
+            ({"level_contexts": [42]}, "level_contexts"),
         ],
     )
     def test_progress_validation_rejects_each_malformed_field(
         self, state: dict[str, object], expected_fragment: str
     ) -> None:
         detail = ParallelACExecutor._checkpoint_progress_malformed(SimpleNamespace(state=state))
+        assert detail is not None
+        assert expected_fragment in detail
+
+    @pytest.mark.parametrize(
+        ("state_update", "expected_fragment"),
+        [
+            (
+                {"ac_statuses": {"0": "completed", "00": "completed", "1": "pending"}},
+                "duplicate normalized",
+            ),
+            ({"ac_statuses": {"0": "completed", "2": "pending"}}, "Seed AC range"),
+            ({"failed_indices": [0, "0"]}, "duplicate AC index"),
+            ({"failed_indices": [0]}, "does not match failed"),
+            ({"completed_count": 0}, "does not match completed"),
+            ({"completed_levels": 3}, "exceeds plan_total_stages"),
+            ({"plan_total_stages": 3}, "does not match execution_plan.stages"),
+        ],
+    )
+    def test_progress_validation_rejects_relational_corruption(
+        self,
+        state_update: dict[str, object],
+        expected_fragment: str,
+    ) -> None:
+        state: dict[str, object] = {
+            "completed_levels": 1,
+            "plan_total_stages": 2,
+            "execution_plan": {
+                "version": 1,
+                "nodes": [],
+                "stages": [{"index": 0}, {"index": 1}],
+            },
+            "ac_statuses": {"0": "completed", "1": "pending"},
+            "failed_indices": [],
+            "completed_count": 1,
+            "level_contexts": [],
+        }
+        state.update(state_update)
+        detail = ParallelACExecutor._checkpoint_progress_malformed(
+            SimpleNamespace(state=state),
+            total_acs=2,
+        )
         assert detail is not None
         assert expected_fragment in detail
 
