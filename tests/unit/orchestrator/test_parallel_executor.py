@@ -1463,6 +1463,47 @@ def test_codex_runtime_watchdog_identity_reflects_timeouts() -> None:
     assert "startup_output_timeout_seconds" in contract
 
 
+def test_watchdog_identity_is_provider_neutral_via_attributes() -> None:
+    """R8 blocker #3: runtimes without a watchdog contract still fingerprint policy.
+
+    OpenCode/Hermes/Pi/GJC expose ``_startup_output_timeout_seconds`` /
+    ``_stdout_idle_timeout_seconds`` attributes but no ``watchdog_identity_contract()``;
+    the executor must still bind those, so idle timeouts 1 vs 999 differ.
+    """
+
+    class _AttrOnlyRuntime:
+        # No watchdog_identity_contract() method — attribute-only, like OpenCode.
+        _startup_output_timeout_seconds = 120.0
+
+        def __init__(self, idle: float) -> None:
+            self._stdout_idle_timeout_seconds = idle
+
+    fast = ParallelACExecutor._runtime_watchdog_identity(_AttrOnlyRuntime(1.0))
+    slow = ParallelACExecutor._runtime_watchdog_identity(_AttrOnlyRuntime(999.0))
+    assert fast["observed"] is True
+    assert fast["policy"]["stdout_idle_timeout_seconds"] == 1.0
+    assert fast != slow
+
+
+def test_completed_verify_outcome_bounded_by_utf8_bytes() -> None:
+    """R8 blocker #4: the completed-lifecycle outcome validator bounds UTF-8 bytes.
+
+    A payload under the char limit but over 64 KiB of UTF-8 bytes (multi-byte
+    artifact paths) must be rejected, not accepted.
+    """
+    from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
+
+    # 40 entries × ~700 4-byte chars ≈ 112 KiB bytes but only ~28k chars.
+    outcome = {
+        "passed": True,
+        "reason": None,
+        "output_tail": "",
+        "missing_artifacts": ["𐍈" * 700 for _ in range(40)],
+    }
+    with pytest.raises(ValueError, match="exceeds the size limit"):
+        ACRuntimeHandleManager._parse_verify_gate_outcome(outcome)
+
+
 def test_runtime_capabilities_contract_includes_realtime_effect_visibility() -> None:
     """R6 blocker #1: the stall-affecting capability participates in authority."""
     from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
@@ -11990,6 +12031,40 @@ class TestParallelACExecutor:
                 ),
             ]
         )
+        # The completion must be backed by the durable single-shot verify chain
+        # (exactly one intent + matching outcome) under the shared per-attempt key.
+        _verify_command_digest = executor._verify_gate_command_digest(ac_spec)
+        _verify_key = executor._ac_verify_gate_key(
+            execution_scope="session-completed-verify-recovery", ac_index=0, retry_attempt=0
+        )
+        appended_events.extend(
+            [
+                BaseEvent(
+                    type="execution.ac.verify.intent",
+                    aggregate_type="execution",
+                    aggregate_id="session-completed-verify-recovery",
+                    data={
+                        "verify_key": _verify_key,
+                        "verify_command_digest": _verify_command_digest,
+                    },
+                ),
+                BaseEvent(
+                    type="execution.ac.verify.outcome",
+                    aggregate_type="execution",
+                    aggregate_id="session-completed-verify-recovery",
+                    data={
+                        "verify_key": _verify_key,
+                        "verify_command_digest": _verify_command_digest,
+                        "verify_gate_outcome": {
+                            "passed": True,
+                            "reason": None,
+                            "output_tail": "",
+                            "missing_artifacts": [],
+                        },
+                    },
+                ),
+            ]
+        )
 
         recovered = await executor._execute_single_ac(
             ac_index=0,
@@ -12047,6 +12122,56 @@ class TestParallelACExecutor:
                 ac_index=0,
                 ac_content="Run the command once",
                 session_id="session-missing-verify-outcome",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="system",
+                seed_goal="Ship",
+                ac_spec=AcceptanceCriterionSpec(
+                    description="Run the command once",
+                    verify_command="apply-once",
+                ),
+            )
+
+    @pytest.mark.asyncio
+    async def test_completed_recovery_requires_durable_verify_chain(self) -> None:
+        """R8 blocker #2: a completion with a cached PASS but NO durable verify
+        intent/outcome chain fails closed — an orphan completion cannot
+        manufacture command-backed acceptance."""
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        # A completion carrying a cached PASS verdict, but no verify.intent/outcome
+        # events were ever persisted for this attempt.
+        executor._execute_atomic_ac = AsyncMock(
+            side_effect=CompletedACExecutionError(
+                "already completed",
+                result_summary="fabricated completion",
+                session_id="orphan-provider-session",
+                verify_gate_outcome={
+                    "passed": True,
+                    "reason": None,
+                    "output_tail": "",
+                    "missing_artifacts": [],
+                },
+            )
+        )
+
+        with pytest.raises(
+            AmbiguousACExecutionError, match="lacks the durable verify intent/outcome chain"
+        ):
+            await executor._execute_single_ac(
+                ac_index=0,
+                ac_content="Run the command once",
+                session_id="session-orphan-completion",
+                execution_id="session-orphan-completion",
                 tools=[],
                 tool_catalog=None,
                 system_prompt="system",
@@ -13738,6 +13863,83 @@ class TestParallelACExecutor:
             execution_id="exec-apply-gate",
         )
         assert run_count == 1
+
+    @pytest.mark.asyncio
+    async def test_apply_gate_consumes_atomic_outcome_under_shared_key(self) -> None:
+        """R8 blocker #1: one per-attempt oracle key spans the atomic and apply gates.
+
+        If the atomic outcome was persisted but its result-carried copy was lost
+        (e.g. a failed session.completed), the recovery gate consumes the durable
+        atomic outcome instead of re-running the command under a separate key.
+        """
+        from ouroboros.events.base import BaseEvent
+
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        seed = _make_seed(
+            AcceptanceCriterionSpec(description="AC", verify_command="./deploy.sh"),
+        )
+        spec = seed.acceptance_criteria[0]
+        assert isinstance(spec, AcceptanceCriterionSpec)
+        digest = executor._verify_gate_command_digest(spec)
+        # Simulate the atomic gate having already persisted its intent+outcome
+        # under the SHARED per-attempt key (execution scope, ac_index, retry 0).
+        key = executor._ac_verify_gate_key(
+            execution_scope="exec-shared", ac_index=0, retry_attempt=0
+        )
+        for event_type, extra in (
+            ("execution.ac.verify.intent", {}),
+            (
+                "execution.ac.verify.outcome",
+                {
+                    "verify_gate_outcome": {
+                        "passed": True,
+                        "reason": None,
+                        "output_tail": "ok",
+                        "missing_artifacts": [],
+                    }
+                },
+            ),
+        ):
+            await event_store.append(
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="execution",
+                    aggregate_id="exec-shared",
+                    data={"verify_key": key, "verify_command_digest": digest, **extra},
+                )
+            )
+
+        run_count = 0
+
+        async def _counting_gate(*, spec: Any, cwd: str) -> _VerifyGateOutcome:
+            nonlocal run_count
+            run_count += 1
+            return _VerifyGateOutcome(passed=False, reason="ran again", output_tail="")
+
+        executor._run_ac_verify_gate = _counting_gate  # type: ignore[method-assign]
+        failed_result = ACExecutionResult(
+            ac_index=0, ac_content="AC", success=False, error="lost completion", retry_attempt=0
+        )
+        finalized = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=failed_result,
+            session_id="sess",
+            execution_id="exec-shared",
+        )
+        # Consumed the durable atomic outcome (PASS) — the command did NOT re-run.
+        assert run_count == 0
+        assert finalized.success is True
 
     @pytest.mark.asyncio
     async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:

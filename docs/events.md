@@ -221,7 +221,7 @@ and decomposed-parent verify gates.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `verify_key` | `string` | Stable per-attempt gate identity. Namespaces: `atomic:…` (atomic gate), `decomposed_parent:…` (decomposed-parent gate), `apply_gate:…` (failed-runtime recovery gate), `flip_gate:…` (sibling-evidence flip gate), `skip_completed:…` (`--skip-completed` proof gate) |
+| `verify_key` | `string` | Stable per-attempt gate identity. `acgate:<execution>:<ac_index>:<retry>` is the single authoritative per-attempt key shared by the atomic gate, the failed-runtime recovery gate, and the sibling-flip gate, so a post-verify failure never reruns the command under a different key; `decomposed_parent:…` keys the decomposed-parent gate and `skip_completed:…` the pre-execution `--skip-completed` proof gate. A command-bearing completed-attempt recovery requires exactly one matching intent+outcome under this key before its cached PASS is trusted. |
 | `verify_command_digest` | `string` | Digest of the exact command, expected artifacts, and output assertion |
 | `execution_id` | `string` | Durable execution/run anchor |
 | `session_id` | `string` | Orchestrator session id |

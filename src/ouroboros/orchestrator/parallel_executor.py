@@ -290,6 +290,7 @@ from ouroboros.orchestrator.evidence_schema import (
     validate_evidence,
 )
 from ouroboros.orchestrator.execution_event_emitter import (
+    _MAX_VERIFY_MISSING_ARTIFACT_CHARS,
     _MAX_VERIFY_MISSING_ARTIFACTS,
     _MAX_VERIFY_TEXT_CHARS,
     ExecutionEventEmitter,
@@ -2688,19 +2689,45 @@ class ParallelACExecutor:
         Startup- and stdout-idle watchdog timeouts (and process-shutdown grace)
         change WHEN a provider turn is interrupted, so two runtimes with different
         timeouts have materially different termination semantics and must not
-        share a capsule fingerprint. A runtime that owns a watchdog exposes a
-        provider-neutral ``watchdog_identity_contract()``; absent it, the policy
-        is recorded as unobserved.
+        share a capsule fingerprint. Resolution is provider-neutral: a runtime may
+        expose an explicit ``watchdog_identity_contract()``, but otherwise the
+        well-known watchdog timeout attributes every subprocess runtime carries
+        (Codex, OpenCode, Hermes, Pi, GJC, ...) are probed directly, and a wrapped
+        ``_transport`` is probed one level, so a configurable interruption policy
+        is never left unobserved.
         """
-        contract = getattr(adapter, "watchdog_identity_contract", None)
-        if callable(contract):
-            try:
-                declared = contract()
-            except Exception:
-                declared = None
-            if isinstance(declared, Mapping):
-                return {"version": 1, "observed": True, "policy": dict(declared)}
-        return {"version": 1, "observed": False, "policy": None}
+        _watchdog_attrs = (
+            "_startup_output_timeout_seconds",
+            "_stdout_idle_timeout_seconds",
+            "_process_shutdown_timeout_seconds",
+            "_completed_process_group_shutdown_timeout_seconds",
+        )
+
+        def _probe(obj: object) -> dict[str, object] | None:
+            contract = getattr(obj, "watchdog_identity_contract", None)
+            if callable(contract):
+                try:
+                    declared = contract()
+                except Exception:
+                    declared = None
+                if isinstance(declared, Mapping):
+                    return dict(declared)
+            policy: dict[str, object] = {}
+            for attr in _watchdog_attrs:
+                value = getattr(obj, attr, None)
+                # Only bind genuine numeric/None timeout settings — never a
+                # MagicMock or other incidental attribute.
+                if value is None or isinstance(value, (int, float)):
+                    if hasattr(obj, attr):
+                        policy[attr.lstrip("_")] = value
+            return policy or None
+
+        policy = _probe(adapter)
+        if policy is None:
+            transport = getattr(adapter, "_transport", None)
+            if transport is not None:
+                policy = _probe(transport)
+        return {"version": 1, "observed": policy is not None, "policy": policy}
 
     @staticmethod
     def _runtime_capabilities_contract(adapter: object) -> dict[str, Any] | None:
@@ -8454,12 +8481,37 @@ class ParallelACExecutor:
                     self._run_verify_commands
                     and isinstance(ac_spec, AcceptanceCriterionSpec)
                     and ac_spec.verify_command
-                    and recovered_verify_outcome is None
                 ):
-                    raise AmbiguousACExecutionError(
-                        "Completed AC recovery is missing its non-idempotent verify-command "
-                        "outcome; refusing to replay the command"
-                    ) from completed
+                    if recovered_verify_outcome is None:
+                        raise AmbiguousACExecutionError(
+                            "Completed AC recovery is missing its non-idempotent verify-command "
+                            "outcome; refusing to replay the command"
+                        ) from completed
+                    # The completed lifecycle's cached PASS is not self-authorizing:
+                    # require the durable single-shot verify chain (exactly one
+                    # intent + matching outcome) to back it, so an orphan or
+                    # corrupted completion cannot manufacture command-backed
+                    # acceptance. The durable oracle outcome is authoritative.
+                    execution_scope = execution_id or session_id
+                    (
+                        durable_verify_outcome,
+                        _intent_only,
+                    ) = await self._load_persisted_verify_decision(
+                        aggregate_id=execution_scope,
+                        verify_key=self._ac_verify_gate_key(
+                            execution_scope=execution_scope,
+                            ac_index=ac_index,
+                            retry_attempt=atomic_retry_attempt,
+                        ),
+                        command_digest=self._verify_gate_command_digest(ac_spec),
+                    )
+                    if durable_verify_outcome is None:
+                        raise AmbiguousACExecutionError(
+                            "Completed AC recovery lacks the durable verify intent/outcome chain "
+                            "backing its verify-command result; refusing to trust a completion "
+                            "that cannot prove its acceptance evidence"
+                        ) from completed
+                    recovered_verify_outcome = durable_verify_outcome
                 log.info(
                     "parallel_executor.ac.completed_recovered",
                     ac_index=ac_index,
@@ -10585,9 +10637,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     spec=ac_spec,
                     cwd=cwd,
                     aggregate_id=execution_context_id,
-                    verify_key=(
-                        f"atomic:{runtime_identity.ac_id}:"
-                        f"{runtime_identity.session_attempt_id}:{retry_attempt}"
+                    # One authoritative per-attempt key shared by the atomic gate,
+                    # the failed-runtime recovery gate (_apply_verify_gate), and the
+                    # sibling-flip gate, so a post-verify failure (e.g. a lost
+                    # session.completed) never reruns the command under a different
+                    # key — the later path consumes this attempt's durable outcome.
+                    verify_key=self._ac_verify_gate_key(
+                        execution_scope=execution_context_id,
+                        ac_index=ac_index,
+                        retry_attempt=retry_attempt,
                     ),
                     execution_id=execution_context_id,
                     session_id=session_id,
@@ -11117,6 +11175,17 @@ Respond with either ATOMIC or the structured JSON object only.
             return None, None, str(exc)
         return record, validation, None
 
+    @staticmethod
+    def _ac_verify_gate_key(*, execution_scope: str, ac_index: int, retry_attempt: int) -> str:
+        """One stable per-attempt verify-oracle key shared across every gate path.
+
+        The atomic gate, the failed-runtime recovery gate, and the sibling-flip
+        gate all reference the SAME (execution, AC, attempt) verify command, so
+        they key the single-shot oracle identically and a later path consumes the
+        durable outcome instead of re-running the command.
+        """
+        return f"acgate:{execution_scope}:{ac_index}:{retry_attempt}"
+
     def _verify_gate_command_digest(self, spec: AcceptanceCriterionSpec) -> str:
         """Bind a durable verify outcome to the exact command/contract that ran.
 
@@ -11300,10 +11369,15 @@ Respond with either ATOMIC or the structured JSON object only.
 
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
         if missing_artifacts:
-            # ``expected_artifacts`` is not size-limited, so bound the reported
-            # miss list (verdict is preserved) before it flows into any durable
-            # outcome; the emitter/replay enforce a hard byte cap on top of this.
-            capped_missing = missing_artifacts[:_MAX_VERIFY_MISSING_ARTIFACTS]
+            # ``expected_artifacts`` is not size-limited, so bound BOTH the count
+            # and each entry's length (verdict is preserved) before it flows into
+            # any durable outcome — the completed-lifecycle path persists this
+            # outcome directly, so an unbounded per-entry length would blow the
+            # byte cap. The emitter/replay enforce a hard byte cap on top of this.
+            capped_missing = tuple(
+                entry[:_MAX_VERIFY_MISSING_ARTIFACT_CHARS]
+                for entry in missing_artifacts[:_MAX_VERIFY_MISSING_ARTIFACTS]
+            )
             reason = "expected_artifacts missing: " + ", ".join(capped_missing)
             if len(missing_artifacts) > len(capped_missing):
                 reason += f" (+{len(missing_artifacts) - len(capped_missing)} more)"
@@ -11431,7 +11505,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 spec=spec,
                 cwd=cwd,
                 aggregate_id=execution_id or session_id,
-                verify_key=f"apply_gate:{ac_index}:{result.retry_attempt}",
+                # Same per-attempt key as the atomic gate: if the atomic outcome
+                # was persisted but its result-carried copy was lost (e.g. a failed
+                # session.completed), this consumes it instead of re-running.
+                verify_key=self._ac_verify_gate_key(
+                    execution_scope=execution_id or session_id,
+                    ac_index=ac_index,
+                    retry_attempt=result.retry_attempt,
+                ),
                 execution_id=execution_id,
                 session_id=session_id,
                 identity_metadata={"ac_index": ac_index, "retry_attempt": result.retry_attempt},
@@ -11727,7 +11808,12 @@ Respond with either ATOMIC or the structured JSON object only.
                     spec=spec,
                     cwd=cwd,
                     aggregate_id=execution_id or session_id,
-                    verify_key=f"flip_gate:{ac_idx}:{result.retry_attempt}",
+                    # Same per-attempt key as the atomic/apply gates — one oracle.
+                    verify_key=self._ac_verify_gate_key(
+                        execution_scope=execution_id or session_id,
+                        ac_index=ac_idx,
+                        retry_attempt=result.retry_attempt,
+                    ),
                     execution_id=execution_id,
                     session_id=session_id,
                     identity_metadata={"ac_index": ac_idx, "retry_attempt": result.retry_attempt},

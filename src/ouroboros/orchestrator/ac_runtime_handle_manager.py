@@ -55,7 +55,9 @@ _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _AC_ATTEMPT_DISPATCHED_EVENT = "execution.ac.attempt.dispatched"
 _AC_REUSABLE_RUNTIME_EVENT_TYPES = _REUSABLE_RUNTIME_EVENT_TYPES | {_AC_ATTEMPT_DISPATCHED_EVENT}
 _VERIFY_GATE_OUTCOME_KEYS = frozenset({"passed", "reason", "output_tail", "missing_artifacts"})
-_MAX_VERIFY_GATE_OUTCOME_CHARS = 65_536
+# 64 KiB measured in UTF-8 bytes (the persisted/replayed size), not Unicode code
+# points — a multi-byte outcome must be bounded by its actual encoded size.
+_MAX_VERIFY_GATE_OUTCOME_BYTES = 65_536
 _AC_EFFECT_EVENT_TYPES = frozenset(
     {
         "execution.tool.started",
@@ -256,7 +258,7 @@ class ACRuntimeHandleManager:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        if len(encoded) > _MAX_VERIFY_GATE_OUTCOME_CHARS:
+        if len(encoded.encode("utf-8")) > _MAX_VERIFY_GATE_OUTCOME_BYTES:
             raise ValueError("durable completed AC verify outcome exceeds the size limit")
         return normalized
 
