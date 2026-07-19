@@ -107,12 +107,13 @@ session freshness.
 | `session_id` | `string` | Orchestrator session id |
 | `semantic_ac_key` | `string` | Stable semantic AC identity |
 | `capsule_fingerprint` | `string` | SHA-256 identity of the complete capsule contract |
-| `capsule` | `object` | Strict versioned `ACExecutionCapsule` contract |
+| `capsule_manifest` | `object` | Strict versioned manifest whose free-form values and paths are represented only by SHA-256 digests |
 | `session_origin` | `string` | `"fresh"` or `"restored_same_attempt"` |
 
-The nested capsule contains compact facts and typed context references, not a
-provider transcript. A native runtime handle is bound to the capsule fingerprint
-and may resume only the same AC attempt.
+The nested manifest contains compact identities and typed context-reference
+digests, not a provider transcript or copies of free-form Seed/prompt/workspace
+text. Recovery strictly parses and re-fingerprints the manifest before a native
+runtime handle may resume the same AC attempt.
 
 ### mcp.job.cancelled
 

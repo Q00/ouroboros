@@ -101,7 +101,7 @@ class ExecutionEventEmitter:
                     "session_id": session_id,
                     "semantic_ac_key": capsule.semantic_ac_key,
                     "capsule_fingerprint": capsule.fingerprint,
-                    "capsule": capsule.to_contract_data(),
+                    "capsule_manifest": capsule.manifest.to_contract_data(),
                     "session_origin": session_origin,
                 },
             )

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsuleManifest
 from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     runtime_handle_tool_catalog,
@@ -493,7 +494,25 @@ class ACRuntimeHandleManager:
                         != runtime_identity.session_attempt_id
                     ):
                         continue
-                    if event_data.get("capsule_fingerprint") != expected_capsule_fingerprint:
+                    try:
+                        manifest = ACExecutionCapsuleManifest.from_contract_data(
+                            event_data.get("capsule_manifest")
+                        )
+                    except ValueError as exc:
+                        raise ValueError("durable AC capsule manifest is malformed") from exc
+                    persisted_fingerprint = event_data.get("capsule_fingerprint")
+                    if persisted_fingerprint != manifest.fingerprint:
+                        raise ValueError(
+                            "durable AC capsule fingerprint disagrees with its manifest"
+                        )
+                    if (
+                        manifest.ac_id != runtime_identity.ac_id
+                        or manifest.session_attempt_id != runtime_identity.session_attempt_id
+                    ):
+                        raise ValueError(
+                            "durable AC capsule manifest disagrees with its event identity"
+                        )
+                    if manifest.fingerprint != expected_capsule_fingerprint:
                         raise ValueError(
                             "durable AC capsule fingerprint disagrees with the current dispatch"
                         )

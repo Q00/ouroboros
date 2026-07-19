@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -10,7 +11,7 @@ from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator.ac_execution_capsule import (
     ACContextReference,
     ACContextReferenceKind,
-    ACExecutionCapsule,
+    ACExecutionCapsuleManifest,
     bind_capsule_to_runtime_handle,
     compile_ac_execution_capsule,
 )
@@ -58,9 +59,9 @@ def _capsule(tmp_path):
 def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
     capsule = _capsule(tmp_path)
 
-    restored = ACExecutionCapsule.from_contract_data(capsule.to_contract_data())
+    restored = ACExecutionCapsuleManifest.from_contract_data(capsule.manifest.to_contract_data())
 
-    assert restored == capsule
+    assert restored == capsule.manifest
     assert restored.fingerprint == capsule.fingerprint
     assert restored.fresh_session_required is True
     assert [reference.kind for reference in restored.context_references] == [
@@ -70,6 +71,40 @@ def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
         ACContextReferenceKind.ARTIFACT,
         ACContextReferenceKind.GATE,
     ]
+
+
+def test_capsule_manifest_hashes_free_form_authority(tmp_path) -> None:
+    capsule = replace(
+        _capsule(tmp_path),
+        seed_goal="Contact owner@example.com with api_key=sk-live-secret",
+        ac_content="Use Authorization: Bearer private-token",
+        success_contract=replace(
+            _capsule(tmp_path).success_contract,
+            verify_command="curl -H 'Authorization: Bearer private-token'",
+        ),
+    )
+
+    persisted = json.dumps(capsule.manifest.to_contract_data(), sort_keys=True)
+
+    assert "owner@example.com" not in persisted
+    assert "sk-live-secret" not in persisted
+    assert "private-token" not in persisted
+    assert str(tmp_path.resolve()) not in persisted
+    assert capsule.manifest.fingerprint == capsule.fingerprint
+
+
+def test_capsule_manifest_rejects_corrupt_version_and_digests(tmp_path) -> None:
+    manifest = _capsule(tmp_path).manifest.to_contract_data()
+
+    unsupported = dict(manifest)
+    unsupported["version"] = 999
+    with pytest.raises(ValueError, match="version is unsupported"):
+        ACExecutionCapsuleManifest.from_contract_data(unsupported)
+
+    corrupt = dict(manifest)
+    corrupt["seed_goal_digest"] = "sha256:not-a-digest"
+    with pytest.raises(ValueError, match="seed goal digest is malformed"):
+        ACExecutionCapsuleManifest.from_contract_data(corrupt)
 
 
 def test_capsule_references_dependency_without_copying_its_output(tmp_path) -> None:

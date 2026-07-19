@@ -21,7 +21,10 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
-from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
+from ouroboros.orchestrator.ac_execution_capsule import (
+    ACExecutionCapsuleManifest,
+    compile_ac_execution_capsule,
+)
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -34,7 +37,10 @@ from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
-from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ExecutionNodeIdentity,
+    build_ac_runtime_identity,
+)
 from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -4377,13 +4383,16 @@ class TestParallelACExecutor:
         capsule_event = next(
             event for event in appended_events if event.type == "execution.ac.capsule.compiled"
         )
-        restored_capsule = ACExecutionCapsule.from_contract_data(capsule_event.data["capsule"])
-        assert capsule_event.data["capsule_fingerprint"] == restored_capsule.fingerprint
+        restored_manifest = ACExecutionCapsuleManifest.from_contract_data(
+            capsule_event.data["capsule_manifest"]
+        )
+        assert capsule_event.data["capsule_fingerprint"] == restored_manifest.fingerprint
         assert capsule_event.data["session_origin"] == "fresh"
         assert isinstance(runtime_call["prompt"], str)
         assert "Ouroboros AC Runtime" in runtime_call["prompt"]
-        assert restored_capsule.ac_content == "Implement AC 3"
-        assert restored_capsule.workspace == os.path.realpath("/tmp/project")
+        assert "Implement AC 3" in runtime_call["prompt"]
+        assert restored_manifest.ac_content_digest.startswith("sha256:")
+        assert restored_manifest.workspace_digest.startswith("sha256:")
         assert [tool["name"] for tool in started_event.data["tool_catalog"]] == ["Read", "Edit"]
         assert [
             tool["name"] for tool in started_event.data["runtime"]["metadata"]["tool_catalog"]
@@ -4459,6 +4468,20 @@ class TestParallelACExecutor:
 
         runtime = _Runtime()
         event_store, appended_events = _make_replaying_event_store()
+        persisted_capsule = compile_ac_execution_capsule(
+            runtime_identity=build_ac_runtime_identity(
+                0,
+                execution_context_id="session-capsule-mismatch",
+                retry_attempt=0,
+            ),
+            execution_id="session-capsule-mismatch",
+            semantic_ac_key="semantic-key",
+            workspace=os.path.realpath("/tmp/project"),
+            authority_scope="execution:session-capsule-mismatch",
+            seed_goal="Ship",
+            ac_content="Original AC authority",
+            ac_spec=None,
+        )
         appended_events.append(
             BaseEvent(
                 type="execution.ac.capsule.compiled",
@@ -4467,7 +4490,8 @@ class TestParallelACExecutor:
                 data={
                     "ac_id": "session-capsule-mismatch_ac_1",
                     "session_attempt_id": "session-capsule-mismatch_ac_1_attempt_1",
-                    "capsule_fingerprint": "sha256:" + "0" * 64,
+                    "capsule_fingerprint": persisted_capsule.fingerprint,
+                    "capsule_manifest": persisted_capsule.manifest.to_contract_data(),
                 },
             )
         )
@@ -4488,6 +4512,7 @@ class TestParallelACExecutor:
                 seed_goal="Ship",
                 depth=0,
                 start_time=datetime.now(UTC),
+                semantic_ac_key="semantic-key",
             )
 
         assert runtime.calls == 0

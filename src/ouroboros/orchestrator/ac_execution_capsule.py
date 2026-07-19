@@ -39,6 +39,18 @@ def _canonical_json(value: object) -> str:
     )
 
 
+def _validate_sha256_digest(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or len(value) != len("sha256:") + 64:
+        raise ValueError(f"{field} is malformed")
+    if not value.startswith("sha256:"):
+        raise ValueError(f"{field} is malformed")
+    try:
+        int(value.removeprefix("sha256:"), 16)
+    except ValueError as exc:
+        raise ValueError(f"{field} is malformed") from exc
+    return value
+
+
 class ACContextReferenceKind(StrEnum):
     """External context source named by an execution capsule."""
 
@@ -69,15 +81,8 @@ class ACContextReference:
             raise ValueError("context reference hint is oversized")
         if any(character in self.hint for character in ("\x00", "\r", "\n")):
             raise ValueError("context reference hint contains control characters")
-        if self.digest is not None and (
-            len(self.digest) != len("sha256:") + 64 or not self.digest.startswith("sha256:")
-        ):
-            raise ValueError("context reference digest is malformed")
         if self.digest is not None:
-            try:
-                int(self.digest.removeprefix("sha256:"), 16)
-            except ValueError as exc:
-                raise ValueError("context reference digest is malformed") from exc
+            _validate_sha256_digest(self.digest, field="context reference digest")
 
     def to_contract_data(self) -> dict[str, object]:
         return {
@@ -105,6 +110,71 @@ class ACContextReference:
         if not isinstance(hint, str):
             raise ValueError("context reference hint is invalid")
         return cls(kind=kind, locator=locator, digest=digest, hint=hint)
+
+
+@dataclass(frozen=True, slots=True)
+class ACContextReferenceManifest:
+    """Non-sensitive durable identity for one external context reference."""
+
+    kind: ACContextReferenceKind
+    locator_digest: str
+    content_digest: str | None
+    hint_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ACContextReferenceKind):
+            raise ValueError("context reference manifest kind is invalid")
+        _validate_sha256_digest(
+            self.locator_digest,
+            field="context reference manifest locator digest",
+        )
+        if self.content_digest is not None:
+            _validate_sha256_digest(
+                self.content_digest,
+                field="context reference manifest content digest",
+            )
+        _validate_sha256_digest(
+            self.hint_digest,
+            field="context reference manifest hint digest",
+        )
+
+    def to_contract_data(self) -> dict[str, object]:
+        return {
+            "kind": self.kind.value,
+            "locator_digest": self.locator_digest,
+            "content_digest": self.content_digest,
+            "hint_digest": self.hint_digest,
+        }
+
+    @classmethod
+    def from_reference(cls, reference: ACContextReference) -> ACContextReferenceManifest:
+        return cls(
+            kind=reference.kind,
+            locator_digest=_sha256_text(reference.locator),
+            content_digest=reference.digest,
+            hint_digest=_sha256_text(reference.hint),
+        )
+
+    @classmethod
+    def from_contract_data(cls, raw: object) -> ACContextReferenceManifest:
+        expected = {"kind", "locator_digest", "content_digest", "hint_digest"}
+        if not isinstance(raw, Mapping) or set(raw) != expected:
+            raise ValueError("context reference manifest has an invalid shape")
+        try:
+            kind = ACContextReferenceKind(raw.get("kind"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("context reference manifest kind is invalid") from exc
+        locator_digest = raw.get("locator_digest")
+        content_digest = raw.get("content_digest")
+        hint_digest = raw.get("hint_digest")
+        if content_digest is not None and not isinstance(content_digest, str):
+            raise ValueError("context reference manifest content digest is invalid")
+        return cls(
+            kind=kind,
+            locator_digest=locator_digest,  # type: ignore[arg-type]
+            content_digest=content_digest,
+            hint_digest=hint_digest,  # type: ignore[arg-type]
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +230,171 @@ class ACSuccessContract:
             verify_command=verify_command,
             expected_artifacts=tuple(expected_artifacts),
             output_assertion=output_assertion,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ACExecutionCapsuleManifest:
+    """Strict durable capsule identity with all free-form values hashed.
+
+    Provider prompts still receive the in-memory :class:`ACExecutionCapsule`,
+    but the event ledger stores only this manifest. Recovery can therefore
+    validate exact authority without copying credentials, PII, prompts, or
+    absolute workspace paths into another durable payload.
+    """
+
+    execution_id: str
+    semantic_ac_key: str
+    ac_id: str
+    session_scope_id: str
+    session_attempt_id: str
+    node_id: str | None
+    retry_attempt: int
+    segment_index: int
+    workspace_digest: str
+    authority_scope_digest: str
+    seed_goal_digest: str
+    ac_content_digest: str
+    success_contract_digest: str
+    context_references: tuple[ACContextReferenceManifest, ...]
+    context_budget_chars: int
+    fresh_session_required: bool = True
+    version: int = AC_EXECUTION_CAPSULE_VERSION
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("execution_id", self.execution_id),
+            ("semantic_ac_key", self.semantic_ac_key),
+            ("ac_id", self.ac_id),
+            ("session_scope_id", self.session_scope_id),
+            ("session_attempt_id", self.session_attempt_id),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"capsule manifest {name} is missing")
+        if self.node_id is not None and (not isinstance(self.node_id, str) or not self.node_id):
+            raise ValueError("capsule manifest node id is invalid")
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version != AC_EXECUTION_CAPSULE_VERSION
+        ):
+            raise ValueError("capsule manifest version is unsupported")
+        for name, value in (
+            ("retry attempt", self.retry_attempt),
+            ("segment index", self.segment_index),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"capsule manifest {name} is invalid")
+        if (
+            not isinstance(self.context_budget_chars, int)
+            or isinstance(self.context_budget_chars, bool)
+            or self.context_budget_chars <= 0
+        ):
+            raise ValueError("capsule manifest context budget is invalid")
+        if self.fresh_session_required is not True:
+            raise ValueError("capsule manifest must require a fresh session")
+        if not self.context_references:
+            raise ValueError("capsule manifest must contain context references")
+        for name, value in (
+            ("workspace digest", self.workspace_digest),
+            ("authority scope digest", self.authority_scope_digest),
+            ("seed goal digest", self.seed_goal_digest),
+            ("AC content digest", self.ac_content_digest),
+            ("success contract digest", self.success_contract_digest),
+        ):
+            _validate_sha256_digest(value, field=f"capsule manifest {name}")
+
+    @property
+    def fingerprint(self) -> str:
+        return _sha256_text(_canonical_json(self.to_contract_data()))
+
+    def to_contract_data(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "execution_id": self.execution_id,
+            "semantic_ac_key": self.semantic_ac_key,
+            "ac_id": self.ac_id,
+            "session_scope_id": self.session_scope_id,
+            "session_attempt_id": self.session_attempt_id,
+            "node_id": self.node_id,
+            "retry_attempt": self.retry_attempt,
+            "segment_index": self.segment_index,
+            "workspace_digest": self.workspace_digest,
+            "authority_scope_digest": self.authority_scope_digest,
+            "seed_goal_digest": self.seed_goal_digest,
+            "ac_content_digest": self.ac_content_digest,
+            "success_contract_digest": self.success_contract_digest,
+            "context_references": [
+                reference.to_contract_data() for reference in self.context_references
+            ],
+            "context_budget_chars": self.context_budget_chars,
+            "fresh_session_required": self.fresh_session_required,
+        }
+
+    @classmethod
+    def from_contract_data(cls, raw: object) -> ACExecutionCapsuleManifest:
+        expected = {
+            "version",
+            "execution_id",
+            "semantic_ac_key",
+            "ac_id",
+            "session_scope_id",
+            "session_attempt_id",
+            "node_id",
+            "retry_attempt",
+            "segment_index",
+            "workspace_digest",
+            "authority_scope_digest",
+            "seed_goal_digest",
+            "ac_content_digest",
+            "success_contract_digest",
+            "context_references",
+            "context_budget_chars",
+            "fresh_session_required",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != expected:
+            raise ValueError("AC execution capsule manifest has an invalid shape")
+        references = raw.get("context_references")
+        if not isinstance(references, list):
+            raise ValueError("capsule manifest context references are invalid")
+        node_id = raw.get("node_id")
+        if node_id is not None and not isinstance(node_id, str):
+            raise ValueError("capsule manifest node id is invalid")
+        scalar_names = (
+            "execution_id",
+            "semantic_ac_key",
+            "ac_id",
+            "session_scope_id",
+            "session_attempt_id",
+            "workspace_digest",
+            "authority_scope_digest",
+            "seed_goal_digest",
+            "ac_content_digest",
+            "success_contract_digest",
+        )
+        scalars = {name: raw.get(name) for name in scalar_names}
+        if any(not isinstance(value, str) for value in scalars.values()):
+            raise ValueError("capsule manifest string field is invalid")
+        return cls(
+            version=raw.get("version"),  # type: ignore[arg-type]
+            execution_id=scalars["execution_id"],  # type: ignore[arg-type]
+            semantic_ac_key=scalars["semantic_ac_key"],  # type: ignore[arg-type]
+            ac_id=scalars["ac_id"],  # type: ignore[arg-type]
+            session_scope_id=scalars["session_scope_id"],  # type: ignore[arg-type]
+            session_attempt_id=scalars["session_attempt_id"],  # type: ignore[arg-type]
+            node_id=node_id,
+            retry_attempt=raw.get("retry_attempt"),  # type: ignore[arg-type]
+            segment_index=raw.get("segment_index"),  # type: ignore[arg-type]
+            workspace_digest=scalars["workspace_digest"],  # type: ignore[arg-type]
+            authority_scope_digest=scalars["authority_scope_digest"],  # type: ignore[arg-type]
+            seed_goal_digest=scalars["seed_goal_digest"],  # type: ignore[arg-type]
+            ac_content_digest=scalars["ac_content_digest"],  # type: ignore[arg-type]
+            success_contract_digest=scalars["success_contract_digest"],  # type: ignore[arg-type]
+            context_references=tuple(
+                ACContextReferenceManifest.from_contract_data(reference) for reference in references
+            ),
+            context_budget_chars=raw.get("context_budget_chars"),  # type: ignore[arg-type]
+            fresh_session_required=raw.get("fresh_session_required"),  # type: ignore[arg-type]
         )
 
 
@@ -232,98 +467,35 @@ class ACExecutionCapsule:
             raise ValueError("capsule must contain at least one context reference")
 
     @property
-    def fingerprint(self) -> str:
-        return _sha256_text(_canonical_json(self.to_contract_data()))
-
-    def to_contract_data(self) -> dict[str, object]:
-        return {
-            "version": self.version,
-            "execution_id": self.execution_id,
-            "semantic_ac_key": self.semantic_ac_key,
-            "ac_id": self.ac_id,
-            "session_scope_id": self.session_scope_id,
-            "session_attempt_id": self.session_attempt_id,
-            "node_id": self.node_id,
-            "retry_attempt": self.retry_attempt,
-            "segment_index": self.segment_index,
-            "workspace": self.workspace,
-            "authority_scope": self.authority_scope,
-            "seed_goal": self.seed_goal,
-            "ac_content": self.ac_content,
-            "success_contract": self.success_contract.to_contract_data(),
-            "context_references": [
-                reference.to_contract_data() for reference in self.context_references
-            ],
-            "context_budget_chars": self.context_budget_chars,
-            "fresh_session_required": self.fresh_session_required,
-        }
-
-    @classmethod
-    def from_contract_data(cls, raw: object) -> ACExecutionCapsule:
-        expected = {
-            "version",
-            "execution_id",
-            "semantic_ac_key",
-            "ac_id",
-            "session_scope_id",
-            "session_attempt_id",
-            "node_id",
-            "retry_attempt",
-            "segment_index",
-            "workspace",
-            "authority_scope",
-            "seed_goal",
-            "ac_content",
-            "success_contract",
-            "context_references",
-            "context_budget_chars",
-            "fresh_session_required",
-        }
-        if not isinstance(raw, Mapping) or set(raw) != expected:
-            raise ValueError("AC execution capsule has an invalid shape")
-        references = raw.get("context_references")
-        if not isinstance(references, list):
-            raise ValueError("capsule context references are invalid")
-        scalar_fields = {
-            name: raw.get(name)
-            for name in (
-                "execution_id",
-                "semantic_ac_key",
-                "ac_id",
-                "session_scope_id",
-                "session_attempt_id",
-                "workspace",
-                "authority_scope",
-                "seed_goal",
-                "ac_content",
-            )
-        }
-        if any(not isinstance(value, str) for value in scalar_fields.values()):
-            raise ValueError("capsule string field is invalid")
-        node_id = raw.get("node_id")
-        if node_id is not None and not isinstance(node_id, str):
-            raise ValueError("capsule node id is invalid")
-        return cls(
-            version=raw.get("version"),  # type: ignore[arg-type]
-            execution_id=scalar_fields["execution_id"],  # type: ignore[arg-type]
-            semantic_ac_key=scalar_fields["semantic_ac_key"],  # type: ignore[arg-type]
-            ac_id=scalar_fields["ac_id"],  # type: ignore[arg-type]
-            session_scope_id=scalar_fields["session_scope_id"],  # type: ignore[arg-type]
-            session_attempt_id=scalar_fields["session_attempt_id"],  # type: ignore[arg-type]
-            node_id=node_id,
-            retry_attempt=raw.get("retry_attempt"),  # type: ignore[arg-type]
-            segment_index=raw.get("segment_index"),  # type: ignore[arg-type]
-            workspace=scalar_fields["workspace"],  # type: ignore[arg-type]
-            authority_scope=scalar_fields["authority_scope"],  # type: ignore[arg-type]
-            seed_goal=scalar_fields["seed_goal"],  # type: ignore[arg-type]
-            ac_content=scalar_fields["ac_content"],  # type: ignore[arg-type]
-            success_contract=ACSuccessContract.from_contract_data(raw.get("success_contract")),
-            context_references=tuple(
-                ACContextReference.from_contract_data(reference) for reference in references
+    def manifest(self) -> ACExecutionCapsuleManifest:
+        return ACExecutionCapsuleManifest(
+            version=self.version,
+            execution_id=self.execution_id,
+            semantic_ac_key=self.semantic_ac_key,
+            ac_id=self.ac_id,
+            session_scope_id=self.session_scope_id,
+            session_attempt_id=self.session_attempt_id,
+            node_id=self.node_id,
+            retry_attempt=self.retry_attempt,
+            segment_index=self.segment_index,
+            workspace_digest=_sha256_text(self.workspace),
+            authority_scope_digest=_sha256_text(self.authority_scope),
+            seed_goal_digest=_sha256_text(self.seed_goal),
+            ac_content_digest=_sha256_text(self.ac_content),
+            success_contract_digest=_sha256_text(
+                _canonical_json(self.success_contract.to_contract_data())
             ),
-            context_budget_chars=raw.get("context_budget_chars"),  # type: ignore[arg-type]
-            fresh_session_required=raw.get("fresh_session_required"),  # type: ignore[arg-type]
+            context_references=tuple(
+                ACContextReferenceManifest.from_reference(reference)
+                for reference in self.context_references
+            ),
+            context_budget_chars=self.context_budget_chars,
+            fresh_session_required=self.fresh_session_required,
         )
+
+    @property
+    def fingerprint(self) -> str:
+        return self.manifest.fingerprint
 
     def to_prompt_reference_block(self) -> str:
         """Render the small external-memory index given to the provider driver."""
@@ -479,8 +651,10 @@ __all__ = [
     "AC_EXECUTION_CAPSULE_VERSION",
     "DEFAULT_AC_CONTEXT_BUDGET_CHARS",
     "ACContextReference",
+    "ACContextReferenceManifest",
     "ACContextReferenceKind",
     "ACExecutionCapsule",
+    "ACExecutionCapsuleManifest",
     "ACSuccessContract",
     "bind_capsule_to_runtime_handle",
     "compile_ac_execution_capsule",
