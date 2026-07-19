@@ -5125,6 +5125,109 @@ class TestParallelACExecutor:
         assert compiled_event.data["session_origin"] == "fresh"
 
     @pytest.mark.asyncio
+    async def test_capsule_loader_skips_legacy_scope_replay(self) -> None:
+        """Capsule-era attempts are authored only in the canonical AC aggregate."""
+        event_store = AsyncMock()
+        event_store.replay.return_value = []
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        identity = build_ac_runtime_identity(
+            3,
+            execution_context_id="exec-canonical-replay",
+            retry_attempt=2,
+        )
+
+        restored = await executor._load_persisted_ac_runtime_handle(
+            3,
+            execution_context_id="exec-canonical-replay",
+            retry_attempt=2,
+            expected_capsule_fingerprint="sha256:" + "0" * 64,
+            expected_capsule_workspace=os.path.realpath("/tmp/project"),
+        )
+
+        assert restored is None
+        event_store.replay.assert_awaited_once_with(
+            "execution",
+            identity.session_scope_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_capsule_loader_incrementally_fetches_retry_history(self) -> None:
+        """Growing retry history is fetched once, not replayed from row zero per attempt."""
+
+        class _IncrementalStore:
+            def __init__(self) -> None:
+                self.events: list[BaseEvent] = []
+                self.returned_events = 0
+                self.replay_calls = 0
+
+            async def get_events_after(
+                self,
+                aggregate_type: str,
+                aggregate_id: str,
+                last_row_id: int,
+            ) -> tuple[list[BaseEvent], int]:
+                matching = [
+                    event
+                    for event in self.events
+                    if event.aggregate_type == aggregate_type
+                    and event.aggregate_id == aggregate_id
+                ]
+                new_events = matching[last_row_id:]
+                self.returned_events += len(new_events)
+                return new_events, len(matching)
+
+            async def replay(self, _aggregate_type: str, _aggregate_id: str):
+                self.replay_calls += 1
+                raise AssertionError("full replay should not be used")
+
+        store = _IncrementalStore()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=store,  # type: ignore[arg-type]
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        for retry_attempt in range(5):
+            restored = await executor._load_persisted_ac_runtime_handle(
+                0,
+                execution_context_id="exec-incremental-replay",
+                retry_attempt=retry_attempt,
+                expected_capsule_fingerprint="sha256:" + "0" * 64,
+                expected_capsule_workspace=os.path.realpath("/tmp/project"),
+            )
+            assert restored is None
+            identity = build_ac_runtime_identity(
+                0,
+                execution_context_id="exec-incremental-replay",
+                retry_attempt=retry_attempt,
+            )
+            store.events.append(
+                BaseEvent(
+                    type="execution.session.failed",
+                    aggregate_type="execution",
+                    aggregate_id=identity.session_scope_id,
+                    data=identity.to_metadata(),
+                )
+            )
+
+        assert store.replay_calls == 0
+        assert store.returned_events == 4
+
+    @pytest.mark.asyncio
     async def test_capsule_resume_rejects_foreign_workspace_handle(self) -> None:
         """A matching fingerprint cannot authorize continuity from another checkout."""
         runtime = SimpleNamespace(

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+import inspect
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -75,6 +77,85 @@ class ACRuntimeHandleManager:
         self._event_store = event_store
         self._task_cwd = task_cwd
         self.runtime_handles: dict[str, RuntimeHandle] = {}
+        self._event_replay_cache: dict[tuple[str, str], list[Any]] = {}
+        self._event_replay_cursors: dict[tuple[str, str], int] = {}
+
+    async def _replay_runtime_scope_events(
+        self,
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> list[Any]:
+        """Incrementally replay one runtime scope when the store supports cursors."""
+        cache_key = (aggregate_type, aggregate_id)
+        incremental_descriptor = inspect.getattr_static(
+            type(self._event_store),
+            "get_events_after",
+            None,
+        )
+        if incremental_descriptor is None:
+            return await self._event_store.replay(aggregate_type, aggregate_id)
+
+        getter = object.__getattribute__(self._event_store, "get_events_after")
+        cursor = self._event_replay_cursors.get(cache_key, 0)
+        result = await getter(aggregate_type, aggregate_id, cursor)
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or not isinstance(result[0], list)
+            or not isinstance(result[1], int)
+        ):
+            return await self._event_store.replay(aggregate_type, aggregate_id)
+        new_events, next_cursor = result
+        cached_events = self._event_replay_cache.setdefault(cache_key, [])
+        cached_events.extend(new_events)
+        self._event_replay_cursors[cache_key] = next_cursor
+        return list(cached_events)
+
+    @staticmethod
+    def _event_retry_attempt(event_data: Mapping[str, Any]) -> int | None:
+        value = event_data.get("retry_attempt")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        attempt_number = event_data.get("attempt_number")
+        if (
+            isinstance(attempt_number, int)
+            and not isinstance(attempt_number, bool)
+            and attempt_number >= 1
+        ):
+            return attempt_number - 1
+        session_attempt_id = event_data.get("session_attempt_id")
+        if isinstance(session_attempt_id, str):
+            marker, separator, suffix = session_attempt_id.rpartition("_attempt_")
+            if marker and separator and suffix.isdigit() and int(suffix) >= 1:
+                return int(suffix) - 1
+        runtime_payload = event_data.get("runtime")
+        if isinstance(runtime_payload, Mapping):
+            metadata = runtime_payload.get("metadata")
+            if isinstance(metadata, Mapping):
+                value = metadata.get("retry_attempt")
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    return value
+        return None
+
+    @classmethod
+    def _events_for_runtime_attempt(
+        cls,
+        events: list[Any],
+        *,
+        retry_attempt: int,
+    ) -> list[Any]:
+        """Slice the append-only AC stream down to the current attempt tail."""
+        attempt_events: list[Any] = []
+        for event in reversed(events):
+            event_data = event.data if isinstance(getattr(event, "data", None), dict) else {}
+            observed_attempt = cls._event_retry_attempt(event_data)
+            if observed_attempt == retry_attempt:
+                attempt_events.append(event)
+                continue
+            if observed_attempt is not None and observed_attempt < retry_attempt:
+                break
+        attempt_events.reverse()
+        return attempt_events
 
     @staticmethod
     def _build_expected_ac_runtime_metadata(
@@ -501,12 +582,16 @@ class ACRuntimeHandleManager:
             return cached_handle
 
         candidate_scope_ids = (
-            runtime_identity.session_scope_id,
-            *runtime_identity.legacy_session_scope_ids,
+            (runtime_identity.session_scope_id,)
+            if expected_capsule_fingerprint is not None
+            else (
+                runtime_identity.session_scope_id,
+                *runtime_identity.legacy_session_scope_ids,
+            )
         )
         for candidate_scope_id in dict.fromkeys(candidate_scope_ids):
             try:
-                events = await self._event_store.replay(
+                events = await self._replay_runtime_scope_events(
                     runtime_identity.runtime_scope.aggregate_type,
                     candidate_scope_id,
                 )
@@ -523,10 +608,18 @@ class ACRuntimeHandleManager:
                 if expected_capsule_fingerprint is not None:
                     raise
                 continue
+            attempt_events = (
+                self._events_for_runtime_attempt(
+                    events,
+                    retry_attempt=runtime_identity.retry_attempt,
+                )
+                if expected_capsule_fingerprint is not None
+                else events
+            )
 
             capsule_authorized = expected_capsule_fingerprint is None
             if expected_capsule_fingerprint is not None:
-                for event in events:
+                for event in attempt_events:
                     if event.type != "execution.ac.capsule.compiled":
                         continue
                     event_data = event.data if isinstance(event.data, dict) else {}
@@ -580,10 +673,10 @@ class ACRuntimeHandleManager:
                     event.data if isinstance(event.data, dict) else {},
                     runtime_identity,
                 )
-                for event in events
+                for event in attempt_events
             )
 
-            for event in reversed(events):
+            for event in reversed(attempt_events):
                 event_data = event.data if isinstance(event.data, dict) else {}
                 if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
                     continue
