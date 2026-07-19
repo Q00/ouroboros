@@ -643,6 +643,90 @@ def test_depth_and_fat_harness_probe_from_round_14_review_diverges() -> None:
     )
 
 
+def test_rebuild_recovered_system_prompt_threads_restored_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-14 finding #3 (BLOCKING): the executor calls this builder back
+    AFTER RC3 restoration; it must construct the prompt from the RESTORED
+    settings (not the runner's current fields) and restore the checkpointed
+    guidance identity through the same fail-closed machinery
+    ``resume_session`` uses."""
+    runner = _runner()
+    # The runner's CURRENT config says context pack ON — the restored run
+    # said OFF; the builder must honor the restored value it is passed.
+    runner._context_pack_enabled = True
+    seed = _seed()
+    captured: dict[str, object] = {}
+
+    def _fake_build(
+        seed_arg: object,
+        strategy: object = None,
+        *,
+        repo_root: object = None,
+        guidance_fragment: str = "",
+        context_pack_enabled: object = None,
+    ) -> str:
+        captured["context_pack_enabled"] = context_pack_enabled
+        captured["guidance_fragment"] = guidance_fragment
+        return "rebuilt-prompt"
+
+    monkeypatch.setattr("ouroboros.orchestrator.runner.build_system_prompt", _fake_build)
+    # The exact shape a real run persists on the checkpoint: the resolved
+    # guidance identity (mode/provenance plus content-hash metadata).
+    persisted_guidance = OrchestratorRunner._guidance_contract(runner._ensure_new_run_guidance())
+    prompt = runner._rebuild_recovered_system_prompt(
+        seed,
+        fat_harness_mode=False,
+        context_pack_enabled=False,
+        guidance_contract=persisted_guidance,
+    )
+
+    assert prompt == "rebuilt-prompt"
+    assert captured["context_pack_enabled"] is False
+    # Disabled restored guidance produces the empty fragment.
+    assert captured["guidance_fragment"] == ""
+
+
+@pytest.mark.parametrize(
+    "bad_guidance",
+    [
+        "not-a-mapping",
+        {"mode": "evil", "provenance_scope": "ouroboros_declared_guidance_only", "items": []},
+        {"mode": "declared", "provenance_scope": "somewhere-else", "items": []},
+    ],
+)
+def test_rebuild_recovered_system_prompt_fails_closed_on_bad_guidance(
+    bad_guidance: object,
+) -> None:
+    """A malformed checkpointed guidance identity must refuse the recovered
+    launch (fail closed), never silently keep the current process's
+    guidance for a run that started with different guidance."""
+    runner = _runner()
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        runner._rebuild_recovered_system_prompt(
+            _seed(),
+            fat_harness_mode=False,
+            context_pack_enabled=None,
+            guidance_contract=bad_guidance,
+        )
+
+
+def test_rebuild_recovered_system_prompt_refuses_changed_guidance() -> None:
+    """A well-formed checkpointed guidance identity whose metadata no longer
+    matches the currently-resolvable guidance must refuse the recovered
+    launch — the exact ``resume_session`` fail-closed semantics."""
+    runner = _runner()
+    stale = OrchestratorRunner._guidance_contract(runner._ensure_new_run_guidance())
+    stale["rendered_fragment_hash"] = "sha256:" + "0" * 64
+    with pytest.raises(OrchestratorError, match="guidance changed"):
+        runner._rebuild_recovered_system_prompt(
+            _seed(),
+            fat_harness_mode=False,
+            context_pack_enabled=None,
+            guidance_contract=stale,
+        )
+
+
 def test_retry_policy_is_folded_into_proof_cohort_identity() -> None:
     """End-to-end through ``_proof_cohort_identity``: two runs differing
     ONLY in retry_policy must resolve to DIFFERENT cohort identities so a

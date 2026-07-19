@@ -1162,6 +1162,8 @@ class ParallelACExecutor:
         session_signal_hub: SessionSignalHub | None = None,
         parked_retry_backoff_seconds: float = 300.0,
         lateral_escalation_enabled: bool = False,
+        context_pack_enabled: bool | None = None,
+        prompt_guidance_contract: Mapping[str, Any] | None = None,
     ):
         """Initialize executor.
 
@@ -1211,6 +1213,22 @@ class ParallelACExecutor:
                 earlier round established that default specifically to avoid
                 an infinite-sleep hang for callers that never asked for the
                 ladder); an operator enables it explicitly via config.
+            context_pack_enabled: Round-14 finding #3 — the runner's pinned
+                worker-prompt semantic (whether ``build_system_prompt``
+                appends the deterministic repo context pack). Carried on the
+                RC3 checkpoint so a crash-restart can REBUILD the system
+                prompt with the ORIGINAL run's setting (see
+                ``system_prompt_builder`` on :meth:`execute_parallel`).
+                ``None`` (direct/test callers) means "unknown" and is never
+                restored over a concrete value.
+            prompt_guidance_contract: Round-14 finding #3 — the runner's
+                resolved guidance identity (the same
+                ``mode``/``provenance_scope``/items metadata shape the
+                durable execution contract persists). Stored OPAQUELY on the
+                RC3 checkpoint; on recovery it is handed back to the
+                runner's prompt builder, whose ``_restore_guidance_contract``
+                machinery re-resolves and identity-checks it (fail-closed on
+                changed guidance, exactly like ``resume_session``).
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -1234,6 +1252,10 @@ class ParallelACExecutor:
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        self._context_pack_enabled = context_pack_enabled
+        self._prompt_guidance_contract = (
+            dict(prompt_guidance_contract) if prompt_guidance_contract is not None else None
+        )
         self._run_verify_commands = run_verify_commands
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
         self._ac_retry_attempts = max(0, ac_retry_attempts)
@@ -2177,6 +2199,12 @@ class ParallelACExecutor:
           redispatch escalation option is available (escalation semantics).
         - ``shadow_replay_enabled`` — whether successful decomposed children
           are re-dispatched for the parent-tier baseline measurement.
+        - ``context_pack_enabled`` (round-14 #3) — whether the runner's
+          worker system prompt carries the deterministic repo context pack.
+          Persisted ``None`` (a run whose runner never resolved it — direct
+          callers) restores nothing, like an absent key; only a concrete
+          bool is adopted, and only over the current value, so the
+          crash-restart's rebuilt prompt uses the ORIGINAL run's setting.
 
         Conventions mirror ``_restore_checkpoint_retry_policy`` exactly:
         ``None`` (checkpoint predates the field) keeps the current
@@ -2195,11 +2223,13 @@ class ParallelACExecutor:
             fat_present = "fat_harness_mode" in raw_semantics
             cross_present = "cross_harness_redispatch_enabled" in raw_semantics
             shadow_present = "shadow_replay_enabled" in raw_semantics
+            cpack_present = "context_pack_enabled" in raw_semantics
             mode = raw_semantics.get("decomposition_mode")
             depth = raw_semantics.get("max_decomposition_depth")
             fat = raw_semantics.get("fat_harness_mode")
             cross = raw_semantics.get("cross_harness_redispatch_enabled")
             shadow = raw_semantics.get("shadow_replay_enabled")
+            cpack = raw_semantics.get("context_pack_enabled")
             if (
                 (not mode_present or mode in self._DECOMPOSITION_MODES)
                 and (
@@ -2209,6 +2239,9 @@ class ParallelACExecutor:
                 and (not fat_present or isinstance(fat, bool))
                 and (not cross_present or isinstance(cross, bool))
                 and (not shadow_present or isinstance(shadow, bool))
+                # ``None`` is a legitimate persisted value here (a run whose
+                # runner never resolved the flag), not corruption.
+                and (not cpack_present or cpack is None or isinstance(cpack, bool))
             ):
                 if (
                     (mode_present and mode != self._decomposition_mode)
@@ -2216,6 +2249,11 @@ class ParallelACExecutor:
                     or (fat_present and fat != self._fat_harness_mode)
                     or (cross_present and cross != self._cross_harness_redispatch_enabled)
                     or (shadow_present and shadow != self._shadow_replay_enabled)
+                    or (
+                        cpack_present
+                        and isinstance(cpack, bool)
+                        and cpack != self._context_pack_enabled
+                    )
                 ):
                     log.info(
                         "parallel_executor.recovery.execution_semantics_restored",
@@ -2238,6 +2276,8 @@ class ParallelACExecutor:
                         ),
                         checkpoint_shadow_replay_enabled=(shadow if shadow_present else "<absent>"),
                         current_shadow_replay_enabled=self._shadow_replay_enabled,
+                        checkpoint_context_pack_enabled=(cpack if cpack_present else "<absent>"),
+                        current_context_pack_enabled=self._context_pack_enabled,
                     )
                 # The isinstance re-checks are guaranteed true by the block
                 # above; they only re-narrow types for mypy.
@@ -2256,6 +2296,8 @@ class ParallelACExecutor:
                     self._cross_harness_redispatch_enabled = cross
                 if shadow_present and isinstance(shadow, bool):
                     self._shadow_replay_enabled = shadow
+                if cpack_present and isinstance(cpack, bool):
+                    self._context_pack_enabled = cpack
                 return
         log.error(
             "parallel_executor.recovery.execution_semantics_malformed",
@@ -2614,7 +2656,17 @@ class ParallelACExecutor:
                             self._cross_harness_redispatch_enabled
                         ),
                         "shadow_replay_enabled": self._shadow_replay_enabled,
+                        # Round-14 finding #3 (BLOCKING): the worker-prompt
+                        # semantic the runner pinned for this run. Restored
+                        # BEFORE the crash-restart's system prompt is
+                        # (re)built — see ``system_prompt_builder``.
+                        "context_pack_enabled": self._context_pack_enabled,
                     },
+                    # Round-14 finding #3 (BLOCKING): the runner's resolved
+                    # guidance identity, stored opaquely; recovery hands it
+                    # back to the runner's prompt builder for the same
+                    # fail-closed identity check ``resume_session`` performs.
+                    "prompt_guidance": self._prompt_guidance_contract,
                     # Round-12 finding #3 (BLOCKING): ownership
                     # marker for the liveness gate
                     # (``_checkpoint_owner_conflict``) — which
@@ -2766,6 +2818,7 @@ class ParallelACExecutor:
         execution_plan: StagedExecutionPlan | None = None,
         reconciled_level_contexts: list[LevelContext] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        system_prompt_builder: Callable[..., str] | None = None,
     ) -> ParallelExecutionResult:
         """Execute ACs per the staged plan, always draining deferred writes.
 
@@ -2806,6 +2859,7 @@ class ParallelACExecutor:
                 execution_plan=execution_plan,
                 reconciled_level_contexts=reconciled_level_contexts,
                 externally_satisfied_acs=externally_satisfied_acs,
+                system_prompt_builder=system_prompt_builder,
             )
         finally:
             self._release_seed_execution_lease(lease_seed_id, lease_token)
@@ -2827,6 +2881,7 @@ class ParallelACExecutor:
         execution_plan: StagedExecutionPlan | None = None,
         reconciled_level_contexts: list[LevelContext] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        system_prompt_builder: Callable[..., str] | None = None,
     ) -> ParallelExecutionResult:
         """Execute ACs according to a staged execution plan.
 
@@ -2837,6 +2892,22 @@ class ParallelACExecutor:
             execution_id: Execution ID for event tracking.
             tools: Tools available to agents.
             system_prompt: System prompt for agents.
+            system_prompt_builder: Round-14 finding #3 (BLOCKING) — the
+                caller's system prompt was necessarily built BEFORE this
+                method could run RC3 checkpoint recovery, i.e. from the
+                CURRENT process's prompt semantics (fat-harness strategy,
+                context-pack flag, resolved guidance). When recovery adopts
+                a checkpoint, the prompt must instead reflect the ORIGINAL
+                run's restored semantics — so after (and only after) a
+                successful adoption, this callback is invoked with the
+                restored ``fat_harness_mode`` / ``context_pack_enabled`` /
+                opaque ``guidance_contract`` and its return value REPLACES
+                ``system_prompt`` before any AC is dispatched. A raise from
+                the builder (e.g. the runner's guidance identity check
+                refusing changed guidance) fails the launch loudly before
+                any AC work — never a silent fallback to the stale prompt.
+                ``None`` (direct/test callers) keeps the passed prompt
+                byte-for-byte, recovery or not.
             dependency_graph: Legacy fallback used to derive ``execution_plan``.
             reconciled_level_contexts: Existing post-reconcile stage contexts
                 from a previous execution attempt. Reopened ACs receive these
@@ -2874,6 +2945,12 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int] = dict.fromkeys(range(total_acs), 0)
         completed_count = 0
         resume_from_level = 0
+        # Round-14 finding #3: only a FULLY adopted recovery may trigger the
+        # post-restoration prompt rebuild below; a partially restored state
+        # that hit the generic "recovery failed, run fresh" path keeps the
+        # caller's prompt (the pre-existing fresh-run posture).
+        recovery_adopted = False
+        restored_prompt_guidance: Any = None
 
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
@@ -3048,6 +3125,12 @@ class ParallelACExecutor:
                             f"(checkpoint recovered, "
                             f"{len(level_contexts)} level context(s) restored)[/cyan]"
                         )
+                        # Round-14 finding #3: adoption is complete — the
+                        # prompt rebuild below may now use the restored
+                        # semantics (and the original run's opaque guidance
+                        # identity, if the checkpoint carried one).
+                        recovery_adopted = True
+                        restored_prompt_guidance = cp.state.get("prompt_guidance")
             except CheckpointOwnershipError:
                 # Round-12 finding #3: the ownership refusal must FAIL the
                 # launch, never degrade into "recovery failed, run fresh" —
@@ -3060,6 +3143,22 @@ class ParallelACExecutor:
                     "parallel_executor.recovery.failed",
                     error=str(e),
                 )
+
+        # Round-14 finding #3 (BLOCKING): the caller built ``system_prompt``
+        # BEFORE this recovery could restore the original run's prompt
+        # semantics — an ordering bug, not a coverage bug. Rebuild it NOW,
+        # after restoration and before any dispatch, from the restored
+        # fat-harness/context-pack values and the checkpointed guidance
+        # identity. Deliberately OUTSIDE the recovery try/except: a builder
+        # refusal (changed guidance) must fail the launch loudly — an
+        # infra-fatal condition before any AC work, like the ownership gate
+        # — never degrade into dispatching with a stale or mismatched prompt.
+        if recovery_adopted and system_prompt_builder is not None:
+            system_prompt = system_prompt_builder(
+                fat_harness_mode=self._fat_harness_mode,
+                context_pack_enabled=self._context_pack_enabled,
+                guidance_contract=restored_prompt_guidance,
+            )
 
         # Validation: check all AC indices are present in dependency graph
         expected_indices = set(range(total_acs))
@@ -5270,6 +5369,8 @@ class ParallelACExecutor:
             # just keeps the throwaway executor's behavior consistent.
             shadow_replay_enabled=self._shadow_replay_enabled,
             session_signal_hub=self._session_signal_hub,
+            context_pack_enabled=self._context_pack_enabled,
+            prompt_guidance_contract=self._prompt_guidance_contract,
         )
         return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
 

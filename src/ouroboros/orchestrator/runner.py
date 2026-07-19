@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 import hashlib
 import inspect
 import json
@@ -2189,6 +2190,46 @@ class OrchestratorRunner:
         if self._execution_guidance is None:
             self._execution_guidance = self._resolve_guidance_bundle(self._project_guidance_ids)
         return self._execution_guidance
+
+    def _rebuild_recovered_system_prompt(
+        self,
+        seed: Seed,
+        *,
+        fat_harness_mode: bool,
+        context_pack_enabled: bool | None,
+        guidance_contract: object = None,
+    ) -> str:
+        """Rebuild the worker system prompt AFTER RC3 checkpoint restoration.
+
+        Round-14 finding #3 (BLOCKING): on the crash-restart path the runner
+        builds the system prompt from the CURRENT process's settings before
+        ``ParallelACExecutor.execute_parallel`` ever gets to run checkpoint
+        recovery — so even a complete field-coverage restore could not fix
+        the already-baked prompt. The executor calls back here once (and
+        only once) recovery has adopted a checkpoint, passing the RESTORED
+        prompt semantics; the returned prompt replaces the stale one before
+        any AC is dispatched.
+
+        ``guidance_contract`` is the checkpointed run's persisted guidance
+        identity (the ``_guidance_contract`` shape). It is re-resolved and
+        identity-checked through the SAME ``_restore_guidance_contract``
+        machinery ``resume_session`` uses — changed guidance files raise
+        (fail-closed launch refusal), and a malformed payload raises too,
+        never silently keeping the current process's guidance. ``None``
+        (a checkpoint predating this field) keeps the current process's
+        guidance — the one-time migration convention every restored field
+        follows.
+        """
+        if guidance_contract is not None:
+            self._restore_guidance_contract({"guidance": guidance_contract})
+        strategy = _strategy_for_seed(seed, fat_harness_mode=fat_harness_mode)
+        return build_system_prompt(
+            seed,
+            strategy=strategy,
+            repo_root=self._effective_cwd(),
+            guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+            context_pack_enabled=context_pack_enabled,
+        )
 
     def _restore_guidance_contract(self, raw_contract: Mapping[str, Any]) -> None:
         """Restore persisted guidance refs without consulting the current allowlist."""
@@ -5199,6 +5240,12 @@ class OrchestratorRunner:
             # ``None`` default) — a resumed run must keep the redispatch
             # semantics it started with.
             cross_harness_redispatch=self._cross_harness_redispatch_enabled,
+            # Round-14 finding #3: the prompt-semantic inputs ride the RC3
+            # checkpoint so a crash-restart can REBUILD the system prompt
+            # from the original run's settings (see system_prompt_builder
+            # below).
+            context_pack_enabled=self._context_pack_enabled,
+            prompt_guidance_contract=self._guidance_contract(self._ensure_new_run_guidance()),
         )
 
         # Check for cancellation before starting parallel execution
@@ -5220,6 +5267,13 @@ class OrchestratorRunner:
                 tool_catalog=tool_catalog.tools,
                 system_prompt=system_prompt,
                 externally_satisfied_acs=externally_satisfied_acs,
+                # Round-14 finding #3 (BLOCKING): ``system_prompt`` above was
+                # necessarily built BEFORE the executor's RC3 checkpoint
+                # recovery could restore the original run's prompt semantics.
+                # When recovery adopts a checkpoint, the executor calls this
+                # back with the RESTORED fat-harness/context-pack/guidance
+                # values and dispatches the rebuilt prompt instead.
+                system_prompt_builder=partial(self._rebuild_recovered_system_prompt, seed),
             )
         finally:
             # Release any warm worker-pool sessions the runtime holds (e.g. the

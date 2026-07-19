@@ -1433,6 +1433,9 @@ class TestCrashRestartRestoresModelRouterAndExecutionSemantics:
             "fat_harness_mode": True,
             "cross_harness_redispatch_enabled": False,
             "shadow_replay_enabled": True,
+            # Round-14 finding #3: ``None`` — this direct-constructed
+            # executor was never given the runner's pinned flag.
+            "context_pack_enabled": None,
         }
 
         # --- Restart under DIFFERENT construction args: another router
@@ -2118,3 +2121,186 @@ class TestInProcessConcurrentSeedExecutionRefused:
             execution_plan=_plan(),
         )
         assert result.all_succeeded
+
+
+class TestRecoveredPromptReflectsOriginalRunSemantics:
+    """Round-14 finding #3 (BLOCKING): the runner builds the system prompt
+    BEFORE ``execute_parallel`` can run RC3 checkpoint recovery, so the
+    prompt handed in was baked from the CURRENT process's prompt semantics
+    (fat-harness strategy, context-pack flag, guidance) — even a complete
+    field-coverage restore could not fix the already-constructed prompt.
+    The executor must now call the runner's ``system_prompt_builder`` back
+    AFTER restoration (and only on a genuinely adopted recovery) with the
+    RESTORED semantics, and dispatch the rebuilt prompt."""
+
+    _GUIDANCE = {
+        "mode": "disabled",
+        "provenance_scope": "ouroboros_declared_guidance_only",
+        "items": [],
+    }
+
+    async def _crash_original_run(
+        self, seed: Seed, ckpt_path: Path, **executor_overrides: object
+    ) -> None:
+        store = CheckpointStore(base_path=ckpt_path)
+        store.initialize()
+        original = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=store,
+            **executor_overrides,  # type: ignore[arg-type]
+        )
+        original._run_batch_with_verify_and_retry = AsyncMock(
+            side_effect=RuntimeError("simulated crash mid-level-1")
+        )
+        with pytest.raises(BaseException):
+            await original.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="original-process prompt",
+                execution_plan=_plan(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_dispatched_prompt_is_rebuilt_from_restored_settings(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's scenario: the checkpointed run's context-pack/
+        guidance/fat-harness settings genuinely DIFFER from the restarted
+        process's config. The prompt actually dispatched must reflect the
+        RESTORED (original) settings, not the stale prompt the caller baked
+        from the current process's config."""
+        seed = _seed("Recovered prompt semantics")
+        ckpt_path = tmp_path / "checkpoints"
+        await self._crash_original_run(
+            seed,
+            ckpt_path,
+            fat_harness_mode=True,
+            context_pack_enabled=False,
+            prompt_guidance_contract=self._GUIDANCE,
+        )
+
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        semantics = saved.value.state["execution_semantics"]
+        assert semantics["fat_harness_mode"] is True
+        assert semantics["context_pack_enabled"] is False
+        assert saved.value.state["prompt_guidance"] == self._GUIDANCE
+
+        # Restart in a process configured the OPPOSITE way.
+        restart = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            fat_harness_mode=False,
+            context_pack_enabled=True,
+            prompt_guidance_contract=None,
+        )
+        builder_calls: list[dict[str, object]] = []
+
+        def _builder(**kwargs: object) -> str:
+            builder_calls.append(kwargs)
+            return "REBUILT-FROM-RESTORED-SETTINGS"
+
+        captured: dict[str, object] = {}
+
+        async def _capturing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["system_prompt"] = kwargs["system_prompt"]
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        restart._run_batch_with_verify_and_retry = AsyncMock(side_effect=_capturing_stage_runner)
+        result = await restart.execute_parallel(
+            seed,
+            session_id="session-restart",
+            execution_id="exec-restart",
+            tools=[],
+            system_prompt="STALE prompt baked from the current process's config",
+            execution_plan=_plan(),
+            system_prompt_builder=_builder,
+        )
+
+        assert result.all_succeeded
+        # The builder ran exactly once, AFTER restoration, with the
+        # ORIGINAL run's semantics — not the restart process's.
+        assert builder_calls == [
+            {
+                "fat_harness_mode": True,
+                "context_pack_enabled": False,
+                "guidance_contract": self._GUIDANCE,
+            }
+        ]
+        # And the rebuilt prompt — not the stale baked one — was dispatched.
+        assert captured["system_prompt"] == "REBUILT-FROM-RESTORED-SETTINGS"
+
+    @pytest.mark.asyncio
+    async def test_fresh_run_keeps_caller_prompt_and_never_calls_builder(
+        self, tmp_path: Path
+    ) -> None:
+        """No checkpoint adopted: the caller's prompt is used byte-for-byte
+        and the builder is never invoked (no behavior change for fresh
+        runs)."""
+        seed = _seed("Fresh run keeps baked prompt")
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        fresh = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=store,
+            context_pack_enabled=True,
+        )
+        builder = MagicMock(return_value="never-used")
+        captured: dict[str, object] = {}
+
+        async def _capturing_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["system_prompt"] = kwargs["system_prompt"]
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        fresh._run_batch_with_verify_and_retry = AsyncMock(side_effect=_capturing_stage_runner)
+        result = await fresh.execute_parallel(
+            seed,
+            session_id="session-fresh",
+            execution_id="exec-fresh",
+            tools=[],
+            system_prompt="freshly baked prompt",
+            execution_plan=_plan(),
+            system_prompt_builder=builder,
+        )
+
+        assert result.all_succeeded
+        builder.assert_not_called()
+        assert captured["system_prompt"] == "freshly baked prompt"
+
+    @pytest.mark.asyncio
+    async def test_builder_refusal_fails_launch_before_any_dispatch(self, tmp_path: Path) -> None:
+        """A builder raise (the runner's guidance identity check refusing
+        changed guidance) must fail the recovered launch loudly BEFORE any
+        AC work — never degrade into dispatching the stale prompt."""
+        seed = _seed("Guidance refusal fails launch")
+        ckpt_path = tmp_path / "checkpoints"
+        await self._crash_original_run(
+            seed,
+            ckpt_path,
+            context_pack_enabled=False,
+            prompt_guidance_contract=self._GUIDANCE,
+        )
+
+        restart = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            context_pack_enabled=True,
+        )
+        restart._run_batch_with_verify_and_retry = AsyncMock()
+
+        def _refusing_builder(**kwargs: object) -> str:
+            raise RuntimeError("Cannot resume because declared project guidance changed")
+
+        with pytest.raises(RuntimeError, match="guidance changed"):
+            await restart.execute_parallel(
+                seed,
+                session_id="session-restart",
+                execution_id="exec-restart",
+                tools=[],
+                system_prompt="STALE prompt",
+                execution_plan=_plan(),
+                system_prompt_builder=_refusing_builder,
+            )
+        restart._run_batch_with_verify_and_retry.assert_not_awaited()
