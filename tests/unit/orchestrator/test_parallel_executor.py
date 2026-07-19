@@ -1139,7 +1139,7 @@ def test_capsule_authority_distinguishes_verifier_closure_state() -> None:
     )
 
     assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority
-    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "durable"
+    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "process_local"
 
 
 def test_capsule_authority_distinguishes_callable_verifier_state() -> None:
@@ -1151,6 +1151,9 @@ def test_capsule_authority_distinguishes_callable_verifier_state() -> None:
 
         def __call__(self, **_kwargs: Any) -> VerifierVerdict:
             return VerifierVerdict(passed=self.passed)
+
+        def verification_identity_contract(self) -> dict[str, object]:
+            return {"version": 1, "passed": self.passed}
 
     runtime = SimpleNamespace(
         runtime_backend="codex_cli",
@@ -1171,8 +1174,16 @@ def test_capsule_authority_distinguishes_callable_verifier_state() -> None:
         enable_decomposition=False,
         atomic_verifier=ConfiguredVerifier(False),
     )
+    matching = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=ConfiguredVerifier(True),
+    )
 
     assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority
+    assert passing._atomic_verifier_authority == matching._atomic_verifier_authority
     assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "durable"
 
 
@@ -1201,7 +1212,7 @@ def test_capsule_authority_distinguishes_referenced_verifier_globals(monkeypatch
     )
 
     assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority
-    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "durable"
+    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "process_local"
 
 
 def test_capsule_authority_reuses_large_context_and_catalog_digests(monkeypatch) -> None:

@@ -2317,7 +2317,7 @@ class ParallelACExecutor:
         return {"version": 1, "observed": True, "identity": normalized}
 
     @classmethod
-    def _project_verifier_authority_value(
+    def _project_verifier_identity_value(
         cls,
         value: object,
         *,
@@ -2325,7 +2325,7 @@ class ParallelACExecutor:
         depth: int = 0,
         seen: set[int] | None = None,
     ) -> object:
-        """Project verifier state into bounded, deterministic JSON authority."""
+        """Validate one explicit verifier identity as bounded canonical JSON."""
         if depth > _MAX_VERIFIER_AUTHORITY_DEPTH:
             raise ValueError(f"{field} exceeds verifier authority depth")
         if value is None or isinstance(value, (bool, int)):
@@ -2338,37 +2338,6 @@ class ParallelACExecutor:
             if len(value) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
                 raise ValueError(f"{field} contains oversized text")
             return value
-        if isinstance(value, bytes):
-            if len(value) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
-                raise ValueError(f"{field} contains oversized bytes")
-            return {
-                "kind": "bytes",
-                "digest": "sha256:" + hashlib.sha256(value).hexdigest(),
-            }
-        if isinstance(value, Path):
-            path = os.fspath(value)
-            if len(path) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
-                raise ValueError(f"{field} contains an oversized path")
-            return {"kind": "path", "value": path}
-        if isinstance(value, datetime):
-            return {"kind": "datetime", "value": value.isoformat()}
-        if isinstance(value, timedelta):
-            return {"kind": "timedelta", "seconds": value.total_seconds()}
-        if inspect.ismodule(value):
-            raise ValueError(f"{field} contains mutable module state")
-        if inspect.isclass(value):
-            try:
-                source = inspect.getsource(value)
-            except (OSError, TypeError) as exc:
-                raise ValueError(f"{field} contains an opaque class") from exc
-            return {
-                "kind": "class",
-                "module": str(getattr(value, "__module__", "")),
-                "qualname": str(getattr(value, "__qualname__", value.__name__)),
-                "source_digest": cls._prompt_identity(source),
-            }
-        if inspect.isroutine(value):
-            raise ValueError(f"{field} contains nested executable state")
 
         seen = set() if seen is None else seen
         value_id = id(value)
@@ -2379,97 +2348,32 @@ class ParallelACExecutor:
             if isinstance(value, Mapping):
                 if len(value) > _MAX_VERIFIER_AUTHORITY_ITEMS:
                     raise ValueError(f"{field} contains too many mapping items")
-                items: list[list[object]] = []
+                projected: dict[str, object] = {}
                 for key, item in value.items():
-                    projected_key = cls._project_verifier_authority_value(
-                        key,
-                        field=f"{field}.key",
-                        depth=depth + 1,
-                        seen=seen,
-                    )
-                    projected_value = cls._project_verifier_authority_value(
+                    if not isinstance(key, str) or not key:
+                        raise ValueError(f"{field} contains a non-string or empty key")
+                    if len(key) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
+                        raise ValueError(f"{field} contains an oversized key")
+                    projected[key] = cls._project_verifier_identity_value(
                         item,
-                        field=f"{field}.value",
+                        field=f"{field}.{key}",
                         depth=depth + 1,
                         seen=seen,
                     )
-                    items.append([projected_key, projected_value])
-                items.sort(
-                    key=lambda pair: json.dumps(
-                        pair[0],
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    )
-                )
-                return {"kind": "mapping", "items": items}
+                return projected
             if isinstance(value, (list, tuple)):
                 if len(value) > _MAX_VERIFIER_AUTHORITY_ITEMS:
                     raise ValueError(f"{field} contains too many sequence items")
-                return {
-                    "kind": "tuple" if isinstance(value, tuple) else "list",
-                    "items": [
-                        cls._project_verifier_authority_value(
-                            item,
-                            field=f"{field}[{index}]",
-                            depth=depth + 1,
-                            seen=seen,
-                        )
-                        for index, item in enumerate(value)
-                    ],
-                }
-            if isinstance(value, (set, frozenset)):
-                if len(value) > _MAX_VERIFIER_AUTHORITY_ITEMS:
-                    raise ValueError(f"{field} contains too many set items")
-                items = [
-                    cls._project_verifier_authority_value(
+                return [
+                    cls._project_verifier_identity_value(
                         item,
-                        field=f"{field}.item",
+                        field=f"{field}[{index}]",
                         depth=depth + 1,
                         seen=seen,
                     )
-                    for item in value
+                    for index, item in enumerate(value)
                 ]
-                items.sort(
-                    key=lambda item: json.dumps(
-                        item,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    )
-                )
-                return {
-                    "kind": "frozenset" if isinstance(value, frozenset) else "set",
-                    "items": items,
-                }
-
-            object_state: dict[str, object] = {}
-            try:
-                object_state.update(vars(value))
-            except TypeError:
-                pass
-            slots = inspect.getattr_static(type(value), "__slots__", ())
-            if isinstance(slots, str):
-                slots = (slots,)
-            for slot in slots:
-                if slot in {"__dict__", "__weakref__"} or slot in object_state:
-                    continue
-                try:
-                    object_state[slot] = object.__getattribute__(value, slot)
-                except AttributeError:
-                    continue
-            if not object_state:
-                raise ValueError(f"{field} has no inspectable stable state")
-            return {
-                "kind": "object",
-                "type": f"{type(value).__module__}.{type(value).__qualname__}",
-                "state": cls._project_verifier_authority_value(
-                    object_state,
-                    field=f"{field}.state",
-                    depth=depth + 1,
-                    seen=seen,
-                ),
-            }
+            raise ValueError(f"{field} is not canonical JSON data")
         finally:
             seen.remove(value_id)
 
@@ -2503,49 +2407,40 @@ class ParallelACExecutor:
         }
 
     def _verifier_state_authority_contract(self, verifier: Verifier) -> dict[str, object]:
-        """Bind behavioral verifier state or deliberately disable durable reuse."""
+        """Reuse verifier authority only when the verifier declares stable identity."""
+
+        def _process_local(reason: str) -> dict[str, object]:
+            nonce = uuid.uuid4().hex
+            log.warning(
+                "parallel_executor.atomic_verifier_authority_process_local",
+                verifier_type=f"{type(verifier).__module__}.{type(verifier).__qualname__}",
+                reason=reason,
+            )
+            return {
+                "stability": "process_local",
+                "instance_nonce": nonce,
+            }
+
+        identity_descriptor = inspect.getattr_static(
+            verifier,
+            "verification_identity_contract",
+            None,
+        )
+        if identity_descriptor is None:
+            return _process_local("custom verifier did not declare verification_identity_contract")
         try:
-            identity_descriptor = inspect.getattr_static(
+            identity_provider = object.__getattribute__(
                 verifier,
                 "verification_identity_contract",
-                None,
             )
-            if identity_descriptor is not None:
-                identity_provider = object.__getattribute__(
-                    verifier,
-                    "verification_identity_contract",
-                )
-                if not callable(identity_provider):
-                    raise ValueError("verification_identity_contract is not callable")
-                identity = identity_provider()
-                if not isinstance(identity, Mapping):
-                    raise ValueError("verification_identity_contract is not a mapping")
-                raw_state: object = {"explicit_identity": dict(identity)}
-            elif inspect.isfunction(verifier) or inspect.ismethod(verifier):
-                function = verifier.__func__ if inspect.ismethod(verifier) else verifier
-                closure_vars = inspect.getclosurevars(function)
-                closure_values: list[object] = []
-                for cell in getattr(function, "__closure__", None) or ():
-                    try:
-                        closure_values.append(cell.cell_contents)
-                    except ValueError:
-                        closure_values.append({"empty_cell": True})
-                raw_state = {
-                    "defaults": getattr(function, "__defaults__", None),
-                    "kwdefaults": getattr(function, "__kwdefaults__", None),
-                    "closure": closure_values,
-                    "function_attributes": dict(vars(function)),
-                    "bound_instance": verifier.__self__ if inspect.ismethod(verifier) else None,
-                    "referenced_globals": dict(closure_vars.globals),
-                    "referenced_builtins": sorted(closure_vars.builtins),
-                    "unbound_names": sorted(closure_vars.unbound),
-                }
-            else:
-                raw_state = {"callable_instance": verifier}
-
-            projected = self._project_verifier_authority_value(
-                raw_state,
-                field="atomic verifier state",
+            if not callable(identity_provider):
+                raise ValueError("verification_identity_contract is not callable")
+            identity = identity_provider()
+            if not isinstance(identity, Mapping):
+                raise ValueError("verification_identity_contract is not a mapping")
+            projected = self._project_verifier_identity_value(
+                dict(identity),
+                field="atomic verifier identity contract",
             )
             encoded = json.dumps(
                 projected,
@@ -2561,16 +2456,7 @@ class ParallelACExecutor:
                 "state_digest": self._prompt_identity(encoded),
             }
         except (AttributeError, TypeError, ValueError) as exc:
-            nonce = uuid.uuid4().hex
-            log.warning(
-                "parallel_executor.atomic_verifier_authority_process_local",
-                verifier_type=f"{type(verifier).__module__}.{type(verifier).__qualname__}",
-                reason=str(exc),
-            )
-            return {
-                "stability": "process_local",
-                "instance_nonce": nonce,
-            }
+            return _process_local(str(exc))
 
     def _atomic_verifier_authority_contract(self) -> dict[str, object]:
         """Return a durable identity for the acceptance judge in force."""
