@@ -11,6 +11,8 @@ from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.orchestrator.ac_execution_capsule import (
     AC_EXECUTION_CAPSULE_VERSION,
     MAX_AC_CONTEXT_REFERENCES,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
+    MAX_AC_SUCCESS_CONTRACT_CHARS,
     ACContextReference,
     ACContextReferenceKind,
     ACExecutionCapsuleManifest,
@@ -189,6 +191,37 @@ def test_capsule_rejects_unbounded_reference_work(tmp_path) -> None:
             level_contexts=(LevelContext(level_number=0, completed_acs=summaries),),
             context_budget_chars=1_000,
         )
+
+
+def test_capsule_rejects_unbounded_success_contract_before_hashing(tmp_path) -> None:
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-contract-limit",
+        retry_attempt=0,
+    )
+    spec = AcceptanceCriterionSpec(
+        description="Implement the bounded AC",
+        expected_artifacts=tuple(
+            f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="success contract artifact limit exceeded"):
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-contract-limit",
+            semantic_ac_key="semantic-key",
+            workspace=str(tmp_path.resolve()),
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Implement the bounded AC",
+            ac_spec=spec,
+        )
+
+
+def test_success_contract_rejects_unbounded_text_before_serialization() -> None:
+    with pytest.raises(ValueError, match="success contract character budget exceeded"):
+        ACSuccessContract(verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1))
 
 
 def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None:
