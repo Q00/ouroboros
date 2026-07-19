@@ -183,7 +183,16 @@ class CheckpointStore:
             BlockingIOError: Another process currently holds the seed lease.
         """
         checkpoint_path = self._get_checkpoint_path(seed_id)
-        lease_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".execution")
+        # Do not extend the already length-budgeted checkpoint basename.
+        # ``_get_checkpoint_path`` permits the checkpoint itself plus its
+        # ordinary ``.lock`` suffix to reach the filesystem's 255-byte
+        # component limit. Appending ``.execution.lock`` to that path can
+        # therefore raise ENAMETOOLONG for a perfectly valid long seed ID.
+        # Hash the canonical checkpoint basename instead: the lease remains
+        # stable for the exact checkpoint key while its filename has a fixed
+        # upper bound on every supported filesystem.
+        lease_digest = hashlib.sha256(checkpoint_path.name.encode()).hexdigest()
+        lease_path = self._base_path / f".execution_{lease_digest}"
         self._validate_path_containment(lease_path)
         with _file_lock(lease_path, exclusive=True, blocking=False):
             yield

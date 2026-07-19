@@ -161,6 +161,17 @@ class TestCheckpointStore:
 
         assert _run_execution_lease_probe(checkpoint_store._base_path, seed_id) == "acquired"
 
+    def test_execution_lease_supports_seed_ids_longer_than_filename_limit(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Lease names stay bounded even when checkpoint seed IDs are truncated."""
+        seed_id = "seed-" + ("x" * 300)
+
+        with checkpoint_store.execution_lease(seed_id):
+            assert _run_execution_lease_probe(checkpoint_store._base_path, seed_id) == "blocked"
+
+        assert _run_execution_lease_probe(checkpoint_store._base_path, seed_id) == "acquired"
+
     def test_save_creates_checkpoint_file(
         self, checkpoint_store: CheckpointStore, sample_checkpoint: CheckpointData
     ) -> None:
