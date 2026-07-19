@@ -285,8 +285,17 @@ class OpenCodeRuntime:
                 except Exception:
                     dispatcher_identity = None
             if dispatcher_identity is None:
+                # No durable identity contract: the class alone cannot distinguish
+                # two same-class instances with different state/behavior, and
+                # nothing durable would let a restart re-establish trust. Bind a
+                # process-local nonce (stable within THIS process, distinct per
+                # instance) so different dispatchers differ AND any restart — which
+                # cannot reproduce the nonce — fails closed rather than trusting an
+                # unidentifiable dispatcher.
                 dispatcher_identity = {
-                    "type": f"{type(dispatcher).__module__}.{type(dispatcher).__qualname__}"
+                    "type": f"{type(dispatcher).__module__}.{type(dispatcher).__qualname__}",
+                    "process_local_nonce": id(dispatcher),
+                    "durable_identity": False,
                 }
 
         return {

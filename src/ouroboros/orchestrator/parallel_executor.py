@@ -1204,6 +1204,16 @@ _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS = 8_192
 _MAX_VERIFIER_AUTHORITY_JSON_CHARS = 64_000
 
 
+class _AltHarnessPreEntryError(Exception):
+    """An alternate-harness redispatch failed BEFORE any provider entry.
+
+    Only a construction/spawn failure that provably precedes provider entry may
+    fall back to the original result; a failure after the alternate has entered
+    the provider (and possibly mutated the shared workspace) must instead fail
+    closed as ambiguity, so it is NOT wrapped in this type.
+    """
+
+
 class ParallelACExecutor:
     """Executes ACs in parallel based on dependency graph."""
 
@@ -8806,11 +8816,13 @@ class ParallelACExecutor:
             # The alternate ran in the SAME shared workspace and may already have
             # applied non-idempotent effects; swallowing this to ``None`` would let
             # the caller finalize/escalate from the stale pre-redispatch state.
-            # Propagate the ambiguity so it fails closed (the fallback below is only
-            # for failures proven to occur before any provider entry).
+            # Propagate the ambiguity so it fails closed.
             self._alt_harness_status_by_root[root_ac_index] = "failed"
             raise
-        except Exception as exc:  # never make a failure worse
+        except _AltHarnessPreEntryError as exc:
+            # Proven to fail BEFORE any provider entry (runtime construction/spawn):
+            # the shared workspace was not touched, so falling back to the original
+            # result is safe — never make a failure worse.
             self._alt_harness_status_by_root[root_ac_index] = "failed"
             log.warning(
                 "parallel_executor.alt_harness_redispatch_failed",
@@ -8819,6 +8831,17 @@ class ParallelACExecutor:
                 error=str(exc),
             )
             return None
+        except Exception as exc:
+            # A generic failure AFTER provider entry (e.g. terminal-event
+            # persistence raising once the alternate already mutated the shared
+            # workspace) must NOT restore the stale original result. Fail closed as
+            # ambiguity so recovery cannot finalize from pre-redispatch state.
+            self._alt_harness_status_by_root[root_ac_index] = "failed"
+            raise AmbiguousACExecutionError(
+                "alternate-harness redispatch failed after provider entry "
+                f"({type(exc).__name__}); the alternate may have mutated the shared "
+                "workspace, so refusing to restore the original result"
+            ) from exc
         if alt_result is None:
             self._alt_harness_status_by_root[root_ac_index] = "failed"
             return None
@@ -8886,22 +8909,30 @@ class ParallelACExecutor:
         )
         from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
-        cwd = self._task_cwd or self._adapter.working_directory
-        alt_adapter = create_agent_runtime(
-            backend=backend,
-            cwd=cwd,
-            permission_mode="bypassPermissions",
-        )
+        # Everything up to (but NOT including) ``_execute_single_ac`` runs BEFORE
+        # any provider entry, so a failure here is a safe pre-entry fallback. A
+        # failure inside ``_execute_single_ac`` may follow provider entry and a
+        # workspace mutation, so it is deliberately left OUTSIDE this guard to
+        # propagate as ambiguity.
+        try:
+            cwd = self._task_cwd or self._adapter.working_directory
+            alt_adapter = create_agent_runtime(
+                backend=backend,
+                cwd=cwd,
+                permission_mode="bypassPermissions",
+            )
 
-        event = create_alt_harness_redispatch_event(
-            session_id=rerun_kwargs["session_id"],
-            ac_index=rerun_kwargs["ac_index"],
-            ac_id=runtime_identity.ac_id,
-            execution_id=rerun_kwargs["execution_id"] or None,
-            decision=decision,
-            redispatch_index=1,
-            failure_class=failure_class,
-        )
+            event = create_alt_harness_redispatch_event(
+                session_id=rerun_kwargs["session_id"],
+                ac_index=rerun_kwargs["ac_index"],
+                ac_id=runtime_identity.ac_id,
+                execution_id=rerun_kwargs["execution_id"] or None,
+                decision=decision,
+                redispatch_index=1,
+                failure_class=failure_class,
+            )
+        except Exception as exc:
+            raise _AltHarnessPreEntryError(str(exc)) from exc
         await self._safe_emit_event(event)
         log.info(
             "parallel_executor.alt_harness_redispatch",
@@ -9853,6 +9884,14 @@ Respond with either ATOMIC or the structured JSON object only.
             ),
         )
 
+        # Snapshot the executable identity the capsule authority was built from, so
+        # we can revalidate it IMMEDIATELY before provider dispatch and refuse a
+        # symlink/PATH swap that happened in the compile→launch window (the capsule
+        # records a realpath, but the adapter launches the raw path later).
+        capsule_executable_identity = self._runtime_executable_identity(
+            self._adapter, cwd=capsule.workspace
+        )
+
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
         prompt_bundle = AtomicPromptBuilder(self).build(
@@ -10184,6 +10223,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
+
+            # Enforce (not just sample) the executable authority at the launch
+            # boundary: re-resolve it now and refuse if it drifted from the
+            # capsule since compile (e.g. a symlink swapped under the recorded
+            # realpath), so the launched binary always matches capsule authority.
+            if (
+                self._runtime_executable_identity(self._adapter, cwd=capsule.workspace)
+                != capsule_executable_identity
+            ):
+                raise AmbiguousACExecutionError(
+                    "runtime executable identity drifted between capsule compilation and "
+                    "dispatch; refusing to launch a binary that no longer matches capsule "
+                    "authority"
+                )
 
             await self._event_emitter.emit_ac_attempt_dispatched(
                 runtime_identity=runtime_identity,
@@ -10689,17 +10742,31 @@ Respond with either ATOMIC or the structured JSON object only.
             # once, after all children finish, by ``_attest_decomposition_round``.
             verify_gate_active = self._run_verify_commands and not is_sub_ac
             verify_gate_outcome: _VerifyGateOutcome | None = None
-            if success and verify_gate_active and has_success_contract:
+            # A verify_command's result is only authoritative for the FINAL shared
+            # workspace. This atomic leaf runs concurrently with its siblings (and
+            # precedes coordinator reconciliation), so running the command HERE
+            # would capture a mid-run snapshot that a later sibling edit could
+            # invalidate while the cached PASS survives. Defer the single
+            # authoritative command run to the batch-completion verify gate
+            # (``_apply_verify_gate``, applied to every AC after all siblings in the
+            # batch finish): leaving ``verify_gate_outcome`` unset makes that gate
+            # run the command ONCE (via the single-shot oracle) over the final
+            # workspace. A pure expected-artifacts contract is idempotent and its
+            # existence check is re-validated at finalization, so it still runs here.
+            defer_command_to_finalization = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
+                ac_spec.verify_command
+            )
+            if (
+                success
+                and verify_gate_active
+                and has_success_contract
+                and not defer_command_to_finalization
+            ):
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
                 verify_gate_outcome = await self._run_verify_gate_single_shot(
                     spec=ac_spec,
                     cwd=cwd,
                     aggregate_id=execution_context_id,
-                    # One authoritative per-attempt key shared by the atomic gate,
-                    # the failed-runtime recovery gate (_apply_verify_gate), and the
-                    # sibling-flip gate, so a post-verify failure (e.g. a lost
-                    # session.completed) never reruns the command under a different
-                    # key — the later path consumes this attempt's durable outcome.
                     verify_key=self._ac_verify_gate_key(
                         execution_scope=execution_context_id,
                         ac_index=ac_index,

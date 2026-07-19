@@ -254,12 +254,21 @@ class ACRuntimeHandleManager:
             not isinstance(item, str) for item in missing_artifacts
         ):
             raise ValueError("durable completed AC verify outcome has invalid artifacts")
-        normalized = {
+        # Validate and preserve the optional byte-fitting omission counter rather
+        # than silently accepting a malformed value and dropping it.
+        omitted = value.get("missing_artifacts_omitted")
+        if omitted is not None and (
+            not isinstance(omitted, int) or isinstance(omitted, bool) or omitted < 0
+        ):
+            raise ValueError("durable completed AC verify outcome has an invalid omission count")
+        normalized: dict[str, Any] = {
             "passed": passed,
             "reason": reason,
             "output_tail": output_tail,
             "missing_artifacts": list(missing_artifacts),
         }
+        if omitted:
+            normalized["missing_artifacts_omitted"] = omitted
         encoded = json.dumps(
             normalized,
             sort_keys=True,

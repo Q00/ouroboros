@@ -1576,6 +1576,84 @@ def test_opencode_execution_identity_contract_binds_dispatch_policy() -> None:
     assert "_Dispatcher" in contract["skill_dispatcher"]["type"]
 
 
+def test_opencode_unidentifiable_dispatcher_gets_process_local_nonce() -> None:
+    """R13 warning: two same-class stateful dispatchers are NOT identity-equal.
+
+    Without a durable identity contract, the class alone cannot tell two distinct
+    dispatcher instances apart; a process-local nonce distinguishes them and makes
+    any restart (which cannot reproduce the nonce) fail closed.
+    """
+    from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
+
+    class _StatefulDispatcher:
+        def __init__(self, state: str) -> None:
+            self.state = state
+
+    a = OpenCodeRuntime(skill_dispatcher=_StatefulDispatcher("a"))
+    b = OpenCodeRuntime(skill_dispatcher=_StatefulDispatcher("b"))
+    ca = a.execution_identity_contract()["skill_dispatcher"]
+    cb = b.execution_identity_contract()["skill_dispatcher"]
+    assert ca["durable_identity"] is False
+    assert "process_local_nonce" in ca
+    assert ca != cb  # distinct instances → distinct identity
+
+
+@pytest.mark.asyncio
+async def test_executable_drift_before_dispatch_fails_closed(tmp_path: Any) -> None:
+    """R13 blocker #3: a symlink swap in the compile→launch window is refused."""
+    link = tmp_path / "tool"
+    link.symlink_to("/bin/true")
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = str(tmp_path)
+        permission_mode = "acceptEdits"
+        _cli_path = str(tmp_path / "tool")
+
+        def __init__(self, swap: Any) -> None:
+            self._swap = swap
+
+        async def execute_task(self, **_kwargs: object):
+            # This would be the provider entry — it must never be reached because
+            # the pre-dispatch executable revalidation fails closed first.
+            yield AgentMessage(type="result", content="[TASK_COMPLETE]")  # pragma: no cover
+
+    # Swap the symlink target between capsule compile and dispatch by monkeypatching
+    # _runtime_executable_identity to return a drifted value on the SECOND call.
+    executor = ParallelACExecutor(
+        adapter=_Runtime(None),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+    )
+    calls = {"n": 0}
+    real = ParallelACExecutor._runtime_executable_identity
+
+    def _drifting(adapter: Any, *, cwd: str | None = None) -> dict[str, object]:
+        calls["n"] += 1
+        base = real(adapter, cwd=cwd)
+        # Calls 1 (authority build) and 2 (compile-time snapshot) return the true
+        # value; the pre-dispatch revalidation (call 3+) sees a drifted target.
+        if calls["n"] >= 3:
+            return {**base, "executable": {"path": "tool", "realpath": "/bin/false"}}
+        return base
+
+    executor._runtime_executable_identity = _drifting  # type: ignore[method-assign, assignment]
+
+    with pytest.raises(AmbiguousACExecutionError, match="executable identity drifted"):
+        await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Refuse a drifted executable",
+            session_id="orch_drift",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+
 def test_capsule_authority_binds_signal_hub_durable_relay_mode() -> None:
     """R12 blocker #3: a durable-relay hub differs in authority from a non-durable one.
 
@@ -12151,6 +12229,12 @@ class TestParallelACExecutor:
             task_cwd=str(tmp_path),
         )
 
+        ac_spec = AcceptanceCriterionSpec(
+            description="Create output.txt with the smoke marker.",
+            expected_artifacts=("output.txt",),
+            verify_command="test -f output.txt",
+        )
+        seed = _make_seed(ac_spec)
         result = await executor._execute_atomic_ac(
             ac_index=0,
             ac_content="Create output.txt with the smoke marker.",
@@ -12161,17 +12245,21 @@ class TestParallelACExecutor:
             seed_goal="Ship the artifact",
             depth=0,
             start_time=datetime.now(UTC),
-            ac_spec=AcceptanceCriterionSpec(
-                description="Create output.txt with the smoke marker.",
-                expected_artifacts=("output.txt",),
-                verify_command="test -f output.txt",
-            ),
+            ac_spec=ac_spec,
         )
-
-        assert result.success is True
-        assert result.error is None
-        assert result.typed_evidence is None
-        assert result.atomic_verifier_verdict is None
+        # R13: the verify_command is deferred to the batch-completion gate, so the
+        # passing artifact/command gate now replaces evidence at THAT authoritative
+        # gate (over the final workspace), which recovers the AC to success.
+        finalized = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=result,
+            session_id="orch_123",
+            execution_id="exec_123",
+        )
+        assert finalized.success is True
+        assert finalized.typed_evidence is None
+        assert finalized.atomic_verifier_verdict is None
         evidence_event = next(
             event
             for event in appended_events
@@ -12179,7 +12267,14 @@ class TestParallelACExecutor:
         )
         assert evidence_event.data["required_fields"] == []
         assert evidence_event.data["typed_evidence_present"] is False
-        assert evidence_event.data["enforcement_error"] is None
+        # R13: the verify_command is deferred, so the leaf can no longer replace
+        # evidence in-place; it records the evidence gap and the batch-completion
+        # gate then recovers the AC via the passing command over the final
+        # workspace (asserted by finalized.success above).
+        verify_recovered = [
+            event for event in appended_events if event.type == "execution.verify.recovered"
+        ]
+        assert verify_recovered
 
     @pytest.mark.asyncio
     async def test_verify_only_code_contract_still_requires_files_touched_evidence(
@@ -12291,19 +12386,14 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
             ac_spec=seed.acceptance_criteria[0],
         )
+        # R13: the verify_command is DEFERRED out of the concurrent atomic leaf,
+        # so the leaf neither runs it (counter untouched) nor caches an outcome.
         assert result.success is True
-        assert result.verify_gate_outcome is not None
-        assert counter.read_text(encoding="utf-8") == "1"
-        completed_event = next(
-            event for event in appended_events if event.type == "execution.session.completed"
-        )
-        assert completed_event.data["verify_gate_outcome"] == {
-            "passed": True,
-            "reason": None,
-            "output_tail": "",
-            "missing_artifacts": [],
-        }
+        assert result.verify_gate_outcome is None
+        assert not counter.exists()
 
+        # The single authoritative run happens at the batch-completion gate, over
+        # the FINAL workspace — the command runs exactly once here.
         finalized = await executor._apply_verify_gate(
             seed=seed,
             ac_index=0,
@@ -12311,9 +12401,80 @@ class TestParallelACExecutor:
             session_id="orch_123",
             execution_id="exec_123",
         )
-
         assert finalized.success is True
         assert counter.read_text(encoding="utf-8") == "1"
+
+        # A second finalization consumes the durable outcome — still single-shot.
+        again = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=finalized,
+            session_id="orch_123",
+            execution_id="exec_123",
+        )
+        assert again.success is True
+        assert counter.read_text(encoding="utf-8") == "1"
+
+    @pytest.mark.asyncio
+    async def test_verify_command_reflects_final_workspace_not_leaf_snapshot(
+        self, tmp_path: Any
+    ) -> None:
+        """R13 blocker #1: the verify_command is authoritative for the FINAL workspace.
+
+        The command is deferred out of the concurrent atomic leaf, so a workspace
+        mutation after the leaf (a sibling-style edit) is reflected: the deferred
+        gate re-evaluates the predicate over the final state and fails the AC.
+        """
+        target = tmp_path / "marker.txt"
+        target.write_text("PASS_CONTENT\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="marker.txt contains PASS_CONTENT",
+            verify_command="grep -q PASS_CONTENT marker.txt",
+        )
+        seed = _make_seed(spec)
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = str(tmp_path)
+            permission_mode = "acceptEdits"
+
+            async def execute_task(self, **_kwargs: object):
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_Runtime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="marker.txt contains PASS_CONTENT",
+            session_id="orch_final_ws",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+            ac_spec=spec,
+        )
+        # Leaf deferred the command (did not evaluate the predicate).
+        assert result.verify_gate_outcome is None
+
+        # A sibling-style mutation lands AFTER the leaf but before the authoritative gate.
+        target.write_text("FAIL_CONTENT\n", encoding="utf-8")
+
+        finalized = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=result,
+            session_id="orch_final_ws",
+            execution_id="orch_final_ws",
+        )
+        # The gate observed the FINAL (mutated) workspace and failed the AC.
+        assert finalized.success is False
 
     @pytest.mark.asyncio
     async def test_completed_recovery_reuses_durable_verify_outcome_without_command_replay(

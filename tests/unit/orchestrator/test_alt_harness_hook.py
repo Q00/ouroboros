@@ -350,12 +350,15 @@ async def test_no_alternative_falls_back(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_rerun_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_rerun_pre_entry_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PRE-provider-entry construction/spawn failure safely falls back to None."""
+    from ouroboros.orchestrator.parallel_executor import _AltHarnessPreEntryError
+
     executor = _make_executor(enabled=True)
     monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
 
     async def _boom(backend: str, **kwargs: Any) -> ACExecutionResult:
-        raise RuntimeError("fresh runtime failed to spawn")
+        raise _AltHarnessPreEntryError("fresh runtime failed to spawn")
 
     executor._run_single_ac_on_backend = _boom  # type: ignore[method-assign]
     result = await executor._maybe_redispatch_alt_harness(
@@ -366,6 +369,33 @@ async def test_rerun_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
         stall_retries_exhausted=True,
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_rerun_post_entry_error_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R13 blocker #2: a generic failure AFTER provider entry must NOT fall back.
+
+    Terminal-event persistence (etc.) raising once the alternate already mutated
+    the shared workspace must propagate as ambiguity, not restore the stale
+    original result.
+    """
+    from ouroboros.orchestrator.ac_runtime_handle_manager import AmbiguousACExecutionError
+
+    executor = _make_executor(enabled=True)
+    monkeypatch.setattr(chr, "pick_alternative_runtime", lambda *_a, **_k: "codex")
+
+    async def _boom(backend: str, **kwargs: Any) -> ACExecutionResult:
+        raise RuntimeError("terminal persistence failed after the alternate ran")
+
+    executor._run_single_ac_on_backend = _boom  # type: ignore[method-assign]
+    with pytest.raises(AmbiguousACExecutionError, match="after provider entry"):
+        await executor._maybe_redispatch_alt_harness(
+            result=_failed(),
+            execution_context_id="exec-1",
+            rerun_kwargs=_rerun_kwargs(),
+            atomic_retry_attempt=0,
+            stall_retries_exhausted=True,
+        )
 
 
 @pytest.mark.asyncio
