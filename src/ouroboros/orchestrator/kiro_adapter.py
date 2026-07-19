@@ -412,9 +412,9 @@ class KiroAgentAdapter:
                 # so leaf_dispatcher's infra-fatal classifier (which
                 # deliberately never scans free-text ``content``) can
                 # evaluate it against its narrow, vetted auth/infra pattern
-                # list. Kiro has no auth-specific exit code or stderr prefix
-                # we could match more narrowly; without this bridge a
-                # genuine "Unauthorized"/"invalid API key" failure on an
+                # list. Kiro has no auth-specific exit code (round-14
+                # verified: every fatal error is ``ExitCode::FAILURE``);
+                # without this bridge a genuine credential failure on an
                 # unusual exit code was invisible to the classifier and
                 # retried forever. Same convention as worker_runtime.py
                 # (WorkerTurn.error) and pi_runtime.py (errorMessage).
@@ -434,19 +434,33 @@ class KiroAgentAdapter:
                 #
                 # Round-13 finding #4 (BLOCKING): round 6's cure made the
                 # OTHER mandate direction fail — Kiro has no auth-specific
-                # exit code, so a genuine "Unauthorized: invalid API key"
-                # failure legitimately exits 1 and became permanently
-                # invisible to the classifier, looping in retry/escalation
-                # forever instead of failing immediately. Resolution for
-                # both sides: retryable exits DO mirror stderr now, but
-                # tagged ``error_pattern_scope: "auth"`` so the classifier
-                # scans ONLY the narrow credential-failure phrases
-                # (``_INFRA_FATAL_AUTH_CONTENT_PATTERNS`` — "invalid api
-                # key", "authentication failed", ... — vanishingly unlikely
-                # as incidental forwarded-tool text), never the broad
-                # filesystem/command/model phrases that plausibly ARE such
-                # noise. Non-retryable exits keep the full broad list, as
-                # before.
+                # exit code, so a genuine Kiro credential failure
+                # legitimately exits 1 and became permanently invisible to
+                # the classifier, looping in retry/escalation forever
+                # instead of failing immediately. Retryable exits therefore
+                # DO mirror stderr, but under a narrowed scan scope.
+                #
+                # Round-14 finding #4 (BLOCKING): round 13's scope still
+                # scanned GENERIC third-party auth vocabulary
+                # ("unauthorized", "invalid api key", ...) — but Kiro is an
+                # agentic CLI, and an AC whose own task curl-s a target API
+                # that returns an ordinary business-logic 401 puts ``curl:
+                # server returned 401 Unauthorized`` on this very stream,
+                # misclassifying an ORDINARY retryable failure as
+                # infra-fatal (skipping the ladder the mandate says must be
+                # tried). Verified against kiro-cli's actual sources (the
+                # rebranded open-source ``aws/amazon-q-developer-cli``):
+                # Kiro's OWN auth failures use first-person phrasing —
+                # "You are not logged in, please log in with ..." (emitted
+                # by ``cli/mod.rs`` BEFORE chat/tools even start, printed
+                # by ``main.rs`` as ``error: ...`` on stderr, exit 1) and
+                # "Your login session has expired. Please log in again"
+                # (``chat/mod.rs``) — and NEVER the generic vocabulary,
+                # which had zero true-positive value here. The
+                # ``kiro_auth`` scope scans only those first-party phrases
+                # (``_INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS``), which
+                # forwarded tool output structurally cannot produce.
+                # Non-retryable exits keep the full broad list, as before.
                 retryable_exit = proc.returncode in _RETRYABLE_EXIT_CODES
                 yield AgentMessage(
                     type="result",
@@ -456,7 +470,7 @@ class KiroAgentAdapter:
                         "exit_code": proc.returncode,
                         **({"error": stderr_text} if stderr_text else {}),
                         **(
-                            {"error_pattern_scope": "auth"}
+                            {"error_pattern_scope": "kiro_auth"}
                             if stderr_text and retryable_exit
                             else {}
                         ),

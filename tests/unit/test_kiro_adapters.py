@@ -720,7 +720,7 @@ class TestKiroAgentAdapterExecuteTask:
         result = messages[-1]
         assert result.is_error
         assert result.data["error"] == "2 tests failed"
-        assert result.data["error_pattern_scope"] == "auth"
+        assert result.data["error_pattern_scope"] == "kiro_auth"
         # The free-text content still carries the detail for humans/retry
         # classification ("exit 1" keeps _is_retryable True).
         assert "2 tests failed" in result.content
@@ -765,26 +765,109 @@ class TestKiroAgentAdapterExecuteTask:
         # mirrored structured field...
         assert "no such file or directory" in result.content.lower()
         assert "no such file or directory" in result.data["error"].lower()
-        # ...but the auth-only scope keeps the broad pattern from firing.
-        assert result.data["error_pattern_scope"] == "auth"
+        # ...but the narrowed Kiro-own-phrase scope keeps the broad pattern
+        # from firing.
+        assert result.data["error_pattern_scope"] == "kiro_auth"
         assert _is_infra_fatal_error_message(result) is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("retryable_exit_code", [1, 137])
-    async def test_retryable_exit_genuine_auth_failure_is_infra_fatal(
+    @pytest.mark.parametrize(
+        "kiro_own_auth_stderr",
+        [
+            # ``cli/mod.rs`` bails BEFORE chat/tools start; ``main.rs``
+            # prints it to stderr as ``error: <msg>`` with ANSI styling
+            # around the "error:" label and the suggested command —
+            # reproduced here byte-realistically, since the adapter does
+            # not ANSI-strip stderr.
+            (
+                b"\x1b[38;5;9merror:\x1b[0m You are not logged in, "
+                b"please log in with \x1b[38;5;10mkiro-cli login\x1b[0m"
+            ),
+            # ``chat/mod.rs`` on mid-session AuthError::NoToken.
+            (
+                b"\x1b[1m\x1b[38;5;9mAuthentication Error\x1b[0m\n"
+                b"\nYour login session has expired. Please log in again using:\n"
+                b"\n    kiro-cli login\n"
+            ),
+        ],
+    )
+    async def test_retryable_exit_genuine_kiro_auth_failure_is_infra_fatal(
+        self, retryable_exit_code: int, kiro_own_auth_stderr: bytes
+    ) -> None:
+        """Rounds 13+14 finding #4 (BLOCKING): Kiro has no auth-specific
+        exit code — a genuine Kiro credential failure legitimately exits 1,
+        the SAME code as an ordinary retryable task failure — so it must be
+        caught by content. Round 14 verified (against kiro-cli's actual
+        sources, the rebranded ``aws/amazon-q-developer-cli``) the EXACT
+        first-person phrases Kiro's own auth failures use; these — not the
+        generic third-party vocabulary round 13 guessed — are what the
+        narrowed scope now matches, so a genuinely unauthenticated Kiro
+        fails immediately instead of looping in retry/escalation."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(stdout=b"", stderr=kiro_own_auth_stderr, returncode=retryable_exit_code)
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("fail")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["exit_code"] == retryable_exit_code
+        assert result.data["error_pattern_scope"] == "kiro_auth"
+        assert _is_infra_fatal_error_message(result) is True
+
+    @pytest.mark.asyncio
+    async def test_forwarded_target_401_is_not_infra_fatal(self) -> None:
+        """Round-14 finding #4 (BLOCKING) — the review's exact reproduced
+        probe: the AC's OWN task curl-ed a target API that legitimately
+        returned an ordinary business-logic 401, and Kiro forwarded that
+        tool output on its exit-1 stderr. Round 13's generic "unauthorized"
+        pattern misclassified this ORDINARY, retryable failure as "Kiro's
+        own credentials are broken" and skipped the retry/escalation ladder
+        entirely — the most direct mandate violation. The Kiro-own-phrase
+        scope must NOT match it."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(
+            stdout=b"",
+            stderr=b"curl: server returned 401 Unauthorized",
+            returncode=1,
+        )
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("call the API and verify auth")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["error"] == "curl: server returned 401 Unauthorized"
+        assert result.data["error_pattern_scope"] == "kiro_auth"
+        assert _is_infra_fatal_error_message(result) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retryable_exit_code", [1, 137])
+    async def test_generic_auth_vocabulary_on_retryable_exit_loops_by_design(
         self, retryable_exit_code: int
     ) -> None:
-        """Round-13 finding #4 (BLOCKING): Kiro has no auth-specific exit
-        code — a genuine authentication failure legitimately exits 1, the
-        SAME code as an ordinary retryable task failure. Round 6's fix
-        stopped mirroring exit-1/137 stderr entirely, so such a failure was
-        permanently invisible to the classifier and looped in
-        retry/escalation forever instead of failing immediately (the OTHER
-        forbidden mandate direction). Before this fix
-        ``_is_infra_fatal_error_message`` returned False here; the narrow
-        auth-only scan scope now catches it without re-opening the broad
-        false-positive class the parametrized negative control above
-        protects."""
+        """Round-14 finding #4 design decision, asserted explicitly: the
+        generic third-party auth vocabulary ("Unauthorized: invalid API
+        key") is text Kiro's OWN failures never produce (verified at the
+        source) — on this stream its only realistic origin is forwarded/
+        quoted output from the AC's own work. Under the mandate's stated
+        asymmetry, letting a hypothetical oddly-phrased genuine failure
+        loop in the ladder (wasteful, still "keep trying") is preferred
+        over skipping escalation for ordinary AC work, so this must NOT
+        classify infra-fatal on Kiro's ordinary-retryable exits."""
         from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
 
         proc = _make_proc(
@@ -802,9 +885,8 @@ class TestKiroAgentAdapterExecuteTask:
         result = messages[-1]
         assert result.is_error
         assert result.data["exit_code"] == retryable_exit_code
-        assert result.data["error"] == "Unauthorized: invalid API key"
-        assert result.data["error_pattern_scope"] == "auth"
-        assert _is_infra_fatal_error_message(result) is True
+        assert result.data["error_pattern_scope"] == "kiro_auth"
+        assert _is_infra_fatal_error_message(result) is False
 
     @pytest.mark.asyncio
     async def test_non_retryable_exit_keeps_full_broad_pattern_list(self) -> None:

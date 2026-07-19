@@ -207,6 +207,59 @@ _INFRA_FATAL_CONTENT_PATTERNS = (
     *_INFRA_FATAL_AUTH_CONTENT_PATTERNS,
 )
 
+# Round-14 finding #4 (BLOCKING): the round-13 "auth" subset above is still
+# THIRD-PARTY phrasing ("unauthorized", "invalid api key", provider-SDK
+# shapes) — and Kiro is an AGENTIC CLI whose stderr can carry output
+# forwarded from tools the AC's OWN task ran. The review's reproduced
+# counterexample: an AC legitimately curl-ing a target API that returns an
+# ordinary business-logic 401 puts ``curl: server returned 401
+# Unauthorized`` on Kiro's exit-1 stderr, and the generic "unauthorized"
+# pattern misclassified that ORDINARY failure as "Kiro's own credentials
+# are broken", skipping the retry/escalation ladder the mandate says must
+# be tried. Content classification over a stream that can contain
+# forwarded output has a structural ceiling — UNLESS the phrases matched
+# are ones only the runtime ITSELF utters.
+#
+# Kiro-cli is the rebranded open-source ``aws/amazon-q-developer-cli``
+# (Rust), so its own auth-failure surfaces are verifiable at the source
+# (same standard as round 4's claude_agent_sdk and round 7's Pi provider
+# inspections). Verified against ``crates/chat-cli``:
+#
+# 1. ``src/cli/mod.rs`` — ``execute()`` checks auth BEFORE chat starts and
+#    bails with ``"You are not logged in, please log in with {kiro-cli
+#    login}"``; ``src/main.rs`` prints any such error to STDERR as
+#    ``error: <msg>`` and exits ``ExitCode::FAILURE`` (1). Emitted before
+#    a single tool can run, in Kiro's own first-person phrasing — it
+#    structurally cannot be forwarded tool output.
+# 2. ``src/cli/chat/mod.rs`` — mid-session ``ChatError::Auth(AuthError::
+#    NoToken)`` prints ``"Your login session has expired. Please log in
+#    again using:"`` to stderr.
+# 3. There is NO auth-specific exit code (everything fatal is exit 1), NO
+#    JSON/structured output mode for headless chat, and — decisively —
+#    Kiro NEVER phrases its own auth failures with the generic
+#    "unauthorized"/"invalid api key" vocabulary: the round-13 subset had
+#    ZERO true-positive value for Kiro's stream while keeping the
+#    forwarded-401 false positive alive.
+#
+# So the ``kiro_auth`` scope scans ONLY Kiro's verified first-party
+# phrases. Residual risk, accepted explicitly under the mandate's stated
+# asymmetry: an auth-adjacent Kiro failure phrased differently (e.g. an
+# AWS-SDK-rendered service error) will loop in retry/escalation instead of
+# failing immediately — wasteful, but "keep trying" is exactly what the
+# mandate prefers over misclassifying ordinary AC work as infra-fatal and
+# skipping the ladder.
+_INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS = (
+    "you are not logged in, please log in with",
+    "your login session has expired",
+)
+
+#: ``error_pattern_scope`` tag → the pattern subset it authorizes. Unknown
+#: or absent scopes keep the pre-existing broad-list behavior.
+_ERROR_PATTERN_SCOPES = {
+    "auth": _INFRA_FATAL_AUTH_CONTENT_PATTERNS,
+    "kiro_auth": _INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS,
+}
+
 
 def _is_infra_fatal_error_message(message: AgentMessage) -> bool:
     """Classify a FINAL error message's KIND rather than its raise/return site.
@@ -229,16 +282,19 @@ def _is_infra_fatal_error_message(message: AgentMessage) -> bool:
     if not isinstance(error_detail, str) or not error_detail:
         return False
     content = error_detail.lower()
-    # Round-13 finding #4: an adapter that mirrors a chatty, unstructured
+    # Round-13/14 finding #4: an adapter that mirrors a chatty, unstructured
     # stream (Kiro's exit-1/137 stderr, which routinely forwards sub-tool
-    # output) tags it ``error_pattern_scope: "auth"`` so only the narrow
-    # credential-failure phrases are scanned — a genuine auth failure with
-    # no distinguishing exit code still fails immediately, while the broad
-    # filesystem/command/model phrases (plausible incidental noise there)
-    # cannot false-positive an ordinary retryable failure into infra-fatal.
+    # output) tags it with a narrowed ``error_pattern_scope`` so only the
+    # subset appropriate to that stream is scanned. Round 14 narrowed
+    # Kiro's scope further, from the generic third-party auth vocabulary
+    # (which forwarded tool output CAN contain — the review's ``curl:
+    # server returned 401 Unauthorized`` probe) to Kiro's OWN verified
+    # first-party auth phrases (which forwarded output cannot plausibly
+    # contain) — see ``_INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS``.
+    scope = message.data.get("error_pattern_scope")
     patterns = (
-        _INFRA_FATAL_AUTH_CONTENT_PATTERNS
-        if message.data.get("error_pattern_scope") == "auth"
+        _ERROR_PATTERN_SCOPES.get(scope, _INFRA_FATAL_CONTENT_PATTERNS)
+        if isinstance(scope, str)
         else _INFRA_FATAL_CONTENT_PATTERNS
     )
     return any(pattern in content for pattern in patterns)
