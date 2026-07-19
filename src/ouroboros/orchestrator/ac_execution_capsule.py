@@ -77,6 +77,7 @@ class ACContextReferenceKind(StrEnum):
     DEPENDENCY = "dependency"
     ARTIFACT = "artifact"
     GATE = "gate"
+    INDEX = "index"
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,6 +484,8 @@ class ACExecutionCapsule:
             raise ValueError("capsule node id is invalid")
         if not self.context_references:
             raise ValueError("capsule must contain at least one context reference")
+        if len(self.to_prompt_reference_block()) > self.context_budget_chars:
+            raise ValueError("capsule context references exceed the declared budget")
 
     @property
     def manifest(self) -> ACExecutionCapsuleManifest:
@@ -517,18 +520,96 @@ class ACExecutionCapsule:
 
     def to_prompt_reference_block(self) -> str:
         """Render the small external-memory index given to the provider driver."""
-        lines = [
-            "## Ouroboros AC Runtime",
-            "This AC runs in a fresh provider context. The shared workspace and "
-            "Ouroboros event/gate records are authoritative; inspect referenced "
-            "sources as needed instead of assuming prior chat history.",
-            f"Capsule: {self.fingerprint}",
-            "Context references:",
-        ]
-        for reference in self.context_references:
-            hint = f" — {reference.hint}" if reference.hint else ""
-            lines.append(f"- {reference.kind.value}: {reference.locator}{hint}")
-        return "\n".join(lines)
+        return _render_prompt_reference_block(
+            self.context_references,
+            fingerprint=self.fingerprint,
+        )
+
+
+def _render_prompt_reference_block(
+    references: Sequence[ACContextReference],
+    *,
+    fingerprint: str,
+) -> str:
+    """Render a reference-only provider block with a fixed-size fingerprint."""
+    lines = [
+        "## Ouroboros AC Runtime",
+        "This AC runs in a fresh provider context. The shared workspace and "
+        "Ouroboros event/gate records are authoritative; inspect referenced "
+        "sources as needed instead of assuming prior chat history.",
+        f"Capsule: {fingerprint}",
+        "Context references:",
+    ]
+    for reference in references:
+        hint = f" — {reference.hint}" if reference.hint else ""
+        lines.append(f"- {reference.kind.value}: {reference.locator}{hint}")
+    return "\n".join(lines)
+
+
+def _bounded_context_references(
+    *,
+    required: Sequence[ACContextReference],
+    optional: Sequence[ACContextReference],
+    execution_id: str,
+    context_budget_chars: int,
+) -> tuple[ACContextReference, ...]:
+    """Fit deterministic references and summarize overflow as one index page."""
+    placeholder_fingerprint = "sha256:" + "0" * 64
+    all_references = tuple(required) + tuple(optional)
+    if (
+        len(
+            _render_prompt_reference_block(
+                all_references,
+                fingerprint=placeholder_fingerprint,
+            )
+        )
+        <= context_budget_chars
+    ):
+        return all_references
+
+    def _index_reference(omitted: Sequence[ACContextReference]) -> ACContextReference:
+        return ACContextReference(
+            kind=ACContextReferenceKind.INDEX,
+            locator=f"execution:{execution_id}:context-index",
+            digest=_sha256_text(
+                _canonical_json([reference.to_contract_data() for reference in omitted])
+            ),
+            hint=f"{len(omitted)} additional references; page from the event ledger",
+        )
+
+    selected = list(required)
+    placeholder_index = _index_reference(optional)
+    if (
+        len(
+            _render_prompt_reference_block(
+                (*selected, placeholder_index),
+                fingerprint=placeholder_fingerprint,
+            )
+        )
+        > context_budget_chars
+    ):
+        raise ValueError("capsule context budget cannot fit required references")
+
+    selected_optional_count = 0
+    for reference in optional:
+        candidate = (*selected, reference, placeholder_index)
+        if (
+            len(
+                _render_prompt_reference_block(
+                    candidate,
+                    fingerprint=placeholder_fingerprint,
+                )
+            )
+            > context_budget_chars
+        ):
+            break
+        selected.append(reference)
+        selected_optional_count += 1
+
+    omitted = tuple(optional[selected_optional_count:])
+    if omitted:
+        selected.append(_index_reference(omitted))
+    return tuple(selected)
 
 
 def _dependency_references(
@@ -577,7 +658,7 @@ def compile_ac_execution_capsule(
     """Compile one deterministic capsule from existing orchestrator authority."""
     canonical_workspace = os.path.realpath(workspace)
     success_contract = ACSuccessContract.from_ac_spec(ac_spec)
-    references: list[ACContextReference] = [
+    required_references: list[ACContextReference] = [
         ACContextReference(
             kind=ACContextReferenceKind.WORKSPACE,
             locator=canonical_workspace,
@@ -590,8 +671,8 @@ def compile_ac_execution_capsule(
             hint="goal and semantic AC authority",
         ),
     ]
-    references.extend(_dependency_references(execution_id, level_contexts))
-    references.extend(
+    optional_references = _dependency_references(execution_id, level_contexts)
+    optional_references.extend(
         ACContextReference(
             kind=ACContextReferenceKind.ARTIFACT,
             locator=f"workspace:{path}",
@@ -600,7 +681,7 @@ def compile_ac_execution_capsule(
         for path in success_contract.expected_artifacts
     )
     if ac_spec is not None and ac_spec.has_success_contract:
-        references.append(
+        required_references.append(
             ACContextReference(
                 kind=ACContextReferenceKind.GATE,
                 locator=f"gate:{runtime_identity.ac_id}",
@@ -608,6 +689,12 @@ def compile_ac_execution_capsule(
                 hint="authoritative acceptance contract",
             )
         )
+    references = _bounded_context_references(
+        required=required_references,
+        optional=optional_references,
+        execution_id=execution_id,
+        context_budget_chars=context_budget_chars,
+    )
     return ACExecutionCapsule(
         execution_id=execution_id,
         semantic_ac_key=semantic_ac_key,
@@ -622,7 +709,7 @@ def compile_ac_execution_capsule(
         seed_goal=seed_goal,
         ac_content=ac_content,
         success_contract=success_contract,
-        context_references=tuple(references),
+        context_references=references,
         context_budget_chars=context_budget_chars,
     )
 

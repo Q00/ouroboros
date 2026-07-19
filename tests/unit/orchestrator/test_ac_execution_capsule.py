@@ -68,9 +68,9 @@ def test_capsule_round_trips_and_fingerprint_is_stable(tmp_path) -> None:
     assert [reference.kind for reference in restored.context_references] == [
         ACContextReferenceKind.WORKSPACE,
         ACContextReferenceKind.SEED,
+        ACContextReferenceKind.GATE,
         ACContextReferenceKind.DEPENDENCY,
         ACContextReferenceKind.ARTIFACT,
-        ACContextReferenceKind.GATE,
     ]
 
 
@@ -115,6 +115,45 @@ def test_capsule_references_dependency_without_copying_its_output(tmp_path) -> N
     assert "execution:execution-1:ac:2" in rendered
     assert "src/dependency.py" not in rendered
     assert "fresh provider context" in rendered
+
+
+def test_capsule_pages_reference_overflow_within_context_budget(tmp_path) -> None:
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-budget",
+        retry_attempt=0,
+    )
+    summaries = tuple(
+        ACContextSummary(
+            ac_index=index,
+            ac_content=f"Dependency {index}",
+            success=True,
+            files_modified=(f"src/dependency_{index}.py",),
+        )
+        for index in range(500)
+    )
+    capsule = compile_ac_execution_capsule(
+        runtime_identity=identity,
+        execution_id="execution-budget",
+        semantic_ac_key="semantic-key",
+        workspace=str(tmp_path.resolve()),
+        authority_scope="authority:v1",
+        seed_goal="Ship the feature",
+        ac_content="Implement the bounded AC",
+        ac_spec=AcceptanceCriterionSpec(
+            description="Implement the bounded AC",
+            verify_command="pytest -q",
+        ),
+        level_contexts=(LevelContext(level_number=0, completed_acs=summaries),),
+        context_budget_chars=1_000,
+    )
+
+    assert len(capsule.to_prompt_reference_block()) <= 1_000
+    assert ACContextReferenceKind.INDEX in {
+        reference.kind for reference in capsule.context_references
+    }
+    assert len(capsule.context_references) < 20
+    assert len(json.dumps(capsule.manifest.to_contract_data())) < 10_000
 
 
 def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None:
@@ -269,6 +308,7 @@ def test_restored_handle_must_match_runtime_authority(
         ("workspace", "relative/path"),
         ("fresh_session_required", False),
         ("context_budget_chars", 0),
+        ("context_budget_chars", 1),
         ("context_budget_chars", True),
         ("segment_index", -1),
         ("version", True),
