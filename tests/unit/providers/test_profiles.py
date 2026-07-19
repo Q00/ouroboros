@@ -43,6 +43,19 @@ def test_resolve_completion_profile_uses_codex_backend_profile() -> None:
     assert resolved.config.max_turns == 1
 
 
+def test_resolve_completion_profile_preserves_codex_xhigh_effort() -> None:
+    """Codex-native provider effort fits the public resolved-config contract."""
+    config = OuroborosConfig(
+        llm_profiles={"deep": {"providers": {"codex": {"reasoning_effort": "xhigh"}}}},
+        llm_role_profiles={"qa": "deep"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(CompletionConfig(model="default", role="qa"), backend="codex")
+
+    assert resolved.config.reasoning_effort == "xhigh"
+
+
 def test_resolve_completion_profile_uses_provider_aliases() -> None:
     """Provider aliases let OpenRouter mappings apply to the LiteLLM backend."""
     config = OuroborosConfig(

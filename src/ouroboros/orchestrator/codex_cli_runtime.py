@@ -378,12 +378,14 @@ class CodexCliRuntime:
                 key: {
                     "model": provider.model,
                     "profile": provider.profile,
+                    "reasoning_effort": provider.reasoning_effort,
                 }
                 for key, provider in sorted(profile.providers.items())
                 if key.strip().lower() in {"codex", "codex_cli"}
             }
             profiles[name] = {
                 "model": profile.model,
+                "reasoning_effort": profile.reasoning_effort,
                 "providers": codex_providers,
             }
 

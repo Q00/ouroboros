@@ -728,6 +728,23 @@ class OrchestratorRunner:
         # create_agent_runtime is a shipped default, not a user pin; explicit
         # environment or persisted Execute-stage pins both count here.
         _model_pin = get_execution_model()
+        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
+        _model_routing_explicit = bool(
+            _model_routing_env is not None and _model_routing_env.strip()
+        )
+        # ``None`` from get_execution_model() is not merely an absent pin for
+        # Codex: it is the user's explicit "follow the model selected in Codex"
+        # choice.  A tier router would turn that sentinel into an OpenAI tier
+        # model and emit ``codex exec --model ...``, silently overriding Codex.
+        # Keep routing dormant for that automatic Codex path.  Explicit pins,
+        # explicit tier requests, and an explicit routing policy retain the
+        # advanced-routing behavior.
+        _codex_automatic_model_selection = (
+            _runtime_backend in {"codex_cli", "codex_mcp"}
+            and _model_pin is None
+            and base_model_tier is None
+            and not _model_routing_explicit
+        )
         # Resume normally restores the run's persisted resolved router. These are
         # the existing user-facing controls that explicitly request a different
         # contract for this invocation, so only they may replace it.
@@ -772,7 +789,7 @@ class OrchestratorRunner:
                 else decomposition_mode
             )
         )
-        if not _model_routing_disabled:
+        if not _model_routing_disabled and not _codex_automatic_model_selection:
             from ouroboros.orchestrator.model_routing import build_model_router
 
             self._model_router = build_model_router(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
@@ -97,6 +98,65 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
     assert "execution.default_model" in (repo_root / "skills" / "config" / "SKILL.md").read_text(
         encoding="utf-8"
     )
+
+
+def _run_setup_gate(script: str, *, home: Path, codex_home: Path | None = None) -> str:
+    """Run the packaged setup gate exactly as a host executes its Markdown snippet."""
+    env = {"HOME": str(home)}
+    if codex_home is not None:
+        env["CODEX_HOME"] = str(codex_home)
+    return subprocess.run(
+        ["bash", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout.strip()
+
+
+def test_codex_setup_gate_accepts_reordered_yaml_and_quoted_toml_mcp_key(tmp_path: Path) -> None:
+    """The first-use gate reads structures, not nearby lines or one TOML spelling."""
+    repo_root = Path(__file__).resolve().parents[3]
+    codex_home = tmp_path / "alternate-codex-home"
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    codex_home.mkdir()
+    config_path.write_text(
+        """orchestrator:\n  retries: 3\n  timeout: 20\n  runtime_backend: codex\nllm:\n  qa_model: gpt-5\n  backend: codex\n""",
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        """[mcp_servers]\n\"ouroboros\" = { command = \"ouroboros\" }\n""",
+        encoding="utf-8",
+    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+    setup_gate_start = skill.index("### Setup Gate: First Use")
+    start = skill.index('CODEX_HOME_DIR=', setup_gate_start)
+    gate = skill[start : skill.index("\n```", start)]
+
+    assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_READY"
+
+
+def test_claude_setup_gate_accepts_reordered_yaml_and_json_mcp_key(tmp_path: Path) -> None:
+    """Claude's mirrored first-use gate uses the same structural YAML check."""
+    repo_root = Path(__file__).resolve().parents[3]
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    mcp_path = tmp_path / ".claude" / "mcp.json"
+    config_path.parent.mkdir()
+    mcp_path.parent.mkdir()
+    config_path.write_text(
+        """llm:\n  qa_model: claude\n  backend: claude\norchestrator:\n  retries: 3\n  timeout: 20\n  runtime_backend: claude\n""",
+        encoding="utf-8",
+    )
+    mcp_path.write_text('{"mcpServers": {"ouroboros": {"command": "ouroboros"}}}', encoding="utf-8")
+    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    setup_gate_start = skill.index("### Setup Gate: First Use")
+    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
+    gate = skill[start : skill.index("\n```", start)]
+
+    assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
 
 
 def test_resolve_packaged_skills_dir_falls_back_to_repo_root_bundle_when_package_is_stub(

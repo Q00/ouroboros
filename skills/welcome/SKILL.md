@@ -66,11 +66,86 @@ user who chose **나중에** or whose setup was later removed:
 
 ```bash
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-if test -f "$HOME/.ouroboros/config.yaml" \
-  && grep -A8 '^orchestrator:' "$HOME/.ouroboros/config.yaml" | grep -q 'runtime_backend: codex' \
-  && grep -A8 '^llm:' "$HOME/.ouroboros/config.yaml" | grep -q 'backend: codex' \
-  && test -f "$CODEX_HOME_DIR/config.toml" \
-  && grep -q '\[mcp_servers\.ouroboros\]' "$CODEX_HOME_DIR/config.toml"; then
+if python3 - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 and earlier hosts
+    tomllib = None
+
+config_path, codex_config_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read the top-level YAML mappings this readiness contract owns.
+
+    The host Python is not guaranteed to include PyYAML. This intentionally
+    handles mapping scalars only, but honors indentation and section boundaries
+    instead of relying on nearby lines or key order.
+    """
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        value = raw_value.strip().split(" #", 1)[0].strip().strip("'\"")
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed.setdefault(section, {})
+        elif section is not None:
+            parsed[section][key.strip("'\"")] = value
+    return parsed
+
+
+def toml_mcp_servers(source: str) -> dict[str, dict[str, object]]:
+    """Read MCP server table membership when the host lacks ``tomllib``."""
+    servers: dict[str, dict[str, object]] = {}
+    table: list[str] = []
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            table = [part.strip().strip("'\"") for part in line[1:-1].split(".")]
+            if len(table) >= 2 and table[0] == "mcp_servers":
+                servers.setdefault(table[1], {})
+            continue
+        if table == ["mcp_servers"] and "=" in line:
+            key = line.split("=", 1)[0].strip().strip("'\"")
+            servers.setdefault(key, {})
+    return servers
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+    codex_source = codex_config_path.read_text(encoding="utf-8")
+    codex_config = tomllib.loads(codex_source) if tomllib is not None else {
+        "mcp_servers": toml_mcp_servers(codex_source)
+    }
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Equivalent to [mcp_servers\.ouroboros], including quoted TOML key forms.
+mcp_servers = codex_config.get("mcp_servers") if isinstance(codex_config, dict) else None
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") == "codex"
+    and isinstance(llm, dict)
+    and llm.get("backend") == "codex"
+    and isinstance(mcp_servers, dict)
+    and isinstance(mcp_servers.get("ouroboros"), dict)
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
   CODEX_READY="true"
 fi
 ```
@@ -139,11 +214,82 @@ or another runtime.
 
 ```bash
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-if test -f "$HOME/.ouroboros/config.yaml" \
-  && grep -A8 '^orchestrator:' "$HOME/.ouroboros/config.yaml" | grep -q 'runtime_backend: codex' \
-  && grep -A8 '^llm:' "$HOME/.ouroboros/config.yaml" | grep -q 'backend: codex' \
-  && test -f "$CODEX_HOME_DIR/config.toml" \
-  && grep -q '\[mcp_servers\.ouroboros\]' "$CODEX_HOME_DIR/config.toml"; then
+if python3 - "$HOME/.ouroboros/config.yaml" "$CODEX_HOME_DIR/config.toml" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 and earlier hosts
+    tomllib = None
+
+config_path, codex_config_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read only the top-level mapping scalars owned by this readiness gate."""
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        value = raw_value.strip().split(" #", 1)[0].strip().strip("'\"")
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed.setdefault(section, {})
+        elif section is not None:
+            parsed[section][key.strip("'\"")] = value
+    return parsed
+
+
+def toml_mcp_servers(source: str) -> dict[str, dict[str, object]]:
+    """Read MCP table membership when the host lacks the TOML standard library."""
+    servers: dict[str, dict[str, object]] = {}
+    table: list[str] = []
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            table = [part.strip().strip("'\"") for part in line[1:-1].split(".")]
+            if len(table) >= 2 and table[0] == "mcp_servers":
+                servers.setdefault(table[1], {})
+            continue
+        if table == ["mcp_servers"] and "=" in line:
+            key = line.split("=", 1)[0].strip().strip("'\"")
+            servers.setdefault(key, {})
+    return servers
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+    codex_source = codex_config_path.read_text(encoding="utf-8")
+    codex_config = tomllib.loads(codex_source) if tomllib is not None else {
+        "mcp_servers": toml_mcp_servers(codex_source)
+    }
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# This is equivalent to checking [mcp_servers\.ouroboros], but TOML parsing
+# also accepts a quoted "ouroboros" key and does not depend on table ordering.
+mcp_servers = codex_config.get("mcp_servers") if isinstance(codex_config, dict) else None
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") == "codex"
+    and isinstance(llm, dict)
+    and llm.get("backend") == "codex"
+    and isinstance(mcp_servers, dict)
+    and isinstance(mcp_servers.get("ouroboros"), dict)
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
   echo "CODEX_READY"
 else
   echo "CODEX_SETUP_REQUIRED"

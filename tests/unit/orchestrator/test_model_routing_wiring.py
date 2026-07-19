@@ -35,6 +35,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.runner import OrchestratorRunner
@@ -463,6 +464,24 @@ class TestRunnerRouterConstruction:
         runner = self._runner(self._adapter("claude"))
         assert runner._model_router is not None
         assert runner._model_router.runtime_backend == "claude"
+
+    def test_codex_automatic_model_selection_omits_model_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Automatic Codex selection must preserve the App/CLI selected model."""
+        monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        empty_config = OuroborosConfig()
+
+        monkeypatch.setattr("ouroboros.providers.profiles.load_config", lambda: empty_config)
+        monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        runner = self._runner(runtime)
+
+        assert runner._model_router is None
+        command = runtime._build_command("/tmp/output", prompt="automatic model")
+
+        assert "--model" not in command
 
     def test_missing_user_config_uses_shipped_routing_and_verify_defaults(
         self,

@@ -65,11 +65,55 @@ previously completed welcome must never hide the setup gate from a user who
 chose **나중에** or whose setup was later removed:
 
 ```bash
-if test -f "$HOME/.ouroboros/config.yaml" \
-  && grep -A8 '^orchestrator:' "$HOME/.ouroboros/config.yaml" | grep -q 'runtime_backend: claude' \
-  && grep -A8 '^llm:' "$HOME/.ouroboros/config.yaml" | grep -q 'backend: claude' \
-  && test -f "$HOME/.claude/mcp.json" \
-  && grep -q '"ouroboros"' "$HOME/.claude/mcp.json"; then
+if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+config_path, mcp_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read the top-level mapping scalars this readiness gate owns."""
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        value = raw_value.strip().split(" #", 1)[0].strip().strip("'\"")
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed.setdefault(section, {})
+        elif section is not None:
+            parsed[section][key.strip("'\"")] = value
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+    mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
+mcp_servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") == "claude"
+    and isinstance(llm, dict)
+    and llm.get("backend") == "claude"
+    and isinstance(mcp_servers, dict)
+    and isinstance(mcp_servers.get("ouroboros"), dict)
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
   SETUP_READY="true"
 fi
 ```
@@ -136,11 +180,55 @@ Before showing the welcome banner, check whether Ouroboros has been prepared
 on this machine:
 
 ```bash
-if test -f "$HOME/.ouroboros/config.yaml" \
-  && grep -A8 '^orchestrator:' "$HOME/.ouroboros/config.yaml" | grep -q 'runtime_backend: claude' \
-  && grep -A8 '^llm:' "$HOME/.ouroboros/config.yaml" | grep -q 'backend: claude' \
-  && test -f "$HOME/.claude/mcp.json" \
-  && grep -q '"ouroboros"' "$HOME/.claude/mcp.json"; then
+if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+config_path, mcp_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read only the top-level mapping scalars owned by this readiness gate."""
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        value = raw_value.strip().split(" #", 1)[0].strip().strip("'\"")
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed.setdefault(section, {})
+        elif section is not None:
+            parsed[section][key.strip("'\"")] = value
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+    mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
+mcp_servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") == "claude"
+    and isinstance(llm, dict)
+    and llm.get("backend") == "claude"
+    and isinstance(mcp_servers, dict)
+    and isinstance(mcp_servers.get("ouroboros"), dict)
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
   echo "SETUP_READY"
 else
   echo "SETUP_REQUIRED"

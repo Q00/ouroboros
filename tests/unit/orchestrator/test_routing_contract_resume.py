@@ -629,6 +629,50 @@ def test_codex_implementation_role_mapping_drift_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
+    ("original_provider_effort", "drifted_provider_effort"),
+    [("xhigh", "low"), (None, None)],
+)
+def test_codex_profile_reasoning_effort_drift_is_rejected_before_command_build(
+    original_provider_effort: str | None,
+    drifted_provider_effort: str | None,
+) -> None:
+    """Every profile effort that can form ``-c model_reasoning_effort`` is frozen."""
+    original_profile: dict[str, object] = {"reasoning_effort": "high"}
+    drifted_profile: dict[str, object] = {"reasoning_effort": "low"}
+    if original_provider_effort is not None:
+        original_profile["providers"] = {
+            "codex": {"reasoning_effort": original_provider_effort}
+        }
+        drifted_profile["providers"] = {
+            "codex": {"reasoning_effort": drifted_provider_effort}
+        }
+
+    original_config = OuroborosConfig(
+        llm_profiles={"implementation": original_profile},
+        llm_role_profiles={"agent_runtime_implementation": "implementation"},
+    )
+    drifted_config = OuroborosConfig(
+        llm_profiles={"implementation": drifted_profile},
+        llm_role_profiles={"agent_runtime_implementation": "implementation"},
+    )
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        metadata={"llm_role": "agent_runtime_implementation"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
+        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        original_command = runtime._build_command("/tmp/output", runtime_handle=handle)
+
+    expected_effort = "xhigh" if original_provider_effort else "high"
+    assert f"model_reasoning_effort={expected_effort}" in original_command
+    with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
+        with pytest.raises(RuntimeError, match="profile routing changed"):
+            runtime._build_command("/tmp/output", runtime_handle=handle)
+
+
+@pytest.mark.parametrize(
     "runtime_handle",
     [
         RuntimeHandle(
