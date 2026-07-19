@@ -33,6 +33,7 @@ import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -1394,6 +1395,8 @@ class ParallelACExecutor:
         self._shadow_replay_enabled = shadow_replay_enabled
         self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
+        self._runtime_execution_authority = self._runtime_execution_authority_contract()
+        self._atomic_verifier_authority = self._atomic_verifier_authority_contract()
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=self._inherited_runtime_handle,
@@ -2256,6 +2259,74 @@ class ParallelACExecutor:
         return "sha256:" + hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _canonical_authority_value(value: object, *, field: str) -> object:
+        """Round-trip one authority payload through strict canonical JSON."""
+        try:
+            encoded = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            return json.loads(encoded)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} is not canonical JSON") from exc
+
+    def _runtime_execution_authority_contract(self) -> dict[str, object]:
+        """Capture backend-specific provider/model identity when exposed."""
+        provider_descriptor = inspect.getattr_static(
+            type(self._adapter),
+            "execution_identity_contract",
+            None,
+        )
+        if provider_descriptor is None:
+            return {"version": 1, "observed": False}
+        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
+        identity = provider()
+        if not isinstance(identity, Mapping):
+            raise ValueError("runtime execution identity contract is not a mapping")
+        normalized = self._canonical_authority_value(
+            dict(identity),
+            field="runtime execution identity contract",
+        )
+        if not isinstance(normalized, dict):
+            raise ValueError("runtime execution identity contract is not an object")
+        return {"version": 1, "observed": True, "identity": normalized}
+
+    def _atomic_verifier_authority_contract(self) -> dict[str, object]:
+        """Return a durable identity for the acceptance judge in force."""
+        verifier = self._atomic_verifier
+        if verifier is None:
+            return {"version": 1, "mode": "runtime_transcript"}
+
+        module = getattr(verifier, "__module__", type(verifier).__module__)
+        qualname = getattr(verifier, "__qualname__", type(verifier).__qualname__)
+        try:
+            source = inspect.getsource(verifier)
+        except (OSError, TypeError):
+            code = getattr(verifier, "__code__", None)
+            source = repr(
+                (
+                    getattr(code, "co_code", None),
+                    getattr(code, "co_consts", None),
+                    getattr(verifier, "__defaults__", None),
+                    getattr(verifier, "__kwdefaults__", None),
+                    tuple(
+                        repr(cell.cell_contents)
+                        for cell in (getattr(verifier, "__closure__", None) or ())
+                    ),
+                )
+            )
+        return {
+            "version": 1,
+            "mode": "custom",
+            "module": str(module),
+            "qualname": str(qualname),
+            "implementation_digest": self._prompt_identity(source),
+        }
+
+    @staticmethod
     def _normalize_externally_satisfied_acs(
         raw: Mapping[int, Mapping[str, Any]] | None,
         *,
@@ -2410,6 +2481,8 @@ class ParallelACExecutor:
         decomposition_trustworthy: bool,
         force_frontier_routing: bool,
         investment_spec: InvestmentSpec | None,
+        sibling_acs: list[_SiblingACRef] | None = None,
+        retry_prompt_extra: str = "",
     ) -> str:
         """Bind a capsule to the exact provider dispatch authority in force."""
         dispatch_contract = self._build_checkpoint_dispatch_contract(
@@ -2427,6 +2500,25 @@ class ParallelACExecutor:
             "investment_spec": (
                 investment_spec.model_dump(mode="json") if investment_spec is not None else None
             ),
+            "runtime_execution_authority": self._runtime_execution_authority,
+            "atomic_verifier_authority": self._atomic_verifier_authority,
+            "prompt_authority": {
+                "retry_prompt_digest": self._prompt_identity(retry_prompt_extra),
+                "siblings": [
+                    {
+                        "ac_index": sibling_index,
+                        "content_digest": self._prompt_identity(sibling_content),
+                    }
+                    for sibling_index, sibling_content in (sibling_acs or [])
+                ],
+                "fat_harness_mode": self._fat_harness_mode,
+                "run_verify_commands": self._run_verify_commands,
+                "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+                "context_pack_enabled": self._context_pack_enabled,
+                "prompt_guidance_contract": self._prompt_guidance_contract,
+                "decomposition_mode": self._decomposition_mode,
+                "max_decomposition_depth": self._max_decomposition_depth,
+            },
         }
         return build_ac_dispatch_authority_scope(
             base_scope=(
@@ -9098,6 +9190,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 decomposition_trustworthy=decomposition_trustworthy,
                 force_frontier_routing=force_frontier_routing,
                 investment_spec=investment_spec,
+                sibling_acs=sibling_acs,
+                retry_prompt_extra=retry_prompt_extra,
             ),
             seed_goal=seed_goal,
             ac_content=ac_content,

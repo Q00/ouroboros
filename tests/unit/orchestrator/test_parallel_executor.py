@@ -1012,6 +1012,94 @@ def _compiled_capsule_event(
     )
 
 
+def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
+    """Every input that can alter provider work or acceptance must change authority."""
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+        def __init__(self, profile: str) -> None:
+            self.profile = profile
+
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {"profile": self.profile, "effective_model_observed": True}
+
+    def verifier_a(**_kwargs: Any) -> VerifierVerdict:
+        return VerifierVerdict(passed=True)
+
+    def verifier_b(**_kwargs: Any) -> VerifierVerdict:
+        return VerifierVerdict(passed=False)
+
+    base = ParallelACExecutor(
+        adapter=_Runtime("profile-a"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=verifier_a,
+    )
+
+    def scope(executor: ParallelACExecutor, **overrides: Any) -> str:
+        kwargs: dict[str, Any] = {
+            "execution_context_id": "exec-authority",
+            "tools": ["Read"],
+            "tool_catalog": None,
+            "system_prompt": "system",
+            "level_contexts": None,
+            "is_sub_ac": False,
+            "decomposition_trustworthy": False,
+            "force_frontier_routing": False,
+            "investment_spec": None,
+            "sibling_acs": [(0, "current"), (1, "sibling A")],
+            "retry_prompt_extra": "retry A",
+        }
+        kwargs.update(overrides)
+        return executor._build_ac_capsule_authority_scope(**kwargs)
+
+    baseline = scope(base)
+    assert scope(base, retry_prompt_extra="retry B") != baseline
+    assert scope(base, sibling_acs=[(0, "current"), (1, "sibling B")]) != baseline
+
+    fat = ParallelACExecutor(
+        adapter=_Runtime("profile-a"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        fat_harness_mode=True,
+        atomic_verifier=verifier_a,
+    )
+    assert scope(fat) != baseline
+
+    verify_off = ParallelACExecutor(
+        adapter=_Runtime("profile-a"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        run_verify_commands=False,
+        atomic_verifier=verifier_a,
+    )
+    assert scope(verify_off) != baseline
+
+    runtime_drift = ParallelACExecutor(
+        adapter=_Runtime("profile-b"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=verifier_a,
+    )
+    assert scope(runtime_drift) != baseline
+
+    verifier_drift = ParallelACExecutor(
+        adapter=_Runtime("profile-a"),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=verifier_b,
+    )
+    assert scope(verifier_drift) != baseline
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     (
