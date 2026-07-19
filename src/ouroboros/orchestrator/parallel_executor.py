@@ -36,6 +36,7 @@ import hashlib
 import inspect
 from itertools import islice
 import json
+import marshal
 import math
 import os
 from pathlib import Path
@@ -1166,6 +1167,10 @@ def _pid_alive(pid: int) -> bool:
 _CHECKPOINT_OWNER_FRESHNESS = timedelta(minutes=15)
 _EXECUTION_CHECKPOINT_CONTRACT_VERSION = 2
 _CHECKPOINT_DISPATCH_CONTRACT_VERSION = 2
+_MAX_VERIFIER_AUTHORITY_DEPTH = 8
+_MAX_VERIFIER_AUTHORITY_ITEMS = 256
+_MAX_VERIFIER_AUTHORITY_SCALAR_CHARS = 8_192
+_MAX_VERIFIER_AUTHORITY_JSON_CHARS = 64_000
 
 
 class ParallelACExecutor:
@@ -2311,36 +2316,255 @@ class ParallelACExecutor:
             raise ValueError("runtime execution identity contract is not an object")
         return {"version": 1, "observed": True, "identity": normalized}
 
+    @classmethod
+    def _project_verifier_authority_value(
+        cls,
+        value: object,
+        *,
+        field: str,
+        depth: int = 0,
+        seen: set[int] | None = None,
+    ) -> object:
+        """Project verifier state into bounded, deterministic JSON authority."""
+        if depth > _MAX_VERIFIER_AUTHORITY_DEPTH:
+            raise ValueError(f"{field} exceeds verifier authority depth")
+        if value is None or isinstance(value, (bool, int)):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError(f"{field} contains a non-finite float")
+            return value
+        if isinstance(value, str):
+            if len(value) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
+                raise ValueError(f"{field} contains oversized text")
+            return value
+        if isinstance(value, bytes):
+            if len(value) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
+                raise ValueError(f"{field} contains oversized bytes")
+            return {
+                "kind": "bytes",
+                "digest": "sha256:" + hashlib.sha256(value).hexdigest(),
+            }
+        if isinstance(value, Path):
+            path = os.fspath(value)
+            if len(path) > _MAX_VERIFIER_AUTHORITY_SCALAR_CHARS:
+                raise ValueError(f"{field} contains an oversized path")
+            return {"kind": "path", "value": path}
+        if isinstance(value, datetime):
+            return {"kind": "datetime", "value": value.isoformat()}
+        if isinstance(value, timedelta):
+            return {"kind": "timedelta", "seconds": value.total_seconds()}
+        if inspect.isroutine(value) or inspect.isclass(value):
+            raise ValueError(f"{field} contains nested executable state")
+
+        seen = set() if seen is None else seen
+        value_id = id(value)
+        if value_id in seen:
+            raise ValueError(f"{field} contains cyclic state")
+        seen.add(value_id)
+        try:
+            if isinstance(value, Mapping):
+                if len(value) > _MAX_VERIFIER_AUTHORITY_ITEMS:
+                    raise ValueError(f"{field} contains too many mapping items")
+                items: list[list[object]] = []
+                for key, item in value.items():
+                    projected_key = cls._project_verifier_authority_value(
+                        key,
+                        field=f"{field}.key",
+                        depth=depth + 1,
+                        seen=seen,
+                    )
+                    projected_value = cls._project_verifier_authority_value(
+                        item,
+                        field=f"{field}.value",
+                        depth=depth + 1,
+                        seen=seen,
+                    )
+                    items.append([projected_key, projected_value])
+                items.sort(
+                    key=lambda pair: json.dumps(
+                        pair[0],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                )
+                return {"kind": "mapping", "items": items}
+            if isinstance(value, (list, tuple)):
+                if len(value) > _MAX_VERIFIER_AUTHORITY_ITEMS:
+                    raise ValueError(f"{field} contains too many sequence items")
+                return {
+                    "kind": "tuple" if isinstance(value, tuple) else "list",
+                    "items": [
+                        cls._project_verifier_authority_value(
+                            item,
+                            field=f"{field}[{index}]",
+                            depth=depth + 1,
+                            seen=seen,
+                        )
+                        for index, item in enumerate(value)
+                    ],
+                }
+            if isinstance(value, (set, frozenset)):
+                if len(value) > _MAX_VERIFIER_AUTHORITY_ITEMS:
+                    raise ValueError(f"{field} contains too many set items")
+                items = [
+                    cls._project_verifier_authority_value(
+                        item,
+                        field=f"{field}.item",
+                        depth=depth + 1,
+                        seen=seen,
+                    )
+                    for item in value
+                ]
+                items.sort(
+                    key=lambda item: json.dumps(
+                        item,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                )
+                return {
+                    "kind": "frozenset" if isinstance(value, frozenset) else "set",
+                    "items": items,
+                }
+
+            object_state: dict[str, object] = {}
+            try:
+                object_state.update(vars(value))
+            except TypeError:
+                pass
+            slots = inspect.getattr_static(type(value), "__slots__", ())
+            if isinstance(slots, str):
+                slots = (slots,)
+            for slot in slots:
+                if slot in {"__dict__", "__weakref__"} or slot in object_state:
+                    continue
+                try:
+                    object_state[slot] = object.__getattribute__(value, slot)
+                except AttributeError:
+                    continue
+            if not object_state:
+                raise ValueError(f"{field} has no inspectable stable state")
+            return {
+                "kind": "object",
+                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "state": cls._project_verifier_authority_value(
+                    object_state,
+                    field=f"{field}.state",
+                    depth=depth + 1,
+                    seen=seen,
+                ),
+            }
+        finally:
+            seen.remove(value_id)
+
+    @classmethod
+    def _verifier_implementation_contract(cls, verifier: Verifier) -> dict[str, object]:
+        """Identify the executable code behind a function, method, or callable object."""
+        if inspect.ismethod(verifier):
+            target = verifier.__func__
+        elif inspect.isfunction(verifier) or inspect.isbuiltin(verifier):
+            target = verifier
+        else:
+            target = type(verifier).__call__
+
+        module = getattr(target, "__module__", type(verifier).__module__)
+        qualname = getattr(target, "__qualname__", type(verifier).__qualname__)
+        try:
+            source_digest = cls._prompt_identity(inspect.getsource(target))
+        except (OSError, TypeError):
+            source_digest = None
+        code = getattr(target, "__code__", None)
+        code_digest = (
+            "sha256:" + hashlib.sha256(marshal.dumps(code)).hexdigest()
+            if code is not None
+            else None
+        )
+        return {
+            "module": str(module),
+            "qualname": str(qualname),
+            "source_digest": source_digest,
+            "code_digest": code_digest,
+        }
+
+    def _verifier_state_authority_contract(self, verifier: Verifier) -> dict[str, object]:
+        """Bind behavioral verifier state or deliberately disable durable reuse."""
+        try:
+            identity_descriptor = inspect.getattr_static(
+                verifier,
+                "verification_identity_contract",
+                None,
+            )
+            if identity_descriptor is not None:
+                identity_provider = object.__getattribute__(
+                    verifier,
+                    "verification_identity_contract",
+                )
+                if not callable(identity_provider):
+                    raise ValueError("verification_identity_contract is not callable")
+                identity = identity_provider()
+                if not isinstance(identity, Mapping):
+                    raise ValueError("verification_identity_contract is not a mapping")
+                raw_state: object = {"explicit_identity": dict(identity)}
+            elif inspect.isfunction(verifier) or inspect.ismethod(verifier):
+                function = verifier.__func__ if inspect.ismethod(verifier) else verifier
+                closure_values: list[object] = []
+                for cell in getattr(function, "__closure__", None) or ():
+                    try:
+                        closure_values.append(cell.cell_contents)
+                    except ValueError:
+                        closure_values.append({"empty_cell": True})
+                raw_state = {
+                    "defaults": getattr(function, "__defaults__", None),
+                    "kwdefaults": getattr(function, "__kwdefaults__", None),
+                    "closure": closure_values,
+                    "function_attributes": dict(vars(function)),
+                    "bound_instance": verifier.__self__ if inspect.ismethod(verifier) else None,
+                }
+            else:
+                raw_state = {"callable_instance": verifier}
+
+            projected = self._project_verifier_authority_value(
+                raw_state,
+                field="atomic verifier state",
+            )
+            encoded = json.dumps(
+                projected,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            if len(encoded) > _MAX_VERIFIER_AUTHORITY_JSON_CHARS:
+                raise ValueError("atomic verifier state exceeds authority budget")
+            return {
+                "stability": "durable",
+                "state_digest": self._prompt_identity(encoded),
+            }
+        except (AttributeError, TypeError, ValueError) as exc:
+            nonce = uuid.uuid4().hex
+            log.warning(
+                "parallel_executor.atomic_verifier_authority_process_local",
+                verifier_type=f"{type(verifier).__module__}.{type(verifier).__qualname__}",
+                reason=str(exc),
+            )
+            return {
+                "stability": "process_local",
+                "instance_nonce": nonce,
+            }
+
     def _atomic_verifier_authority_contract(self) -> dict[str, object]:
         """Return a durable identity for the acceptance judge in force."""
         verifier = self._atomic_verifier
         if verifier is None:
             return {"version": 1, "mode": "runtime_transcript"}
-
-        module = getattr(verifier, "__module__", type(verifier).__module__)
-        qualname = getattr(verifier, "__qualname__", type(verifier).__qualname__)
-        try:
-            source = inspect.getsource(verifier)
-        except (OSError, TypeError):
-            code = getattr(verifier, "__code__", None)
-            source = repr(
-                (
-                    getattr(code, "co_code", None),
-                    getattr(code, "co_consts", None),
-                    getattr(verifier, "__defaults__", None),
-                    getattr(verifier, "__kwdefaults__", None),
-                    tuple(
-                        repr(cell.cell_contents)
-                        for cell in (getattr(verifier, "__closure__", None) or ())
-                    ),
-                )
-            )
         return {
             "version": 1,
             "mode": "custom",
-            "module": str(module),
-            "qualname": str(qualname),
-            "implementation_digest": self._prompt_identity(source),
+            "implementation": self._verifier_implementation_contract(verifier),
+            "behavioral_state": self._verifier_state_authority_contract(verifier),
         }
 
     @staticmethod

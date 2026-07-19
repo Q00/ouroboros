@@ -1102,6 +1102,73 @@ def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> N
     assert scope(verifier_drift) != baseline
 
 
+def test_capsule_authority_distinguishes_verifier_closure_state() -> None:
+    """Factory-created judges with the same source must not share authority."""
+
+    def configured_verifier(passed: bool):
+        def verifier(**_kwargs: Any) -> VerifierVerdict:
+            return VerifierVerdict(passed=passed)
+
+        return verifier
+
+    runtime = SimpleNamespace(
+        runtime_backend="codex_cli",
+        working_directory="/tmp/project",
+        permission_mode="acceptEdits",
+    )
+    passing = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=configured_verifier(True),
+    )
+    rejecting = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=configured_verifier(False),
+    )
+
+    assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority
+    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "durable"
+
+
+def test_capsule_authority_distinguishes_callable_verifier_state() -> None:
+    """Callable instances bind their configured acceptance behavior."""
+
+    class ConfiguredVerifier:
+        def __init__(self, passed: bool) -> None:
+            self.passed = passed
+
+        def __call__(self, **_kwargs: Any) -> VerifierVerdict:
+            return VerifierVerdict(passed=self.passed)
+
+    runtime = SimpleNamespace(
+        runtime_backend="codex_cli",
+        working_directory="/tmp/project",
+        permission_mode="acceptEdits",
+    )
+    passing = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=ConfiguredVerifier(True),
+    )
+    rejecting = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=ConfiguredVerifier(False),
+    )
+
+    assert passing._atomic_verifier_authority != rejecting._atomic_verifier_authority
+    assert passing._atomic_verifier_authority["behavioral_state"]["stability"] == "durable"
+
+
 def test_capsule_authority_reuses_large_context_and_catalog_digests(monkeypatch) -> None:
     """Sibling ACs and retries must not reserialize the same authority inputs."""
     import ouroboros.orchestrator.mcp_tools as mcp_tools
