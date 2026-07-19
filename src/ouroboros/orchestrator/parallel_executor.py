@@ -2583,7 +2583,9 @@ class ParallelACExecutor:
         return contexts
 
     @staticmethod
-    def _runtime_executable_identity(adapter: object) -> dict[str, object]:
+    def _runtime_executable_identity(
+        adapter: object, *, cwd: str | None = None
+    ) -> dict[str, object]:
         """Bind the actual subprocess executable and launcher into capsule authority.
 
         Backend, model, and the adapter's execution-identity contract do not
@@ -2623,6 +2625,13 @@ class ParallelACExecutor:
                 if which is None:
                     return {"path": value, "realpath": None, "path_resolution": "unresolved"}
                 return {"path": value, "realpath": os.path.realpath(which)}
+            # A RELATIVE path with a separator (e.g. ``./tool``) is resolved by the
+            # child against ITS working directory, not the orchestrator process
+            # directory. Anchor it to the effective child cwd before realpath so
+            # capsule identity binds the binary actually launched (and follows a
+            # symlink-target swap under that cwd).
+            if not os.path.isabs(expanded) and cwd is not None:
+                expanded = os.path.join(cwd, expanded)
             return {"path": value, "realpath": os.path.realpath(expanded)}
 
         def _probe(
@@ -2693,6 +2702,10 @@ class ParallelACExecutor:
             "model_override_support": capabilities.model_override_support.value,
             "subagent_orchestration": capabilities.subagent_orchestration.value,
             "session_signals": capabilities.session_signals.to_event_data(),
+            # Execution-semantic: this flag chooses retryable vs sealed/fail-closed
+            # stall handling, so it must participate in capsule/checkpoint authority
+            # — two runtimes differing only in it are NOT interchangeable on resume.
+            "realtime_tool_effect_visibility": capabilities.realtime_tool_effect_visibility,
         }
 
     def _authority_digest(self, value: object, *, field: str) -> str:
@@ -2813,7 +2826,9 @@ class ParallelACExecutor:
                 ),
                 "capabilities": self._runtime_capabilities_contract(self._adapter),
                 "execution": self._runtime_execution_authority,
-                "executable": self._runtime_executable_identity(self._adapter),
+                "executable": self._runtime_executable_identity(
+                    self._adapter, cwd=workspace_identity
+                ),
             },
             "model_routing": serialize_model_router(self._model_router),
             "execution_profile": serialize_execution_profile(self._execution_profile),
@@ -3015,11 +3030,17 @@ class ParallelACExecutor:
                 "model_override_support",
                 "subagent_orchestration",
                 "session_signals",
+                "realtime_tool_effect_visibility",
             }:
                 return "dispatch_contract.runtime capabilities have an invalid shape"
             if any(
                 not isinstance(raw_capabilities.get(key), bool)
-                for key in ("skill_dispatch", "targeted_resume", "structured_output")
+                for key in (
+                    "skill_dispatch",
+                    "targeted_resume",
+                    "structured_output",
+                    "realtime_tool_effect_visibility",
+                )
             ):
                 return "dispatch_contract.runtime capabilities contain invalid booleans"
             support_values = {support.value for support in ParamSupport}
@@ -10350,7 +10371,21 @@ Respond with either ATOMIC or the structured JSON object only.
                                 orchestrator_session_id=session_id,
                             )
                         )
-                        if dispatch_state.tool_effects_observed:
+                        # Same rule as the primary provider entry: a follow-up
+                        # stall is only safely non-fatal when we can PROVE no
+                        # effect occurred — a tool effect WAS observed, or the
+                        # driver does not stream effects in real time (an opaque
+                        # driver may have applied an effect and then yielded
+                        # nothing). Both seal and fail closed so the stalled
+                        # follow-up is never redispatched by bounce/retry.
+                        followup_realtime_visibility = bool(
+                            getattr(
+                                getattr(self._adapter, "capabilities", None),
+                                "realtime_tool_effect_visibility",
+                                False,
+                            )
+                        )
+                        if dispatch_state.tool_effects_observed or not followup_realtime_visibility:
                             await self._event_emitter.emit_ac_dispatch_sealed(
                                 runtime_identity=runtime_identity,
                                 dispatch_id=signal_dispatch_id,
@@ -10359,9 +10394,11 @@ Respond with either ATOMIC or the structured JSON object only.
                                 capsule_fingerprint=capsule.fingerprint,
                             )
                             raise AmbiguousACExecutionError(
-                                "SessionSignal follow-up stalled after emitting tool effects; "
-                                "refusing to record success because a cold restart could resume "
-                                "the stalled follow-up and repeat non-idempotent effects"
+                                "SessionSignal follow-up stalled and its effects cannot be "
+                                "proven absent (a tool effect was observed, or the driver does "
+                                "not attest real-time tool-effect visibility); refusing to record "
+                                "success because a cold restart could resume the stalled follow-up "
+                                "and repeat non-idempotent effects"
                             )
                         if inform_mode:
                             dispatch_state.success = primary_success

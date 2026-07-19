@@ -52,41 +52,60 @@ _MAX_VERIFY_MISSING_ARTIFACT_CHARS = 512
 _MAX_VERIFY_TEXT_CHARS = 4096
 
 
-def bound_verify_gate_outcome(outcome: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a bounded, shape-validated verify outcome safe to persist/replay.
+_VERIFY_OUTCOME_REQUIRED_KEYS = frozenset({"passed", "reason", "output_tail", "missing_artifacts"})
+_VERIFY_OUTCOME_ALLOWED_KEYS = _VERIFY_OUTCOME_REQUIRED_KEYS | {"missing_artifacts_omitted"}
 
-    Preserves the acceptance verdict (``passed``) exactly while capping the
-    unbounded ``missing_artifacts`` list and the free-text ``reason``/
-    ``output_tail`` fields, recording an omission count when the list is
-    truncated. Raises ``ValueError`` if the bounded payload still exceeds the
-    hard UTF-8 size cap, so an oversized record can never be persisted.
+
+def bound_verify_gate_outcome(outcome: Mapping[str, Any]) -> dict[str, Any]:
+    """Strictly validate, then bound, a verify outcome for persistence/replay.
+
+    Used as the exact-shape validator on BOTH the persist and replay paths, so it
+    accepts ONLY the exact keys with their NATIVE types — it never coerces. This
+    matters on replay: a corrupted record with ``"passed": "false"`` or ``1``
+    must NOT become a trusted PASS. It then caps the unbounded ``missing_artifacts``
+    list and the free-text fields (recording an omission count) and rejects any
+    payload still over the hard UTF-8 byte cap.
     """
     if not isinstance(outcome, Mapping):
         raise ValueError("verify outcome payload is not a mapping")
+    keys = set(outcome)
+    if not keys >= _VERIFY_OUTCOME_REQUIRED_KEYS:
+        raise ValueError("verify outcome payload is missing required fields")
+    if keys - _VERIFY_OUTCOME_ALLOWED_KEYS:
+        raise ValueError("verify outcome payload has unexpected fields")
 
-    def _bounded_text(value: object) -> str | None:
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError("verify outcome text field is not a string")
-        return value[:_MAX_VERIFY_TEXT_CHARS]
+    passed = outcome["passed"]
+    if not isinstance(passed, bool):
+        # bool is an int subclass; reject ints/strings that would coerce to a verdict.
+        raise ValueError("verify outcome 'passed' is not a boolean")
+    reason = outcome["reason"]
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("verify outcome 'reason' is not a string or null")
+    output_tail = outcome["output_tail"]
+    if not isinstance(output_tail, str):
+        raise ValueError("verify outcome 'output_tail' is not a string")
+    raw_missing = outcome["missing_artifacts"]
+    if not isinstance(raw_missing, (list, tuple)) or not all(
+        isinstance(item, str) for item in raw_missing
+    ):
+        raise ValueError("verify outcome 'missing_artifacts' is not a list of strings")
+    prior_omitted = outcome.get("missing_artifacts_omitted", 0)
+    if not isinstance(prior_omitted, int) or isinstance(prior_omitted, bool) or prior_omitted < 0:
+        raise ValueError("verify outcome 'missing_artifacts_omitted' is invalid")
 
-    raw_missing = outcome.get("missing_artifacts") or []
-    if not isinstance(raw_missing, (list, tuple)):
-        raise ValueError("verify outcome missing_artifacts is not a sequence")
     bounded_missing = [
-        str(item)[:_MAX_VERIFY_MISSING_ARTIFACT_CHARS]
+        item[:_MAX_VERIFY_MISSING_ARTIFACT_CHARS]
         for item in list(raw_missing)[:_MAX_VERIFY_MISSING_ARTIFACTS]
     ]
     result: dict[str, Any] = {
-        "passed": bool(outcome.get("passed")),
-        "reason": _bounded_text(outcome.get("reason")),
-        "output_tail": _bounded_text(outcome.get("output_tail")) or "",
+        "passed": passed,
+        "reason": reason[:_MAX_VERIFY_TEXT_CHARS] if reason is not None else None,
+        "output_tail": output_tail[:_MAX_VERIFY_TEXT_CHARS],
         "missing_artifacts": bounded_missing,
     }
-    omitted = len(raw_missing) - len(bounded_missing)
-    if omitted > 0:
-        result["missing_artifacts_omitted"] = omitted
+    total_omitted = (len(raw_missing) - len(bounded_missing)) + prior_omitted
+    if total_omitted > 0:
+        result["missing_artifacts_omitted"] = total_omitted
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
     if len(encoded.encode("utf-8")) > _MAX_VERIFY_OUTCOME_BYTES:
         raise ValueError("verify outcome exceeds the durable size bound")

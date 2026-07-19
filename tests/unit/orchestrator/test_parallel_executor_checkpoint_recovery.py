@@ -3897,7 +3897,14 @@ class TestCheckpointDispatchContract:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "drift",
-        ["workspace", "runtime_backend", "permission_mode", "constructor_model", "capabilities"],
+        [
+            "workspace",
+            "runtime_backend",
+            "permission_mode",
+            "constructor_model",
+            "capabilities",
+            "realtime_effect_visibility",
+        ],
     )
     async def test_runtime_authority_drift_is_rejected_before_dispatch(
         self, tmp_path: Path, drift: str
@@ -3923,6 +3930,16 @@ class TestCheckpointDispatchContract:
             resumed_permission = "bypassPermissions"
         elif drift == "constructor_model":
             resumed_model = "model-b"
+        elif drift == "realtime_effect_visibility":
+            # Same shape, only the stall-affecting flag flips — it must still
+            # count as authority drift (original defaults to False).
+            resumed_capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.NATIVE,
+                realtime_tool_effect_visibility=True,
+            )
         else:
             resumed_capabilities = RuntimeCapabilities(
                 skill_dispatch=True,

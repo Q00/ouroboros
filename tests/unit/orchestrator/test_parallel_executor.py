@@ -1382,6 +1382,92 @@ def test_bound_verify_gate_outcome_caps_and_rejects_oversized() -> None:
         )
 
 
+def test_bound_verify_gate_outcome_rejects_type_coercion() -> None:
+    """R6 blocker #3: replay validation must not coerce a verdict.
+
+    A persisted outcome with a non-boolean ``passed`` (e.g. ``"false"`` or ``1``)
+    must be rejected, never coerced into a trusted PASS; unknown fields and
+    non-string artifacts are rejected too.
+    """
+    from ouroboros.orchestrator.execution_event_emitter import bound_verify_gate_outcome
+
+    base = {"passed": True, "reason": None, "output_tail": "", "missing_artifacts": []}
+
+    for bad_passed in ("false", "true", 1, 0, None):
+        with pytest.raises(ValueError, match="'passed' is not a boolean"):
+            bound_verify_gate_outcome({**base, "passed": bad_passed})
+
+    with pytest.raises(ValueError, match="unexpected fields"):
+        bound_verify_gate_outcome({**base, "injected": "x"})
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        bound_verify_gate_outcome({"passed": True})
+
+    with pytest.raises(ValueError, match="'missing_artifacts' is not a list of strings"):
+        bound_verify_gate_outcome({**base, "missing_artifacts": [123]})
+
+    # A correctly-typed payload round-trips unchanged.
+    assert bound_verify_gate_outcome(base) == base
+
+
+def test_runtime_capabilities_contract_includes_realtime_effect_visibility() -> None:
+    """R6 blocker #1: the stall-affecting capability participates in authority."""
+    from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
+
+    class _Runtime:
+        runtime_backend = "codex_cli"
+        working_directory = "/tmp/project"
+        permission_mode = "acceptEdits"
+
+        def __init__(self, *, realtime: bool) -> None:
+            self.capabilities = replace(FULL_CAPABILITIES, realtime_tool_effect_visibility=realtime)
+
+    def _authority(realtime: bool) -> dict[str, object]:
+        executor = ParallelACExecutor(
+            adapter=_Runtime(realtime=realtime),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        return executor._build_capsule_dispatch_authority_contract(
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=None,
+        )
+
+    with_rt = _authority(True)
+    without_rt = _authority(False)
+    assert (
+        with_rt["runtime"]["capabilities"]["realtime_tool_effect_visibility"] is True  # type: ignore[index]
+    )
+    assert with_rt != without_rt
+
+
+def test_runtime_executable_identity_resolves_relative_path_against_child_cwd(
+    tmp_path: Any,
+) -> None:
+    """R6 blocker #4: a relative ``./tool`` binds to the child cwd's target."""
+    import os as _os
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    link = workspace / "tool"
+    link.symlink_to("/bin/true")
+
+    class _Runtime:
+        _cli_path = "./tool"
+
+    identity = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(workspace))
+    assert identity["executable"]["realpath"] == _os.path.realpath(str(workspace / "tool"))
+
+    # Swapping the symlink target under the SAME cwd changes authority.
+    link.unlink()
+    link.symlink_to("/bin/false")
+    swapped = ParallelACExecutor._runtime_executable_identity(_Runtime(), cwd=str(workspace))
+    assert swapped["executable"]["realpath"] != identity["executable"]["realpath"]
+
+
 def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
     """Every input that can alter provider work or acceptance must change authority."""
 
