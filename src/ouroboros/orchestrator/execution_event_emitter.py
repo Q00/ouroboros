@@ -32,6 +32,7 @@ from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
+    from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
     from ouroboros.orchestrator.adapter import AgentMessage
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.persistence.event_store import EventStore
@@ -74,6 +75,37 @@ class ExecutionEventEmitter:
                 parts.append(f"{key}: {rendered}")
         preview = ", ".join(parts)
         return preview[:100] if preview else None
+
+    async def emit_ac_capsule_compiled(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        session_id: str,
+        capsule: ACExecutionCapsule,
+        session_origin: str,
+    ) -> None:
+        """Durably persist the authority contract before provider dispatch.
+
+        Unlike observe-only telemetry, this event defines which AC capsule a
+        provider session is allowed to execute. Persistence failure therefore
+        propagates and prevents the external effect from starting.
+        """
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.capsule.compiled",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "execution_id": capsule.execution_id,
+                    "session_id": session_id,
+                    "semantic_ac_key": capsule.semantic_ac_key,
+                    "capsule_fingerprint": capsule.fingerprint,
+                    "capsule": capsule.to_contract_data(),
+                    "session_origin": session_origin,
+                },
+            )
+        )
 
     async def emit_decomposition_decision_finalized(
         self,

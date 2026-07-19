@@ -428,6 +428,7 @@ class ACRuntimeHandleManager:
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
+        expected_capsule_fingerprint: str | None = None,
     ) -> RuntimeHandle | None:
         """Load the latest reusable AC-scoped runtime handle from execution events."""
         runtime_identity = self._resolve_ac_runtime_identity(
@@ -477,7 +478,25 @@ class ACRuntimeHandleManager:
                     retry_attempt=retry_attempt,
                     session_scope_id=candidate_scope_id,
                 )
+                if expected_capsule_fingerprint is not None:
+                    raise
                 continue
+
+            if expected_capsule_fingerprint is not None:
+                for event in events:
+                    if event.type != "execution.ac.capsule.compiled":
+                        continue
+                    event_data = event.data if isinstance(event.data, dict) else {}
+                    if (
+                        event_data.get("ac_id") != runtime_identity.ac_id
+                        or event_data.get("session_attempt_id")
+                        != runtime_identity.session_attempt_id
+                    ):
+                        continue
+                    if event_data.get("capsule_fingerprint") != expected_capsule_fingerprint:
+                        raise ValueError(
+                            "durable AC capsule fingerprint disagrees with the current dispatch"
+                        )
 
             for event in reversed(events):
                 event_data = event.data if isinstance(event.data, dict) else {}

@@ -87,6 +87,10 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.ac_execution_capsule import (
+    bind_capsule_to_runtime_handle,
+    compile_ac_execution_capsule,
+)
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -1851,6 +1855,7 @@ class ParallelACExecutor:
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
+        expected_capsule_fingerprint: str | None = None,
     ) -> RuntimeHandle | None:
         return await self._ac_runtime_handle_manager._load_persisted_ac_runtime_handle(
             ac_index,
@@ -1860,6 +1865,7 @@ class ParallelACExecutor:
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+            expected_capsule_fingerprint=expected_capsule_fingerprint,
         )
 
     def _remember_ac_runtime_handle(
@@ -8963,20 +8969,43 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         ac_session_id: str | None = None
         semantic_ac_key = semantic_ac_key or derive_semantic_ac_key(ac_spec or ac_content)
+        execution_context_id = execution_id or session_id
+        runtime_identity = build_ac_runtime_identity(
+            ac_index,
+            execution_context_id=execution_context_id,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            node_identity=node_identity,
+            retry_attempt=retry_attempt,
+        )
+        capsule = compile_ac_execution_capsule(
+            runtime_identity=runtime_identity,
+            execution_id=execution_context_id,
+            semantic_ac_key=semantic_ac_key,
+            workspace=(
+                self._task_cwd or getattr(self._adapter, "working_directory", None) or os.getcwd()
+            ),
+            authority_scope=(
+                self._decomposition_attestation_scope or f"execution:{execution_context_id}"
+            ),
+            seed_goal=seed_goal,
+            ac_content=ac_content,
+            ac_spec=ac_spec,
+            level_contexts=tuple(level_contexts or ()),
+        )
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
         prompt_bundle = AtomicPromptBuilder(self).build(
+            capsule=capsule,
             ac_index=ac_index,
-            ac_content=ac_content,
-            seed_goal=seed_goal,
             is_sub_ac=is_sub_ac,
             parent_ac_index=parent_ac_index,
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
-            retry_attempt=retry_attempt,
             retry_prompt_extra=retry_prompt_extra,
             ac_spec=ac_spec,
         )
@@ -8989,7 +9018,6 @@ Respond with either ATOMIC or the structured JSON object only.
         final_message = ""
         success = False
         clear_cached_runtime_handle = False
-        execution_context_id = execution_id or session_id
         persisted_runtime_handle = await self._load_persisted_ac_runtime_handle(
             ac_index,
             execution_context_id=execution_context_id,
@@ -8998,6 +9026,7 @@ Respond with either ATOMIC or the structured JSON object only.
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+            expected_capsule_fingerprint=capsule.fingerprint,
         )
         if persisted_runtime_handle is not None:
             self._remember_ac_runtime_handle(
@@ -9020,14 +9049,18 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             tool_catalog=tool_catalog,
         )
-        runtime_identity = build_ac_runtime_identity(
-            ac_index,
-            execution_context_id=execution_context_id,
-            is_sub_ac=is_sub_ac,
-            parent_ac_index=parent_ac_index,
-            sub_ac_index=sub_ac_index,
-            node_identity=node_identity,
-            retry_attempt=retry_attempt,
+        runtime_handle = bind_capsule_to_runtime_handle(
+            capsule,
+            runtime_handle,
+            restored_same_attempt=persisted_runtime_handle is not None,
+        )
+        await self._event_emitter.emit_ac_capsule_compiled(
+            runtime_identity=runtime_identity,
+            session_id=session_id,
+            capsule=capsule,
+            session_origin=(
+                "restored_same_attempt" if persisted_runtime_handle is not None else "fresh"
+            ),
         )
         await self._emit_atomic_context_governed_event(
             runtime_identity=runtime_identity,

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import AcceptanceCriterionSpec
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
+from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
 from ouroboros.orchestrator.evidence.ac_classification import (
     _effective_evidence_schema_for_ac,
     _is_documentation_only_ac,
@@ -83,21 +84,22 @@ class AtomicPromptBuilder:
     def build(
         self,
         *,
+        capsule: ACExecutionCapsule,
         ac_index: int,
-        ac_content: str,
-        seed_goal: str,
         is_sub_ac: bool,
         parent_ac_index: int | None,
         sub_ac_index: int | None,
         node_identity: ExecutionNodeIdentity | None,
         level_contexts: list[LevelContext] | None,
         sibling_acs: list[_SiblingACRef] | None,
-        retry_attempt: int,
         retry_prompt_extra: str,
         ac_spec: AcceptanceCriterionSpec | None,
     ) -> AtomicPromptBundle:
         """Build the prompt for one atomic leaf dispatch."""
         executor = self._executor
+        ac_content = capsule.ac_content
+        seed_goal = capsule.seed_goal
+        retry_attempt = capsule.retry_attempt
 
         # Build prompt
         if node_identity is not None:
@@ -291,6 +293,8 @@ Files present:
 
 ## Goal Context
 {seed_goal}
+
+{capsule.to_prompt_reference_block()}
 
 {render_auto_recursion_guard()}
 

@@ -21,6 +21,7 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
+from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -4363,6 +4364,9 @@ class TestParallelACExecutor:
         ]
         assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_3"
         assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_3_attempt_1"
+        assert resume_handle.metadata["ac_capsule_version"] == 1
+        assert resume_handle.metadata["ac_capsule_fingerprint"].startswith("sha256:")
+        assert resume_handle.metadata["ac_session_origin"] == "fresh"
         assert (
             resume_handle.metadata["session_state_path"]
             == "execution.workflows.orch_123.acceptance_criteria.ac_3.implementation_session"
@@ -4370,6 +4374,16 @@ class TestParallelACExecutor:
         started_event = next(
             event for event in appended_events if event.type == "execution.session.started"
         )
+        capsule_event = next(
+            event for event in appended_events if event.type == "execution.ac.capsule.compiled"
+        )
+        restored_capsule = ACExecutionCapsule.from_contract_data(capsule_event.data["capsule"])
+        assert capsule_event.data["capsule_fingerprint"] == restored_capsule.fingerprint
+        assert capsule_event.data["session_origin"] == "fresh"
+        assert isinstance(runtime_call["prompt"], str)
+        assert "Ouroboros AC Runtime" in runtime_call["prompt"]
+        assert restored_capsule.ac_content == "Implement AC 3"
+        assert restored_capsule.workspace == os.path.realpath("/tmp/project")
         assert [tool["name"] for tool in started_event.data["tool_catalog"]] == ["Read", "Edit"]
         assert [
             tool["name"] for tool in started_event.data["runtime"]["metadata"]["tool_catalog"]
@@ -4385,6 +4399,139 @@ class TestParallelACExecutor:
         assert result.session_id == "opencode-session-1"
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == "opencode-session-1"
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_does_not_dispatch_when_capsule_persistence_fails(self) -> None:
+        """An authority-bearing capsule must be durable before provider effects."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store = AsyncMock()
+        event_store.replay.return_value = []
+        event_store.append.side_effect = OSError("event store unavailable")
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        with pytest.raises(OSError, match="event store unavailable"):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Implement the AC",
+                session_id="session-capsule-failure",
+                tools=["Read", "Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert runtime.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_refuses_durable_capsule_drift_before_resume(self) -> None:
+        """Recovery cannot apply an old provider session to a new capsule."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store, appended_events = _make_replaying_event_store()
+        appended_events.append(
+            BaseEvent(
+                type="execution.ac.capsule.compiled",
+                aggregate_type="execution",
+                aggregate_id="session-capsule-mismatch_ac_1",
+                data={
+                    "ac_id": "session-capsule-mismatch_ac_1",
+                    "session_attempt_id": "session-capsule-mismatch_ac_1_attempt_1",
+                    "capsule_fingerprint": "sha256:" + "0" * 64,
+                },
+            )
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        with pytest.raises(ValueError, match="capsule fingerprint disagrees"):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Changed AC authority",
+                session_id="session-capsule-mismatch",
+                tools=["Read", "Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert runtime.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_refuses_dispatch_when_capsule_replay_is_unreadable(self) -> None:
+        """A fresh dispatch cannot guess that no authority-bearing capsule exists."""
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        runtime = _Runtime()
+        event_store = AsyncMock()
+        event_store.replay.side_effect = OSError("replay unavailable")
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        with pytest.raises(OSError, match="replay unavailable"):
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Implement the AC",
+                session_id="session-capsule-replay",
+                tools=["Read", "Edit"],
+                system_prompt="system",
+                seed_goal="Ship",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert runtime.calls == 0
+        event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_atomic_ac_terminates_live_runtime_handle_after_completion(self) -> None:

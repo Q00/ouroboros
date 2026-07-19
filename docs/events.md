@@ -93,6 +93,27 @@ name further.
 | `ac_id` | `string` | Legacy source acceptance-criterion identifier for the execution unit |
 | `status` | `string` | Legacy worker completion status: `"passed"` means completed, `"failed"` means failed |
 
+### execution.ac.capsule.compiled
+
+Authority-bearing event emitted before a provider driver may start an AC
+attempt. Unlike observe-only telemetry, persistence failure blocks dispatch.
+The capsule makes Ouroboros — rather than Claude, Codex, or another provider —
+the owner of AC identity, context references, workspace authority, and native
+session freshness.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `execution_id` | `string` | Durable execution/run anchor |
+| `session_id` | `string` | Orchestrator session id |
+| `semantic_ac_key` | `string` | Stable semantic AC identity |
+| `capsule_fingerprint` | `string` | SHA-256 identity of the complete capsule contract |
+| `capsule` | `object` | Strict versioned `ACExecutionCapsule` contract |
+| `session_origin` | `string` | `"fresh"` or `"restored_same_attempt"` |
+
+The nested capsule contains compact facts and typed context references, not a
+provider transcript. A native runtime handle is bound to the capsule fingerprint
+and may resume only the same AC attempt.
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.
