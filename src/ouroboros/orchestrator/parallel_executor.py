@@ -3672,9 +3672,14 @@ class ParallelACExecutor:
         exhausted_attempts: set[tuple[int, int]] = set()
         for event in events:
             event_type = getattr(event, "type", None)
+            if event_type not in {
+                "execution.ac.outcome_finalized",
+                "execution.ac.recovery_exhausted",
+            }:
+                continue
             data = getattr(event, "data", None)
             if not isinstance(data, dict):
-                continue
+                return None
             ac_idx = data.get("root_ac_index")
             attempt = data.get("retry_attempt")
             if (
@@ -3685,11 +3690,9 @@ class ParallelACExecutor:
                 or isinstance(attempt, bool)
                 or attempt < 0
             ):
-                continue
+                return None
             if event_type == "execution.ac.recovery_exhausted":
                 exhausted_attempts.add((ac_idx, attempt))
-                continue
-            if event_type != "execution.ac.outcome_finalized":
                 continue
             success = data.get("success")
             raw_outcome = data.get("outcome")
@@ -3700,7 +3703,7 @@ class ParallelACExecutor:
                 or not isinstance(is_decomposed, bool)
                 or not isinstance(forced_frontier_routing, bool)
             ):
-                continue
+                return None
             try:
                 outcome = (
                     ACExecutionOutcome(raw_outcome)
@@ -3710,7 +3713,7 @@ class ParallelACExecutor:
                     else ACExecutionOutcome.FAILED
                 )
             except ValueError:
-                continue
+                return None
             context_valid, context_summary = self._deserialize_durable_ac_context_summary(
                 data.get("context_summary"),
                 expected_ac_index=ac_idx,

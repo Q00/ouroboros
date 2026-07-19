@@ -4145,6 +4145,61 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
         )
 
     @pytest.mark.asyncio
+    async def test_malformed_newer_finalized_marker_blocks_stale_fallback(self) -> None:
+        """A corrupt latest attempt cannot make an older attempt authoritative."""
+        from ouroboros.events.base import BaseEvent
+
+        event_store = AsyncMock()
+        event_store.replay.return_value = [
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-original",
+                data={
+                    "execution_id": "exec-original",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "retry_attempt": 0,
+                    "success": False,
+                    "outcome": "failed",
+                    "is_decomposed": False,
+                    "forced_frontier_routing": False,
+                    "context_summary": None,
+                },
+            ),
+            BaseEvent(
+                type="execution.ac.outcome_finalized",
+                aggregate_type="execution",
+                aggregate_id="exec-original",
+                data={
+                    "execution_id": "exec-original",
+                    "session_id": "s1",
+                    "root_ac_index": 0,
+                    "retry_attempt": 1,
+                    # Type-mangled latest success from a torn/foreign writer.
+                    "success": "true",
+                    "outcome": "succeeded",
+                    "is_decomposed": False,
+                    "forced_frontier_routing": False,
+                    "context_summary": None,
+                },
+            ),
+        ]
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        recovered = await executor._reconstruct_finalized_outcomes(
+            execution_id="exec-original",
+            total_acs=1,
+        )
+
+        assert recovered is None
+
+    @pytest.mark.asyncio
     async def test_retry_consumption_reconstructed_from_finalized_markers(
         self, tmp_path: Path
     ) -> None:
