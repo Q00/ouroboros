@@ -4421,6 +4421,44 @@ class TestOutcomeFinalizedWriteFailureFailsClosed:
             await store.close()
 
 
+class TestRecoveryExhaustedWriteFailureFailsClosed:
+    @pytest.mark.asyncio
+    async def test_failed_write_retries_before_dedupe_is_finalized(self) -> None:
+        """A failed append cannot consume the in-process dedupe key forever."""
+        executor = _make_executor_with_active_ladder()
+        executor._safe_emit_event = AsyncMock(side_effect=[False, True])
+
+        await executor._emit_recovery_exhausted(
+            seed=_make_seed(),
+            result=_failed_result(),
+            root_ac_index=0,
+            session_id="s1",
+            execution_id="exec-1",
+            retry_termination_reason="budget_exhausted",
+        )
+
+        assert ("exec-1", 0) not in executor._recovery_exhausted_emitted
+        assert ("exec-1", 0) in executor._recovery_exhausted_pending
+        assert executor._deferred_durable_write_tasks
+
+        await asyncio.gather(*executor._deferred_durable_write_tasks)
+
+        assert executor._safe_emit_event.await_count == 2
+        assert ("exec-1", 0) in executor._recovery_exhausted_emitted
+        assert ("exec-1", 0) not in executor._recovery_exhausted_pending
+
+        # Once persistence is confirmed, later callers are genuinely deduped.
+        await executor._emit_recovery_exhausted(
+            seed=_make_seed(),
+            result=_failed_result(),
+            root_ac_index=0,
+            session_id="s1",
+            execution_id="exec-1",
+            retry_termination_reason="budget_exhausted",
+        )
+        assert executor._safe_emit_event.await_count == 2
+
+
 class TestDeferredWriteFirstAttemptIsImmediate:
     """Adversarial-review Bug #1: the deferred retry loop slept the FULL
     parked cadence (default 300s) BEFORE its first attempt, while the

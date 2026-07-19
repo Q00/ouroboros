@@ -1488,6 +1488,7 @@ class ParallelACExecutor:
         self._alt_harness_redispatched_acs: set[str] = set()
         self._alt_harness_status_by_root: dict[int, str] = {}
         self._recovery_exhausted_emitted: set[tuple[str, int]] = set()
+        self._recovery_exhausted_pending: set[tuple[str, int]] = set()
 
     @staticmethod
     def _build_dispatch_rate_gate(adapter: AgentRuntime) -> RateLimitGate:
@@ -9457,9 +9458,11 @@ Respond with either ATOMIC or the structured JSON object only.
         if result.success or result.outcome is not ACExecutionOutcome.FAILED:
             return
         emission_key = (execution_id or session_id, root_ac_index)
-        if emission_key in self._recovery_exhausted_emitted:
+        if (
+            emission_key in self._recovery_exhausted_emitted
+            or emission_key in self._recovery_exhausted_pending
+        ):
             return
-        self._recovery_exhausted_emitted.add(emission_key)
 
         criterion = seed.acceptance_criteria[root_ac_index]
         semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
@@ -9469,26 +9472,55 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         if alternate_status == "failed":
             retry_termination_reason = "alternate_harness_exhausted"
-        await self._safe_emit_event(
-            BaseEvent(
-                type="execution.ac.recovery_exhausted",
-                aggregate_type="execution",
-                aggregate_id=execution_id or session_id,
-                data={
-                    "schema_version": 1,
-                    "execution_id": execution_id,
-                    "session_id": session_id,
-                    "root_ac_index": root_ac_index,
-                    "semantic_ac_key": semantic_ac_key,
-                    "retry_attempt": result.retry_attempt,
-                    "configured_retry_attempts": self._ac_retry_attempts,
-                    "retry_termination_reason": retry_termination_reason,
-                    "alternate_redispatch_status": alternate_status,
-                    "last_failure_class": self._failure_class_for_result(result) or "unknown",
-                    "success": False,
-                },
-            )
+        event = BaseEvent(
+            type="execution.ac.recovery_exhausted",
+            aggregate_type="execution",
+            aggregate_id=execution_id or session_id,
+            data={
+                "schema_version": 1,
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "root_ac_index": root_ac_index,
+                "semantic_ac_key": semantic_ac_key,
+                "retry_attempt": result.retry_attempt,
+                "configured_retry_attempts": self._ac_retry_attempts,
+                "retry_termination_reason": retry_termination_reason,
+                "alternate_redispatch_status": alternate_status,
+                "last_failure_class": self._failure_class_for_result(result) or "unknown",
+                "success": False,
+            },
         )
+
+        async def _emit_marker() -> bool:
+            return await self._safe_emit_event(event)
+
+        if await _emit_marker():
+            self._recovery_exhausted_emitted.add(emission_key)
+            return
+
+        log.error(
+            "parallel_executor.ac.recovery_exhausted_write_failed_correctness_risk",
+            root_ac_index=root_ac_index,
+            execution_id=execution_id,
+            retry_attempt=result.retry_attempt,
+        )
+        self._recovery_exhausted_pending.add(emission_key)
+
+        def _mark_persisted() -> None:
+            self._recovery_exhausted_pending.discard(emission_key)
+            self._recovery_exhausted_emitted.add(emission_key)
+
+        task = self._schedule_deferred_durable_write(
+            write=_emit_marker,
+            on_persisted=_mark_persisted,
+            log_key="parallel_executor.ac.recovery_exhausted",
+            root_ac_index=root_ac_index,
+            execution_id=execution_id,
+            retry_attempt=result.retry_attempt,
+        )
+        # If the bounded background retry gives up or is cancelled, clear the
+        # in-flight guard so a later authoritative call can try again.
+        task.add_done_callback(lambda _task: self._recovery_exhausted_pending.discard(emission_key))
 
     async def _compute_sibling_flip_gated_out(
         self,
@@ -10122,7 +10154,7 @@ Respond with either ATOMIC or the structured JSON object only.
         on_persisted: Callable[[], None] | None,
         log_key: str,
         **log_context: Any,
-    ) -> None:
+    ) -> asyncio.Task[None]:
         """Keep retrying an exhausted correctness-bearing write in the background.
 
         Round-6 Findings #3/#4 (BLOCKING), same underlying problem for two
@@ -10209,6 +10241,7 @@ Respond with either ATOMIC or the structured JSON object only.
         task = asyncio.create_task(_retry_loop())
         self._deferred_durable_write_tasks.add(task)
         task.add_done_callback(self._deferred_durable_write_tasks.discard)
+        return task
 
     async def _drain_deferred_durable_writes(self) -> None:
         """Give in-flight deferred durable writes a bounded final shot.
