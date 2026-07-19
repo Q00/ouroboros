@@ -3651,6 +3651,30 @@ class ParallelACExecutor:
                 if normalized_index in normalized_failed:
                     return f"failed_indices contains duplicate AC index: {entry!r}"
                 normalized_failed.add(normalized_index)
+        normalized_external_completed: set[int] | None = None
+        if "satisfied_externally_indices" in state:
+            raw_external_completed = state["satisfied_externally_indices"]
+            if not isinstance(raw_external_completed, list | tuple):
+                return f"satisfied_externally_indices is not a list: {raw_external_completed!r}"
+            normalized_external_completed = set()
+            for entry in raw_external_completed:
+                normalized_index = cls._checkpoint_index_value(entry)
+                if normalized_index is None:
+                    return (
+                        f"satisfied_externally_indices entry is not an integer AC index: {entry!r}"
+                    )
+                if normalized_index < 0 or (
+                    total_acs is not None and normalized_index >= total_acs
+                ):
+                    return (
+                        "satisfied_externally_indices entry is outside the Seed AC range: "
+                        f"{entry!r}"
+                    )
+                if normalized_index in normalized_external_completed:
+                    return "satisfied_externally_indices contains duplicate AC index"
+                normalized_external_completed.add(normalized_index)
+        elif state.get("checkpoint_contract_version") == _EXECUTION_CHECKPOINT_CONTRACT_VERSION:
+            return "satisfied_externally_indices is missing"
         completed_count: int | None = None
         if "completed_count" in state:
             completed_count = state["completed_count"]
@@ -3717,6 +3741,10 @@ class ParallelACExecutor:
                             and isinstance(raw_ac.get("ac_index"), int)
                             and not isinstance(raw_ac.get("ac_index"), bool)
                         }
+                if total_acs is not None and any(
+                    ac_index >= total_acs for ac_index in external_indices | reconciled_indices
+                ):
+                    return "dispatch context provenance is outside the Seed AC range"
                 context_level_by_ac = {
                     raw_ac["ac_index"]: raw_context["level_number"]
                     for raw_context in state["level_contexts"]
@@ -3725,8 +3753,13 @@ class ParallelACExecutor:
                 completed_status_indices = {
                     index for index, status in normalized_statuses.items() if status == "completed"
                 }
+                satisfied_externally = normalized_external_completed or set()
+                if not satisfied_externally <= completed_status_indices:
+                    return "satisfied_externally_indices does not match completed ac_statuses"
+                if not satisfied_externally <= external_indices:
+                    return "satisfied_externally_indices is not covered by the dispatch skip set"
                 context_indices = set(context_level_by_ac)
-                missing_context = completed_status_indices - context_indices - external_indices
+                missing_context = completed_status_indices - context_indices - satisfied_externally
                 unexpected_context = context_indices - completed_status_indices - reconciled_indices
                 if missing_context or unexpected_context:
                     return "level_contexts ACs do not match completed/external/reconciled progress"
@@ -3989,6 +4022,70 @@ class ParallelACExecutor:
             )
         return [by_level[level_number] for level_number in sorted(by_level)]
 
+    @staticmethod
+    def _recovery_exhausted_payload_malformed(
+        data: Mapping[str, Any],
+        *,
+        execution_id: str,
+        configured_retry_attempts: int,
+    ) -> str | None:
+        """Validate the complete closure contract emitted by this executor."""
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        expected_fields = {
+            "schema_version",
+            "execution_id",
+            "session_id",
+            "root_ac_index",
+            "semantic_ac_key",
+            "retry_attempt",
+            "configured_retry_attempts",
+            "retry_termination_reason",
+            "alternate_redispatch_status",
+            "last_failure_class",
+            "success",
+        }
+        if set(data) != expected_fields:
+            return "recovery_exhausted has an invalid shape"
+        if data.get("schema_version") != 1 or isinstance(data.get("schema_version"), bool):
+            return "recovery_exhausted has an unsupported schema_version"
+        if data.get("execution_id") != execution_id:
+            return "recovery_exhausted execution_id does not match the replay aggregate"
+        session_id = data.get("session_id")
+        semantic_ac_key = data.get("semantic_ac_key")
+        if not isinstance(session_id, str) or not session_id:
+            return "recovery_exhausted session_id is invalid"
+        if not isinstance(semantic_ac_key, str) or not semantic_ac_key:
+            return "recovery_exhausted semantic_ac_key is invalid"
+        persisted_retry_attempts = data.get("configured_retry_attempts")
+        if (
+            not isinstance(persisted_retry_attempts, int)
+            or isinstance(persisted_retry_attempts, bool)
+            or persisted_retry_attempts < 0
+            or persisted_retry_attempts != configured_retry_attempts
+        ):
+            return "recovery_exhausted configured retry policy does not match"
+        termination_reason = data.get("retry_termination_reason")
+        alternate_status = data.get("alternate_redispatch_status")
+        if termination_reason not in {
+            "alternate_harness_exhausted",
+            "budget_exhausted",
+            "infra_fatal",
+            "not_retryable",
+            "repeated_failure_early_stop",
+        }:
+            return "recovery_exhausted termination reason is invalid"
+        if alternate_status not in {"failed", "not_attempted", "not_eligible"}:
+            return "recovery_exhausted alternate redispatch status is invalid"
+        if (alternate_status == "failed") != (termination_reason == "alternate_harness_exhausted"):
+            return "recovery_exhausted alternate status contradicts its termination reason"
+        failure_class = data.get("last_failure_class")
+        if failure_class not in {member.value for member in FailureClass} | {"unknown"}:
+            return "recovery_exhausted failure class is invalid"
+        if data.get("success") is not False:
+            return "recovery_exhausted must record success=false"
+        return None
+
     async def _reconstruct_finalized_outcomes(
         self, *, execution_id: str, total_acs: int
     ) -> dict[int, _RecoveredFinalizedOutcome] | None:
@@ -4030,16 +4127,33 @@ class ParallelACExecutor:
             ):
                 return None
             if event_type == "execution.ac.recovery_exhausted":
+                if (
+                    self._recovery_exhausted_payload_malformed(
+                        data,
+                        execution_id=execution_id,
+                        configured_retry_attempts=self._ac_retry_attempts,
+                    )
+                    is not None
+                ):
+                    return None
                 exhausted_attempts.add((ac_idx, attempt))
                 continue
             success = data.get("success")
             raw_outcome = data.get("outcome")
             is_decomposed = data.get("is_decomposed", False)
             forced_frontier_routing = data.get("forced_frontier_routing", False)
+            event_execution_id = data.get("execution_id")
+            event_session_id = data.get("session_id")
+            event_ac_index = data.get("ac_index")
             if (
                 not isinstance(success, bool)
                 or not isinstance(is_decomposed, bool)
                 or not isinstance(forced_frontier_routing, bool)
+                or event_execution_id != execution_id
+                or not isinstance(event_session_id, str)
+                or not event_session_id
+                or event_ac_index != ac_idx
+                or isinstance(event_ac_index, bool)
             ):
                 return None
             try:
@@ -4047,10 +4161,19 @@ class ParallelACExecutor:
                     ACExecutionOutcome(raw_outcome)
                     if isinstance(raw_outcome, str)
                     else ACExecutionOutcome.SUCCEEDED
-                    if success
+                    if raw_outcome is None and success
                     else ACExecutionOutcome.FAILED
+                    if raw_outcome is None
+                    else None
                 )
             except ValueError:
+                return None
+            expected_outcome = (
+                ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED
+            )
+            if outcome is not expected_outcome:
+                return None
+            if not success and data.get("context_summary") is not None:
                 return None
             context_valid, context_summary = self._deserialize_durable_ac_context_summary(
                 data.get("context_summary"),
@@ -4202,6 +4325,7 @@ class ParallelACExecutor:
         dispatch_contract: Mapping[str, Any],
         ac_statuses: dict[int, str],
         failed_indices: set[int],
+        satisfied_externally_indices: set[int],
         completed_count: int,
         level_contexts: list[LevelContext],
         checkpoint_point: str,
@@ -4259,6 +4383,7 @@ class ParallelACExecutor:
                     "dispatch_contract": dict(dispatch_contract),
                     "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                     "failed_indices": sorted(failed_indices),
+                    "satisfied_externally_indices": sorted(satisfied_externally_indices),
                     "completed_count": completed_count,
                     "level_contexts": serialize_level_contexts(level_contexts),
                     "decomposition_decisions": {
@@ -4614,6 +4739,7 @@ class ParallelACExecutor:
         all_results: list[ACExecutionResult] = []
         failed_indices: set[int] = set()
         blocked_indices: set[int] = set()
+        satisfied_externally_indices: set[int] = set()
         stage_results: list[ParallelExecutionStageResult] = []
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
@@ -4672,6 +4798,7 @@ class ParallelACExecutor:
             pre_recovery_level_contexts = list(level_contexts)
             pre_recovery_external_completed = dict(external_completed)
             pre_recovery_dispatch_contract = dict(dispatch_contract)
+            pre_recovery_satisfied_externally_indices = set(satisfied_externally_indices)
             try:
                 seed_id = self._checkpoint_seed_id(seed, session_id)
                 cp = await self._load_checkpoint_for_recovery(seed_id)
@@ -5007,6 +5134,9 @@ class ParallelACExecutor:
                             ac_statuses[int(idx)] = "pending" if status == "skipped" else status
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
+                        satisfied_externally_indices.update(
+                            int(idx) for idx in cp.state.get("satisfied_externally_indices", [])
+                        )
                         completed_count = cp.state.get("completed_count", 0)
                         # Restore execution semantics before interpreting
                         # finalized attempts: the original retry cap/profile
@@ -5248,13 +5378,18 @@ class ParallelACExecutor:
                         for ac_idx in sorted(checkpoint_resolved):
                             status = checkpoint_resolved[ac_idx]
                             is_completed = status == "completed"
+                            is_external = ac_idx in satisfied_externally_indices
                             all_results.append(
                                 ACExecutionResult(
                                     ac_index=ac_idx,
                                     ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                                     success=is_completed,
                                     final_message=(
-                                        "[Restored from checkpoint]" if is_completed else ""
+                                        "[Restored externally satisfied result from checkpoint]"
+                                        if is_external
+                                        else "[Restored from checkpoint]"
+                                        if is_completed
+                                        else ""
                                     ),
                                     error=(
                                         None
@@ -5262,6 +5397,13 @@ class ParallelACExecutor:
                                         else "Failed (restored from checkpoint)"
                                     ),
                                     retry_attempt=ac_retry_attempts.get(ac_idx, 0),
+                                    outcome=(
+                                        ACExecutionOutcome.SATISFIED_EXTERNALLY
+                                        if is_external
+                                        else ACExecutionOutcome.SUCCEEDED
+                                        if is_completed
+                                        else ACExecutionOutcome.FAILED
+                                    ),
                                 )
                             )
                         self._console.print(
@@ -5330,6 +5472,7 @@ class ParallelACExecutor:
                 level_contexts = pre_recovery_level_contexts
                 external_completed = pre_recovery_external_completed
                 dispatch_contract = pre_recovery_dispatch_contract
+                satisfied_externally_indices = pre_recovery_satisfied_externally_indices
                 del all_results[pre_recovery_result_count:]
                 self._decomposition_decisions.clear()
                 self._decomposition_decisions.update(pre_recovery_decomposition_decisions)
@@ -5467,6 +5610,7 @@ class ParallelACExecutor:
             dispatch_contract=dispatch_contract,
             ac_statuses=ac_statuses,
             failed_indices=failed_indices,
+            satisfied_externally_indices=satisfied_externally_indices,
             completed_count=completed_count,
             level_contexts=level_contexts,
             checkpoint_point="run_start",
@@ -5610,6 +5754,7 @@ class ParallelACExecutor:
                     all_results.append(satisfied_result)
                     stage_ac_results.append(satisfied_result)
                     ac_statuses[ac_idx] = "completed"
+                    satisfied_externally_indices.add(ac_idx)
                     completed_count += 1
                     level_success += 1
                     log.info(
@@ -5949,6 +6094,7 @@ class ParallelACExecutor:
                     dispatch_contract=dispatch_contract,
                     ac_statuses=ac_statuses,
                     failed_indices=failed_indices,
+                    satisfied_externally_indices=satisfied_externally_indices,
                     completed_count=completed_count,
                     level_contexts=level_contexts,
                     checkpoint_point=f"level_{level_num}_completed",
