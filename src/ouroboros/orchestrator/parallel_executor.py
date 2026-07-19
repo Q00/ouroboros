@@ -4066,6 +4066,7 @@ class ParallelACExecutor:
         if not isinstance(semantic_ac_key, str) or not semantic_ac_key:
             return "recovery_exhausted semantic_ac_key is invalid"
         persisted_retry_attempts = data.get("configured_retry_attempts")
+        retry_attempt = data.get("retry_attempt")
         if (
             not isinstance(persisted_retry_attempts, int)
             or isinstance(persisted_retry_attempts, bool)
@@ -4073,6 +4074,12 @@ class ParallelACExecutor:
             or persisted_retry_attempts != configured_retry_attempts
         ):
             return "recovery_exhausted configured retry policy does not match"
+        if (
+            not isinstance(retry_attempt, int)
+            or isinstance(retry_attempt, bool)
+            or retry_attempt < 0
+        ):
+            return "recovery_exhausted retry_attempt is invalid"
         termination_reason = data.get("retry_termination_reason")
         alternate_status = data.get("alternate_redispatch_status")
         if termination_reason not in {
@@ -4087,6 +4094,8 @@ class ParallelACExecutor:
             return "recovery_exhausted alternate redispatch status is invalid"
         if (alternate_status == "failed") != (termination_reason == "alternate_harness_exhausted"):
             return "recovery_exhausted alternate status contradicts its termination reason"
+        if termination_reason == "budget_exhausted" and retry_attempt < persisted_retry_attempts:
+            return "recovery_exhausted budget closure precedes the configured retry cap"
         failure_class = data.get("last_failure_class")
         if failure_class not in {member.value for member in FailureClass} | {"unknown"}:
             return "recovery_exhausted failure class is invalid"

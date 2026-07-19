@@ -4886,6 +4886,10 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
             {"configured_retry_attempts": 99},
             {"retry_termination_reason": "unknown_reason"},
             {"alternate_redispatch_status": "succeeded"},
+            {
+                "retry_attempt": 0,
+                "retry_termination_reason": "budget_exhausted",
+            },
         ],
     )
     async def test_malformed_recovery_exhausted_payload_fails_closed(
@@ -4963,7 +4967,7 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
                     "session_id": "s1",
                     "root_ac_index": 0,
                     "ac_index": 0,
-                    "retry_attempt": 0,
+                    "retry_attempt": 2,
                     "success": False,
                     "outcome": "failed",
                     "is_decomposed": False,
@@ -4981,9 +4985,9 @@ class TestOrdinaryRetryBudgetSurvivesCrashRestart:
                     "session_id": "s1",
                     "root_ac_index": 0,
                     "semantic_ac_key": "ac-key",
-                    "retry_attempt": 0,
+                    "retry_attempt": 2,
                     "configured_retry_attempts": 2,
-                    "retry_termination_reason": "not_retryable",
+                    "retry_termination_reason": "budget_exhausted",
                     "alternate_redispatch_status": "not_attempted",
                     "last_failure_class": "unknown",
                     "success": False,
