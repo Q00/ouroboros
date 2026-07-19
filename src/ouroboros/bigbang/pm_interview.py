@@ -114,6 +114,33 @@ Respond ONLY with valid JSON in this exact format:
 """
 
 
+def _fit_steering_paragraphs(steering: str, budget: int) -> str:
+    """Fit whole steering paragraphs into ``budget`` characters.
+
+    Paragraphs are included in document order and atomically: one that does
+    not fit (with its trailing ``"\\n\\n"`` separator) is dropped along with
+    everything after it, so a reduced budget can only narrow the steering
+    policy — never cut a sentence in half or strip the exclusion clause off
+    a paragraph and invert its meaning.
+
+    Returns the fitted block ending with ``"\\n\\n"``, or ``""`` when not
+    even the first paragraph fits.
+    """
+    fitted_len = 0
+    fitted: list[str] = []
+    for paragraph in steering.split("\n\n"):
+        if not paragraph.strip():
+            continue
+        cost = len(paragraph) + 2  # paragraph + "\n\n" separator
+        if fitted_len + cost > budget:
+            break
+        fitted.append(paragraph)
+        fitted_len += cost
+    if not fitted:
+        return ""
+    return "\n\n".join(fitted) + "\n\n"
+
+
 @dataclass
 class PMInterviewEngine:
     """PM interview engine — wraps InterviewEngine via composition.
@@ -486,8 +513,11 @@ class PMInterviewEngine:
         inner builder is guaranteed its minimum system-prompt allocation
         first, because it carries the engine's operating instructions (role,
         one-question rule, round, initial context, ambiguity snapshot).
-        Steering is philosophy — safe to truncate or drop when a saturated
-        history leaves only the minimum budget.
+        Steering is philosophy — safe to shed when a saturated history
+        leaves only the minimum budget. Shedding is paragraph-atomic: a
+        steering paragraph is either included whole or dropped, never cut
+        mid-sentence, so a reduced budget can narrow the policy but never
+        garble or invert it.
         """
         self._pm_steering = getattr(self, "_pm_steering", _PM_SYSTEM_PROMPT_PREFIX)
 
@@ -504,10 +534,10 @@ class PMInterviewEngine:
         ) -> str:
             cap = max_chars or self.inner._MAX_SYSTEM_PROMPT_CHARS
             inner_reserve = min(cap, self.inner._MIN_SYSTEM_PROMPT_CHARS)
-            steering_block = self._pm_steering + "\n\n"
-            steering_budget = max(0, cap - inner_reserve)
-            if len(steering_block) > steering_budget:
-                steering_block = steering_block[:steering_budget]
+            steering_block = _fit_steering_paragraphs(
+                self._pm_steering,
+                budget=max(0, cap - inner_reserve),
+            )
             # Never pass 0 down: the inner builder treats falsy max_chars as
             # "use the default cap", which would blow the budget again.
             inner_budget = max(1, cap - len(steering_block))

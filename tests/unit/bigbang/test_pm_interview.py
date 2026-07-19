@@ -140,22 +140,45 @@ class TestPMSteeringPromptBudget:
         assert self._INNER_ROLE_MARKER in prompt
         assert self._INNER_JOB_MARKER in prompt
 
-    def test_mid_cap_truncates_steering_before_inner_prompt(self, tmp_path: Path) -> None:
-        """Between the minimum and comfortable budgets, steering is truncated
-        to whatever fits above the inner reserve — the inner prompt still
-        gets its full minimum allocation."""
+    @staticmethod
+    def _assert_steering_paragraphs_atomic(prompt: str, cap: int) -> None:
+        """Every steering paragraph is either fully present or fully absent.
+
+        A paragraph whose head appears without its tail was cut mid-text —
+        the failure mode where a reduced budget garbles the prompt or strips
+        the exclusion clause off the post-launch policy and inverts it.
+        """
+        for paragraph in _PM_SYSTEM_PROMPT_PREFIX.split("\n\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            head = paragraph[:40]
+            if head in prompt:
+                assert paragraph in prompt, (
+                    f"cap={cap}: steering paragraph cut mid-text: {head!r}..."
+                )
+
+    @pytest.mark.parametrize("cap", range(1_200, 2_700, 100))
+    def test_intermediate_caps_shed_steering_paragraphs_atomically(
+        self, tmp_path: Path, cap: int
+    ) -> None:
+        """Budgets between the minimum and the comfortable range (reachable
+        as conversation history grows) may narrow the steering policy but
+        must never garble or invert it, and the inner prompt survives."""
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
-            interview_id="t_budget_mid",
+            interview_id=f"t_budget_atomic_{cap}",
             initial_context="Build a task manager",
         )
-        cap = 2_000
         prompt = engine.inner._build_system_prompt(state, max_chars=cap)
         assert len(prompt) <= cap
-        steering_budget = cap - InterviewEngine._MIN_SYSTEM_PROMPT_CHARS
-        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX[:steering_budget])
         assert self._INNER_ROLE_MARKER in prompt
         assert self._INNER_JOB_MARKER in prompt
+        self._assert_steering_paragraphs_atomic(prompt, cap)
+        # The post-launch exclusion must never be separated from its subject.
+        flat = " ".join(prompt.split())
+        if "Post-launch outcomes" in flat:
+            assert "no place in this contract" in flat
 
     def test_tiny_cap_is_never_exceeded(self, tmp_path: Path) -> None:
         engine = self._steered_engine(tmp_path)
