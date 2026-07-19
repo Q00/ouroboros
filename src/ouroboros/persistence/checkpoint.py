@@ -298,9 +298,15 @@ class CheckpointStore:
 
         Returns:
             Result.ok(CheckpointData) with valid checkpoint,
-            Result.err(PersistenceError) if no valid checkpoint found.
+            Result.err(PersistenceError) if no valid checkpoint found. The
+            error's ``details["no_checkpoint_found"]`` is ``True`` only when
+            EVERY rollback level was confirmed absent (an ordinary "nothing
+            was ever saved" launch) — ``False`` means at least one level
+            exists but could not be read (corruption/IO), which callers
+            must treat as an indeterminate read, not as "no checkpoint".
         """
         # Try loading checkpoints in order: current, .1, .2, .3
+        all_levels_confirmed_absent = True
         for level in range(self.MAX_ROLLBACK_DEPTH + 1):
             result = self._load_checkpoint_level(seed_id, level)
             if result.is_ok:
@@ -311,6 +317,8 @@ class CheckpointStore:
 
             # Log corruption details for debugging
             error = result.error
+            if not (isinstance(error.details, dict) and error.details.get("not_found") is True):
+                all_levels_confirmed_absent = False
             print(f"Checkpoint corruption at level {level} for {seed_id}: {error.message}")
 
         # No valid checkpoint found at any level
@@ -319,7 +327,10 @@ class CheckpointStore:
                 f"No valid checkpoint found for seed {seed_id} "
                 f"(tried {self.MAX_ROLLBACK_DEPTH + 1} levels)",
                 operation="load",
-                details={"seed_id": seed_id},
+                details={
+                    "seed_id": seed_id,
+                    "no_checkpoint_found": all_levels_confirmed_absent,
+                },
             )
         )
 
@@ -383,7 +394,12 @@ class CheckpointStore:
                 PersistenceError(
                     f"Checkpoint not found at level {level}",
                     operation="read",
-                    details={"seed_id": seed_id, "level": level},
+                    # ``not_found`` marks a CONFIRMED-absent level, letting
+                    # ``load()`` distinguish "nothing was ever saved" from
+                    # "a file exists but could not be read" (round-15
+                    # finding #2 — degraded reads must not masquerade as
+                    # "no checkpoint").
+                    details={"seed_id": seed_id, "level": level, "not_found": True},
                 )
             )
 

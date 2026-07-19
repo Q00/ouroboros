@@ -1035,6 +1035,27 @@ class CheckpointOwnershipError(OuroborosError):
     """
 
 
+class CheckpointUnreadableError(OuroborosError):
+    """The RC3 checkpoint store could not CONFIRM whether a checkpoint exists.
+
+    Round-15 finding #2 (BLOCKING, load direction): a degraded checkpoint
+    READ used to fall through to "proceed as if no checkpoint exists" — the
+    fail-OPEN direction the ``_replay_with_retry`` convention forbids for
+    every other durable read in this file. A checkpoint that genuinely
+    exists but cannot be read may belong to a still-live run (silently
+    bypassing the round-12 ownership gate) or to an interrupted run whose
+    execution_id/policy/ladder history rounds 9-13 exist to restore;
+    running fresh over either mints a new execution_id and races or orphans
+    the original run's durable state. Like
+    :class:`CheckpointOwnershipError`, this fails the LAUNCH loudly after
+    bounded read retries, before any AC work starts — an infra-fatal store
+    degradation, not an AC failure, so the escalation mandate (never
+    surface FAILED with escalation options untried) is not implicated. A
+    CONFIRMED "no checkpoint at any rollback level" is still an ordinary
+    fresh launch — only the indeterminate read refuses.
+    """
+
+
 class ConcurrentSeedExecutionError(OuroborosError):
     """Another invocation IN THIS PROCESS is already executing this seed.
 
@@ -1324,6 +1345,19 @@ class ParallelACExecutor:
         # final output says "the true durable state of X is uncertain"
         # instead of reporting an ordinary, fully-durable completion.
         self._unconfirmed_durable_write_descriptions: list[str] = []
+        # Round-15 finding #2 (BLOCKING): monotonic sequence numbers for RC3
+        # checkpoint saves. ``_checkpoint_save_seq`` counts save ATTEMPTS;
+        # ``_checkpoint_persisted_seq`` records the newest attempt that
+        # actually LANDED. The deferred retry of a failed pre-dispatch
+        # anchor save uses them to (a) stand down once any newer per-level
+        # save has landed (that checkpoint strictly supersedes the anchor)
+        # and (b) never overwrite a newer durable checkpoint with staler
+        # state. ``_latest_checkpoint_save_args`` keeps the most recent save
+        # call's arguments so the deferred retry persists the FRESHEST known
+        # progress instead of a stale run-start snapshot.
+        self._checkpoint_save_seq: int = 0
+        self._checkpoint_persisted_seq: int = 0
+        self._latest_checkpoint_save_args: dict[str, Any] | None = None
         # Round-6 Finding #1: the ACTUAL in-flight dispatch-attempt number
         # durably recorded by the latest ``lateral_escalation_progressed``
         # event for each root AC, reconstructed alongside
@@ -2561,6 +2595,68 @@ class ParallelACExecutor:
                 error=str(e),
             )
 
+    async def _load_checkpoint_for_recovery(self, seed_id: str, *, max_retries: int = 3) -> Any:
+        """Load the RC3 checkpoint, distinguishing "confirmed absent" from
+        "could not read" (round-15 finding #2, BLOCKING — load direction).
+
+        Returns the checkpoint on success, or ``None`` when the store
+        CONFIRMS no checkpoint exists at any rollback level (the
+        ``no_checkpoint_found`` marker on the store's load error). A
+        degraded read — the store raising, or returning an error WITHOUT
+        that confirmed-absent marker (corrupt-beyond-rollback, IO failure)
+        — is retried on the same bounded backoff ``_replay_with_retry``
+        uses, then raises :class:`CheckpointUnreadableError`: falling
+        through to "no checkpoint, run fresh" is the fail-open direction
+        (see the error class docstring for why running fresh over an
+        unconfirmable checkpoint is never safe).
+        """
+        last_error = "unknown error"
+        for attempt in range(max_retries):
+            try:
+                result = self._checkpoint_store.load(seed_id)
+            except Exception as e:  # noqa: BLE001 - degraded store surfaces below.
+                last_error = str(e)
+            else:
+                if hasattr(result, "is_ok") and result.is_ok:
+                    return result.value if result.value else None
+                error = getattr(result, "error", None)
+                details = getattr(error, "details", None)
+                if isinstance(details, Mapping) and details.get("no_checkpoint_found") is True:
+                    # Every rollback level was CONFIRMED absent — an
+                    # ordinary fresh launch, not a degraded read.
+                    return None
+                last_error = str(error) if error is not None else "unknown error"
+            if attempt < max_retries - 1:
+                wait = min(1.0 * (2**attempt), 5.0)
+                log.warning(
+                    "parallel_executor.recovery.checkpoint_load_retry",
+                    seed_id=seed_id,
+                    attempt=attempt + 1,
+                    error=last_error,
+                )
+                await anyio.sleep(wait)
+        log.error(
+            "parallel_executor.recovery.checkpoint_load_failed",
+            seed_id=seed_id,
+            attempts=max_retries,
+            error=last_error,
+        )
+        self._console.print(
+            "[red]Refusing to start: the checkpoint store could not confirm "
+            f"whether a prior run of seed '{seed_id}' left a resumable "
+            f"checkpoint ({last_error}). Running fresh over an unconfirmed "
+            "checkpoint could race a live run or orphan an interrupted "
+            "run's durable state.[/red]"
+        )
+        raise CheckpointUnreadableError(
+            f"Could not read the RC3 checkpoint for seed '{seed_id}' after "
+            f"{max_retries} attempts: {last_error}. Refusing to launch — a "
+            "checkpoint may exist but cannot be confirmed, and running "
+            "fresh over it could race a still-live run or silently orphan "
+            "an interrupted run's restorable identity/escalation state. "
+            "Investigate the checkpoint store, then relaunch."
+        )
+
     def _save_execution_checkpoint(
         self,
         *,
@@ -2573,7 +2669,7 @@ class ParallelACExecutor:
         completed_count: int,
         level_contexts: list[LevelContext],
         checkpoint_point: str,
-    ) -> None:
+    ) -> bool:
         """Persist the RC3 execution checkpoint in its one canonical shape.
 
         Called from two points with the SAME state layout: once at run
@@ -2587,11 +2683,38 @@ class ParallelACExecutor:
         after every level completion (the original RC3 cadence, which
         simply overwrites this same checkpoint with updated progress).
 
-        Best-effort by design, exactly like the historical per-level save:
-        a failed write is logged loudly but never fails the run itself.
+        Round-15 finding #2 (BLOCKING): a failed write is logged loudly and
+        never fails the run itself, but it is no longer uniformly silent to
+        the CALLER — the return value says whether the checkpoint actually
+        landed (``True`` also when no checkpoint store is configured: the
+        run then has no durability contract to honor). The pre-dispatch
+        anchor call site schedules a deferred durable retry on ``False``,
+        because a silently-lost anchor recreates the exact round-13 hole
+        this save exists to close. The per-level call sites deliberately
+        remain best-effort: see the reasoning at the level-loop call site.
+
+        Every attempt records its arguments in
+        ``_latest_checkpoint_save_args`` and bumps ``_checkpoint_save_seq``;
+        a success advances ``_checkpoint_persisted_seq`` so the anchor's
+        deferred retry can both stand down once a newer save has landed and
+        re-persist the freshest attempted state rather than a stale
+        run-start snapshot.
         """
         if not self._checkpoint_store:
-            return
+            return True
+        self._checkpoint_save_seq += 1
+        attempt_seq = self._checkpoint_save_seq
+        self._latest_checkpoint_save_args = {
+            "seed": seed,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "completed_levels": completed_levels,
+            "ac_statuses": ac_statuses,
+            "failed_indices": failed_indices,
+            "completed_count": completed_count,
+            "level_contexts": level_contexts,
+            "checkpoint_point": checkpoint_point,
+        }
         try:
             from ouroboros.persistence.checkpoint import CheckpointData
 
@@ -2689,26 +2812,25 @@ class ParallelACExecutor:
             )
             save_result = self._checkpoint_store.save(checkpoint)
             if hasattr(save_result, "is_ok") and save_result.is_ok:
+                self._checkpoint_persisted_seq = max(self._checkpoint_persisted_seq, attempt_seq)
                 log.info(
                     "parallel_executor.checkpoint.saved",
                     checkpoint_point=checkpoint_point,
                     completed_levels=completed_levels,
                     seed_id=seed_id,
                 )
-            else:
-                err_msg = (
-                    str(save_result.error) if hasattr(save_result, "error") else "unknown error"
-                )
-                log.warning(
-                    "parallel_executor.checkpoint.save_failed",
-                    checkpoint_point=checkpoint_point,
-                    completed_levels=completed_levels,
-                    seed_id=seed_id,
-                    error=err_msg,
-                )
-                self._console.print(
-                    f"  [yellow]Checkpoint save failed ({checkpoint_point}): {err_msg}[/yellow]"
-                )
+                return True
+            err_msg = str(save_result.error) if hasattr(save_result, "error") else "unknown error"
+            log.warning(
+                "parallel_executor.checkpoint.save_failed",
+                checkpoint_point=checkpoint_point,
+                completed_levels=completed_levels,
+                seed_id=seed_id,
+                error=err_msg,
+            )
+            self._console.print(
+                f"  [yellow]Checkpoint save failed ({checkpoint_point}): {err_msg}[/yellow]"
+            )
         except Exception as e:
             log.warning(
                 "parallel_executor.checkpoint.save_failed",
@@ -2716,6 +2838,7 @@ class ParallelACExecutor:
                 completed_levels=completed_levels,
                 error=str(e),
             )
+        return False
 
     async def _execute_ac_batch(
         self,
@@ -2972,9 +3095,8 @@ class ParallelACExecutor:
         if self._checkpoint_store:
             try:
                 seed_id = self._checkpoint_seed_id(seed, session_id)
-                load_result = self._checkpoint_store.load(seed_id)
-                if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
-                    cp = load_result.value
+                cp = await self._load_checkpoint_for_recovery(seed_id)
+                if cp is not None:
                     # Round-10 finding #1 (BLOCKING): a checkpoint is only a
                     # resume ticket for an INTERRUPTED run. If the run it
                     # belongs to already recorded a non-resumable terminal
@@ -3147,12 +3269,16 @@ class ParallelACExecutor:
                         # identity, if the checkpoint carried one).
                         recovery_adopted = True
                         restored_prompt_guidance = cp.state.get("prompt_guidance")
-            except CheckpointOwnershipError:
+            except (CheckpointOwnershipError, CheckpointUnreadableError):
                 # Round-12 finding #3: the ownership refusal must FAIL the
                 # launch, never degrade into "recovery failed, run fresh" —
                 # a fresh run of the same seed would still race the live
                 # owner on the shared checkpoint key, the workspace, and
-                # the dispatched ACs themselves.
+                # the dispatched ACs themselves. Round-15 finding #2: the
+                # unreadable-checkpoint refusal follows for the same reason
+                # — an UNCONFIRMED checkpoint may hide exactly that live
+                # owner (or an interrupted run's restorable identity), so a
+                # degraded read must not degrade into running fresh either.
                 raise
             except Exception as e:
                 log.warning(
@@ -3269,7 +3395,21 @@ class ParallelACExecutor:
         # run; the restored progress, for a recovery — which also
         # refreshes the round-12 ownership marker to THIS process). The
         # level loop keeps overwriting it as levels complete.
-        self._save_execution_checkpoint(
+        #
+        # Round-15 finding #2 (BLOCKING): this anchor is the ONLY durable
+        # record a first-level crash has — if its write silently fails, the
+        # run is in exactly the "zero durable record" state round 13 was
+        # built to close, and the old best-effort posture proceeded anyway.
+        # A failed anchor save therefore gets the same deferred durable
+        # retry every other correctness-bearing write in this file gets
+        # (rounds 6-13): keep retrying at the parked cadence in the
+        # background, and surface a terminal give-up through
+        # ``unconfirmed_durable_writes``. The retry re-persists the FRESHEST
+        # attempted checkpoint state (progress dicts are mutated in place
+        # and ``_latest_checkpoint_save_args`` tracks each later attempt),
+        # and stands down as soon as any newer save has landed — it must
+        # never roll a newer durable checkpoint back to staler progress.
+        anchor_persisted = self._save_execution_checkpoint(
             seed=seed,
             session_id=session_id,
             execution_id=execution_id,
@@ -3280,6 +3420,32 @@ class ParallelACExecutor:
             level_contexts=level_contexts,
             checkpoint_point="run_start",
         )
+        if self._checkpoint_store and not anchor_persisted:
+            anchor_attempt_seq = self._checkpoint_save_seq
+
+            async def _retry_run_start_anchor() -> bool:
+                if self._checkpoint_persisted_seq >= anchor_attempt_seq:
+                    # A save at/after the anchor attempt already landed — a
+                    # newer checkpoint strictly supersedes the anchor (same
+                    # shape, fresher progress); rewriting here could roll it
+                    # back to staler state.
+                    return True
+                latest_args = self._latest_checkpoint_save_args
+                if latest_args is None:  # pragma: no cover - anchor recorded args
+                    return False
+                retry_point = str(latest_args["checkpoint_point"])
+                if not retry_point.endswith("_deferred_retry"):
+                    retry_point += "_deferred_retry"
+                return self._save_execution_checkpoint(
+                    **{**latest_args, "checkpoint_point": retry_point}
+                )
+
+            self._schedule_deferred_durable_write(
+                write=_retry_run_start_anchor,
+                on_persisted=None,
+                log_key="parallel_executor.checkpoint.run_start_anchor",
+                execution_id=execution_id,
+            )
 
         # Execute groups sequentially, but ACs within each group in parallel.
         # The resilient progress emitter runs as a sibling background task
@@ -3704,7 +3870,24 @@ class ParallelACExecutor:
                     level_contexts.append(level_ctx)
                 stage_results.append(stage_result)
 
-                # RC3: Save checkpoint after each level completion
+                # RC3: Save checkpoint after each level completion.
+                #
+                # Round-15 finding #2: deliberately still best-effort (the
+                # historical posture), unlike the pre-dispatch anchor above.
+                # Once the anchor has landed (or is durably retrying in the
+                # background — and that retry re-persists the freshest
+                # attempted state recorded by THIS call), a failed per-level
+                # overwrite only leaves the durable checkpoint's PROGRESS
+                # briefly stale: recovery still finds the run's identity,
+                # policy, router, and dispatch semantics, and merely resumes
+                # from an earlier level. That is the safe direction (re-run
+                # and re-verify, never skip), and re-executing a level whose
+                # completion never persisted is the same crash-mid-level
+                # shape the ambiguous-completion machinery (round 11)
+                # already guards. Scheduling a deferred retry HERE would add
+                # real risk instead: a background rewrite racing later
+                # per-level saves could roll a newer durable checkpoint back
+                # to staler progress.
                 self._save_execution_checkpoint(
                     seed=seed,
                     session_id=session_id,

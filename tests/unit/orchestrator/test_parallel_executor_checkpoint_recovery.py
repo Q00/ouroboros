@@ -749,6 +749,227 @@ class TestFirstLevelCrashLeavesRecoverableCheckpoint:
         await run2_events.close()
 
 
+class _AnchorFailingStore(CheckpointStore):
+    """Real store whose first N ``save`` calls fail (transient write blip)."""
+
+    def __init__(self, base_path: Path, *, fail_first_saves: int) -> None:
+        super().__init__(base_path=base_path)
+        self.remaining_failures = fail_first_saves
+        self.save_attempts = 0
+
+    def save(self, checkpoint):  # type: ignore[no-untyped-def]
+        self.save_attempts += 1
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            from ouroboros.core.errors import PersistenceError
+            from ouroboros.core.types import Result
+
+            return Result.err(
+                PersistenceError(
+                    "simulated transient checkpoint write failure",
+                    operation="write",
+                    details={"seed_id": checkpoint.seed_id},
+                )
+            )
+        return super().save(checkpoint)
+
+
+class TestAnchorSaveFailureIsDurablyRetried:
+    """Round-15 finding #2 (BLOCKING, save direction): the pre-dispatch
+    anchor save was best-effort — if THAT write silently failed, a
+    first-level crash was back in the exact "zero durable record" state
+    round 13 was built to close (fresh execution_id minted on restart, the
+    original run's ladder/escalation events unreachable). A failed anchor
+    save must now get the same deferred durable retry every other
+    correctness-bearing write in this file gets."""
+
+    @pytest.mark.asyncio
+    async def test_failed_anchor_write_recovers_via_deferred_retry_then_crash_is_resumable(
+        self, tmp_path: Path
+    ) -> None:
+        """The review's exact scenario: the run-start anchor write FAILS,
+        the run then crashes during level 1 — recovery must STILL find the
+        original execution_id/policy (the deferred retry landed) instead of
+        silently starting fresh with zero durable record."""
+        seed = _seed("Anchor save failure is durably retried")
+        db_path = tmp_path / "events.db"
+        ckpt_path = tmp_path / "checkpoints"
+
+        # --- Run 1: the anchor (run_start) save fails; the crash follows
+        # during level 1 before any level-completion save could land.
+        run1_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run1_events.initialize()
+        run1_ckpt = _AnchorFailingStore(ckpt_path, fail_first_saves=1)
+        run1_ckpt.initialize()
+        run1 = _executor(
+            event_store=run1_events,
+            checkpoint_store=run1_ckpt,
+            lateral_escalation_enabled=True,
+            parked_retry_backoff_seconds=0.01,
+        )
+
+        async def _crash(**kwargs: object) -> list[ACExecutionResult]:
+            # Yield once so the deferred anchor retry's immediate first
+            # attempt gets scheduled the way it would in a real run.
+            await asyncio.sleep(0)
+            raise RuntimeError("simulated crash during the first level")
+
+        run1._run_batch_with_verify_and_retry = AsyncMock(side_effect=_crash)
+        with pytest.raises(BaseException):
+            await run1.execute_parallel(
+                seed,
+                session_id="session-original",
+                execution_id="exec-original",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+        await run1_events.close()
+
+        # The immediate anchor attempt failed, but the deferred retry (given
+        # its bounded final shot by the crash path's drain) landed the SAME
+        # identity/policy state durably.
+        assert run1_ckpt.save_attempts >= 2
+        saved = CheckpointStore(base_path=ckpt_path).load(seed.metadata.seed_id)
+        assert saved.is_ok
+        state = saved.value.state
+        assert state["execution_id"] == "exec-original"
+        assert state["completed_levels"] == 0
+        assert state["retry_policy"]["lateral_escalation_enabled"] is True
+
+        # --- Run 2: crash-restart. Recovery must adopt the retried anchor:
+        # original execution_id restored, original escalation policy wins
+        # over the restart's contrary config, level 1 re-dispatched.
+        run2_events = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await run2_events.initialize()
+        run2 = _executor(
+            event_store=run2_events,
+            checkpoint_store=CheckpointStore(base_path=ckpt_path),
+            lateral_escalation_enabled=False,
+        )
+        captured: dict[str, object] = {}
+
+        async def _recovered_stage_runner(**kwargs: object) -> list[ACExecutionResult]:
+            captured["execution_id"] = kwargs["execution_id"]
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        run2._run_batch_with_verify_and_retry = AsyncMock(side_effect=_recovered_stage_runner)
+        result = await run2.execute_parallel(
+            seed,
+            session_id="session-restart",
+            execution_id="exec-restart",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        assert captured["execution_id"] == "exec-original"
+        assert result.execution_id == "exec-original"
+        assert run2._lateral_escalation_enabled is True
+        await run2_events.close()
+
+    @pytest.mark.asyncio
+    async def test_anchor_retry_stands_down_after_newer_save_landed(self, tmp_path: Path) -> None:
+        """The deferred anchor retry must never roll a NEWER durable
+        checkpoint back to staler run-start state: once a per-level save
+        has landed, the pending retry reports success without writing."""
+        seed = _seed("Anchor retry stands down")
+        ckpt_path = tmp_path / "checkpoints"
+        store = _AnchorFailingStore(ckpt_path, fail_first_saves=1)
+        store.initialize()
+        executor = _executor(
+            event_store=AsyncMock(),
+            checkpoint_store=store,
+            parked_retry_backoff_seconds=60.0,
+        )
+
+        async def _complete_level(**kwargs: object) -> list[ACExecutionResult]:
+            return [ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
+
+        executor._run_batch_with_verify_and_retry = AsyncMock(side_effect=_complete_level)
+        result = await executor.execute_parallel(
+            seed,
+            session_id="session-live",
+            execution_id="exec-live",
+            tools=[],
+            system_prompt="system",
+            execution_plan=_plan(),
+        )
+        assert result.success_count == 1
+        # Nothing left unconfirmed: the level-completion save superseded the
+        # failed anchor, so its deferred retry stood down cleanly.
+        assert result.unconfirmed_durable_writes == ()
+        loaded = store.load(seed.metadata.seed_id)
+        assert loaded.is_ok
+        # The durable checkpoint kept the NEWER per-level progress — it was
+        # not rolled back to the run-start snapshot's zero progress.
+        assert loaded.value.state["completed_levels"] == 1
+
+
+class TestDegradedCheckpointReadFailsClosed:
+    """Round-15 finding #2 (BLOCKING, load direction): a checkpoint READ
+    that cannot confirm whether a checkpoint exists used to fall through to
+    "no checkpoint, run fresh" — silently bypassing the ownership gate and
+    every restoration round 9-13 added. An indeterminate read must refuse
+    the launch loudly BEFORE any AC work; a CONFIRMED absent checkpoint
+    stays an ordinary fresh launch."""
+
+    @pytest.mark.asyncio
+    async def test_confirmed_absent_checkpoint_returns_none(self, tmp_path: Path) -> None:
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        assert await executor._load_checkpoint_for_recovery("seed-never-saved") is None
+
+    @pytest.mark.asyncio
+    async def test_unreadable_checkpoint_raises_instead_of_running_fresh(
+        self, tmp_path: Path
+    ) -> None:
+        from ouroboros.orchestrator.parallel_executor import CheckpointUnreadableError
+
+        seed = _seed("Degraded checkpoint read fails closed")
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        # A checkpoint FILE exists but is corrupt at every rollback level:
+        # the store can neither return it nor confirm absence.
+        corrupt = store._get_checkpoint_path(seed.metadata.seed_id)
+        corrupt.write_text("{ not json")
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        with pytest.raises(CheckpointUnreadableError):
+            await executor._load_checkpoint_for_recovery(seed.metadata.seed_id, max_retries=1)
+
+    @pytest.mark.asyncio
+    async def test_launch_refuses_and_dispatches_nothing_on_degraded_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio as anyio_module
+
+        from ouroboros.orchestrator.parallel_executor import CheckpointUnreadableError
+
+        seed = _seed("Degraded read refuses launch")
+        store = CheckpointStore(base_path=tmp_path / "checkpoints")
+        store.initialize()
+        corrupt = store._get_checkpoint_path(seed.metadata.seed_id)
+        corrupt.write_text("{ not json")
+
+        async def _instant_sleep(_delay: float) -> None:
+            await asyncio.sleep(0)
+
+        monkeypatch.setattr(anyio_module, "sleep", _instant_sleep)
+        executor = _executor(event_store=AsyncMock(), checkpoint_store=store)
+        executor._run_batch_with_verify_and_retry = AsyncMock()
+        with pytest.raises(CheckpointUnreadableError):
+            await executor.execute_parallel(
+                seed,
+                session_id="session-live",
+                execution_id="exec-live",
+                tools=[],
+                system_prompt="system",
+                execution_plan=_plan(),
+            )
+        # Fail-closed means BEFORE any AC work: nothing was dispatched.
+        executor._run_batch_with_verify_and_retry.assert_not_called()
+
+
 class TestIndeterminateReplayWithCompletedCheckpoint:
     """Round-13 finding #2 (BLOCKING): the terminal-staleness gate's
     indeterminate-replay tiebreaker ("a surviving checkpoint is itself
