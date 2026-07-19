@@ -138,6 +138,12 @@ Decomposition trust is gate-anchored:
 - real negative evidence wins over missing evidence;
 - the verdict is durable and authority-bound.
 
+Custom semantic verifiers follow the same rule. Ouroboros does not guess a
+durable identity from Python source, closures, globals, or callable state. A
+verifier may opt into recovery and reusable trust only with a bounded canonical
+`verification_identity_contract()`; otherwise its authority is process-local and
+any crash restart fails closed into a fresh, non-reusable identity.
+
 This is the central lesson from the #1648 experiment: proposal shape, model prose,
 and apparent MECE structure cannot authorize a cheaper route. Only executed and
 verified outcomes can.
