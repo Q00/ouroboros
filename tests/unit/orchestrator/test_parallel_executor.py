@@ -1102,6 +1102,110 @@ def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> N
     assert scope(verifier_drift) != baseline
 
 
+def test_capsule_authority_reuses_large_context_and_catalog_digests(monkeypatch) -> None:
+    """Sibling ACs and retries must not reserialize the same authority inputs."""
+    import ouroboros.orchestrator.mcp_tools as mcp_tools
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    runtime = SimpleNamespace(
+        runtime_backend="codex_cli",
+        working_directory="/tmp/project",
+        permission_mode="acceptEdits",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    level_contexts = [
+        LevelContext(
+            level_number=index,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=index,
+                    ac_content=f"Dependency {index}",
+                    success=True,
+                ),
+            ),
+        )
+        for index in range(8)
+    ]
+    tool_catalog = (
+        MCPToolDefinition(name="Read", description="Read files"),
+        MCPToolDefinition(name="Edit", description="Edit files"),
+    )
+    real_serialize_levels = pe.serialize_level_contexts
+    real_serialize_tools = mcp_tools.serialize_tool_catalog
+    level_batch_sizes: list[int] = []
+    tool_calls = 0
+
+    def count_levels(contexts):
+        level_batch_sizes.append(len(contexts))
+        return real_serialize_levels(contexts)
+
+    def count_tools(catalog):
+        nonlocal tool_calls
+        tool_calls += 1
+        return real_serialize_tools(catalog)
+
+    monkeypatch.setattr(pe, "serialize_level_contexts", count_levels)
+    monkeypatch.setattr(mcp_tools, "serialize_tool_catalog", count_tools)
+
+    for _ in range(3):
+        executor._build_ac_capsule_authority_scope(
+            execution_context_id="exec-cache",
+            tools=["Read", "Edit"],
+            tool_catalog=tool_catalog,
+            system_prompt="system",
+            level_contexts=level_contexts,
+            is_sub_ac=False,
+            decomposition_trustworthy=False,
+            force_frontier_routing=False,
+            investment_spec=None,
+        )
+        executor._capsule_dependency_references(
+            execution_id="exec-cache",
+            level_contexts=level_contexts,
+        )
+
+    assert tool_calls == 1
+    assert level_batch_sizes == [1] * len(level_contexts)
+
+
+def test_level_context_authority_digest_extends_incrementally(monkeypatch) -> None:
+    """Sequential stage growth serializes each accepted handoff exactly once."""
+    import ouroboros.orchestrator.parallel_executor as pe
+
+    executor = ParallelACExecutor(
+        adapter=SimpleNamespace(
+            runtime_backend="codex_cli",
+            working_directory="/tmp/project",
+            permission_mode="acceptEdits",
+        ),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    real_serialize = pe.serialize_level_contexts
+    serialized_level_numbers: list[int] = []
+
+    def count_levels(contexts):
+        serialized_level_numbers.extend(context.level_number for context in contexts)
+        return real_serialize(contexts)
+
+    monkeypatch.setattr(pe, "serialize_level_contexts", count_levels)
+    contexts: list[LevelContext] = []
+    for level_number in range(20):
+        contexts = executor._merge_level_context(
+            contexts,
+            LevelContext(level_number=level_number, completed_acs=()),
+        )
+        executor._level_context_chain_digest(contexts)
+
+    assert serialized_level_numbers == list(range(20))
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     (

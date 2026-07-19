@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 import inspect
+from itertools import islice
 import json
 import math
 import os
@@ -89,8 +90,11 @@ from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_execution_capsule import (
+    MAX_AC_CONTEXT_REFERENCES,
+    ACContextReference,
     ACSuccessContract,
     bind_capsule_to_runtime_handle,
+    build_ac_dependency_references,
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
 )
@@ -1419,6 +1423,19 @@ class ParallelACExecutor:
             event_store,
             safe_emit_event=self._safe_emit_event,
         )
+        self._capsule_tool_catalog_cache: dict[
+            int,
+            tuple[tuple[MCPToolDefinition, ...], dict[str, object]],
+        ] = {}
+        self._capsule_level_context_cache: dict[
+            int,
+            tuple[list[LevelContext], str],
+        ] = {}
+        self._capsule_level_item_digest_cache: dict[int, tuple[LevelContext, str]] = {}
+        self._capsule_dependency_reference_cache: dict[
+            tuple[str, int],
+            tuple[list[LevelContext], tuple[ACContextReference, ...]],
+        ] = {}
         self._checkpoint_store = checkpoint_store
         self._checkpoint_execution_lease_held = checkpoint_execution_lease_held
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
@@ -2418,6 +2435,139 @@ class ParallelACExecutor:
             "session_signals": capabilities.session_signals.to_event_data(),
         }
 
+    def _authority_digest(self, value: object, *, field: str) -> str:
+        normalized = self._canonical_authority_value(value, field=field)
+        return self._prompt_identity(
+            json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        )
+
+    def _capsule_tool_catalog_authority(
+        self,
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+    ) -> dict[str, object]:
+        """Hash a catalog once per immutable catalog object."""
+        from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
+
+        if tool_catalog is None:
+            return {"present": False, "count": 0, "digest": None}
+        cached = self._capsule_tool_catalog_cache.get(id(tool_catalog))
+        if cached is not None and cached[0] is tool_catalog:
+            return cached[1]
+        serialized = serialize_tool_catalog(tool_catalog)
+        authority = {
+            "present": True,
+            "count": len(serialized),
+            "digest": self._authority_digest(
+                serialized,
+                field="AC capsule tool catalog",
+            ),
+        }
+        self._capsule_tool_catalog_cache[id(tool_catalog)] = (tool_catalog, authority)
+        return authority
+
+    def _level_context_item_digest(self, context: LevelContext) -> str:
+        cached = self._capsule_level_item_digest_cache.get(id(context))
+        if cached is not None and cached[0] is context:
+            return cached[1]
+        serialized = serialize_level_contexts([context])
+        digest = self._authority_digest(
+            serialized[0],
+            field="AC capsule level context",
+        )
+        self._capsule_level_item_digest_cache[id(context)] = (context, digest)
+        return digest
+
+    def _level_context_chain_digest(self, level_contexts: list[LevelContext] | None) -> str:
+        if not level_contexts:
+            return self._prompt_identity("ac-level-context-chain:v1")
+        cached = self._capsule_level_context_cache.get(id(level_contexts))
+        if cached is not None and cached[0] is level_contexts:
+            return cached[1]
+        digest = self._prompt_identity("ac-level-context-chain:v1")
+        for context in level_contexts:
+            digest = self._prompt_identity(f"{digest}\n{self._level_context_item_digest(context)}")
+        self._capsule_level_context_cache[id(level_contexts)] = (level_contexts, digest)
+        return digest
+
+    def _copy_level_context_chain_digest(
+        self,
+        *,
+        source: list[LevelContext],
+        target: list[LevelContext],
+    ) -> None:
+        digest = self._level_context_chain_digest(source)
+        self._capsule_level_context_cache[id(target)] = (target, digest)
+
+    def _capsule_dependency_references(
+        self,
+        *,
+        execution_id: str,
+        level_contexts: list[LevelContext] | None,
+    ) -> tuple[ACContextReference, ...]:
+        if not level_contexts:
+            return ()
+        cache_key = (execution_id, id(level_contexts))
+        cached = self._capsule_dependency_reference_cache.get(cache_key)
+        if cached is not None and cached[0] is level_contexts:
+            return cached[1]
+        references = tuple(
+            islice(
+                build_ac_dependency_references(execution_id, level_contexts),
+                MAX_AC_CONTEXT_REFERENCES + 1,
+            )
+        )
+        self._capsule_dependency_reference_cache[cache_key] = (
+            level_contexts,
+            references,
+        )
+        return references
+
+    def _build_capsule_dispatch_authority_contract(
+        self,
+        *,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext] | None,
+    ) -> dict[str, object]:
+        """Build an exact digest-only authority contract without large copies."""
+        workspace = self._task_cwd or getattr(self._adapter, "working_directory", None)
+        workspace_identity = os.path.realpath(os.path.expanduser(workspace or os.getcwd()))
+        runtime_backend = getattr(self._adapter, "runtime_backend", None)
+        permission_mode = getattr(self._adapter, "permission_mode", None)
+        constructor_model = getattr(self._adapter, "_model", None)
+        return {
+            "version": 1,
+            "workspace": workspace_identity,
+            "runtime": {
+                "backend": runtime_backend if isinstance(runtime_backend, str) else None,
+                "permission_mode": (permission_mode if isinstance(permission_mode, str) else None),
+                "constructor_model": (
+                    constructor_model if isinstance(constructor_model, str) else None
+                ),
+                "capabilities": self._runtime_capabilities_contract(self._adapter),
+                "execution": self._runtime_execution_authority,
+            },
+            "model_routing": serialize_model_router(self._model_router),
+            "execution_profile": serialize_execution_profile(self._execution_profile),
+            "tools": {
+                "count": len(tools),
+                "digest": self._authority_digest(tools, field="AC capsule tools"),
+            },
+            "tool_catalog": self._capsule_tool_catalog_authority(tool_catalog),
+            "system_prompt_digest": self._prompt_identity(system_prompt),
+            "level_contexts": {
+                "count": len(level_contexts or ()),
+                "chain_digest": self._level_context_chain_digest(level_contexts),
+            },
+        }
+
     def _build_checkpoint_dispatch_contract(
         self,
         *,
@@ -2485,12 +2635,11 @@ class ParallelACExecutor:
         retry_prompt_extra: str = "",
     ) -> str:
         """Bind a capsule to the exact provider dispatch authority in force."""
-        dispatch_contract = self._build_checkpoint_dispatch_contract(
+        dispatch_contract = self._build_capsule_dispatch_authority_contract(
             tools=tools,
             tool_catalog=tool_catalog,
             system_prompt=system_prompt,
-            system_prompt_builder=None,
-            reconciled_level_contexts=level_contexts,
+            level_contexts=level_contexts,
         )
         execution_policy: dict[str, object] = {
             "reasoning_effort": self._reasoning_effort,
@@ -4276,12 +4425,13 @@ class ParallelACExecutor:
             )
         return [by_level[level_number] for level_number in sorted(by_level)]
 
-    @staticmethod
     def _merge_level_context(
+        self,
         level_contexts: list[LevelContext],
         incoming: LevelContext,
     ) -> list[LevelContext]:
         """Merge a new stage handoff with an existing reconciled stage context."""
+        previous_digest = self._level_context_chain_digest(level_contexts)
         by_level = {context.level_number: context for context in level_contexts}
         existing = by_level.get(incoming.level_number)
         if existing is None:
@@ -4294,7 +4444,17 @@ class ParallelACExecutor:
                 completed_acs=tuple(summaries[index] for index in sorted(summaries)),
                 coordinator_review=(incoming.coordinator_review or existing.coordinator_review),
             )
-        return [by_level[level_number] for level_number in sorted(by_level)]
+        merged = [by_level[level_number] for level_number in sorted(by_level)]
+        if existing is None and (
+            not level_contexts or incoming.level_number > level_contexts[-1].level_number
+        ):
+            digest = self._prompt_identity(
+                f"{previous_digest}\n{self._level_context_item_digest(incoming)}"
+            )
+            self._capsule_level_context_cache[id(merged)] = (merged, digest)
+        else:
+            self._level_context_chain_digest(merged)
+        return merged
 
     @staticmethod
     def _recovery_exhausted_payload_malformed(
@@ -6257,6 +6417,10 @@ class ParallelACExecutor:
 
                 # Capture current contexts for this level's closure
                 current_contexts = list(level_contexts)
+                self._copy_level_context_chain_digest(
+                    source=level_contexts,
+                    target=current_contexts,
+                )
 
                 for batch_index, batch in enumerate(stage_batches, start=1):
                     batch_executable = [ac_idx for ac_idx in batch if ac_idx in executable]
@@ -8543,9 +8707,7 @@ class ParallelACExecutor:
             capsule_success_contract=capsule_success_contract,
         )
         parent_expected_artifacts: tuple[str, ...] = (
-            tuple(active_success_spec.expected_artifacts)
-            if active_success_spec is not None
-            else ()
+            tuple(active_success_spec.expected_artifacts) if active_success_spec is not None else ()
         )
         ac_label = (
             f"AC #{node_identity.display_path}"
@@ -9198,6 +9360,10 @@ Respond with either ATOMIC or the structured JSON object only.
             ac_spec=ac_spec,
             success_contract_override=capsule_success_contract,
             level_contexts=tuple(level_contexts or ()),
+            dependency_references=self._capsule_dependency_references(
+                execution_id=execution_context_id,
+                level_contexts=level_contexts,
+            ),
         )
 
         # Build prompt (label/indent, governed task section, success contract,

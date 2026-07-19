@@ -652,7 +652,7 @@ def _bounded_context_references(
     return tuple(selected), omitted_count, omitted_digest
 
 
-def _dependency_references(
+def build_ac_dependency_references(
     execution_id: str,
     level_contexts: Sequence[LevelContext],
 ) -> Iterator[ACContextReference]:
@@ -690,6 +690,7 @@ def compile_ac_execution_capsule(
     ac_spec: AcceptanceCriterionSpec | None,
     success_contract_override: ACSuccessContract | None = None,
     level_contexts: Sequence[LevelContext] = (),
+    dependency_references: Iterable[ACContextReference] | None = None,
     segment_index: int = 0,
     context_budget_chars: int = DEFAULT_AC_CONTEXT_BUDGET_CHARS,
 ) -> ACExecutionCapsule:
@@ -717,7 +718,11 @@ def compile_ac_execution_capsule(
                 locator=f"workspace:{path}",
                 hint="seed-authored expected artifact",
             )
-        yield from _dependency_references(execution_id, level_contexts)
+        yield from (
+            dependency_references
+            if dependency_references is not None
+            else build_ac_dependency_references(execution_id, level_contexts)
+        )
 
     if success_contract.has_success_contract:
         required_references.append(
@@ -817,6 +822,7 @@ __all__ = [
     "ACExecutionCapsuleManifest",
     "ACSuccessContract",
     "bind_capsule_to_runtime_handle",
+    "build_ac_dependency_references",
     "build_ac_dispatch_authority_scope",
     "compile_ac_execution_capsule",
 ]
