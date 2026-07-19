@@ -26,6 +26,7 @@ replayable execution contract on your choice of runtime backend.
 ### Architecture
 
 - [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
+- [Ouroboros AC Runtime RFC](./rfc/ouroboros-ac-runtime.md) - Acceptance-criterion VM: Grill, context paging, fresh AC capsules, gate-anchored trust, and RLM-inspired frugality
 - [Interview Milestone Lateral Contract](./rfc/interview-milestone-lateral-contract.md) - Proposed contract for bounded lateral review at ambiguity milestone transitions
 - [CLI Reference](./cli-reference.md) - Command-line interface flags and options
 - [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables
