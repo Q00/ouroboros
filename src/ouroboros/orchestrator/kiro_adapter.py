@@ -461,7 +461,44 @@ class KiroAgentAdapter:
                 # (``_INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS``), which
                 # forwarded tool output structurally cannot produce.
                 # Non-retryable exits keep the full broad list, as before.
+                #
+                # Round-15 finding #4 (BLOCKING): "structurally cannot
+                # produce" was asserted but never ENFORCED — the classifier
+                # substring-matched the phrases ANYWHERE in the captured
+                # stderr, so an AC whose own test/assertion output contains
+                # the EXACT literal Kiro sentence (e.g. a test asserting
+                # some other system emits that precise error string) still
+                # misclassified an ordinary failure as infra-fatal. Round
+                # 14's own provenance argument supplies the enforceable
+                # constraint: the "not logged in" bail happens BEFORE chat
+                # or a single tool can start, so a GENUINE Kiro-own auth
+                # death produces NO stdout chat output at all — and when no
+                # chat output was ever produced, NOTHING on stderr can be
+                # forwarded tool output (no tools ran); the whole stream is
+                # Kiro's own words. The auth scope therefore applies ONLY
+                # when this invocation produced zero stdout output
+                # (``saw_output`` False); once chat visibly started, the
+                # stream may carry the AC's own tool/test output verbatim
+                # and NO text pattern in it is provenance-safe — the
+                # ``kiro_forwarded`` scope scans nothing. Accepted residual
+                # cost, per the mandate's stated asymmetry (looping is
+                # wasteful but permitted; skipping escalation is not): a
+                # MID-session expiry ("Your login session has expired",
+                # ``chat/mod.rs``) arrives after chat output exists, so it
+                # now takes one ordinary retry — whose fresh ``kiro-cli``
+                # launch then fails the ``cli/mod.rs`` pre-chat auth check
+                # with the "not logged in" shape (zero stdout) and IS
+                # classified infra-fatal; if a stale token ever slips past
+                # that pre-chat check repeatedly, the failure loops in the
+                # ladder and parks loudly instead of failing fast — the
+                # direction the mandate prefers over misclassifying
+                # ordinary AC work.
                 retryable_exit = proc.returncode in _RETRYABLE_EXIT_CODES
+                error_pattern_scope = (
+                    ("kiro_auth" if not saw_output else "kiro_forwarded")
+                    if retryable_exit
+                    else None
+                )
                 yield AgentMessage(
                     type="result",
                     content=f"Kiro CLI failed (exit {proc.returncode}): {stderr_text}",
@@ -470,8 +507,8 @@ class KiroAgentAdapter:
                         "exit_code": proc.returncode,
                         **({"error": stderr_text} if stderr_text else {}),
                         **(
-                            {"error_pattern_scope": "kiro_auth"}
-                            if stderr_text and retryable_exit
+                            {"error_pattern_scope": error_pattern_scope}
+                            if stderr_text and error_pattern_scope
                             else {}
                         ),
                     },

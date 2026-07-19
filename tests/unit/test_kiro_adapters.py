@@ -823,6 +823,76 @@ class TestKiroAgentAdapterExecuteTask:
         assert _is_infra_fatal_error_message(result) is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("retryable_exit_code", [1, 137])
+    @pytest.mark.parametrize(
+        "forwarded_stderr_with_exact_kiro_phrase",
+        [
+            # A test suite the AC's own task ran, asserting that some OTHER
+            # system produces exactly Kiro's login-error string — the
+            # literal sentence, verbatim, in obviously-forwarded test
+            # output. (Kiro's real message could never appear here: it is
+            # printed before chat/tools start, and chat visibly started.)
+            (
+                b"$ pytest tests/test_cli_errors.py\n"
+                b"AssertionError: assert error_message == 'You are not "
+                b"logged in, please log in with `kiro-cli login`'\n"
+                b"1 failed in 0.21s"
+            ),
+            # Same shape for the mid-session phrase.
+            (
+                b"FAILED tests/test_session.py::test_expiry_message - "
+                b"expected 'Your login session has expired. Please log in "
+                b"again using:' but got ''"
+            ),
+        ],
+    )
+    async def test_exact_kiro_phrase_in_forwarded_output_after_chat_started_is_not_infra_fatal(
+        self,
+        retryable_exit_code: int,
+        forwarded_stderr_with_exact_kiro_phrase: bytes,
+    ) -> None:
+        """Round-15 finding #4 (BLOCKING) — the review's new counterexample:
+        round 14 argued its phrases "cannot be forwarded tool output"
+        because Kiro prints them BEFORE chat/tools start, but the classifier
+        never enforced that positional constraint — it substring-matched the
+        phrase ANYWHERE in the captured stderr. An AC whose own test output
+        contains the exact literal sentence was misclassified infra-fatal,
+        skipping the escalation ladder for an ordinary failure. The adapter
+        now enforces the provenance constraint round 14's reasoning already
+        implied: once chat output exists (tools could have run), NO stderr
+        text pattern is provenance-safe — the stream is tagged
+        ``kiro_forwarded`` (scans nothing) and the failure stays ordinary."""
+        from ouroboros.orchestrator.leaf_dispatcher import _is_infra_fatal_error_message
+
+        proc = _make_proc(
+            # Chat visibly started: Kiro streamed assistant/tool activity.
+            stdout=(
+                b"I'll run the test suite to verify the error messages.\nRunning: pytest tests/\n"
+            ),
+            stderr=forwarded_stderr_with_exact_kiro_phrase,
+            returncode=retryable_exit_code,
+        )
+        with patch(
+            "ouroboros.orchestrator.kiro_adapter.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+
+            adapter = KiroAgentAdapter(cli_path="kiro-cli")
+            messages = [msg async for msg in adapter.execute_task("verify error messages")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["exit_code"] == retryable_exit_code
+        # The exact literal phrase IS present in the mirrored stderr...
+        assert "you are not logged in" in result.data["error"].lower() or (
+            "your login session has expired" in result.data["error"].lower()
+        )
+        # ...but the stream is post-chat-start, so no pattern may fire.
+        assert result.data["error_pattern_scope"] == "kiro_forwarded"
+        assert _is_infra_fatal_error_message(result) is False
+
+    @pytest.mark.asyncio
     async def test_forwarded_target_401_is_not_infra_fatal(self) -> None:
         """Round-14 finding #4 (BLOCKING) — the review's exact reproduced
         probe: the AC's OWN task curl-ed a target API that legitimately

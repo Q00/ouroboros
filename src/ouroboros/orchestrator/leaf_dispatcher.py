@@ -258,6 +258,17 @@ _INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS = (
 _ERROR_PATTERN_SCOPES = {
     "auth": _INFRA_FATAL_AUTH_CONTENT_PATTERNS,
     "kiro_auth": _INFRA_FATAL_KIRO_OWN_AUTH_CONTENT_PATTERNS,
+    # Round-15 finding #4 (BLOCKING): once Kiro's chat visibly started
+    # (stdout output exists), its stderr may carry the AC's OWN tool/test
+    # output VERBATIM — including, adversarially, the exact literal text of
+    # Kiro's first-person auth sentences (round 14's phrases are only
+    # provenance-safe on a stream produced BEFORE any tool could run; the
+    # adapter now enforces that positional constraint and tags
+    # post-chat-start streams with THIS scope instead). No text pattern in
+    # a forwarded-capable stream is provenance-safe, so this scope scans
+    # nothing: such failures take ordinary retry/escalation, per the
+    # mandate's asymmetry (wasteful looping over skipped escalation).
+    "kiro_forwarded": (),
 }
 
 
