@@ -144,6 +144,133 @@ class _InformRuntime(_TwoTurnRuntime):
         )
 
 
+class _EffectfulStallFollowupRuntime(_TwoTurnRuntime):
+    """Follow-up turn acknowledges, emits a tool effect, then stalls silently."""
+
+    async def execute_task(self, **kwargs: Any):
+        if not self.prompts:
+            async for message in super().execute_task(**kwargs):
+                yield message
+            return
+
+        prompt = str(kwargs["prompt"])
+        resume_handle = kwargs.get("resume_handle")
+        self.prompts.append(prompt)
+        assert resume_handle is not None
+        # Acknowledge the after-turn signal, then emit a real tool effect, then
+        # go silent (stall) without ever completing the turn.
+        yield AgentMessage(
+            type="assistant",
+            content="Applying the clarification now.",
+            resume_handle=resume_handle,
+        )
+        yield AgentMessage(
+            type="tool_use",
+            content="edit confirmation copy",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": "confirm.py"}},
+            resume_handle=resume_handle,
+        )
+        await asyncio.Event().wait()  # stall forever
+
+
+@pytest.mark.asyncio
+async def test_after_turn_followup_effectful_stall_seals_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 blocker #4: a follow-up that emits an effect then stalls is not recorded
+    as an acknowledged success — it is sealed and fails closed so a cold restart
+    cannot resume the stalled follow-up and repeat the effect."""
+    from ouroboros.orchestrator import leaf_dispatcher
+    from ouroboros.orchestrator.ac_runtime_handle_manager import AmbiguousACExecutionError
+
+    monkeypatch.setattr(leaf_dispatcher, "STALL_TIMEOUT_SECONDS", 0.2)
+
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    hub = SessionSignalHub(event_store=store)
+    runtime = _EffectfulStallFollowupRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    target_resolver = EventStoreSessionSignalTargetResolver(
+        event_store=store,
+        capabilities_by_backend={
+            runtime.runtime_backend: runtime.capabilities.session_signals,
+        },
+    )
+    mailbox = SessionSignalMailbox(event_store=store, target_resolver=target_resolver)
+    execution_id = "exec_stall_followup"
+    scope_id = "exec_stall_followup_ac_1"
+    attempt_id = "exec_stall_followup_ac_1_attempt_1"
+    idempotency_key = "user_turn_1_ac_1"
+    signal = SessionSignal(
+        signal_id=derive_session_signal_id(
+            expected_execution_id=execution_id,
+            target_session_scope_id=scope_id,
+            target_session_attempt_id=attempt_id,
+            idempotency_key=idempotency_key,
+        ),
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=attempt_id,
+        expected_execution_id=execution_id,
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Make the confirmation copy explicit.",
+        source=SessionSignalSource.USER,
+        reason="The user clarified the desired UX.",
+        idempotency_key=idempotency_key,
+    )
+
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the confirmation interaction",
+            session_id="orch_stall_followup",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Deliver a friendly confirmation UX",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        for _attempt in range(20):
+            if await target_resolver.list_targets(execution_id=execution_id):
+                break
+            await asyncio.sleep(0.01)
+        queued = await mailbox.request(signal)
+        assert queued.state is SessionSignalState.QUEUED
+        runtime.release_first_turn.set()
+
+        with pytest.raises(AmbiguousACExecutionError, match="follow-up stalled after emitting"):
+            await asyncio.wait_for(execution_task, timeout=5)
+
+        runtime_events = await store.replay("execution", scope_id)
+        sealed = [e for e in runtime_events if e.type == "execution.ac.dispatch.sealed"]
+        dispatched = [e for e in runtime_events if e.type == "execution.ac.attempt.dispatched"]
+        followup = next(
+            e for e in dispatched if e.data.get("dispatch_kind") == "session_signal_followup"
+        )
+        # The follow-up dispatch itself is sealed (not just the primary).
+        assert any(e.data.get("ac_dispatch_id") == followup.data["ac_dispatch_id"] for e in sealed)
+        # No successful completion was recorded for this attempt.
+        assert not [
+            e
+            for e in runtime_events
+            if e.type == "execution.session.completed" and e.data.get("success") is True
+        ]
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
 def test_bounded_reply_reassembles_streamed_assistant_chunks() -> None:
     messages = [
         AgentMessage(type="assistant", content="SYNAPSE_"),

@@ -2600,9 +2600,13 @@ class ParallelACExecutor:
             expanded = os.path.expanduser(value)
             return {"path": value, "realpath": os.path.realpath(expanded)}
 
-        def _probe(obj: object) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+        def _probe(
+            obj: object,
+        ) -> tuple[dict[str, str] | None, dict[str, str] | None, object | None]:
             # An explicit contract wins — a wrapping runtime uses it to name the
-            # executable/launcher its transport really invokes.
+            # executable/launcher its transport really invokes AND any additional
+            # command-affecting policy (e.g. Claude's --add-dir / --disallowedTools)
+            # that changes what the process is allowed to do.
             contract = getattr(obj, "executable_identity_contract", None)
             if callable(contract):
                 try:
@@ -2610,7 +2614,12 @@ class ParallelACExecutor:
                 except Exception:
                     declared = None
                 if isinstance(declared, Mapping):
-                    return _resolve(declared.get("executable")), _resolve(declared.get("launcher"))
+                    command_policy = declared.get("command_policy")
+                    return (
+                        _resolve(declared.get("executable")),
+                        _resolve(declared.get("launcher")),
+                        command_policy if isinstance(command_policy, Mapping) else None,
+                    )
             # ``cli_path`` is exposed both as a property (Codex) and as a private
             # attribute (most subprocess runtimes); probe the public form first.
             executable = _resolve(getattr(obj, "cli_path", None)) or _resolve(
@@ -2619,20 +2628,23 @@ class ParallelACExecutor:
             # Zcode launches its CLI through an Electron/Node host; that launcher
             # is part of what actually executes and must be bound too.
             launcher = _resolve(getattr(obj, "_electron_node_path", None))
-            return executable, launcher
+            return executable, launcher, None
 
-        executable, launcher = _probe(adapter)
-        if executable is None and launcher is None:
+        executable, launcher, command_policy = _probe(adapter)
+        if executable is None and launcher is None and command_policy is None:
             # A wrapping runtime holds the real launcher under a transport; probe
             # one delegation level so a delegated executable still fingerprints.
             transport = getattr(adapter, "_transport", None)
             if transport is not None:
-                executable, launcher = _probe(transport)
+                executable, launcher, command_policy = _probe(transport)
         return {
             "version": 1,
-            "observed": executable is not None or launcher is not None,
+            "observed": (
+                executable is not None or launcher is not None or command_policy is not None
+            ),
             "executable": executable,
             "launcher": launcher,
+            "command_policy": dict(command_policy) if isinstance(command_policy, Mapping) else None,
         }
 
     @staticmethod
@@ -6537,7 +6549,18 @@ class ParallelACExecutor:
                         and (spec.verify_command or spec.expected_artifacts)
                     ):
                         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-                        gate = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                        # Route through the single-shot oracle so a crash after the
+                        # command but before status/checkpoint persistence does not
+                        # rerun a non-idempotent verify_command on the next launch.
+                        gate = await self._run_verify_gate_single_shot(
+                            spec=spec,
+                            cwd=cwd,
+                            aggregate_id=execution_id or session_id,
+                            verify_key=f"skip_completed:{ac_idx}",
+                            execution_id=execution_id,
+                            session_id=session_id,
+                            identity_metadata={"ac_index": ac_idx},
+                        )
                         if not gate.passed:
                             executable.append(ac_idx)
                             log.info(
@@ -10059,6 +10082,22 @@ Respond with either ATOMIC or the structured JSON object only.
                     forced_frontier_routing=force_frontier_routing,
                 )
 
+            # Seal the completed provider turn BEFORE any post-processing. The
+            # authoritative terminal (session.completed/failed) is not durable
+            # until after signal handling, verification, evidence, and optional
+            # shadow replay — a crash anywhere in that window would otherwise
+            # leave only attempt.dispatched + session.started, and recovery would
+            # resume the handle and replay the original AC prompt. A sealed head
+            # without a durable terminal fails closed instead; on the normal path
+            # the later session.completed takes precedence over the seal.
+            await self._event_emitter.emit_ac_dispatch_sealed(
+                runtime_identity=runtime_identity,
+                dispatch_id=dispatch_id,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                capsule_fingerprint=capsule.fingerprint,
+            )
+
             if signal_target is not None and self._session_signal_hub is not None:
                 await self._session_signal_hub.refresh_pending(signal_target)
                 while True:
@@ -10185,6 +10224,12 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                         dispatch_id = signal_dispatch_id
                         provider_boundary_persisted = True
+                        # Reset per-dispatch state so the follow-up's OWN stall and
+                        # tool-effect state is measured (the primary's was already
+                        # consumed above), and the follow-up gets the same
+                        # stall/seal handling as the primary provider entry.
+                        dispatch_state.stalled = False
+                        dispatch_state.tool_effects_observed = False
                         await LeafDispatcher(self).stream(
                             state=dispatch_state,
                             prompt=follow_up_prompt,
@@ -10240,6 +10285,47 @@ Respond with either ATOMIC or the structured JSON object only.
                             dispatch_state.infra_fatal = primary_infra_fatal
                             continue
                         raise
+
+                    # Apply the same stall/seal handling to the follow-up provider
+                    # entry as the primary. A follow-up that emitted a tool effect
+                    # and then stalled must NOT be quietly recorded as an
+                    # acknowledged, successful signal turn: seal it and fail closed
+                    # so a cold restart cannot resume it and repeat the effect. An
+                    # effect-free follow-up stall is a non-durable delivery
+                    # uncertainty, handled like a missing acknowledgement.
+                    if dispatch_state.stalled:
+                        await self._event_store.append(
+                            create_session_signal_delivery_uncertain_event(
+                                queued_signal.signal,
+                                effective_mode=queued_signal.effective_mode,
+                                detail="The runtime stalled during the follow-up turn.",
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        if dispatch_state.tool_effects_observed:
+                            await self._event_emitter.emit_ac_dispatch_sealed(
+                                runtime_identity=runtime_identity,
+                                dispatch_id=signal_dispatch_id,
+                                execution_id=execution_context_id,
+                                session_id=session_id,
+                                capsule_fingerprint=capsule.fingerprint,
+                            )
+                            raise AmbiguousACExecutionError(
+                                "SessionSignal follow-up stalled after emitting tool effects; "
+                                "refusing to record success because a cold restart could resume "
+                                "the stalled follow-up and repeat non-idempotent effects"
+                            )
+                        if inform_mode:
+                            dispatch_state.success = primary_success
+                            dispatch_state.final_message = primary_final_message
+                            dispatch_state.infra_fatal = primary_infra_fatal
+                            continue
+                        dispatch_state.success = False
+                        dispatch_state.final_message = (
+                            "Synapse after-turn follow-up stalled before completion."
+                        )
+                        break
 
                     signal_messages = messages[message_count_before_signal:]
                     acknowledgement_messages = [
@@ -11489,7 +11575,17 @@ Respond with either ATOMIC or the structured JSON object only.
                     outcome=cached_outcome,
                 )
             else:
-                outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                # Route through the single-shot oracle so replaying this flip gate
+                # never re-runs a non-idempotent verify_command.
+                outcome = await self._run_verify_gate_single_shot(
+                    spec=spec,
+                    cwd=cwd,
+                    aggregate_id=execution_id or session_id,
+                    verify_key=f"flip_gate:{ac_idx}:{result.retry_attempt}",
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    identity_metadata={"ac_index": ac_idx, "retry_attempt": result.retry_attempt},
+                )
             if not outcome.passed:
                 gated_out.add(ac_idx)
         return frozenset(gated_out)

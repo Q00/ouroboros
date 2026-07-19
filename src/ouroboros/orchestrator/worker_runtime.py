@@ -16,7 +16,7 @@ the SAME pool code — only the transport differs.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import os
@@ -150,15 +150,23 @@ class LeaderDrivenWorkerRuntime:
 
     # -- AgentRuntime Protocol properties ---------------------------------
 
-    def executable_identity_contract(self) -> dict[str, str | None]:
-        """Expose the real executable/launcher this runtime drives via its transport.
+    def executable_identity_contract(self) -> dict[str, object]:
+        """Expose the real executable and command policy this runtime drives.
 
-        The launched binary lives on the wrapped transport (e.g. its
-        ``cli_path``/``_cli_path``), not on this runtime. Surface it so capsule
-        authority fingerprints the actual executable and a restart cannot resume
-        the same capsule under a different transport binary.
+        The launched binary and its command-affecting policy (e.g. Claude's
+        ``--add-dir``/``--disallowedTools``) live on the wrapped transport, not on
+        this runtime. A transport that publishes its own
+        ``executable_identity_contract()`` is delegated to verbatim so its full
+        command authority participates in capsule identity; otherwise its
+        executable path is probed. Either way a restart cannot resume the same
+        capsule under a different transport binary or access policy.
         """
         transport = self._transport
+        delegated = getattr(transport, "executable_identity_contract", None)
+        if callable(delegated):
+            contract = delegated()
+            if isinstance(contract, Mapping):
+                return dict(contract)
         executable = getattr(transport, "cli_path", None)
         if not isinstance(executable, str) or not executable:
             candidate = getattr(transport, "_cli_path", None)

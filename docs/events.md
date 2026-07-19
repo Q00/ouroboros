@@ -148,7 +148,11 @@ exact follow-up phase is not reconstructed from persisted metadata, so replaying
 the original AC prompt is refused rather than risking repeated acceptance work.
 Capsule authority also binds the actual subprocess `executable` (canonical path
 and realpath) and any launcher (e.g. a Zcode Electron/Node host), so a restart
-cannot resume the same capsule under a different binary.
+cannot resume the same capsule under a different binary. For a runtime that wraps
+a transport (e.g. `LeaderDrivenWorkerRuntime`), the transport's delegated
+`executable_identity_contract()` also contributes its command-affecting policy
+(e.g. Claude's `--add-dir` / `--disallowedTools`), so a change in launched-binary
+access changes authority too.
 
 Lifecycle events carry the same `ac_dispatch_id`. Dispatch events form one
 validated predecessor chain, and recovery considers only its unique head; it
@@ -205,7 +209,7 @@ and decomposed-parent verify gates.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `verify_key` | `string` | Stable per-attempt gate identity (`atomic:…` or `decomposed_parent:…`) |
+| `verify_key` | `string` | Stable per-attempt gate identity. Namespaces: `atomic:…` (atomic gate), `decomposed_parent:…` (decomposed-parent gate), `apply_gate:…` (failed-runtime recovery gate), `flip_gate:…` (sibling-evidence flip gate), `skip_completed:…` (`--skip-completed` proof gate) |
 | `verify_command_digest` | `string` | Digest of the exact command, expected artifacts, and output assertion |
 | `execution_id` | `string` | Durable execution/run anchor |
 | `session_id` | `string` | Orchestrator session id |

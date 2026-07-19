@@ -133,6 +133,25 @@ class ClaudeWorkerTransport:
         # command builder just appends the flags. Empty ⇒ no ``--add-dir`` at all.
         self._add_dirs = _resolve_add_dirs(context_reference_dirs, cwd=cwd)
 
+    def executable_identity_contract(self) -> dict[str, object]:
+        """Expose the executable AND the command-affecting policy for capsule authority.
+
+        The launched binary alone does not capture what the command is allowed to
+        do: ``--disallowedTools``, ``--add-dir`` (brownfield context reference
+        dirs), and session persistence all change the worker's actual access and
+        must participate in capsule identity, so a restart cannot resume the same
+        capsule under a different access policy.
+        """
+        return {
+            "executable": self._cli_path,
+            "launcher": None,
+            "command_policy": {
+                "disallowed_tools": sorted(self._disallowed_tools),
+                "add_dirs": list(self._add_dirs),
+                "persist_sessions": self._persist_sessions,
+            },
+        }
+
     @staticmethod
     def _permission_args(permission_mode: str | None) -> list[str]:
         normalized = (permission_mode or "").strip().lower()

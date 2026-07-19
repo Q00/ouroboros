@@ -1228,6 +1228,49 @@ def test_runtime_executable_identity_probes_transport_without_contract() -> None
     assert identity["executable"]["path"] == "/usr/local/bin/worker-cli"
 
 
+def test_runtime_executable_identity_binds_command_policy() -> None:
+    """R4 blocker #3: command-affecting transport policy participates in authority.
+
+    Two runtimes with the same executable but different ``add_dirs`` (Claude's
+    ``--add-dir`` access) must produce different executable identity, so a restart
+    cannot resume the same capsule under a different access policy.
+    """
+
+    class _Runtime:
+        def __init__(self, add_dirs: list[str]) -> None:
+            self._add_dirs = add_dirs
+
+        def executable_identity_contract(self) -> dict[str, object]:
+            return {
+                "executable": "/bin/claude",
+                "launcher": None,
+                "command_policy": {
+                    "disallowed_tools": ["mcp__ouroboros"],
+                    "add_dirs": self._add_dirs,
+                    "persist_sessions": False,
+                },
+            }
+
+    narrow = ParallelACExecutor._runtime_executable_identity(_Runtime(["/repo/a"]))
+    wide = ParallelACExecutor._runtime_executable_identity(_Runtime(["/repo/a", "/repo/b"]))
+    assert narrow["executable"]["path"] == wide["executable"]["path"] == "/bin/claude"
+    assert narrow["command_policy"]["add_dirs"] == ["/repo/a"]
+    assert wide["command_policy"]["add_dirs"] == ["/repo/a", "/repo/b"]
+    # Same binary, different access policy → different authority.
+    assert narrow != wide
+
+
+def test_claude_worker_transport_executable_contract_includes_command_policy() -> None:
+    """R4 blocker #3: the real Claude transport surfaces its command policy."""
+    from ouroboros.orchestrator.claude_worker_runtime import ClaudeWorkerTransport
+
+    transport = ClaudeWorkerTransport(cli_path="/bin/claude", disallowed_tools=("mcp__x",))
+    contract = transport.executable_identity_contract()
+    assert contract["executable"] == "/bin/claude"
+    assert contract["command_policy"]["disallowed_tools"] == ["mcp__x"]
+    assert "add_dirs" in contract["command_policy"]
+
+
 def test_capsule_authority_covers_prompt_gate_runtime_and_verifier_inputs() -> None:
     """Every input that can alter provider work or acceptance must change authority."""
 
@@ -13122,6 +13165,104 @@ class TestParallelACExecutor:
                 identity_metadata={"ac_id": "ac-0"},
             )
         assert run_count == 0  # the possibly-executed command was NOT run again
+
+    @pytest.mark.asyncio
+    async def test_successful_turn_seals_before_terminal_completion(self) -> None:
+        """R4 blocker #1: a completed provider turn is sealed before post-processing.
+
+        The authoritative terminal is not durable until after signal/verify/
+        evidence/shadow. A seal is persisted right after the provider stream so a
+        crash in that window fails closed on recovery instead of replaying the AC
+        prompt; on the normal path the later completion supersedes the seal.
+        """
+
+        class _Runtime:
+            runtime_backend = "codex_cli"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: object):
+                self.calls += 1
+                yield AgentMessage(type="result", content="[TASK_COMPLETE]")
+
+        event_store, appended = _make_replaying_event_store()
+        runtime = _Runtime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Seal the provider turn before finalization",
+            session_id="session-seal-before-terminal",
+            tools=["Read"],
+            system_prompt="system",
+            seed_goal="Ship",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+        assert result.success is True
+        types = [e.type for e in appended]
+        assert "execution.ac.dispatch.sealed" in types
+        # The seal precedes the authoritative terminal completion.
+        assert types.index("execution.ac.dispatch.sealed") < types.index(
+            "execution.session.completed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_flip_gate_recovery_is_single_shot(self) -> None:
+        """R4 blocker #2: the sibling-flip gate uses the single-shot verify oracle."""
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory="/tmp/project",
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        run_count = 0
+
+        async def _counting_gate(*, spec: Any, cwd: str) -> _VerifyGateOutcome:
+            nonlocal run_count
+            run_count += 1
+            return _VerifyGateOutcome(passed=False, reason="nope", output_tail="")
+
+        executor._run_ac_verify_gate = _counting_gate  # type: ignore[method-assign]
+        seed = _make_seed(
+            AcceptanceCriterionSpec(description="AC", verify_command="./deploy.sh"),
+        )
+        failed = ACExecutionResult(
+            ac_index=0,
+            ac_content="AC",
+            success=False,
+            outcome=ACExecutionOutcome.FAILED,
+            retry_attempt=0,
+        )
+
+        first = await executor._compute_sibling_flip_gated_out(
+            seed=seed,
+            level_results=[failed],
+            session_id="sess",
+            execution_id="exec-flip",
+        )
+        assert 0 in first  # gated out (contract failed)
+        assert run_count == 1
+        # Replaying must consume the durable outcome, not re-run the command.
+        await executor._compute_sibling_flip_gated_out(
+            seed=seed,
+            level_results=[failed],
+            session_id="sess",
+            execution_id="exec-flip",
+        )
+        assert run_count == 1
 
     @pytest.mark.asyncio
     async def test_apply_verify_gate_recovery_is_single_shot(self) -> None:
