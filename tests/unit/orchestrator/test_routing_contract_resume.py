@@ -241,6 +241,11 @@ def test_resume_restores_persisted_retry_policy() -> None:
     original._decomposition_mode = "bounce_only"
     original._cross_harness_redispatch_enabled = True
     original._context_pack_enabled = False
+    # Round-14 finding #2: the remaining dispatch/acceptance/spend semantics
+    # join the contract for the same reason.
+    original._max_decomposition_depth = 9
+    original._fat_harness_mode = True
+    original._shadow_replay_enabled = True
     persisted = original._build_execution_contract()
     assert persisted["retry_policy"] == {
         "lateral_escalation_enabled": True,
@@ -252,6 +257,9 @@ def test_resume_restores_persisted_retry_policy() -> None:
         "decomposition_mode": "bounce_only",
         "cross_harness_redispatch_enabled": True,
         "context_pack_enabled": False,
+        "max_decomposition_depth": 9,
+        "fat_harness_mode": True,
+        "shadow_replay_enabled": True,
     }
 
     resumed = _runner()
@@ -270,6 +278,9 @@ def test_resume_restores_persisted_retry_policy() -> None:
     resumed._enable_decomposition = False
     resumed._cross_harness_redispatch_enabled = False
     resumed._context_pack_enabled = True
+    resumed._max_decomposition_depth = 1
+    resumed._fat_harness_mode = False
+    resumed._shadow_replay_enabled = False
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -285,6 +296,11 @@ def test_resume_restores_persisted_retry_policy() -> None:
     assert resumed._enable_decomposition is True
     assert resumed._cross_harness_redispatch_enabled is True
     assert resumed._context_pack_enabled is False
+    assert resumed._max_decomposition_depth == 9
+    assert resumed._fat_harness_mode is True
+    # Restored wholesale — NOT re-derived from this process's env request,
+    # which (unset here) would have resolved False.
+    assert resumed._shadow_replay_enabled is True
 
 
 def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
@@ -317,6 +333,8 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
     resumed._decomposition_mode = "preflight"
     resumed._cross_harness_redispatch_enabled = False
     resumed._context_pack_enabled = True
+    resumed._max_decomposition_depth = 3
+    resumed._fat_harness_mode = True
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
@@ -335,11 +353,16 @@ def test_resume_migrates_legacy_contract_missing_retry_policy() -> None:
         "decomposition_mode": "preflight",
         "cross_harness_redispatch_enabled": False,
         "context_pack_enabled": True,
+        "max_decomposition_depth": 3,
+        "fat_harness_mode": True,
+        # A migrated legacy contract keeps the recomputed (env-and-strict
+        # derived) value; without strict authorization this is always False.
+        "shadow_replay_enabled": False,
     }
 
 
 def _full_retry_policy(**overrides: object) -> dict[str, object]:
-    """A well-formed nine-field policy, with targeted per-test corruption."""
+    """A well-formed twelve-field policy, with targeted per-test corruption."""
     policy: dict[str, object] = {
         "lateral_escalation_enabled": True,
         "parked_retry_backoff_seconds": 300.0,
@@ -350,6 +373,9 @@ def _full_retry_policy(**overrides: object) -> dict[str, object]:
         "decomposition_mode": "preflight",
         "cross_harness_redispatch_enabled": False,
         "context_pack_enabled": True,
+        "max_decomposition_depth": 2,
+        "fat_harness_mode": False,
+        "shadow_replay_enabled": False,
     }
     policy.update(overrides)
     return policy
@@ -427,6 +453,31 @@ def _full_retry_policy(**overrides: object) -> dict[str, object]:
         _full_retry_policy(context_pack_enabled="on"),
         _full_retry_policy(context_pack_enabled=None),
         _full_retry_policy(context_pack_enabled=0),
+        # Round-14 finding #2: a round-13-era contract shape (or any tampered
+        # payload) missing/malformed on the NEW depth/acceptance-gate/
+        # shadow-replay fields must fail closed here too.
+        {
+            "lateral_escalation_enabled": True,
+            "parked_retry_backoff_seconds": 300.0,
+            "ac_retry_attempts": 2,
+            "reasoning_effort": "high",
+            "run_verify_commands": True,
+            "verify_command_timeout_seconds": 600,
+            "decomposition_mode": "preflight",
+            "cross_harness_redispatch_enabled": False,
+            "context_pack_enabled": True,
+        },  # round-13-era nine-field contract shape
+        _full_retry_policy(max_decomposition_depth="2"),
+        _full_retry_policy(max_decomposition_depth=-1),
+        _full_retry_policy(max_decomposition_depth=True),
+        _full_retry_policy(max_decomposition_depth=2.5),
+        _full_retry_policy(max_decomposition_depth=None),
+        _full_retry_policy(fat_harness_mode="yes"),
+        _full_retry_policy(fat_harness_mode=None),
+        _full_retry_policy(fat_harness_mode=1),
+        _full_retry_policy(shadow_replay_enabled="on"),
+        _full_retry_policy(shadow_replay_enabled=None),
+        _full_retry_policy(shadow_replay_enabled=0),
     ],
 )
 def test_malformed_retry_policy_fails_closed(malformed_retry_policy: object) -> None:
@@ -534,6 +585,61 @@ def test_dispatch_and_prompt_semantics_are_folded_into_routing_fingerprint(
     assert (
         first_contract["frugality_proof"]["routing_fingerprint"]
         != second_contract["frugality_proof"]["routing_fingerprint"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "first_value", "second_value"),
+    [
+        ("_max_decomposition_depth", 1, 9),
+        ("_max_decomposition_depth", 0, 2),
+        ("_fat_harness_mode", False, True),
+        ("_shadow_replay_enabled", False, True),
+    ],
+)
+def test_depth_acceptance_and_shadow_replay_are_folded_into_routing_fingerprint(
+    field: str, first_value: object, second_value: object
+) -> None:
+    """Round-14 finding #2 (BLOCKING): ``max_decomposition_depth`` changes
+    how far ACs recursively decompose (dispatch shape and spend),
+    ``fat_harness_mode`` changes the atomic acceptance gate, and
+    ``shadow_replay_enabled`` arms the shadow-baseline experiment harness.
+    Two runs differing ONLY on one of these axes behave materially
+    differently and must never share a fingerprint/cohort."""
+    first = _runner()
+    setattr(first, field, first_value)
+    first_contract = first._build_execution_contract()
+
+    second = _runner()
+    setattr(second, field, second_value)
+    second_contract = second._build_execution_contract()
+
+    assert first_contract["model_routing"] == second_contract["model_routing"]
+    assert first_contract["retry_policy"] != second_contract["retry_policy"]
+    assert (
+        first_contract["frugality_proof"]["routing_fingerprint"]
+        != second_contract["frugality_proof"]["routing_fingerprint"]
+    )
+
+
+def test_depth_and_fat_harness_probe_from_round_14_review_diverges() -> None:
+    """The round-14 review's exact probe: depth=1/fat=False vs
+    depth=9/fat=True previously produced IDENTICAL fingerprints, letting
+    materially incomparable runs share one frugality-proof cohort."""
+    lean = _runner()
+    lean._max_decomposition_depth = 1
+    lean._fat_harness_mode = False
+    lean_contract = lean._build_execution_contract()
+
+    fat = _runner()
+    fat._max_decomposition_depth = 9
+    fat._fat_harness_mode = True
+    fat_contract = fat._build_execution_contract()
+
+    assert lean_contract["model_routing"] == fat_contract["model_routing"]
+    assert (
+        lean_contract["frugality_proof"]["routing_fingerprint"]
+        != fat_contract["frugality_proof"]["routing_fingerprint"]
     )
 
 

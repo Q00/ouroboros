@@ -2005,6 +2005,21 @@ class OrchestratorRunner:
         pack). ``context_pack`` needs no dedicated serializer: the config
         input is a plain bool — the pack CONTENT is derived from the
         workspace, whose identity the contract already pins separately.
+
+        Round-14 finding #2 (BLOCKING): three more execution-semantic
+        inputs join for the same reason — round 12 pinned them in the
+        EXECUTOR's RC3 checkpoint (``execution_semantics``) but this
+        runner-level contract still omitted them, so two runs configured
+        differently on these axes shared one fingerprint (and a resume
+        silently re-read the current config). ``max_decomposition_depth``
+        changes how far ACs recursively decompose (dispatch shape and
+        spend); ``fat_harness_mode`` changes the atomic acceptance gate
+        (typed evidence + verifier PASS required vs not); and
+        ``shadow_replay_enabled`` arms the shadow-baseline experiment
+        harness (spend and dispatch quarantine). ``shadow_replay_enabled``
+        is pinned as the RESOLVED bool (env request AND strict
+        authorization), because that resolved value — not its inputs — is
+        what execution consumes.
         """
         return {
             "lateral_escalation_enabled": self._lateral_escalation_enabled,
@@ -2016,6 +2031,9 @@ class OrchestratorRunner:
             "decomposition_mode": self._decomposition_mode,
             "cross_harness_redispatch_enabled": self._cross_harness_redispatch_enabled,
             "context_pack_enabled": self._context_pack_enabled,
+            "max_decomposition_depth": self._max_decomposition_depth,
+            "fat_harness_mode": self._fat_harness_mode,
+            "shadow_replay_enabled": self._shadow_replay_enabled,
         }
 
     @staticmethod
@@ -2030,7 +2048,24 @@ class OrchestratorRunner:
             "decomposition_mode",
             "cross_harness_redispatch_enabled",
             "context_pack_enabled",
+            "max_decomposition_depth",
+            "fat_harness_mode",
+            "shadow_replay_enabled",
         }:
+            return False
+        # Round-14 finding #2: the new fields mirror their own construction
+        # contracts exactly, like every field above. ``fat_harness_mode`` and
+        # ``shadow_replay_enabled`` are plain bools; ``max_decomposition_depth``
+        # mirrors ``__init__``'s own non-negative-int rule — rejected (not
+        # silently clamped by the ``max(0, ...)`` floor) when negative, so the
+        # fingerprinted value never diverges from the executed value (the
+        # round-3 accept-then-clamp lesson).
+        max_depth = value.get("max_decomposition_depth")
+        if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0:
+            return False
+        if not isinstance(value.get("fat_harness_mode"), bool):
+            return False
+        if not isinstance(value.get("shadow_replay_enabled"), bool):
             return False
         enabled = value.get("lateral_escalation_enabled")
         backoff = value.get("parked_retry_backoff_seconds")
@@ -2807,8 +2842,24 @@ class OrchestratorRunner:
                 raw_retry_policy["cross_harness_redispatch_enabled"]
             )
             self._context_pack_enabled = bool(raw_retry_policy["context_pack_enabled"])
+            # Round-14 finding #2 (BLOCKING): restore the remaining
+            # dispatch/acceptance/spend semantics the run started with,
+            # exactly like the fields above — round 12 pinned these three in
+            # the EXECUTOR's checkpoint, but this runner-level resume path
+            # still silently re-resolved them from the current process.
+            self._max_decomposition_depth = int(raw_retry_policy["max_decomposition_depth"])
+            self._fat_harness_mode = bool(raw_retry_policy["fat_harness_mode"])
         self._execution_preferences = persisted_preferences
-        self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        if not retry_policy_migrated and isinstance(raw_retry_policy, Mapping):
+            # Round-14 finding #2: the persisted RESOLVED shadow-replay bool
+            # overrides the env-derived recomputation a migrated/legacy resume
+            # gets below — otherwise toggling OUROBOROS_SHADOW_REPLAY between
+            # the original run and this resume would silently re-arm (or
+            # disarm) the experiment harness mid-run. Assigned AFTER the
+            # preferences restore, on purpose: this is the last word.
+            self._shadow_replay_enabled = bool(raw_retry_policy["shadow_replay_enabled"])
+        else:
+            self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
             self._execution_contract = self._build_execution_contract(
                 seed=seed,
