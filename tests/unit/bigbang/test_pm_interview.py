@@ -86,8 +86,14 @@ class TestPMSteeringPromptBudget:
 
     The inner engine computes ``max_chars`` against the serialized-prompt
     safety ceiling before calling ``_build_system_prompt``; the PM wrapper
-    must return a prompt within that same cap.
+    must return a prompt within that same cap. Under tight caps the steering
+    yields — the inner prompt's operating instructions must always survive.
     """
+
+    # Stable fragments of the inner builder's dynamic header, which carries
+    # the engine's operating instructions and must survive any cap.
+    _INNER_ROLE_MARKER = "conducting a Socratic interview"
+    _INNER_JOB_MARKER = "reduce ambiguity"
 
     def _steered_engine(self, tmp_path: Path) -> PMInterviewEngine:
         engine = _make_engine(tmp_path=tmp_path)
@@ -103,17 +109,53 @@ class TestPMSteeringPromptBudget:
         prompt = engine.inner._build_system_prompt(state)
         assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
         assert len(prompt) <= InterviewEngine._MAX_SYSTEM_PROMPT_CHARS
+        assert self._INNER_ROLE_MARKER in prompt
+        assert self._INNER_JOB_MARKER in prompt
 
-    def test_caller_supplied_cap_holds_with_steering_installed(self, tmp_path: Path) -> None:
+    def test_caller_supplied_cap_keeps_full_steering_and_inner_prompt(self, tmp_path: Path) -> None:
         engine = self._steered_engine(tmp_path)
         state = InterviewState(
             interview_id="t_budget_caller",
             initial_context="A" * 4_000,
         )
-        cap = 2_000
+        cap = 3_000
         prompt = engine.inner._build_system_prompt(state, max_chars=cap)
         assert len(prompt) <= cap
         assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX)
+        assert self._INNER_ROLE_MARKER in prompt
+        assert self._INNER_JOB_MARKER in prompt
+
+    def test_saturated_history_minimum_budget_preserves_inner_prompt(self, tmp_path: Path) -> None:
+        """A saturated history leaves only the minimum system budget; the
+        steering must yield entirely rather than evict the inner
+        interviewer instructions (role, one-question rule, snapshot)."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_saturated",
+            initial_context="Build a task manager",
+        )
+        cap = InterviewEngine._MIN_SYSTEM_PROMPT_CHARS
+        prompt = engine.inner._build_system_prompt(state, max_chars=cap)
+        assert len(prompt) <= cap
+        assert self._INNER_ROLE_MARKER in prompt
+        assert self._INNER_JOB_MARKER in prompt
+
+    def test_mid_cap_truncates_steering_before_inner_prompt(self, tmp_path: Path) -> None:
+        """Between the minimum and comfortable budgets, steering is truncated
+        to whatever fits above the inner reserve — the inner prompt still
+        gets its full minimum allocation."""
+        engine = self._steered_engine(tmp_path)
+        state = InterviewState(
+            interview_id="t_budget_mid",
+            initial_context="Build a task manager",
+        )
+        cap = 2_000
+        prompt = engine.inner._build_system_prompt(state, max_chars=cap)
+        assert len(prompt) <= cap
+        steering_budget = cap - InterviewEngine._MIN_SYSTEM_PROMPT_CHARS
+        assert prompt.startswith(_PM_SYSTEM_PROMPT_PREFIX[:steering_budget])
+        assert self._INNER_ROLE_MARKER in prompt
+        assert self._INNER_JOB_MARKER in prompt
 
     def test_tiny_cap_is_never_exceeded(self, tmp_path: Path) -> None:
         engine = self._steered_engine(tmp_path)

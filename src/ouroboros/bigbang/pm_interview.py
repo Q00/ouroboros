@@ -481,6 +481,13 @@ class PMInterviewEngine:
         on top of an already-capped prompt, so the combined prompt never
         exceeds the budget the caller computed against the serialized-prompt
         safety ceiling.
+
+        Under tight caps the steering yields, never the inner prompt: the
+        inner builder is guaranteed its minimum system-prompt allocation
+        first, because it carries the engine's operating instructions (role,
+        one-question rule, round, initial context, ambiguity snapshot).
+        Steering is philosophy — safe to truncate or drop when a saturated
+        history leaves only the minimum budget.
         """
         self._pm_steering = getattr(self, "_pm_steering", _PM_SYSTEM_PROMPT_PREFIX)
 
@@ -495,8 +502,12 @@ class PMInterviewEngine:
             initial_context: str | None = None,
             max_chars: int | None = None,
         ) -> str:
-            steering_block = self._pm_steering + "\n\n"
             cap = max_chars or self.inner._MAX_SYSTEM_PROMPT_CHARS
+            inner_reserve = min(cap, self.inner._MIN_SYSTEM_PROMPT_CHARS)
+            steering_block = self._pm_steering + "\n\n"
+            steering_budget = max(0, cap - inner_reserve)
+            if len(steering_block) > steering_budget:
+                steering_block = steering_block[:steering_budget]
             # Never pass 0 down: the inner builder treats falsy max_chars as
             # "use the default cap", which would blow the budget again.
             inner_budget = max(1, cap - len(steering_block))
