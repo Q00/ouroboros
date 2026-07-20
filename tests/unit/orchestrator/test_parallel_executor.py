@@ -12659,6 +12659,86 @@ class TestParallelACExecutor:
         assert "final-workspace" in (results[0].error or "").lower()
 
     @pytest.mark.asyncio
+    async def test_final_workspace_acceptance_rechecks_artifact_only_contract(
+        self, tmp_path: Any
+    ) -> None:
+        """R17/B1: the final pass re-checks ARTIFACT-ONLY contracts too.
+
+        An AC whose success contract is only ``expected_artifacts`` (no command)
+        is still re-verified over the final workspace, so a later stage that
+        deletes a required artifact after its provisional gate invalidates
+        acceptance.
+        """
+        artifact = tmp_path / "artifact.txt"
+        artifact.write_text("ready\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="artifact must exist", expected_artifacts=("artifact.txt",)
+        )
+        seed = _make_seed(spec)
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        accepted = ACExecutionResult(
+            ac_index=0, ac_content="ac", success=True, outcome=ACExecutionOutcome.SUCCEEDED
+        )
+        # A later stage deletes the required artifact after its provisional gate.
+        artifact.unlink()
+
+        results = await executor._apply_final_workspace_acceptance(
+            seed=seed, results=[accepted], session_id="s", execution_id="e"
+        )
+
+        assert results[0].success is False
+        assert results[0].outcome == ACExecutionOutcome.FAILED
+
+    @pytest.mark.asyncio
+    async def test_verify_command_removing_required_directory_fails_closed(
+        self, tmp_path: Any
+    ) -> None:
+        """R17/B5: the fingerprint covers directories, so a verifier that removes a
+        required (even empty) directory is detected and failed closed."""
+        (tmp_path / "artifact_dir").mkdir()
+        spec = AcceptanceCriterionSpec(
+            description="empty dir must survive",
+            verify_command="rmdir artifact_dir",  # exits 0 but removes a dir
+            expected_artifacts=("artifact_dir",),
+        )
+        seed = _make_seed(spec)
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+
+        gated = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=ACExecutionResult(ac_index=0, ac_content="ac", success=True),
+            session_id="s",
+            execution_id="e",
+        )
+
+        assert gated.success is False
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is False
+
+    @pytest.mark.asyncio
     async def test_final_workspace_acceptance_confirms_valid_pass(self, tmp_path: Any) -> None:
         """R16/B1: an AC still satisfied at the final workspace stays accepted."""
         (tmp_path / "marker.txt").write_text("good\n", encoding="utf-8")

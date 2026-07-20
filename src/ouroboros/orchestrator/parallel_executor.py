@@ -11511,6 +11511,16 @@ Respond with either ATOMIC or the structured JSON object only.
         records: list[bytes] = []
         for current, dirnames, filenames in os.walk(cwd, followlinks=False):
             dirnames[:] = [d for d in dirnames if d not in _VERIFY_FINGERPRINT_IGNORE_DIRS]
+            # Record DIRECTORIES too, so creating/removing an (even empty)
+            # directory a contract asserts on -- e.g. ``verify_command="rmdir
+            # artifact_dir"`` deleting a required empty dir -- changes the
+            # fingerprint. A file-only manifest would miss an empty-dir mutation.
+            for dirname in dirnames:
+                dpath = os.path.join(current, dirname)
+                drel = os.path.relpath(dpath, cwd)
+                if ParallelACExecutor._is_transient_git_fingerprint_path(drel):
+                    continue
+                records.append(drel.encode("utf-8", "surrogatepass") + b"\x00D")
             for name in filenames:
                 path = os.path.join(current, name)
                 rel = os.path.relpath(path, cwd)
@@ -11799,7 +11809,13 @@ Respond with either ATOMIC or the structured JSON object only.
             if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
                 continue
             spec = seed.acceptance_criteria[ac_index]
-            if not isinstance(spec, AcceptanceCriterionSpec) or not spec.verify_command:
+            # Every success-contract form is re-checked over the final tree: a
+            # command AND/OR expected_artifacts. An artifact-only contract must be
+            # re-verified too -- a later stage can delete a required artifact after
+            # its provisional gate passed.
+            if not isinstance(spec, AcceptanceCriterionSpec) or not (
+                spec.verify_command or spec.expected_artifacts
+            ):
                 continue
             # Only an AC that is currently ACCEPTED needs a final-workspace
             # re-check; a failed/blocked/invalid/externally-satisfied AC is already
