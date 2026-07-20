@@ -150,6 +150,132 @@ then
 fi
 ```
 
+### Legacy Codex Model Migration
+
+Some older Ouroboros configurations saved `gpt-5` into all four stage-model
+fields. That was a historical default, but it is now an explicit pin and would
+stop Codex App/CLI model changes from taking effect. Do not silently rewrite a
+possible user pin. Instead, when Codex is ready, detect that exact legacy
+shape once before honoring the welcome-completed marker:
+
+```bash
+if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.ouroboros/prefs.json" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+config_path, prefs_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        value = raw_value.strip().split(" #", 1)[0].strip().strip("'\"")
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed.setdefault(section, {})
+        elif section is not None:
+            parsed[section][key.strip("'\"")] = value
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+except OSError:
+    raise SystemExit(1)
+try:
+    prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    prefs = {}
+if not isinstance(prefs, dict):
+    prefs = {}
+
+legacy_gpt5 = (
+    config.get("clarification", {}).get("default_model") == "gpt-5"
+    and config.get("execution", {}).get("default_model") == "gpt-5"
+    and config.get("evaluation", {}).get("semantic_model") == "gpt-5"
+    and config.get("resilience", {}).get("reflect_model") == "gpt-5"
+)
+handled = prefs.get("codexModelMigration") in {"automatic-v1", "kept-gpt-5-v1"}
+raise SystemExit(0 if legacy_gpt5 and not handled else 1)
+PY
+then
+  LEGACY_CODEX_MODEL_MIGRATION_REQUIRED="true"
+fi
+```
+
+**If `CODEX_READY` is true and `LEGACY_CODEX_MODEL_MIGRATION_REQUIRED` is true:**
+
+Use **AskUserQuestion**:
+
+```json
+{
+  "questions": [{
+    "question": "현재 설정은 모든 단계에서 gpt-5를 고정해 두고 있어요. Codex에서 선택한 모델을 자동으로 사용하도록 바꿀까요?",
+    "header": "모델 설정",
+    "options": [
+      {
+        "label": "Codex 선택으로 전환하기 (권장)",
+        "description": "App이나 CLI에서 바꾼 모델을 모든 단계가 자동으로 따라가요"
+      },
+      {
+        "label": "gpt-5 고정 유지하기",
+        "description": "지금처럼 모든 단계를 gpt-5로 계속 실행해요"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **Codex 선택으로 전환하기**: run these four commands on the current host
+  (use `uvx --from 'ouroboros-ai[tui]' ouroboros` in a Marketplace-plugin-only
+  install):
+
+  ```bash
+  ouroboros config set clarification.default_model default
+  ouroboros config set execution.default_model default
+  ouroboros config set evaluation.semantic_model default
+  ouroboros config set resilience.reflect_model default
+  ```
+
+  `default` deliberately sends no model pin to Codex; it does not name a model
+  called "default". Confirm that every command succeeded before recording the
+  decision.
+- **gpt-5 고정 유지하기**: do not change `config.yaml`.
+
+For either completed choice, merge exactly one marker into
+`~/.ouroboros/prefs.json` without deleting existing keys:
+
+```bash
+python3 - "automatic-v1" <<'PY'
+import json, os, sys
+path = os.path.expanduser('~/.ouroboros/prefs.json')
+try:
+    prefs = json.load(open(path, encoding='utf-8'))
+except Exception:
+    prefs = {}
+if not isinstance(prefs, dict):
+    prefs = {}
+prefs['codexModelMigration'] = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(prefs, f, indent=2)
+    f.write('\n')
+PY
+```
+
+Pass `kept-gpt-5-v1` instead of `automatic-v1` for the keep choice. If welcome
+was already completed, show a short confirmation and exit after recording this
+decision; do not make the user answer the generic welcome question too.
+
 **If `ALREADY_COMPLETED` is true, `CODEX_READY` is true, AND no `--force` flag:**
 
 Use **AskUserQuestion**:

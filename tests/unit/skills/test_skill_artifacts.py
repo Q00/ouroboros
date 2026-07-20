@@ -72,6 +72,10 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
         "../config/SKILL.md",
         "temporary `localhost` address",
         "A previously completed welcome must never hide the setup gate",
+        "LEGACY_CODEX_MODEL_MIGRATION_REQUIRED",
+        "Codex 선택으로 전환하기 (권장)",
+        "gpt-5 고정 유지하기",
+        "codexModelMigration",
     )
     codex_welcome = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
     for phrase in codex_required_phrases:
@@ -154,6 +158,39 @@ def test_codex_setup_gate_accepts_reordered_yaml_and_quoted_toml_mcp_key(tmp_pat
     gate = skill[start : skill.index("\n```", start)]
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_READY"
+
+
+def test_codex_legacy_gpt5_migration_gate_only_targets_the_old_all_stage_default(
+    tmp_path: Path,
+) -> None:
+    """A deliberate partial/custom pin must never trigger the upgrade prompt."""
+    repo_root = Path(__file__).resolve().parents[3]
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        """clarification:\n  default_model: gpt-5\nexecution:\n  default_model: gpt-5\nevaluation:\n  semantic_model: gpt-5\nresilience:\n  reflect_model: gpt-5\n""",
+        encoding="utf-8",
+    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+    migration_start = skill.index("### Legacy Codex Model Migration")
+    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', migration_start)
+    gate = skill[start : skill.index("\n```", start)]
+
+    assert (
+        _run_setup_gate(
+            f'{gate}\nprintf "%s" "${{LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}}"', home=tmp_path
+        )
+        == "true"
+    )
+
+    prefs_path = tmp_path / ".ouroboros" / "prefs.json"
+    prefs_path.write_text('{"codexModelMigration": "automatic-v1"}', encoding="utf-8")
+    assert (
+        _run_setup_gate(
+            f'{gate}\nprintf "%s" "${{LEGACY_CODEX_MODEL_MIGRATION_REQUIRED:-}}"', home=tmp_path
+        )
+        == ""
+    )
 
 
 def test_claude_setup_gate_accepts_reordered_yaml_and_json_mcp_key(tmp_path: Path) -> None:

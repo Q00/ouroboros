@@ -202,7 +202,9 @@ Codex default model** and **Enter another model ID…** for users who want to pi
 a stage to a specific model.
 
 Never repeat this first-use prompt once all of those Codex readiness checks
-pass. If the user selected **나중에** or the setup was later removed, offer the
-setup gate again.
+pass. The one exception is an older config that pins every stage to `gpt-5`:
+ask once whether to keep that pin or switch every stage to Codex's current
+selection, then store the user's decision. If the user selected **나중에** or
+the setup was later removed, offer the setup gate again.
 
 If the request is clearly unrelated to Ouroboros, handle it normally.
