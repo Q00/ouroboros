@@ -502,6 +502,21 @@ async def test_codex_default_sentinel_marks_configured_model_as_unconfirmed(app_
         assert model_select.value == "default"  # value stays the sentinel
 
 
+@pytest.mark.asyncio
+async def test_every_codex_stage_offers_the_runtime_default_model(app_env) -> None:
+    """Users can opt every pipeline stage into Codex-owned model selection."""
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        for stage in Stage:
+            pilot.app.query_one(f"#stage-runtime-{stage.value}", Select).value = "codex"
+        await pilot.pause()
+
+        for stage in Stage:
+            model_select = pilot.app.query_one(f"#stage-model-{stage.value}", Select)
+            options = {value for _, value in model_select._options}
+            assert DEFAULT_MODEL_SENTINEL in options
+
+
 @pytest.mark.parametrize(
     "backend",
     [backend for backend in runtime_backend_choices() if uses_default_model_sentinel(backend)],

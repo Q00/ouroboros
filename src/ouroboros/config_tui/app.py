@@ -627,9 +627,9 @@ class SettingsApp(App[None]):
                     self._model_options(
                         effective_backend,
                         current_model,
-                        # Every Execute runtime can inherit its own default;
-                        # the other stages retain backend-specific catalogs.
-                        include_automatic=stage is Stage.EXECUTE,
+                        # Every stage can delegate model selection to its
+                        # currently selected runtime.
+                        include_automatic=True,
                     ),
                     value=current_model if current_model else Select.NULL,
                     allow_blank=True,
@@ -704,9 +704,7 @@ class SettingsApp(App[None]):
             return
         backend = self._selected_runtime(stage)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
-        model_select.set_options(
-            self._model_options(backend, model, include_automatic=stage is Stage.EXECUTE)
-        )
+        model_select.set_options(self._model_options(backend, model, include_automatic=True))
         if model:
             model_select.value = model
 
@@ -762,7 +760,7 @@ class SettingsApp(App[None]):
             and (current_str in self._all_models(backend) or previous_backend == backend)
             else None
         )
-        options = self._model_options(backend, keep, include_automatic=stage is Stage.EXECUTE)
+        options = self._model_options(backend, keep, include_automatic=True)
         model_select.set_options(options)
         self._stage_model_backends[stage] = backend
         concrete = [v for _, v in options if v not in (SEARCH_SENTINEL, CUSTOM_SENTINEL)]
