@@ -997,6 +997,41 @@ class TestCodexCliRuntime:
         assert message.resume_handle.approval_mode == "acceptEdits"
         assert message.resume_handle.metadata == seeded_handle.metadata
 
+    @pytest.mark.parametrize(
+        ("event", "expected"),
+        [
+            (
+                {"type": "thread.started", "thread_id": "thread-123", "model": "gpt-5.4"},
+                ("gpt-5.4", "runtime_stream:thread.started:event.model"),
+            ),
+            (
+                {
+                    "type": "turn.completed",
+                    "session": {"selected_model": "gpt-5.4-mini"},
+                },
+                ("gpt-5.4-mini", "runtime_stream:turn.completed:session.selected_model"),
+            ),
+            # Item payloads can contain arbitrary provider/tool metadata. They
+            # are not a Codex lifecycle declaration of the effective model.
+            (
+                {"type": "item.completed", "item": {"model": "gpt-pretend"}},
+                None,
+            ),
+            # A text sentence is never a model identifier, even on a lifecycle event.
+            (
+                {"type": "turn.started", "model": "the model is gpt-pretend"},
+                None,
+            ),
+        ],
+    )
+    def test_runtime_reported_model_requires_a_lifecycle_model_field(
+        self,
+        event: dict[str, object],
+        expected: tuple[str, str] | None,
+    ) -> None:
+        """Automatic-mode telemetry never promotes configuration or item text to fact."""
+        assert CodexCliRuntime._runtime_reported_model(event) == expected
+
     def test_convert_command_execution_event(self) -> None:
         """Converts command execution items to Bash tool messages."""
         runtime = CodexCliRuntime(cli_path="codex")
@@ -1404,6 +1439,54 @@ class TestCodexCliRuntime:
         assert messages[-1].content == "Final answer"
         assert messages[-1].resume_handle is not None
         assert messages[-1].resume_handle.native_session_id == "thread-123"
+        assert messages[-1].data["model_observation"] == {
+            "mode": "automatic",
+            "status": "unreported",
+            "requested_model": None,
+            "effective_model": None,
+            "source": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_task_surfaces_only_runtime_reported_effective_model(self) -> None:
+        """A stream declaration upgrades automatic mode from unreported to observed."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Final answer", encoding="utf-8")
+            return _FakeProcess(
+                stdout_lines=[
+                    json.dumps(
+                        {
+                            "type": "thread.started",
+                            "thread_id": "thread-123",
+                            "model": "gpt-5.4",
+                        }
+                    ),
+                ],
+                stderr_lines=[],
+                returncode=0,
+            )
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("Do the work")]
+
+        model_message = next(
+            message for message in messages if message.data.get("subtype") == "model.observed"
+        )
+        assert model_message.content == "Codex selected model: gpt-5.4"
+        assert model_message.data["model_observation"] == {
+            "mode": "automatic",
+            "status": "observed",
+            "requested_model": None,
+            "effective_model": "gpt-5.4",
+            "source": "runtime_stream:thread.started:event.model",
+        }
+        assert messages[-1].data["model_observation"] == model_message.data["model_observation"]
 
     @pytest.mark.asyncio
     async def test_execute_task_handles_large_jsonl_events_without_readline(self) -> None:

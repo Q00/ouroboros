@@ -10,6 +10,7 @@ import pytest
 import typer
 
 from ouroboros.cli.commands.run import (
+    _execution_model_status,
     _load_skip_completed_markers,
     _resolve_cli_project_dir,
     _resolve_fat_harness_mode,
@@ -782,6 +783,25 @@ async def test_run_orchestrator_passes_execution_model_to_runtime(
 
     assert mock_runtime.call_args.kwargs["backend"] == "pi"
     assert mock_runtime.call_args.kwargs["model"] == "openai-codex/gpt-5.4-mini"
+
+
+def test_execution_model_status_marks_fixed_model() -> None:
+    assert _execution_model_status("codex", "terra") == "Execution model: terra (fixed)"
+
+
+def test_execution_model_status_does_not_invent_codex_automatic_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.configured_default_model",
+        lambda _backend: "gpt-configured",
+    )
+
+    status = _execution_model_status("codex", None)
+
+    assert "follows Codex's currently selected model" in status
+    assert "config.toml: gpt-configured" in status
+    assert "not confirmed at runtime" in status
 
 
 @pytest.mark.asyncio

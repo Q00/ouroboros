@@ -68,6 +68,30 @@ _TOP_LEVEL_EVENT_MESSAGE_TYPES: dict[str, str] = {
     "error": "assistant",
 }
 
+# ``codex exec --json`` does not currently promise an effective-model field on
+# every event.  Accept a model only when a lifecycle event reports one itself;
+# never infer it from a configured profile, a requested command argument, or
+# arbitrary item metadata.  That distinction keeps automatic mode honest when
+# a Codex version does not disclose the model it selected.
+_MODEL_REPORT_EVENT_TYPES = frozenset(
+    {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "session.started",
+        "session.updated",
+        "run.started",
+        "run.completed",
+    }
+)
+_MODEL_REPORT_KEYS = (
+    "effective_model",
+    "selected_model",
+    "resolved_model",
+    "model_id",
+    "model",
+)
+
 # Token-usage keys Codex's ``turn.completed`` event may carry. Kept in sync by
 # convention with the adapter's ``_USAGE_TOKEN_KEYS`` (a tiny duplicated helper,
 # not a shared module, per the token-attribution seam design).
@@ -395,6 +419,92 @@ class CodexCliRuntime:
         if not candidate or candidate == "default":
             return None
         return candidate
+
+    @staticmethod
+    def _normalize_runtime_reported_model(value: object) -> str | None:
+        """Accept one safe, machine-readable model identifier from Codex output."""
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        # Model identifiers are protocol values, not user-facing text. Reject
+        # whitespace/control-containing values so arbitrary stream content can
+        # never be relabeled as the active model.
+        if not candidate or len(candidate) > 256 or any(char.isspace() for char in candidate):
+            return None
+        return candidate
+
+    @classmethod
+    def _runtime_reported_model(cls, event: Mapping[str, Any]) -> tuple[str, str] | None:
+        """Return an effective model explicitly reported by a Codex lifecycle event.
+
+        The command's ``--model`` is a requested pin, while profile/global
+        config is only an input to Codex's selection.  Neither is evidence of
+        what an automatic run actually used.  A model becomes *observed* only
+        when the runtime stream reports it on a lifecycle event.
+        """
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or event_type not in _MODEL_REPORT_EVENT_TYPES:
+            return None
+
+        sources: tuple[tuple[str, Mapping[str, Any]], ...] = (("event", event),)
+        for container_key in ("session", "runtime", "metadata", "data"):
+            candidate = event.get(container_key)
+            if isinstance(candidate, Mapping):
+                sources += ((container_key, candidate),)
+
+        for source_name, source in sources:
+            for key in _MODEL_REPORT_KEYS:
+                model = cls._normalize_runtime_reported_model(source.get(key))
+                if model is not None:
+                    return model, f"runtime_stream:{event_type}:{source_name}.{key}"
+        return None
+
+    @staticmethod
+    def _command_requested_model(command: list[str]) -> str | None:
+        """Return the exact model handed to ``codex exec --model``, if any."""
+        try:
+            index = command.index("--model")
+        except ValueError:
+            return None
+        if index + 1 >= len(command):
+            return None
+        return CodexCliRuntime._normalize_runtime_reported_model(command[index + 1])
+
+    @classmethod
+    def _initial_model_observation(cls, command: list[str]) -> dict[str, str | None]:
+        """Describe the selection state before any runtime model report arrives."""
+        requested_model = cls._command_requested_model(command)
+        if requested_model is not None:
+            return {
+                "mode": "pinned",
+                "status": "requested",
+                "requested_model": requested_model,
+                "effective_model": None,
+                "source": "command:--model",
+            }
+        return {
+            "mode": "automatic",
+            "status": "unreported",
+            "requested_model": None,
+            "effective_model": None,
+            "source": None,
+        }
+
+    @staticmethod
+    def _observed_model_observation(
+        previous: Mapping[str, str | None],
+        *,
+        model: str,
+        source: str,
+    ) -> dict[str, str | None]:
+        """Upgrade selection metadata only from a runtime-reported model."""
+        return {
+            "mode": previous.get("mode"),
+            "status": "observed",
+            "requested_model": previous.get("requested_model"),
+            "effective_model": model,
+            "source": source,
+        }
 
     @staticmethod
     def _hash_json_payload(payload: object) -> str:
@@ -2251,6 +2361,16 @@ class CodexCliRuntime:
             output_path.unlink(missing_ok=True)
             return
 
+        # This is deliberately separate from the durable execution identity:
+        # a configured/default model can make a command replay-safe without
+        # proving which model an automatic Codex runtime selected.  User-facing
+        # telemetry starts as ``automatic + unreported`` and is upgraded only
+        # by a stream event that explicitly names the model.
+        model_observation: dict[str, str | None] | None = (
+            self._initial_model_observation(command) if self._runtime_backend == "codex" else None
+        )
+        last_reported_model: str | None = None
+
         log.info(
             f"{self._log_namespace}.task_started",
             command=command,
@@ -2381,6 +2501,28 @@ class CodexCliRuntime:
                         session_rebound=session_rebound,
                     )
 
+                    if model_observation is not None:
+                        reported_model = self._runtime_reported_model(event)
+                        if reported_model is not None:
+                            observed_model, observation_source = reported_model
+                            model_observation = self._observed_model_observation(
+                                model_observation,
+                                model=observed_model,
+                                source=observation_source,
+                            )
+                            if observed_model != last_reported_model:
+                                last_reported_model = observed_model
+                                yield AgentMessage(
+                                    type="system",
+                                    content=f"Codex selected model: {observed_model}",
+                                    data={
+                                        "subtype": "model.observed",
+                                        "runtime_event_type": "model.observed",
+                                        "model_observation": dict(model_observation),
+                                    },
+                                    resume_handle=current_handle,
+                                )
+
                     extra_messages = await self._handle_runtime_event(
                         event,
                         current_handle,
@@ -2396,6 +2538,14 @@ class CodexCliRuntime:
                             )
                             message = replace(message, resume_handle=current_handle)
                         last_content = self._update_last_content(last_content, message)
+                        if message.is_final and model_observation is not None:
+                            message = replace(
+                                message,
+                                data={
+                                    **message.data,
+                                    "model_observation": dict(model_observation),
+                                },
+                            )
                         yield message
 
                     for message in self._convert_event(event, current_handle):
@@ -2410,6 +2560,14 @@ class CodexCliRuntime:
                         last_content = self._update_last_content(last_content, message)
                         if message.is_final:
                             yielded_final = True
+                            if model_observation is not None:
+                                message = replace(
+                                    message,
+                                    data={
+                                        **message.data,
+                                        "model_observation": dict(model_observation),
+                                    },
+                                )
                         yield message
 
         except TimeoutError as e:
@@ -2523,6 +2681,8 @@ class CodexCliRuntime:
                 "subtype": "success" if returncode == 0 else "error",
                 "returncode": returncode,
             }
+            if model_observation is not None:
+                result_data["model_observation"] = dict(model_observation)
             if current_handle is not None and current_handle.native_session_id:
                 result_data["session_id"] = current_handle.native_session_id
             if returncode != 0:

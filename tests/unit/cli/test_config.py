@@ -121,6 +121,25 @@ class TestConfigShow:
         assert execute["model"] == "backend default"
         assert execute["model_source"] == "env OUROBOROS_EXECUTION_MODEL (cleared) ⚠"
 
+    def test_show_codex_automatic_model_is_not_presented_as_a_runtime_fact(
+        self, codex_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A config hint is explicitly distinct from the live Codex choice."""
+        monkeypatch.setattr(
+            "ouroboros.backends.model_catalog.configured_default_model",
+            lambda _backend: "gpt-configured",
+        )
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=codex_config_dir):
+            result = runner.invoke(app, ["show", "--json"])
+
+        assert result.exit_code == 0
+        execute = json.loads(result.output)["stages"]["execute"]
+        assert execute["model"] == (
+            "Codex current selected model (config.toml: gpt-configured; not confirmed at runtime)"
+        )
+        assert execute["model_source"] == "automatic Codex selection"
+
 
 # ── config backend ───────────────────────────────────────────────
 

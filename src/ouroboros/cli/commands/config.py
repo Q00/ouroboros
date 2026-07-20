@@ -209,6 +209,37 @@ def _agent_cell(backend: str, installed: dict[str, str | None]) -> str:
     return backend if installed.get(backend) else f"{backend} ⚠ not installed"
 
 
+def _is_automatic_model_value(value: str) -> bool:
+    """Whether an effective model value delegates choice to the runtime."""
+    return value.strip().lower() in {"backend default", "default", "current"}
+
+
+def _display_stage_model(model: str, source: str, runtime_backend: str) -> tuple[str, str]:
+    """Describe a stage model without claiming an unobserved Codex model.
+
+    Codex may use a model selected in the App or CLI rather than a model passed
+    by Ouroboros. A config-file value is a useful hint, but not evidence that
+    this invocation will use it.
+    """
+    capability = get_backend_capability(runtime_backend)
+    if capability is None or capability.name != "codex" or not _is_automatic_model_value(model):
+        return model, source
+
+    from ouroboros.backends.model_catalog import configured_default_model
+
+    configured_hint = configured_default_model("codex")
+    if configured_hint:
+        return (
+            "Codex current selected model "
+            f"(config.toml: {configured_hint}; not confirmed at runtime)",
+            "automatic Codex selection",
+        )
+    return (
+        "Codex current selected model (concrete model not reported by Codex)",
+        "automatic Codex selection",
+    )
+
+
 def _effective_view_data(data: dict, config_path: Path) -> dict:
     """Machine-readable effective view (what `show --json` emits)."""
     from ouroboros.backends.model_catalog import installed_backends
@@ -244,6 +275,7 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
                 "backend default",
                 empty_env_overrides=model_field.empty_env_overrides,
             )
+            model_value, model_source = _display_stage_model(model_value, model_source, resolved)
             model_key = model_field.key
         stages[stage.value] = {
             "agent": resolved,
@@ -330,6 +362,7 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
                 "backend default",
                 empty_env_overrides=model_field.empty_env_overrides,
             )
+            model_value, model_source = _display_stage_model(model_value, model_source, resolved)
         stages_table.add_row(stage.value, agent_cell, model_value, model_source)
     print_table(stages_table)
 

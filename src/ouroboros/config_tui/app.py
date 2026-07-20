@@ -396,11 +396,23 @@ class SettingsApp(App[None]):
         """Describe the runtime-owned default in terms of the model it selects."""
         if model != DEFAULT_MODEL_SENTINEL:
             return model
+        if _canonical_backend(backend) == "codex":
+            # The Codex App/CLI may select a model independently of the
+            # config file. A config.toml value is only a hint, not evidence
+            # that this invocation will use it.
+            if backend not in self._default_hints:
+                self._default_hints[backend] = configured_default_model(backend)
+            hint = self._default_hints[backend]
+            if hint:
+                return (
+                    "Follow Codex's currently selected model "
+                    f"— config.toml: {hint} (not confirmed at runtime)"
+                )
+            return "Follow Codex's currently selected model — concrete model not reported by Codex"
         if backend not in self._default_hints:
             self._default_hints[backend] = configured_default_model(backend)
         hint = self._default_hints[backend]
-        owner = "Codex " if _canonical_backend(backend) == "codex" else ""
-        prefix = f"Use {owner}default model"
+        prefix = "Use runtime default model"
         return f"{prefix} — configured: {hint}" if hint else prefix
 
     def _runtime_env_override(self) -> str | None:

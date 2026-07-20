@@ -484,9 +484,8 @@ async def test_search_modal_cancel_restores_previous_value(app_env, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
-    """For sentinel backends the 'default' entry names the model it resolves
-    to (read from the CLI's own config), e.g. 'Use Codex default model — configured: gpt-9-test'."""
+async def test_codex_default_sentinel_marks_configured_model_as_unconfirmed(app_env) -> None:
+    """The settings label must not call a config hint the live Codex model."""
     app = SettingsApp()
     async with app.run_test() as pilot:
         stage = Stage.INTERVIEW.value
@@ -494,7 +493,12 @@ async def test_default_sentinel_label_shows_configured_model(app_env) -> None:
         await pilot.pause()
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         labels = {str(label) for label, _ in model_select._options}
-        assert any("Use Codex default model — configured: gpt-9-test" in label for label in labels)
+        assert any(
+            "Follow Codex's currently selected model" in label
+            and "config.toml: gpt-9-test" in label
+            and "not confirmed at runtime" in label
+            for label in labels
+        )
         assert model_select.value == "default"  # value stays the sentinel
 
 
@@ -508,7 +512,10 @@ def test_default_sentinel_describes_the_runtime_default_for_every_cli_backend(
     """Every CLI-owned default describes the actual model-selection behavior."""
     label = SettingsApp()._model_label(backend, DEFAULT_MODEL_SENTINEL)
 
-    assert label.startswith("Use ")
+    if backend == "codex":
+        assert label.startswith("Follow Codex's currently selected model")
+    else:
+        assert label.startswith("Use ")
 
 
 @pytest.mark.asyncio
