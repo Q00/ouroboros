@@ -86,11 +86,12 @@ class BackendModelCatalog:
 
 
 # Hand-curated additions per backend, appended after the loader-mirroring
-# default entry. Keep entries verifiable: the codex ids below were confirmed
-# against a live `opencode models` listing of the OpenAI catalog.
+# default entry. Keep entries verifiable: the Codex ids below follow the
+# current official Codex model-selection guidance. Newest/recommended choices
+# come first so a user who pins a model does not start from a retired GPT-5 id.
 _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
     "claude": ("claude-haiku-4-5-20251001",),
-    "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    "codex": ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"),
     # Grok Build model slugs, after the CLI-owned "default" sentinel. Verified
     # against a live `grok models` listing (grok-build, grok-composer-2.5-fast).
     "grok": ("grok-build", "grok-composer-2.5-fast"),

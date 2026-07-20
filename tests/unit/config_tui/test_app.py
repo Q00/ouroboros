@@ -544,7 +544,7 @@ async def test_preset_button_stages_models_for_every_card(app_env) -> None:
         interview_model = pilot.app.query_one(f"#stage-model-{Stage.INTERVIEW.value}", Select)
         assert interview_model.value == "claude-haiku-4-5-20251001"  # claude frugal
         execute_model = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
-        assert execute_model.value == "gpt-5-mini"  # codex frugal
+        assert execute_model.value == "gpt-5.6-luna"  # codex frugal
         status = pilot.app.query_one("#status-bar", Static)
         assert "frugal" in str(status.render())
         assert "Save" in str(status.render())  # staged, not saved
@@ -558,12 +558,12 @@ async def test_save_persists_execute_model_pin(app_env, monkeypatch) -> None:
     app = SettingsApp()
     async with app.run_test() as pilot:
         model_select = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
-        model_select.value = "gpt-5-codex"
+        model_select.value = "gpt-5.6-sol"
         await pilot.pause()
         pilot.app.action_save()
         await pilot.pause()
 
-    assert captured["execution.default_model"] == "gpt-5-codex"
+    assert captured["execution.default_model"] == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio

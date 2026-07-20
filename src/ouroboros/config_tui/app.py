@@ -69,9 +69,9 @@ SEARCH_THRESHOLD = 20
 # One-click model presets: per-backend picks, falling back to the backend's
 # catalog default where no differentiated tier exists (sentinel backends).
 PRESET_MODELS: dict[str, dict[str, str]] = {
-    "frugal": {"claude": "claude-haiku-4-5-20251001", "codex": "gpt-5-mini"},
-    "balanced": {"claude": DEFAULT_SONNET_MODEL, "codex": "gpt-5"},
-    "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": "gpt-5-codex"},
+    "frugal": {"claude": "claude-haiku-4-5-20251001", "codex": "gpt-5.6-luna"},
+    "balanced": {"claude": DEFAULT_SONNET_MODEL, "codex": "gpt-5.6-terra"},
+    "frontier": {"claude": DEFAULT_OPUS_MODEL, "codex": "gpt-5.6-sol"},
 }
 
 # One-click multi-LLM stage-routing presets: per-stage runtime backend picks
