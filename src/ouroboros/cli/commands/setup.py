@@ -1276,13 +1276,18 @@ def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
 
 def _install_codex_default_llm_profiles(
     config_dict: dict,
+    *,
+    preserve_legacy_model_overrides: bool = True,
 ) -> tuple[list[str], list[str], list[str]]:
     """Install missing provider-neutral Ouroboros task profiles for Codex setup.
 
     Existing profile definitions and explicit legacy per-role model overrides
-    are preserved. If a default profile name already exists for another backend,
-    merge in only the missing Codex provider mapping before adding role defaults
-    that target that profile.
+    are preserved. A freshly generated config is the exception: its shipped
+    legacy model fields are defaults, not user pins, so callers pass
+    ``preserve_legacy_model_overrides=False`` to establish every Codex role
+    effort mapping. If a default profile name already exists for another
+    backend, merge in only the missing Codex provider mapping before adding
+    role defaults that target that profile.
     """
     llm_profiles = _ensure_mapping_section(config_dict, "llm_profiles")
     llm_role_profiles = _ensure_mapping_section(config_dict, "llm_role_profiles")
@@ -1312,7 +1317,10 @@ def _install_codex_default_llm_profiles(
 
     added_role_profiles: list[str] = []
     for role, profile_name in _CODEX_DEFAULT_LLM_ROLE_PROFILES.items():
-        if role in llm_role_profiles or _has_explicit_codex_model_override(config_dict, role):
+        if role in llm_role_profiles or (
+            preserve_legacy_model_overrides
+            and _has_explicit_codex_model_override(config_dict, role)
+        ):
             continue
         llm_role_profiles[role] = profile_name
         added_role_profiles.append(role)
@@ -1348,8 +1356,9 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    fresh_config = not config_path.exists()
 
-    if config_path.exists():
+    if not fresh_config:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
         create_default_config(config_dir)
@@ -1369,7 +1378,8 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
         llm_config["backend"] = "codex"
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
-            config_dict
+            config_dict,
+            preserve_legacy_model_overrides=not fresh_config,
         )
         migrated_legacy_profiles = _migrate_legacy_codex_profile_mappings(config_dict)
         protected_legacy_profiles = _referenced_legacy_codex_profiles(config_dict)

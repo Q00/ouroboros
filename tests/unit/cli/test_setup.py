@@ -984,6 +984,30 @@ class TestCodexSetup:
         assert any("Configure Ouroboros runtime" in message for message in info_messages)
         assert any("profiles you manage yourself" in message for message in info_messages)
 
+    def test_fresh_codex_setup_installs_every_role_effort_mapping(self, tmp_path: Path) -> None:
+        """Generated legacy defaults are not user pins that suppress Codex roles."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            setup_cmd._setup_codex("/usr/local/bin/codex")
+
+        config_dict = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        role_profiles = config_dict["llm_role_profiles"]
+        assert role_profiles == setup_cmd._CODEX_DEFAULT_LLM_ROLE_PROFILES
+        for profile_name in set(role_profiles.values()):
+            effort = config_dict["llm_profiles"][profile_name]["providers"]["codex"][
+                "reasoning_effort"
+            ]
+            assert effort in {"low", "medium", "high", "xhigh"}
+
     def test_setup_codex_aborts_on_non_mapping_config(self, tmp_path: Path) -> None:
         """Malformed top-level config should not be rewritten by Codex setup."""
         config_dir = tmp_path / ".ouroboros"
