@@ -37,6 +37,13 @@ def test_active_env_overrides_blank_value_does_not_count(monkeypatch) -> None:
     assert fields.active_env_overrides(field) == ()
 
 
+def test_blank_execution_model_env_is_an_active_clear_override(monkeypatch) -> None:
+    """Unlike other model vars, an empty Execute override intentionally clears a pin."""
+    monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "   ")
+    field = fields.STAGE_MODEL_FIELDS[Stage.EXECUTE]
+    assert fields.active_env_overrides(field) == ("OUROBOROS_EXECUTION_MODEL",)
+
+
 def test_runtime_field_tracks_both_runtime_env_vars(monkeypatch) -> None:
     monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
     monkeypatch.setenv("OUROBOROS_RUNTIME", "hermes")

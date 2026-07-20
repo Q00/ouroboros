@@ -9,8 +9,13 @@ import subprocess
 from ouroboros.skills.artifacts import resolve_packaged_skills_dir
 
 
-def test_codex_plugin_manifest_exposes_the_shared_skills_and_mcp_server() -> None:
-    """The marketplace install must carry the first-use skills before setup runs."""
+def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
+    """A fresh Codex plugin session must not compose its handlers as Claude.
+
+    First-use setup runs *inside* this MCP process, so it cannot retrofit the
+    runtime selected while the server was composed.  The packaged descriptor
+    therefore owns the Codex runtime and LLM backend from process startup.
+    """
     repo_root = Path(__file__).resolve().parents[3]
     marketplace_path = repo_root / ".agents" / "plugins" / "marketplace.json"
     marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
@@ -28,9 +33,23 @@ def test_codex_plugin_manifest_exposes_the_shared_skills_and_mcp_server() -> Non
     ]
     assert manifest["name"] == "ouroboros"
     assert manifest["skills"] == "./skills/"
-    assert manifest["mcpServers"] == "./.mcp.json"
+    assert manifest["mcpServers"] == "./.mcp.codex.json"
     assert manifest["interface"]["displayName"] == "Ouroboros"
-    assert (repo_root / ".mcp.json").is_file()
+    codex_mcp = json.loads((repo_root / ".mcp.codex.json").read_text(encoding="utf-8"))
+    assert codex_mcp["mcpServers"]["ouroboros"] == {
+        "command": "uvx",
+        "args": [
+            "--from",
+            "ouroboros-ai[mcp,claude]",
+            "ouroboros",
+            "mcp",
+            "serve",
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ],
+    }
     assert (repo_root / "skills" / "config" / "SKILL.md").is_file()
     assert (repo_root / "skills" / "ooo" / "SKILL.md").is_file()
     assert (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").is_file()

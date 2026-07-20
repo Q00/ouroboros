@@ -1196,17 +1196,18 @@ def test_mcp_model_tier_omission_remains_distinguishable_from_explicit_medium() 
     )
 
     # FastMCP materializes declared defaults before invoking the handler. Keeping
-    # this schema default unset lets the handler distinguish omitted (restore the
-    # checkpoint) from explicitly supplied ``medium`` (replace it).
+    # this schema default unset lets the handler distinguish omitted (preserve
+    # automatic Codex selection / restore a checkpoint) from explicitly supplied
+    # ``medium`` (pin standard routing).
     assert parameter.default is None
 
-    assert _resolve_model_tier_request({}, is_resume=False) == (
+    assert _resolve_model_tier_request({}) == ("medium", None, None)
+    assert _resolve_model_tier_request({"model_tier": None}) == (
         "medium",
-        "standard",
-        "medium",
+        None,
+        None,
     )
-    assert _resolve_model_tier_request({}, is_resume=True) == ("medium", None, None)
-    assert _resolve_model_tier_request({"model_tier": "medium"}, is_resume=True) == (
+    assert _resolve_model_tier_request({"model_tier": "medium"}) == (
         "medium",
         "standard",
         "medium",

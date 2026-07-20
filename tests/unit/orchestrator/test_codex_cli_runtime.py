@@ -85,6 +85,39 @@ def test_codex_config_fingerprint_still_detects_project_runtime_overrides(
         runtime._assert_codex_config_files_unchanged()
 
 
+def test_profile_fingerprint_preserves_v1_hash_when_effort_is_dormant() -> None:
+    """Null effort fields must not invalidate a pre-effort resume contract."""
+    config = OuroborosConfig(
+        llm_profiles={
+            "standard": {
+                "providers": {"codex": {"profile": "ouroboros-standard"}},
+            },
+        },
+        llm_role_profiles={"agent_runtime": "standard"},
+    )
+    legacy_payload = {
+        "version": 1,
+        "llm_profiles": {
+            "standard": {
+                "model": None,
+                "providers": {
+                    "codex": {
+                        "model": None,
+                        "profile": "ouroboros-standard",
+                    },
+                },
+            },
+        },
+        "llm_role_profiles": {"agent_runtime": "standard"},
+    }
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        assert runtime._fingerprint_profile_resolution_config() == runtime._hash_json_payload(
+            legacy_payload
+        )
+
+
 class TestComposePromptDirectiveFencing:
     """System instructions and tooling must be fenced as binding directives."""
 

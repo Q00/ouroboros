@@ -28,6 +28,7 @@ from ouroboros.config.models import (
     TierConfig,
     get_default_config,
 )
+from ouroboros.mcp.tools.execution_handlers import _resolve_model_tier_request
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -468,20 +469,43 @@ class TestRunnerRouterConstruction:
     def test_codex_automatic_model_selection_omits_model_flag(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Automatic Codex selection must preserve the App/CLI selected model."""
+        """An omitted MCP tier preserves Codex's App/CLI-selected model.
+
+        The public MCP response still calls this ``medium``, but it must not be
+        converted into an explicit ``standard`` runner override.  Supplying
+        ``medium`` intentionally is different and re-enables tier routing.
+        """
         monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
         monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
         empty_config = OuroborosConfig()
 
         monkeypatch.setattr("ouroboros.providers.profiles.load_config", lambda: empty_config)
         monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+
+        public_tier, automatic_override, delegated_tier = _resolve_model_tier_request({})
+        assert (public_tier, automatic_override, delegated_tier) == ("medium", None, None)
         runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
-        runner = self._runner(runtime)
+        runner = self._runner(runtime, base_model_tier=automatic_override)
 
         assert runner._model_router is None
         command = runtime._build_command("/tmp/output", prompt="automatic model")
 
         assert "--model" not in command
+
+        public_tier, explicit_override, delegated_tier = _resolve_model_tier_request(
+            {"model_tier": "medium"}
+        )
+        assert (public_tier, explicit_override, delegated_tier) == (
+            "medium",
+            "standard",
+            "medium",
+        )
+        explicit_runner = self._runner(
+            CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project"),
+            base_model_tier=explicit_override,
+        )
+        assert explicit_runner._model_router is not None
+        assert explicit_runner._model_router.base_tier == "standard"
 
     def test_missing_user_config_uses_shipped_routing_and_verify_defaults(
         self,

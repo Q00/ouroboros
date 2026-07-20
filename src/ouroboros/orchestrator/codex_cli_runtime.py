@@ -374,20 +374,28 @@ class CodexCliRuntime:
 
         profiles: dict[str, object] = {}
         for name, profile in sorted(config.llm_profiles.items()):
-            codex_providers = {
-                key: {
+            codex_providers: dict[str, dict[str, str | None]] = {}
+            for key, provider in sorted(profile.providers.items()):
+                if key.strip().lower() not in {"codex", "codex_cli"}:
+                    continue
+                provider_contract: dict[str, str | None] = {
                     "model": provider.model,
                     "profile": provider.profile,
-                    "reasoning_effort": provider.reasoning_effort,
                 }
-                for key, provider in sorted(profile.providers.items())
-                if key.strip().lower() in {"codex", "codex_cli"}
-            }
-            profiles[name] = {
+                # Retain the v1 identity when the newly introduced field is
+                # dormant. Existing sessions persisted that older shape, and
+                # a null value changes no command-line behavior.
+                if provider.reasoning_effort is not None:
+                    provider_contract["reasoning_effort"] = provider.reasoning_effort
+                codex_providers[key] = provider_contract
+
+            profile_contract: dict[str, object] = {
                 "model": profile.model,
-                "reasoning_effort": profile.reasoning_effort,
                 "providers": codex_providers,
             }
+            if profile.reasoning_effort is not None:
+                profile_contract["reasoning_effort"] = profile.reasoning_effort
+            profiles[name] = profile_contract
 
         return self._hash_json_payload(
             {

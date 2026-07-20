@@ -164,14 +164,21 @@ def _effective_value(
     env_vars: tuple[str, ...],
     raw_value: object,
     default: object,
+    *,
+    empty_env_overrides: bool = False,
 ) -> tuple[str, str]:
     """Resolve the effective value and its source (env > config > default)."""
     import os
 
     for name in env_vars:
-        env_value = os.environ.get(name, "").strip()
+        raw_env_value = os.environ.get(name)
+        if raw_env_value is None:
+            continue
+        env_value = raw_env_value.strip()
         if env_value:
             return env_value, f"env {name} ⚠"
+        if empty_env_overrides:
+            return str(default), f"env {name} (cleared) ⚠"
     if raw_value is not None:
         return str(raw_value), "config"
     return str(default), "default"
@@ -235,6 +242,7 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
                 model_field.env_vars,
                 get_value(data, model_field.key),
                 "backend default",
+                empty_env_overrides=model_field.empty_env_overrides,
             )
             model_key = model_field.key
         stages[stage.value] = {
@@ -320,6 +328,7 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
                 model_field.env_vars,
                 get_value(data, model_field.key),
                 "backend default",
+                empty_env_overrides=model_field.empty_env_overrides,
             )
         stages_table.add_row(stage.value, agent_cell, model_value, model_source)
     print_table(stages_table)

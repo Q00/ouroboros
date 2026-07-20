@@ -160,6 +160,23 @@ async def test_env_override_badge_absent_when_unset(app_env, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_blank_execution_model_env_shows_the_effective_automatic_choice(
+    app_env, monkeypatch
+) -> None:
+    """A blank runtime override masks a saved Execute pin without deleting it."""
+    app_env["execution"] = {"default_model": "terra"}
+    monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "")
+
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        model_select = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert model_select.value == DEFAULT_MODEL_SENTINEL
+        warnings = [str(w.render()) for w in pilot.app.query(".env-warning").results(Static)]
+        assert any("OUROBOROS_EXECUTION_MODEL" in text for text in warnings)
+        assert "execution.default_model" not in pilot.app._collect_changes()
+
+
+@pytest.mark.asyncio
 async def test_runtime_env_override_drives_inherited_stage_cards(app_env, monkeypatch) -> None:
     monkeypatch.setenv("OUROBOROS_RUNTIME", "codex")
 

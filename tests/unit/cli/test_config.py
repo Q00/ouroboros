@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,6 +103,23 @@ class TestConfigShow:
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 0
         assert "ouroboros.db" in result.output
+
+    def test_show_json_reports_blank_execution_model_env_as_a_cleared_override(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The effective view must match ``get_execution_model()`` semantics."""
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        data["execution"] = {"default_model": "terra"}
+        (config_dir / "config.yaml").write_text(yaml.dump(data))
+        monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "")
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["show", "--json"])
+
+        assert result.exit_code == 0
+        execute = json.loads(result.output)["stages"]["execute"]
+        assert execute["model"] == "backend default"
+        assert execute["model_source"] == "env OUROBOROS_EXECUTION_MODEL (cleared) ⚠"
 
 
 # ── config backend ───────────────────────────────────────────────

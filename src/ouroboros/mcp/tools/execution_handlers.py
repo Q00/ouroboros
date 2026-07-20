@@ -105,19 +105,23 @@ def _resolve_execution_model(runtime_backend: str | None) -> str | None:
 
 def _resolve_model_tier_request(
     arguments: Mapping[str, Any],
-    *,
-    is_resume: bool,
 ) -> tuple[str, str | None, str | None]:
     """Resolve public value, runner override, and delegated round-trip value.
 
-    A fresh omitted request uses the public ``medium`` default and must therefore
-    pin the run's base tier to ``standard``. An omitted resume is different: it
-    means restore the persisted routing contract, so neither the runner nor a
-    delegated plugin payload may materialize a new explicit ``medium`` override.
+    ``medium`` is the public response default, not an implicit routing pin.  In
+    particular, an omitted value must reach a fresh Codex execution as ``None``:
+    Codex then keeps the model selected by its App/CLI and Ouroboros emits no
+    ``--model`` flag.  An explicitly supplied ``medium`` is different: it pins
+    the run's base tier to ``standard``.  The same omission rule preserves a
+    resumed run's persisted routing contract.
     """
     requested = arguments.get("model_tier")
     effective = requested if isinstance(requested, str) and requested else "medium"
-    should_override = requested is not None or not is_resume
+    # FastMCP may materialize an omitted optional argument as ``None``.  Treat
+    # that exactly like an absent key; only a non-empty string is an intentional
+    # model-tier request that may replace automatic Codex selection or a resumed
+    # routing contract.
+    should_override = isinstance(requested, str) and bool(requested)
     return (
         effective,
         tier_from_model_tier_arg(effective) if should_override else None,
@@ -850,7 +854,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         arguments = {**arguments, "seed_content": seed_content}
         session_id = session_id or session_id_override
         model_tier, base_model_tier_override, delegated_model_tier = _resolve_model_tier_request(
-            arguments, is_resume=is_resume
+            arguments
         )
         try:
             execution_preferences, raw_efficiency_mode, raw_frugality_assurance = (
@@ -930,8 +934,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 arguments.get("auto_evaluate"),
             )
             _effective_tier, _runner_tier, delegated_model_tier = _resolve_model_tier_request(
-                arguments,
-                is_resume=is_resume,
+                arguments
             )
             payload = build_execute_subagent(
                 seed_content=seed_content,
@@ -1949,7 +1952,7 @@ class StartExecuteSeedHandler:
                 arguments.get("auto_evaluate"),
             )
             _effective_tier, _runner_tier, delegated_model_tier = _resolve_model_tier_request(
-                arguments, is_resume=is_resume
+                arguments
             )
             payload = build_execute_subagent(
                 seed_content=seed_content,

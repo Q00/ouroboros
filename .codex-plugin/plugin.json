@@ -18,7 +18,7 @@
     "evaluation"
   ],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./.mcp.codex.json",
   "interface": {
     "displayName": "Ouroboros",
     "shortDescription": "Turn ideas into verified software.",

@@ -543,6 +543,14 @@ class SettingsApp(App[None]):
         stage_value = get_value(self._raw, runtime_field.key)
         effective_backend = self._effective_stage_backend(stage)
         current_model = str(self._current(model_field.key) or "") if model_field else ""
+        # ``OUROBOROS_EXECUTION_MODEL=`` deliberately clears a saved pin.
+        # Render the effective runtime-owned choice instead of displaying the
+        # dormant persisted value as though it will be used in this session.
+        if model_field is not None and model_field.empty_env_overrides:
+            for name in model_field.env_vars:
+                if name in os.environ:
+                    current_model = os.environ[name].strip()
+                    break
         # Execute has no shipped model pin: display the implicit behavior as an
         # explicit default-model choice without persisting anything merely because
         # the user saves an unrelated setting.
@@ -825,6 +833,14 @@ class SettingsApp(App[None]):
                 elif not _is_blank(model_value):
                     model_text = str(model_value)
                     if stage is Stage.EXECUTE and model_text == DEFAULT_MODEL_SENTINEL:
+                        # A blank ``OUROBOROS_EXECUTION_MODEL`` masks the saved
+                        # pin.  Saving an unrelated UI change must not turn
+                        # that temporary effective state into a destructive
+                        # persisted clear.
+                        if model_field.empty_env_overrides and any(
+                            name in os.environ for name in model_field.env_vars
+                        ):
+                            continue
                         if get_value(self._raw, model_field.key) is not None:
                             changes[model_field.key] = None
                         continue
