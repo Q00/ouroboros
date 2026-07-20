@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import tempfile
 import tomllib
 from typing import Any
@@ -334,6 +335,51 @@ class CodexCliRuntime:
         )
         return resolution.cli_path
 
+    def _cli_executable_identity(self) -> str | None:
+        """Return the stable path of the executable selected for this runtime.
+
+        ``codex`` may be selected through PATH, an explicit configuration value,
+        or the wrapper fallback policy.  A bare command name is not durable:
+        another process can resolve it to a different binary after PATH changes.
+        Only an absolute, existing path may therefore authorize the automatic
+        (no ``--model``) Codex resume exception.  Keep the selected path itself
+        rather than dereferencing symlinks so two launch paths remain distinct
+        execution identities even when they currently point at the same target.
+        """
+        try:
+            candidate = Path(self._cli_path).expanduser()
+            if not candidate.is_absolute() or not candidate.exists():
+                return None
+            return str(candidate.absolute())
+        except (OSError, RuntimeError):
+            return None
+
+    def _cli_executable_version_identity(self) -> str | None:
+        """Hash the selected CLI's version response for replay-safe resumes.
+
+        The absolute launch path distinguishes parallel installations, while
+        this value detects an in-place Codex upgrade at that same path.  A
+        model-less automatic resume is deliberately unavailable when the
+        executable cannot provide a stable version response.
+        """
+        executable_path = self._cli_executable_identity()
+        if executable_path is None:
+            return None
+        try:
+            result = subprocess.run(
+                [executable_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        version_output = (result.stdout or result.stderr).strip()
+        if result.returncode != 0 or not version_output:
+            return None
+        return self._hash_json_payload({"version_output": version_output})
+
     def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
         """Resolve an optional explicit skill override directory for intercept metadata."""
         if skills_dir is None:
@@ -561,6 +607,12 @@ class CodexCliRuntime:
 
         return {
             "kind": "codex_cli_v1",
+            # The automatic Codex default has no model argument.  Bind its
+            # durable identity to the selected executable as well as its
+            # profile/config inputs, otherwise a different Codex installation
+            # could resume the same native thread under different defaults.
+            "cli_executable_path": self._cli_executable_identity(),
+            "cli_executable_version": self._cli_executable_version_identity(),
             "runtime_profile": self._runtime_profile.strip()
             if isinstance(self._runtime_profile, str) and self._runtime_profile.strip()
             else None,

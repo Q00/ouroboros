@@ -351,7 +351,10 @@ class TestExecuteSeedHandlerSubagentDispatch:
         assert ctx["max_iterations"] == 5
         assert ctx["skip_qa"] is True
         assert ctx["auto_evaluate"] is False
-        assert ctx["model_tier"] == "medium"
+        # An omitted tier preserves the runtime's selected model. The public
+        # response calls the automatic choice "medium", but a delegated child
+        # must receive None rather than a materialized standard-tier pin.
+        assert ctx["model_tier"] is None
 
     async def test_context_preserves_explicit_model_tier(self, handler) -> None:
         result = await handler.handle(
@@ -449,13 +452,13 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         assert result.value.meta["job_id"] is None
         assert result.value.meta["status"] == "delegated_to_plugin"
 
-    async def test_plugin_context_applies_fresh_default_and_preserves_explicit_tier(
+    async def test_plugin_context_preserves_automatic_omission_and_explicit_tier(
         self, handler
     ) -> None:
         omitted = await handler.handle({"seed_content": "goal: test"})
         explicit = await handler.handle({"seed_content": "goal: test", "model_tier": "medium"})
 
-        assert omitted.value.meta["_subagent"]["context"]["model_tier"] == "medium"
+        assert omitted.value.meta["_subagent"]["context"]["model_tier"] is None
         assert explicit.value.meta["_subagent"]["context"]["model_tier"] == "medium"
 
     async def test_plugin_mode_delegates_formal_evaluation_to_child(self, handler) -> None:

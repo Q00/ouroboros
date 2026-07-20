@@ -26,6 +26,9 @@ from ouroboros.cli.commands.setup import (
 )
 from ouroboros.codex import CodexArtifactInstallResult
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
+from ouroboros.config.models import OuroborosConfig, get_default_config
+from ouroboros.providers.base import CompletionConfig
+from ouroboros.providers.profiles import resolve_completion_profile
 
 # ── Codex setup tests ────────────────────────────────────────────
 
@@ -1030,6 +1033,38 @@ class TestCodexSetup:
             ]
             assert effort in {"low", "medium", "high", "xhigh"}
 
+    def test_existing_default_config_installs_every_role_effort_mapping(self) -> None:
+        """Serialized shipped defaults must not suppress Codex effort profiles."""
+        config_dict = get_default_config().model_dump(mode="python")
+
+        _, _, added_roles = setup_cmd._install_codex_default_llm_profiles(config_dict)
+
+        assert set(added_roles) == set(setup_cmd._CODEX_DEFAULT_LLM_ROLE_PROFILES)
+        assert config_dict["llm_role_profiles"] == setup_cmd._CODEX_DEFAULT_LLM_ROLE_PROFILES
+
+    def test_codex_setup_preserves_effective_codex_cli_alias_profile(self) -> None:
+        """An aliased pin stays effective instead of being shadowed by ``codex``."""
+        config_dict = {
+            "llm_profiles": {
+                "fast": {
+                    "providers": {"codex_cli": {"model": "user-pin", "profile": "user-profile"}}
+                }
+            }
+        }
+
+        setup_cmd._install_codex_default_llm_profiles(config_dict)
+
+        providers = config_dict["llm_profiles"]["fast"]["providers"]
+        assert set(providers) == {"codex_cli"}
+        config = OuroborosConfig.model_validate(config_dict)
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            resolved = resolve_completion_profile(
+                CompletionConfig(model="default", role="assertion_extraction"), backend="codex"
+            )
+
+        assert resolved.config.model == "user-pin"
+        assert resolved.backend_profile == "user-profile"
+
     def test_setup_codex_aborts_on_non_mapping_config(self, tmp_path: Path) -> None:
         """Malformed top-level config should not be rewritten by Codex setup."""
         config_dir = tmp_path / ".ouroboros"
@@ -1170,8 +1205,10 @@ class TestCodexSetup:
         assert "consensus_judge" not in config_dict["llm_role_profiles"]
         assert "ontology_analysis" not in config_dict["llm_role_profiles"]
 
-    def test_setup_codex_preserves_pinned_legacy_default_model(self, tmp_path: Path) -> None:
-        """Presence of a legacy model key should count as an explicit user override."""
+    def test_setup_codex_treats_shipped_legacy_default_model_as_unpinned(
+        self, tmp_path: Path
+    ) -> None:
+        """A historical shipped default is not distinguishable from an untouched config."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -1201,7 +1238,7 @@ class TestCodexSetup:
 
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == "claude-sonnet-4-20250514"
-        assert "qa" not in config_dict["llm_role_profiles"]
+        assert config_dict["llm_role_profiles"]["qa"] == "frontier"
 
     def test_setup_codex_merges_codex_mapping_into_existing_profiles(self, tmp_path: Path) -> None:
         """Existing same-name profiles should be made safe before role mappings target them."""

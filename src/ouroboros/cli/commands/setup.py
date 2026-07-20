@@ -1265,6 +1265,36 @@ def _ensure_profile_provider_mapping(profile: dict, provider: str) -> dict:
     return provider_config
 
 
+def _ensure_codex_profile_provider_mapping(profile: dict) -> dict:
+    """Return the existing Codex provider slot, or create the canonical one.
+
+    ``codex`` and ``codex_cli`` resolve to the same backend.  In particular,
+    do not add an effort-only ``codex`` mapping beside a user-owned
+    ``codex_cli`` model/profile mapping: profile resolution intentionally
+    prefers the exact canonical key, so doing so would silently shadow the
+    user's effective pin.
+    """
+    providers = profile.get("providers")
+    if not isinstance(providers, dict):
+        if providers is not None:
+            msg = "Invalid non-mapping 'providers' in an LLM profile."
+            raise ValueError(msg)
+        providers = {}
+        profile["providers"] = providers
+
+    for provider in ("codex", "codex_cli"):
+        provider_config = providers.get(provider)
+        if isinstance(provider_config, dict):
+            return provider_config
+        if provider_config is not None:
+            msg = f"Invalid non-mapping {provider!r} provider profile."
+            raise ValueError(msg)
+
+    provider_config = {}
+    providers["codex"] = provider_config
+    return provider_config
+
+
 def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
     """Read a nested config value, returning _MISSING when absent."""
     current: object = config_dict
@@ -1276,10 +1306,26 @@ def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
 
 
 def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
-    """Return True when an existing model setting should beat setup defaults."""
-    for path, _default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
+    """Return True only when an existing legacy setting is a real user pin.
+
+    Default configs serialize their legacy model fields, including values from
+    prior shipped releases.  Field presence is consequently not provenance:
+    match the loader's shipped-default classification before deciding a field
+    should suppress the role's Codex effort profile.
+    """
+    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
         value = _get_nested_value(config_dict, path)
-        if value is not _MISSING:
+        if value is _MISSING:
+            continue
+        if isinstance(default, str) and value in recognized_shipped_defaults(default):
+            continue
+        if (
+            isinstance(default, tuple)
+            and isinstance(value, (list, tuple))
+            and _is_shipped_default_roster(value, default)
+        ):
+            continue
+        if value != default:
             return True
     return False
 
@@ -1316,7 +1362,7 @@ def _install_codex_default_llm_profiles(
             raise ValueError(msg)
 
         default_codex = profile["providers"]["codex"]  # type: ignore[index]
-        codex_provider = _ensure_profile_provider_mapping(existing_profile, "codex")
+        codex_provider = _ensure_codex_profile_provider_mapping(existing_profile)
         if (
             "profile" not in codex_provider
             and "model" not in codex_provider
