@@ -577,6 +577,44 @@ class TestCreateOuroborosServer:
         assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
         assert signal.mailbox.delivery_queue is runtime_context.synapse
 
+    @pytest.mark.asyncio
+    async def test_evolve_step_runner_shares_composition_root_synapse_hub(self) -> None:
+        """Evolve generations must register AC attempts on the public Synapse hub."""
+        from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
+        from ouroboros.persistence.event_store import EventStore
+
+        captured_runner_kwargs: dict[str, object] = {}
+
+        class CapturingRunner:
+            def __init__(self, **kwargs: object) -> None:
+                captured_runner_kwargs.update(kwargs)
+
+            async def execute_seed(self, **_kwargs: object) -> str:
+                return "evolve execution completed"
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        with patch("ouroboros.orchestrator.runner.OrchestratorRunner", CapturingRunner):
+            server = create_ouroboros_server(event_store=store)
+
+        try:
+            runtime_context = server._runtime_context
+            evolve = server._tool_handlers["ouroboros_evolve_step"]
+
+            assert runtime_context is not None
+            assert runtime_context.synapse is not None
+            assert isinstance(evolve, EvolveStepHandler)
+            assert evolve.evolutionary_loop is not None
+
+            result = await evolve.evolutionary_loop.executor(
+                MagicMock(),
+                execution_id="evolve:lin_test:generation:1",
+            )
+
+            assert result == "evolve execution completed"
+            assert captured_runner_kwargs["session_signal_hub"] is runtime_context.synapse
+        finally:
+            await server.shutdown()
+
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""
         from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler

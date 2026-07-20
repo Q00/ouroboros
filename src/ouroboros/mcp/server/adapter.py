@@ -1629,6 +1629,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
             enable_decomposition=True,
+            session_signal_hub=session_signal_hub,
         )
         return await evolution_runner.execute_seed(
             seed=seed,
