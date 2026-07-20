@@ -206,6 +206,52 @@ def test_resume_rejects_changed_base_reasoning_effort(
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
+def test_legacy_contract_without_base_effort_migrates_when_effort_is_dormant() -> None:
+    """A pre-effort contract is replay-safe only when no current effort applies."""
+    original = _runner()
+    persisted = original._build_execution_contract()
+    legacy_routing = dict(persisted["model_routing"])
+    legacy_routing.pop("base_reasoning_effort")
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract}
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["model_routing"]["base_reasoning_effort"] is None
+
+
+def test_legacy_contract_without_base_effort_rejects_enabled_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never guess an old contract's historical effort from current settings."""
+    persisted = _runner()._build_execution_contract()
+    legacy_routing = dict(persisted["model_routing"])
+    legacy_routing.pop("base_reasoning_effort")
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
+    with pytest.raises(OrchestratorError, match="prior reasoning effort is unknown"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract})
+
+
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     original = _runner()
     original._model_router = _frontier_custom_router()
