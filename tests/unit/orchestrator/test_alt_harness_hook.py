@@ -17,11 +17,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.orchestrator import cross_harness_redispatch as chr
+from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.parallel_executor_models import ACExecutionResult
 
 
-def _make_executor(*, enabled: bool) -> ParallelACExecutor:
+def _make_executor(
+    *,
+    enabled: bool,
+    run_verify_commands: bool = True,
+    verify_command_timeout_seconds: int = 600,
+) -> ParallelACExecutor:
     adapter = MagicMock()
     adapter.runtime_backend = "claude"
     adapter.working_directory = "/tmp/work"
@@ -31,6 +37,8 @@ def _make_executor(*, enabled: bool) -> ParallelACExecutor:
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=False,
+        run_verify_commands=run_verify_commands,
+        verify_command_timeout_seconds=verify_command_timeout_seconds,
         cross_harness_redispatch=enabled,
     )
     return executor
@@ -118,6 +126,105 @@ async def test_alternate_runtime_is_created_with_forced_bypass(
 
     assert result is not None and result.success is True
     assert created_kwargs["permission_mode"] == "bypassPermissions"
+
+
+@pytest.mark.asyncio
+async def test_alternate_runtime_preserves_verification_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(
+        enabled=True,
+        run_verify_commands=False,
+        verify_command_timeout_seconds=7,
+    )
+
+    def _fake_create_agent_runtime(**_kwargs: object) -> MagicMock:
+        runtime = MagicMock()
+        runtime.runtime_backend = "codex_cli"
+        runtime.working_directory = "/tmp/work"
+        runtime.permission_mode = "bypassPermissions"
+        runtime.self_governs_rate_limit = True
+        return runtime
+
+    async def _fake_execute_single_ac(
+        alt_executor: ParallelACExecutor,
+        **_kwargs: Any,
+    ) -> ACExecutionResult:
+        assert alt_executor._run_verify_commands is False
+        assert alt_executor._verify_command_timeout_seconds == 7
+        assert alt_executor._ac_retry_attempts == 0
+        return _succeeded()
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_factory.create_agent_runtime",
+        _fake_create_agent_runtime,
+    )
+    monkeypatch.setattr(ParallelACExecutor, "_execute_single_ac", _fake_execute_single_ac)
+
+    result = await executor._run_single_ac_on_backend(
+        "codex",
+        rerun_kwargs=_rerun_kwargs(),
+        retry_attempt=1,
+        decision=chr.AltHarnessDecision(
+            should_redispatch=True,
+            from_backend="claude",
+            to_backend="codex",
+            policy=None,
+            reason="test",
+        ),
+        runtime_identity=executor._resolve_ac_runtime_identity(
+            0,
+            execution_context_id="exec-1",
+        ),
+        failure_class="fabrication_suspected",
+    )
+    assert result is not None and result.success is True
+
+
+@pytest.mark.asyncio
+async def test_alternate_redispatch_event_waits_for_authority_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(enabled=True)
+    emit_event = AsyncMock()
+    monkeypatch.setattr(executor, "_safe_emit_event", emit_event)
+
+    class InvalidAuthorityRuntime:
+        capabilities = FULL_CAPABILITIES
+        runtime_backend = "codex_cli"
+        llm_backend = "codex"
+        permission_mode = "bypassPermissions"
+        working_directory = "/tmp/work"
+        self_governs_rate_limit = True
+        _model = None
+
+        def execution_identity_contract(self) -> dict[str, object]:
+            raise ValueError("invalid runtime authority")
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.runtime_factory.create_agent_runtime",
+        lambda **_kwargs: InvalidAuthorityRuntime(),
+    )
+
+    with pytest.raises(ValueError, match="invalid runtime authority"):
+        await executor._run_single_ac_on_backend(
+            "codex",
+            rerun_kwargs=_rerun_kwargs(),
+            retry_attempt=1,
+            decision=chr.AltHarnessDecision(
+                should_redispatch=True,
+                from_backend="claude",
+                to_backend="codex",
+                policy=None,
+                reason="test",
+            ),
+            runtime_identity=executor._resolve_ac_runtime_identity(
+                0,
+                execution_context_id="exec-1",
+            ),
+            failure_class="fabrication_suspected",
+        )
+    emit_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

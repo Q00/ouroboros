@@ -2690,6 +2690,9 @@ class TestOrchestratorRunner:
         assert profile.axis == "testable_unit"
         assert captured_init["fat_harness_mode"] is True
         assert captured_init["decomposition_mode"] == "preflight"
+        resolved_routing = captured_init["resolved_routing_authority"]
+        assert resolved_routing.data == runner._execution_contract["model_routing"]
+        assert "workspace_authority_identity" in captured_init
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_fat_harness_mode_to_executor(

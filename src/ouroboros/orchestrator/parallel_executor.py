@@ -254,7 +254,11 @@ from ouroboros.orchestrator.evidence_schema import (
     extract_evidence,
     validate_evidence,
 )
-from ouroboros.orchestrator.execution_authority import ExecutionAuthorityContract
+from ouroboros.orchestrator.execution_authority import (
+    ExecutionAuthorityContract,
+    ResolvedRuntimeAuthority,
+    build_execution_policy_contract,
+)
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
@@ -274,7 +278,6 @@ from ouroboros.orchestrator.level_context import (
 from ouroboros.orchestrator.model_routing import (
     decide_model,
     resolve_execute_model,
-    serialize_model_router,
     tier_from_profile_hint,
 )
 from ouroboros.orchestrator.parallel_executor_models import (
@@ -902,6 +905,8 @@ class ParallelACExecutor:
         cross_harness_redispatch: bool | None = None,
         shadow_replay_enabled: bool = False,
         session_signal_hub: SessionSignalHub | None = None,
+        resolved_routing_authority: ResolvedRuntimeAuthority | None = None,
+        workspace_authority_identity: Mapping[str, object] | None = None,
     ):
         """Initialize executor.
 
@@ -1017,29 +1022,30 @@ class ParallelACExecutor:
         self._alt_harness_redispatched_acs: set[str] = set()
         self._alt_harness_status_by_root: dict[int, str] = {}
         self._recovery_exhausted_emitted: set[tuple[str, int]] = set()
-        workspace = task_cwd or getattr(adapter, "working_directory", None)
+        execution_policy = build_execution_policy_contract(
+            decomposition_mode=self._decomposition_mode,
+            max_decomposition_depth=self._max_decomposition_depth,
+            max_concurrent=max_concurrent,
+            execution_profile=self._execution_profile,
+            fat_harness_mode=self._fat_harness_mode,
+            run_verify_commands=self._run_verify_commands,
+            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
+            ac_retry_attempts=self._ac_retry_attempts,
+            reasoning_effort=self._reasoning_effort,
+            model_router=self._model_router,
+            cross_harness_redispatch=self._cross_harness_redispatch_enabled,
+            shadow_replay_enabled=self._shadow_replay_enabled,
+        )
+        workspace = task_cwd or getattr(adapter, "working_directory", None) or os.getcwd()
         self._execution_authority = ExecutionAuthorityContract.build(
             adapter=adapter,
             verifier=atomic_verifier,
-            workspace=workspace if isinstance(workspace, str) else None,
-            execution_policy={
-                "decomposition_mode": self._decomposition_mode,
-                "max_decomposition_depth": self._max_decomposition_depth,
-                "max_concurrent": max_concurrent,
-                "execution_profile": (
-                    self._execution_profile.model_dump(mode="json")
-                    if self._execution_profile is not None
-                    else None
-                ),
-                "fat_harness_mode": self._fat_harness_mode,
-                "run_verify_commands": self._run_verify_commands,
-                "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
-                "ac_retry_attempts": self._ac_retry_attempts,
-                "reasoning_effort": self._reasoning_effort,
-                "model_routing": serialize_model_router(self._model_router),
-                "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
-                "shadow_replay_enabled": self._shadow_replay_enabled,
-            },
+            workspace=workspace if isinstance(workspace, str) else os.getcwd(),
+            workspace_identity=workspace_authority_identity,
+            execution_policy=execution_policy,
+            resolved_routing=resolved_routing_authority,
+            runtime_handle=self._inherited_runtime_handle,
+            runtime_transcript_verifier=self._verify_atomic_evidence_against_runtime_messages,
         )
 
     @property
@@ -3473,23 +3479,6 @@ class ParallelACExecutor:
             permission_mode="bypassPermissions",
         )
 
-        event = create_alt_harness_redispatch_event(
-            session_id=rerun_kwargs["session_id"],
-            ac_index=rerun_kwargs["ac_index"],
-            ac_id=runtime_identity.ac_id,
-            execution_id=rerun_kwargs["execution_id"] or None,
-            decision=decision,
-            redispatch_index=1,
-            failure_class=failure_class,
-        )
-        await self._safe_emit_event(event)
-        log.info(
-            "parallel_executor.alt_harness_redispatch",
-            from_backend=decision.from_backend,
-            to_backend=backend,
-            ac_index=rerun_kwargs["ac_index"],
-        )
-
         alt_executor = ParallelACExecutor(
             alt_adapter,
             self._event_store,
@@ -3505,12 +3494,37 @@ class ParallelACExecutor:
             # The router's backend-mismatch guard makes it inert on a different
             # backend, so passing it to the alt-harness executor is safe.
             model_router=self._model_router,
+            run_verify_commands=self._run_verify_commands,
+            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
+            # This path intentionally performs one alternate-route attempt;
+            # ordinary same-runtime retries were already exhausted by the parent.
+            ac_retry_attempts=0,
             cross_harness_redispatch=False,
             # The router is inert on a different backend, so the baseline resolves
             # no parent-tier model and the replay self-skips — threading the flag
             # just keeps the throwaway executor's behavior consistent.
             shadow_replay_enabled=self._shadow_replay_enabled,
             session_signal_hub=self._session_signal_hub,
+        )
+
+        # Emit "redispatched" only after the alternate runtime and its authority
+        # snapshot are ready. Construction failures are preparation failures, not
+        # evidence that another harness actually received the AC.
+        event = create_alt_harness_redispatch_event(
+            session_id=rerun_kwargs["session_id"],
+            ac_index=rerun_kwargs["ac_index"],
+            ac_id=runtime_identity.ac_id,
+            execution_id=rerun_kwargs["execution_id"] or None,
+            decision=decision,
+            redispatch_index=1,
+            failure_class=failure_class,
+        )
+        await self._safe_emit_event(event)
+        log.info(
+            "parallel_executor.alt_harness_redispatch",
+            from_backend=decision.from_backend,
+            to_backend=backend,
+            ac_index=rerun_kwargs["ac_index"],
         )
         return await alt_executor._execute_single_ac(**rerun_kwargs, retry_attempt=retry_attempt)
 

@@ -89,6 +89,7 @@ from ouroboros.orchestrator.events import (
     create_workflow_progress_event,
 )
 from ouroboros.orchestrator.execution_authority import (
+    ResolvedRuntimeAuthority,
     constructor_model_contract,
     runtime_execution_identity_contract,
     runtime_execution_proves_effective_model,
@@ -4722,6 +4723,24 @@ class OrchestratorRunner:
         # Execute in parallel. Reuse the base effort resolved once in __init__
         # (self._reasoning_effort) so a single runner instance has one consistent
         # effort source across its direct paths and the parallel executor.
+        from ouroboros.config import get_cross_harness_redispatch_enabled
+
+        cross_harness_redispatch = get_cross_harness_redispatch_enabled()
+        raw_execution_contract = self._execution_contract
+        if not isinstance(raw_execution_contract, Mapping):
+            raw_execution_contract = self._build_execution_contract(seed=seed)
+            self._execution_contract = raw_execution_contract
+        resolved_routing = raw_execution_contract.get("model_routing")
+        raw_resume = raw_execution_contract.get("resume")
+        workspace_identity = (
+            raw_resume.get("workspace") if isinstance(raw_resume, Mapping) else None
+        )
+        if not isinstance(resolved_routing, Mapping):
+            raise OrchestratorError(message="Parallel runtime authority is missing")
+        bound_runtime_authority = ResolvedRuntimeAuthority.bind(
+            self._adapter,
+            resolved_routing,
+        )
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
@@ -4740,8 +4759,13 @@ class OrchestratorRunner:
             run_verify_commands=self._run_verify_commands,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,
+            cross_harness_redispatch=cross_harness_redispatch,
             shadow_replay_enabled=self._shadow_replay_enabled,
             session_signal_hub=self._session_signal_hub,
+            resolved_routing_authority=bound_runtime_authority,
+            workspace_authority_identity=(
+                workspace_identity if isinstance(workspace_identity, Mapping) else None
+            ),
         )
 
         # Check for cancellation before starting parallel execution

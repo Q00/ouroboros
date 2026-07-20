@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import os
+from types import MethodType
 from unittest.mock import AsyncMock, MagicMock
 
-from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
-from ouroboros.orchestrator.execution_authority import ExecutionAuthorityContract
+import pytest
+
+from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, RuntimeHandle
+from ouroboros.orchestrator.execution_authority import (
+    ExecutionAuthorityContract,
+    ResolvedRuntimeAuthority,
+)
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import VerifierVerdict
@@ -17,13 +24,39 @@ class _Runtime:
     working_directory: str | None = None
     _model = None
 
-    def __init__(self, *, profile: str = "profile-a") -> None:
+    def __init__(
+        self,
+        *,
+        profile: str = "profile-a",
+        cli_path: str | None = None,
+        startup_timeout: float = 1.0,
+        idle_timeout: float = 2.0,
+    ) -> None:
         self.profile = profile
+        self._cli_path = cli_path
+        self._startup_output_timeout_seconds = startup_timeout
+        self._stdout_idle_timeout_seconds = idle_timeout
+        self._process_shutdown_timeout_seconds = 3.0
+        self._completed_process_group_shutdown_timeout_seconds = 0.2
 
     def execution_identity_contract(self) -> dict[str, object]:
         return {
             "profile": self.profile,
             "effective_model_observed": True,
+        }
+
+    async def execute_task(self, **_: object):
+        if False:  # pragma: no cover - implementation identity only
+            yield None
+
+    def resume_handle_execution_identity_contract(
+        self,
+        runtime_handle: RuntimeHandle | None,
+    ) -> dict[str, object]:
+        return {
+            "profile": (
+                runtime_handle.metadata.get("profile") if runtime_handle is not None else None
+            )
         }
 
 
@@ -38,18 +71,43 @@ class _Verifier:
         return VerifierVerdict(passed=True)
 
 
+class _SlottedRuntime:
+    __slots__ = ("handler",)
+
+    capabilities = FULL_CAPABILITIES
+    runtime_backend = "test-runtime"
+    llm_backend = "test-llm"
+    permission_mode = "bypassPermissions"
+    working_directory = None
+    _model = None
+
+    def __init__(self, handler: object) -> None:
+        self.handler = handler
+
+    def execution_identity_contract(self) -> dict[str, object]:
+        return {"effective_model_observed": True, "profile": "slotted"}
+
+    async def execute_task(self, **_: object):
+        if False:  # pragma: no cover - implementation identity only
+            yield self.handler
+
+
 def _contract(
     *,
     runtime: _Runtime | None = None,
     verifier: object | None = None,
     workspace: str = "/tmp/workspace-a",
     policy: dict[str, object] | None = None,
+    generation: dict[str, object] | None = None,
+    runtime_handle: RuntimeHandle | None = None,
 ) -> ExecutionAuthorityContract:
     return ExecutionAuthorityContract.build(
         adapter=runtime or _Runtime(),
         verifier=verifier,  # type: ignore[arg-type]
         workspace=workspace,
         execution_policy=policy or {"retry_attempts": 2},
+        workspace_generation=generation or {"tree": "generation-a"},
+        runtime_handle=runtime_handle,
     )
 
 
@@ -60,6 +118,108 @@ def test_runtime_profile_drift_changes_authority() -> None:
     )
 
 
+def test_runtime_executable_and_watchdog_drift_change_authority() -> None:
+    baseline = _contract(runtime=_Runtime(cli_path="/bin/true"))
+    changed_executable = _contract(runtime=_Runtime(cli_path="/bin/false"))
+    changed_watchdog = _contract(
+        runtime=_Runtime(cli_path="/bin/true", startup_timeout=9.0, idle_timeout=99.0)
+    )
+    assert baseline.fingerprint != changed_executable.fingerprint
+    assert baseline.fingerprint != changed_watchdog.fingerprint
+
+
+def test_runtime_command_builder_override_changes_authority() -> None:
+    class CommandOne(_Runtime):
+        def _build_command(self) -> list[str]:
+            return ["cli", "one"]
+
+    class CommandTwo(_Runtime):
+        def _build_command(self) -> list[str]:
+            return ["cli", "two"]
+
+    assert (
+        _contract(runtime=CommandOne()).fingerprint != _contract(runtime=CommandTwo()).fingerprint
+    )
+
+
+def test_in_place_executable_generation_change_changes_authority(tmp_path) -> None:
+    executable = tmp_path / "runtime-cli"
+    executable.write_text("one", encoding="utf-8")
+    baseline = _contract(runtime=_Runtime(cli_path=str(executable)))
+    previous = executable.stat()
+    executable.write_text("two", encoding="utf-8")
+    os.utime(
+        executable,
+        ns=(previous.st_atime_ns, max(executable.stat().st_mtime_ns, previous.st_mtime_ns + 1)),
+    )
+    changed = _contract(runtime=_Runtime(cli_path=str(executable)))
+    assert baseline.fingerprint != changed.fingerprint
+
+
+def test_executable_content_drift_changes_authority_with_restored_stat(tmp_path) -> None:
+    executable = tmp_path / "runtime-cli"
+    executable.write_text("one", encoding="utf-8")
+    previous = executable.stat()
+    baseline = _contract(runtime=_Runtime(cli_path=str(executable)))
+    executable.write_text("two", encoding="utf-8")
+    os.utime(executable, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    changed = _contract(runtime=_Runtime(cli_path=str(executable)))
+    assert baseline.fingerprint != changed.fingerprint
+
+
+def test_runtime_execution_body_and_parser_drift_change_authority() -> None:
+    class ImplementationOne(_Runtime):
+        async def _execute_task_impl(self, **_: object):
+            if False:  # pragma: no cover - implementation identity only
+                yield "one"
+
+        def _parse_json_event(self, _line: str) -> str:
+            return "one"
+
+        def _convert_event(self, _event: object) -> str:
+            return "one"
+
+    class ImplementationTwo(_Runtime):
+        async def _execute_task_impl(self, **_: object):
+            if False:  # pragma: no cover - implementation identity only
+                yield "two"
+
+        def _parse_json_event(self, _line: str) -> str:
+            return "two"
+
+        def _convert_event(self, _event: object) -> str:
+            return "two"
+
+    assert (
+        _contract(runtime=ImplementationOne()).fingerprint
+        != _contract(runtime=ImplementationTwo()).fingerprint
+    )
+
+
+def test_instance_level_execution_override_is_process_local() -> None:
+    runtime = _Runtime()
+    baseline = _contract(runtime=runtime)
+
+    async def replacement(self: _Runtime, **_: object):
+        if False:  # pragma: no cover - implementation identity only
+            yield self.profile
+
+    runtime.execute_task = MethodType(replacement, runtime)  # type: ignore[method-assign]
+    overridden = _contract(runtime=runtime)
+    assert baseline.fingerprint != overridden.fingerprint
+    assert overridden.portable_across_processes is False
+
+
+def test_unobservable_slotted_instance_state_is_process_local() -> None:
+    runtime = _SlottedRuntime(lambda: "one")
+    baseline = _contract(runtime=runtime)  # type: ignore[arg-type]
+    runtime.handler = lambda: "two"
+    changed = _contract(runtime=runtime)  # type: ignore[arg-type]
+    assert baseline.fingerprint != changed.fingerprint
+    assert baseline.portable_across_processes is False
+    assert changed.portable_across_processes is False
+
+
 def test_verifier_identity_drift_changes_authority() -> None:
     first = _contract(verifier=_Verifier("judge-a"))
     same = _contract(verifier=_Verifier("judge-a"))
@@ -67,7 +227,7 @@ def test_verifier_identity_drift_changes_authority() -> None:
 
     assert first.fingerprint == same.fingerprint
     assert first.fingerprint != changed.fingerprint
-    assert first.reusable_across_processes is True
+    assert first.portable_across_processes is True
 
 
 def test_undeclared_custom_verifier_is_process_local() -> None:
@@ -77,7 +237,7 @@ def test_undeclared_custom_verifier_is_process_local() -> None:
     first = _contract(verifier=verifier)
     second = _contract(verifier=verifier)
 
-    assert first.reusable_across_processes is False
+    assert first.portable_across_processes is False
     assert first.fingerprint != second.fingerprint
 
 
@@ -85,6 +245,58 @@ def test_workspace_and_policy_drift_change_authority() -> None:
     baseline = _contract()
     assert baseline.fingerprint != _contract(workspace="/tmp/workspace-b").fingerprint
     assert baseline.fingerprint != _contract(policy={"retry_attempts": 3}).fingerprint
+
+
+def test_workspace_generation_drift_changes_authority() -> None:
+    assert (
+        _contract(generation={"tree": "a"}).fingerprint
+        != _contract(generation={"tree": "b"}).fingerprint
+    )
+
+
+def test_unobserved_workspace_or_runtime_is_not_reusable() -> None:
+    class UnobservedRuntime:
+        capabilities = FULL_CAPABILITIES
+        runtime_backend = "legacy"
+        llm_backend = None
+        permission_mode = None
+        working_directory = None
+
+    contract = ExecutionAuthorityContract.build(
+        adapter=UnobservedRuntime(),
+        verifier=None,
+        workspace=None,
+        execution_policy={},
+    )
+    assert contract.portable_across_processes is False
+
+
+def test_runtime_handle_selector_changes_authority() -> None:
+    cheap = RuntimeHandle(backend="codex_cli", metadata={"profile": "cheap"})
+    expensive = RuntimeHandle(backend="codex_cli", metadata={"profile": "expensive"})
+    assert (
+        _contract(runtime_handle=cheap).fingerprint
+        != _contract(runtime_handle=expensive).fingerprint
+    )
+
+
+def test_verifier_identity_provider_failure_degrades_to_process_local() -> None:
+    class RaisingVerifier:
+        def verification_identity_contract(self) -> dict[str, object]:
+            raise OSError("offline")
+
+        def __call__(self, **_: object) -> VerifierVerdict:
+            return VerifierVerdict(passed=True)
+
+    contract = _contract(verifier=RaisingVerifier())
+    assert contract.portable_across_processes is False
+    assert contract.data["verifier"]["behavioral_state"]["stability"] == "process_local"
+
+
+def test_runtime_transcript_verifier_has_implementation_identity() -> None:
+    verifier = _contract().data["verifier"]
+    assert verifier["mode"] == "runtime_transcript"
+    assert verifier["implementation"]["stability"] == "durable"
 
 
 def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:
@@ -102,7 +314,7 @@ def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:
 
     authority = executor.execution_authority
     assert authority.fingerprint.startswith("sha256:")
-    assert authority.data["workspace"]["effective_cwd"] == str(tmp_path.resolve())
+    assert authority.data["workspace"]["identity"]["effective_cwd"] == str(tmp_path.resolve())
     assert authority.data["runtime"]["execution_identity"]["identity"]["profile"] == "profile-a"
     assert authority.data["execution_policy"]["ac_retry_attempts"] == 2
 
@@ -123,3 +335,204 @@ def test_profile_policy_drift_changes_executor_authority(tmp_path) -> None:
         ).execution_authority.fingerprint
 
     assert build(base_profile) != build(changed_profile)
+
+
+def test_transcript_verifier_wrapper_override_changes_executor_authority(tmp_path) -> None:
+    class OverriddenExecutor(ParallelACExecutor):
+        def _verify_atomic_evidence_against_runtime_messages(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            return super()._verify_atomic_evidence_against_runtime_messages(**kwargs)  # type: ignore[arg-type]
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    kwargs = {
+        "adapter": runtime,
+        "event_store": AsyncMock(),
+        "console": MagicMock(),
+        "task_cwd": str(tmp_path),
+        "execution_profile": load_profile("code"),
+    }
+    baseline = ParallelACExecutor(**kwargs).execution_authority.fingerprint  # type: ignore[arg-type]
+    overridden = OverriddenExecutor(**kwargs).execution_authority.fingerprint  # type: ignore[arg-type]
+    assert baseline != overridden
+
+
+def test_shadow_replay_binds_transcript_wrapper_with_custom_verifier(tmp_path) -> None:
+    class OverriddenExecutor(ParallelACExecutor):
+        def _verify_atomic_evidence_against_runtime_messages(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            return super()._verify_atomic_evidence_against_runtime_messages(**kwargs)  # type: ignore[arg-type]
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    kwargs = {
+        "adapter": runtime,
+        "event_store": AsyncMock(),
+        "console": MagicMock(),
+        "task_cwd": str(tmp_path),
+        "execution_profile": load_profile("code"),
+        "atomic_verifier": _Verifier("judge-a"),
+        "shadow_replay_enabled": True,
+    }
+    baseline = ParallelACExecutor(**kwargs).execution_authority.fingerprint  # type: ignore[arg-type]
+    overridden = OverriddenExecutor(**kwargs).execution_authority.fingerprint  # type: ignore[arg-type]
+    assert baseline != overridden
+
+
+def test_resolved_runtime_authority_rejects_adapter_mismatch() -> None:
+    runtime = _Runtime(profile="actual")
+    resolved_routing = {
+        "runtime_backend": "test-runtime",
+        "llm_backend": "test-llm",
+        "permission_mode": {"observed": True, "mode": "bypassPermissions"},
+        "constructor_model": {"observed": True, "model": None},
+        "runtime_execution": {
+            "version": 1,
+            "observed": True,
+            "identity": {"profile": "fake", "effective_model_observed": True},
+        },
+    }
+    with pytest.raises(ValueError, match="runtime_execution"):
+        ResolvedRuntimeAuthority.bind(runtime, resolved_routing)
+
+
+def test_bound_runtime_authority_is_used_without_raw_mapping_injection() -> None:
+    runtime = _Runtime(profile="persisted")
+    resolved_routing = {
+        "runtime_backend": "test-runtime",
+        "llm_backend": "test-llm",
+        "permission_mode": {"observed": True, "mode": "bypassPermissions"},
+        "constructor_model": {"observed": True, "model": None},
+        "runtime_execution": runtime.execution_identity_contract(),
+    }
+    resolved_routing["runtime_execution"] = {
+        "version": 1,
+        "observed": True,
+        "identity": resolved_routing["runtime_execution"],
+    }
+    bound = ResolvedRuntimeAuthority.bind(runtime, resolved_routing)
+    contract = ExecutionAuthorityContract.build(
+        adapter=runtime,
+        verifier=None,
+        workspace="/tmp/workspace-a",
+        workspace_generation={"tree": "a"},
+        execution_policy={},
+        resolved_routing=bound,
+    )
+    assert contract.data["runtime"]["execution_identity"]["identity"]["profile"] == "persisted"
+
+
+def test_bound_runtime_authority_rejects_a_different_adapter_instance() -> None:
+    original = _Runtime(profile="same")
+    replacement = _Runtime(profile="same")
+    resolved_routing = {
+        "runtime_backend": "test-runtime",
+        "llm_backend": "test-llm",
+        "permission_mode": {"observed": True, "mode": "bypassPermissions"},
+        "constructor_model": {"observed": True, "model": None},
+        "runtime_execution": {
+            "version": 1,
+            "observed": True,
+            "identity": original.execution_identity_contract(),
+        },
+    }
+    bound = ResolvedRuntimeAuthority.bind(original, resolved_routing)
+    with pytest.raises(ValueError, match="different adapter"):
+        ExecutionAuthorityContract.build(
+            adapter=replacement,
+            verifier=None,
+            workspace="/tmp/workspace-a",
+            workspace_generation={"tree": "a"},
+            execution_policy={},
+            resolved_routing=bound,
+        )
+
+
+def test_bound_runtime_authority_rejects_same_adapter_identity_drift() -> None:
+    runtime = _Runtime(profile="before")
+    resolved_routing = {
+        "runtime_backend": "test-runtime",
+        "llm_backend": "test-llm",
+        "permission_mode": {"observed": True, "mode": "bypassPermissions"},
+        "constructor_model": {"observed": True, "model": None},
+        "runtime_execution": {
+            "version": 1,
+            "observed": True,
+            "identity": runtime.execution_identity_contract(),
+        },
+    }
+    bound = ResolvedRuntimeAuthority.bind(runtime, resolved_routing)
+    runtime.profile = "after"
+    with pytest.raises(ValueError, match="drifted from active runtime_execution"):
+        ExecutionAuthorityContract.build(
+            adapter=runtime,
+            verifier=None,
+            workspace="/tmp/workspace-a",
+            workspace_generation={"tree": "a"},
+            execution_policy={},
+            resolved_routing=bound,
+        )
+
+
+def test_resolved_runtime_authority_reads_effective_private_permission_mode() -> None:
+    runtime = _Runtime()
+    runtime._permission_mode = "acceptEdits"  # type: ignore[attr-defined]
+    resolved_routing = {
+        "runtime_backend": "test-runtime",
+        "llm_backend": "test-llm",
+        "permission_mode": {"observed": True, "mode": "bypassPermissions"},
+        "constructor_model": {"observed": True, "model": None},
+        "runtime_execution": {
+            "version": 1,
+            "observed": True,
+            "identity": runtime.execution_identity_contract(),
+        },
+    }
+    with pytest.raises(ValueError, match="permission_mode"):
+        ResolvedRuntimeAuthority.bind(runtime, resolved_routing)
+
+
+def test_local_skill_fallback_is_process_local() -> None:
+    class LocalSkillRuntime(_Runtime):
+        _skill_dispatcher = None
+        _skills_dir = "/tmp/skills"
+
+        async def _maybe_dispatch_skill_intercept(self, **_: object) -> None:
+            return None
+
+        async def _dispatch_skill_intercept_locally(self, **_: object) -> None:
+            return None
+
+    contract = _contract(runtime=LocalSkillRuntime())
+    assert contract.portable_across_processes is False
+    assert contract.data["runtime"]["skill_dispatcher"]["mode"] == "local_fallback"
+
+
+def test_declared_callable_dispatcher_has_durable_implementation_identity() -> None:
+    class StableDispatcher:
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {"dispatcher": "stable"}
+
+        async def __call__(self, **_: object) -> None:
+            return None
+
+    runtime = _Runtime()
+    runtime._skill_dispatcher = StableDispatcher()  # type: ignore[attr-defined]
+    contract = _contract(runtime=runtime)
+    dispatcher = contract.data["runtime"]["skill_dispatcher"]
+    assert dispatcher["stability"] == "durable"
+    assert dispatcher["implementation"]["stability"] == "durable"
+
+
+def test_dispatcher_identity_provider_failure_degrades_to_process_local() -> None:
+    class RaisingDispatcher:
+        @property
+        def execution_identity_contract(self) -> object:
+            raise OSError("offline")
+
+        async def __call__(self, **_: object) -> None:
+            return None
+
+    runtime = _Runtime()
+    runtime._skill_dispatcher = RaisingDispatcher()  # type: ignore[attr-defined]
+    contract = _contract(runtime=runtime)
+    assert contract.portable_across_processes is False
+    assert contract.data["runtime"]["skill_dispatcher"]["stability"] == "process_local"
