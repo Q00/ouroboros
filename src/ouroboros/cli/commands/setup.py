@@ -1056,6 +1056,16 @@ def _migrate_legacy_codex_profile_mappings(config_dict: dict) -> list[str]:
     return migrated
 
 
+_CODEX_PROVIDER_ALIASES = frozenset({"codex", "codex_cli"})
+
+
+def _is_codex_provider_alias(provider_name: object) -> bool:
+    """Return whether a config provider key resolves to the Codex backend."""
+    return (
+        isinstance(provider_name, str) and provider_name.strip().lower() in _CODEX_PROVIDER_ALIASES
+    )
+
+
 def _referenced_legacy_codex_profiles(config_dict: dict) -> set[str]:
     """Find old task anchors still intentionally referenced from config.yaml."""
     llm_profiles = config_dict.get("llm_profiles")
@@ -1066,12 +1076,12 @@ def _referenced_legacy_codex_profiles(config_dict: dict) -> set[str]:
     for profile in llm_profiles.values():
         if not isinstance(profile, dict) or not isinstance(profile.get("providers"), dict):
             continue
-        codex_provider = profile["providers"].get("codex")
-        if not isinstance(codex_provider, dict):
-            continue
-        profile_name = codex_provider.get("profile")
-        if isinstance(profile_name, str) and profile_name in known:
-            referenced.add(profile_name)
+        for provider_name, provider_config in profile["providers"].items():
+            if not _is_codex_provider_alias(provider_name) or not isinstance(provider_config, dict):
+                continue
+            profile_name = provider_config.get("profile")
+            if isinstance(profile_name, str) and profile_name in known:
+                referenced.add(profile_name)
     return referenced
 
 

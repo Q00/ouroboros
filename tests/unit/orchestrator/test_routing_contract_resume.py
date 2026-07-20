@@ -206,8 +206,8 @@ def test_resume_rejects_changed_base_reasoning_effort(
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
-def test_legacy_contract_without_base_effort_migrates_when_effort_is_dormant() -> None:
-    """A pre-effort contract is replay-safe only when no current effort applies."""
+def test_legacy_contract_without_base_effort_fails_closed_when_effort_is_dormant() -> None:
+    """A missing historical effort cannot safely be rewritten as ``None``."""
     original = _runner()
     persisted = original._build_execution_contract()
     legacy_routing = dict(persisted["model_routing"])
@@ -221,14 +221,8 @@ def test_legacy_contract_without_base_effort_migrates_when_effort_is_dormant() -
         },
     }
 
-    resumed = _runner()
-    changed = resumed._restore_execution_contract(
-        {EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract}
-    )
-
-    assert changed is True
-    assert resumed._execution_contract is not None
-    assert resumed._execution_contract["model_routing"]["base_reasoning_effort"] is None
+    with pytest.raises(OrchestratorError, match="prior reasoning effort is unknown"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract})
 
 
 def test_legacy_contract_without_base_effort_rejects_enabled_effort(
@@ -250,6 +244,30 @@ def test_legacy_contract_without_base_effort_rejects_enabled_effort(
     monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
     with pytest.raises(OrchestratorError, match="prior reasoning effort is unknown"):
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract})
+
+
+def test_legacy_contract_missing_base_effort_never_rewrites_historical_high_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current dormant config is not evidence that an old run used no effort."""
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
+    persisted = _runner()._build_execution_contract()
+    legacy_routing = dict(persisted["model_routing"])
+    legacy_routing.pop("base_reasoning_effort")
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: None)
+    resumed = _runner()
+    with pytest.raises(OrchestratorError, match="prior reasoning effort is unknown"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract})
+    assert resumed._execution_contract is None
 
 
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
@@ -514,6 +532,53 @@ def test_codex_profile_name_alone_does_not_prove_an_effective_model(
         )
 
 
+def test_automatic_codex_default_resume_uses_fingerprinted_native_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex's model sentinel resumes when all automatic-selection inputs match."""
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    original_runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+    )
+    original_runtime._runtime_profile = None
+    original_runtime._codex_profile = None
+    original_runtime._resolved_fallback_model = None
+    original_runtime._resolved_fallback_profile = None
+    original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
+    persisted = original._build_execution_contract(seed=_seed())
+
+    assert original._model_router is None
+    assert persisted["model_routing"]["constructor_model"] == {
+        "observed": True,
+        "model": None,
+    }
+    assert (
+        persisted["model_routing"]["runtime_execution"]["identity"]["effective_model_observed"]
+        is False
+    )
+
+    resumed_runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+    )
+    resumed_runtime._runtime_profile = None
+    resumed_runtime._codex_profile = None
+    resumed_runtime._resolved_fallback_model = None
+    resumed_runtime._resolved_fallback_profile = None
+    resumed = OrchestratorRunner(resumed_runtime, AsyncMock(), MagicMock())
+
+    assert (
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+        is False
+    )
+
+
 def test_non_codex_subclass_does_not_inherit_codex_profile_as_model_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -560,11 +625,16 @@ def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
         "observed": True,
         "model": None,
     }
-    with pytest.raises(OrchestratorError, match="effective runtime model is unverifiable"):
+    # ``default`` is the same automatic Codex sentinel as ``None``.  It has no
+    # concrete constructor pin, but the fingerprinted native default inputs
+    # make a replay-safe resume possible.
+    assert (
         runner._restore_execution_contract(
             {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
             seed=_seed(),
         )
+        is False
+    )
 
 
 def test_codex_profile_file_drift_is_rejected_even_with_native_routing(

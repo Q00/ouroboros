@@ -499,6 +499,28 @@ class TestCodexSetup:
 
         assert anchor.read_text(encoding="utf-8") == 'model = "terra"\n'
 
+    def test_preserves_generated_anchor_referenced_through_codex_cli_alias(
+        self, tmp_path: Path
+    ) -> None:
+        """A valid Codex alias must prevent retirement of its live profile-v2 file."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        anchor = codex_dir / "ouroboros-fast.config.toml"
+        generated = setup_cmd._render_codex_profile_v2_file(
+            setup_cmd._CODEX_DEFAULT_PROFILE_SECTIONS["ouroboros-fast"]
+        )
+        anchor.write_text(generated, encoding="utf-8")
+        config_dict = {
+            "llm_profiles": {"fast": {"providers": {"codex_cli": {"profile": "ouroboros-fast"}}}}
+        }
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            protected = setup_cmd._referenced_legacy_codex_profiles(config_dict)
+            assert protected == {"ouroboros-fast"}
+            setup_cmd._retire_codex_default_profiles(protected_profile_names=protected)
+
+        assert anchor.read_text(encoding="utf-8") == generated
+
     def test_register_codex_default_profiles_preserves_existing_profile(
         self,
         tmp_path: Path,

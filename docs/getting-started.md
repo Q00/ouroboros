@@ -186,7 +186,7 @@ Use WSL 2 for the supported Windows path, then run the Linux install commands fr
 |------|-------------|
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
-| Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
+| Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, and a signed-in Codex CLI account with access to a Codex-supported model |
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 | Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), `pip install ouroboros-ai[mcp,claude]` (shares the Claude extras for the Agent SDK types; `[mcp]` for the MCP server). Then `ouroboros setup --runtime kiro` to register the Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
 | GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), `pip install 'ouroboros-ai[mcp]'` (or `pipx`/`uv tool` install). Then `ouroboros setup --runtime copilot` to live-discover available models, pick a default, and register the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
@@ -202,11 +202,11 @@ Use WSL 2 for the supported Windows path, then run the Linux install commands fr
 # Claude-backed flows
 export ANTHROPIC_API_KEY="your-anthropic-key"
 
-# Codex-backed flows
+# Codex-backed flows when using API-key authentication
 export OPENAI_API_KEY="your-openai-key"
 ```
 
-> Claude Code plugin users: your Claude Code session provides credentials automatically. No export needed.
+> Codex CLI can also use its normal account sign-in, so `OPENAI_API_KEY` is not required unless you choose API-key authentication. Claude Code plugin users: your Claude Code session provides credentials automatically. No export needed.
 
 ### Configuration File
 

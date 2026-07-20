@@ -11,12 +11,12 @@ Ouroboros can use **OpenAI Codex** as a runtime backend. [Codex CLI](https://git
 
 No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
-> **Model recommendation:** Use **GPT-5.4** with **medium** reasoning effort for the documented Codex setup. GPT-5.4 provides strong coding, multi-step reasoning, and agentic task execution that pairs well with the Ouroboros specification-first workflow harness.
+> **Model recommendation:** Start with Codex's current default model. Ouroboros applies role-specific reasoning effort per invocation; pin a model in Ouroboros settings only when you need a deliberate override.
 
 ## Prerequisites
 
 - **Codex CLI** installed and on your `PATH`, or the bundled executable from the macOS ChatGPT app (see [install steps](#installing-codex-cli) below)
-- An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`). See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
+- A signed-in **Codex CLI** account. API-key authentication is also supported: `printenv OPENAI_API_KEY | codex login --with-api-key`. See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
 - **Python >= 3.12**
 
 ## Installing Codex CLI

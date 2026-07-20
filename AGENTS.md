@@ -3,7 +3,7 @@
 > This AGENTS.md is for **local development only**. End users install via:
 > ```
 > Codex plugin marketplace add Q00/ouroboros
-> Codex plugin install ouroboros@ouroboros
+> Codex plugin add ouroboros@ouroboros
 > ```
 > Once installed as a plugin, skills/hooks/agents work natively without this file.
 
