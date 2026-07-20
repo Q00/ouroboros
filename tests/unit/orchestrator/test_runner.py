@@ -2622,8 +2622,10 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Runner wiring should make profile-aware decomposition live in production."""
+        from ouroboros.orchestrator.backend_limits import resolve_backend_limits
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
+        mock_adapter.self_governs_rate_limit = False
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
@@ -2672,6 +2674,10 @@ class TestOrchestratorRunner:
                 "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
                 _FakeParallelExecutor,
             ),
+            patch(
+                "ouroboros.orchestrator.runner.resolve_backend_limits",
+                wraps=resolve_backend_limits,
+            ) as resolve_limits,
         ):
             result = await runner._execute_parallel(
                 seed=sample_seed,
@@ -2693,6 +2699,10 @@ class TestOrchestratorRunner:
         resolved_routing = captured_init["resolved_routing_authority"]
         assert resolved_routing.data == runner._execution_contract["model_routing"]
         assert "workspace_authority_identity" in captured_init
+        dispatch_rate_policy = captured_init["dispatch_rate_policy"]
+        assert dispatch_rate_policy.backend == mock_adapter.runtime_backend
+        assert dispatch_rate_policy.self_governs_rate_limit is False
+        resolve_limits.assert_called_once_with(mock_adapter.runtime_backend)
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_fat_harness_mode_to_executor(

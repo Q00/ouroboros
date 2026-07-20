@@ -18,6 +18,7 @@ import marshal
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 import uuid
@@ -26,7 +27,11 @@ from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
 )
-from ouroboros.orchestrator.model_routing import ModelRouter, serialize_model_router
+from ouroboros.orchestrator.model_routing import (
+    ModelRouter,
+    deserialize_model_router,
+    serialize_model_router,
+)
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier
@@ -37,6 +42,24 @@ _MAX_IDENTITY_ITEMS = 256
 _MAX_IDENTITY_SCALAR_CHARS = 8_192
 _MAX_IDENTITY_JSON_CHARS = 64_000
 _RESOLVED_RUNTIME_AUTHORITY_TOKEN = object()
+_SHA256_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_EXECUTION_POLICY_VERSION = 1
+_EXECUTION_POLICY_KEYS = {
+    "version",
+    "decomposition_mode",
+    "max_decomposition_depth",
+    "max_concurrent",
+    "execution_profile",
+    "fat_harness_mode",
+    "run_verify_commands",
+    "verify_command_timeout_seconds",
+    "ac_retry_attempts",
+    "reasoning_effort",
+    "model_routing",
+    "cross_harness_redispatch",
+    "shadow_replay_enabled",
+    "dispatch_rate",
+}
 
 
 def _canonical_json(value: object, *, field: str) -> str:
@@ -92,20 +115,41 @@ def canonical_workspace_authority(
             "observed": False,
             "generation": {"observed": False},
         }
-    generation_contract: dict[str, object] = (
-        {
-            "observed": True,
-            "identity": _canonical_object(dict(generation), field="workspace generation"),
-        }
-        if generation is not None
-        else {"observed": False}
-    )
+    generation_contract: dict[str, object] = {"observed": False}
+    if generation is not None:
+        generation_identity = _canonical_object(
+            dict(generation),
+            field="workspace generation",
+        )
+        if generation_identity:
+            if not _valid_workspace_generation_identity(generation_identity):
+                raise ValueError("workspace generation identity is invalid")
+            generation_contract = {
+                "observed": True,
+                "identity": generation_identity,
+            }
     return {
         "version": 1,
         "observed": True,
         "identity": owner,
         "generation": generation_contract,
     }
+
+
+def _valid_workspace_generation_identity(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {"version", "kind", "digest"}:
+        return False
+    version = value.get("version")
+    kind = value.get("kind")
+    digest = value.get("digest")
+    return (
+        not isinstance(version, bool)
+        and version == 1
+        and isinstance(kind, str)
+        and bool(kind.strip())
+        and isinstance(digest, str)
+        and _SHA256_DIGEST_PATTERN.fullmatch(digest) is not None
+    )
 
 
 def constructor_model_contract(adapter: object) -> dict[str, object]:
@@ -719,6 +763,7 @@ def runtime_authority_contract(
             if isinstance(runtime_backend, str) and runtime_backend.strip()
             else None
         ),
+        "self_governs_rate_limit": bool(getattr(adapter, "self_governs_rate_limit", False)),
         "llm_backend": (
             llm_backend.strip() if isinstance(llm_backend, str) and llm_backend.strip() else None
         ),
@@ -863,6 +908,135 @@ def verifier_authority_contract(
     }
 
 
+def _positive_int_or_none(value: object) -> bool:
+    return value is None or (not isinstance(value, bool) and isinstance(value, int) and value > 0)
+
+
+def _positive_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _valid_dispatch_rate_contract(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {
+        "version",
+        "backend",
+        "owner",
+        "observed",
+        "self_governs_rate_limit",
+        "requests_per_minute",
+        "tokens_per_minute",
+        "gate_enabled",
+        "window_seconds",
+        "heartbeat_seconds",
+        "max_wait_seconds",
+        "token_estimation_version",
+    }:
+        return False
+    version = value.get("version")
+    token_version = value.get("token_estimation_version")
+    backend = value.get("backend")
+    owner = value.get("owner")
+    observed = value.get("observed")
+    self_governs = value.get("self_governs_rate_limit")
+    request_limit = value.get("requests_per_minute")
+    token_limit = value.get("tokens_per_minute")
+    gate_enabled = value.get("gate_enabled")
+    if (
+        isinstance(version, bool)
+        or version != 1
+        or isinstance(token_version, bool)
+        or token_version != 1
+        or not isinstance(backend, str)
+        or not backend.strip()
+        or owner not in {"ouroboros", "runtime"}
+        or not isinstance(observed, bool)
+        or not isinstance(self_governs, bool)
+        or not isinstance(gate_enabled, bool)
+        or not _positive_int_or_none(request_limit)
+        or not _positive_int_or_none(token_limit)
+        or not _positive_number(value.get("window_seconds"))
+        or not _positive_number(value.get("heartbeat_seconds"))
+        or not _positive_number(value.get("max_wait_seconds"))
+    ):
+        return False
+    if owner == "runtime":
+        return (
+            self_governs
+            and not observed
+            and request_limit is None
+            and token_limit is None
+            and not gate_enabled
+        )
+    return (
+        not self_governs
+        and observed
+        and gate_enabled == (request_limit is not None or token_limit is not None)
+    )
+
+
+def valid_execution_policy_contract(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != _EXECUTION_POLICY_KEYS:
+        return False
+    version = value.get("version")
+    depth = value.get("max_decomposition_depth")
+    concurrency = value.get("max_concurrent")
+    timeout = value.get("verify_command_timeout_seconds")
+    retries = value.get("ac_retry_attempts")
+    if (
+        isinstance(version, bool)
+        or version != _EXECUTION_POLICY_VERSION
+        or value.get("decomposition_mode") not in {"preflight", "bounce_only", "off"}
+        or isinstance(depth, bool)
+        or not isinstance(depth, int)
+        or depth < 0
+        or isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency < 1
+        or isinstance(timeout, bool)
+        or not isinstance(timeout, int)
+        or timeout < 1
+        or isinstance(retries, bool)
+        or not isinstance(retries, int)
+        or retries < 0
+    ):
+        return False
+    for flag_name in (
+        "fat_harness_mode",
+        "run_verify_commands",
+        "cross_harness_redispatch",
+        "shadow_replay_enabled",
+    ):
+        if not isinstance(value.get(flag_name), bool):
+            return False
+    reasoning_effort = value.get("reasoning_effort")
+    if reasoning_effort is not None and (
+        not isinstance(reasoning_effort, str) or not reasoning_effort.strip()
+    ):
+        return False
+
+    raw_profile = value.get("execution_profile")
+    if raw_profile is not None:
+        if not isinstance(raw_profile, Mapping):
+            return False
+        try:
+            profile = ExecutionProfile.model_validate(dict(raw_profile))
+        except ValueError:
+            return False
+        if profile.model_dump(mode="json") != dict(raw_profile):
+            return False
+
+    raw_routing = value.get("model_routing")
+    recognized, router = deserialize_model_router(raw_routing)
+    if not recognized or serialize_model_router(router) != raw_routing:
+        return False
+    return _valid_dispatch_rate_contract(value.get("dispatch_rate"))
+
+
 def build_execution_policy_contract(
     *,
     decomposition_mode: str,
@@ -877,9 +1051,11 @@ def build_execution_policy_contract(
     model_router: ModelRouter | None,
     cross_harness_redispatch: bool,
     shadow_replay_enabled: bool,
+    dispatch_rate_policy: Mapping[str, object],
 ) -> dict[str, object]:
     """Return the one canonical parallel-execution policy payload."""
     return {
+        "version": _EXECUTION_POLICY_VERSION,
         "decomposition_mode": decomposition_mode,
         "max_decomposition_depth": max_decomposition_depth,
         "max_concurrent": max_concurrent,
@@ -894,6 +1070,10 @@ def build_execution_policy_contract(
         "model_routing": serialize_model_router(model_router),
         "cross_harness_redispatch": cross_harness_redispatch,
         "shadow_replay_enabled": shadow_replay_enabled,
+        "dispatch_rate": _canonical_object(
+            dict(dispatch_rate_policy),
+            field="dispatch rate policy",
+        ),
     }
 
 
@@ -921,6 +1101,32 @@ class ExecutionAuthorityContract:
             "execution_policy",
         }:
             raise ValueError("execution authority contract has an invalid shape")
+        if not valid_execution_policy_contract(data.get("execution_policy")):
+            raise ValueError("execution authority contract has an invalid execution policy")
+        runtime = data.get("runtime")
+        execution_policy = data.get("execution_policy")
+        runtime_backend = runtime.get("runtime_backend") if isinstance(runtime, Mapping) else None
+        dispatch_rate = (
+            execution_policy.get("dispatch_rate") if isinstance(execution_policy, Mapping) else None
+        )
+        dispatch_backend = (
+            dispatch_rate.get("backend") if isinstance(dispatch_rate, Mapping) else None
+        )
+        dispatch_self_governs = (
+            dispatch_rate.get("self_governs_rate_limit")
+            if isinstance(dispatch_rate, Mapping)
+            else None
+        )
+        runtime_self_governs = (
+            runtime.get("self_governs_rate_limit") if isinstance(runtime, Mapping) else None
+        )
+        expected_backend = (
+            runtime_backend if isinstance(runtime_backend, str) and runtime_backend else "unknown"
+        )
+        if dispatch_backend != expected_backend:
+            raise ValueError("dispatch rate policy disagrees with the runtime backend")
+        if dispatch_self_governs is not runtime_self_governs:
+            raise ValueError("dispatch rate policy disagrees with runtime self-governance")
         if _canonical_json(data, field="execution authority contract") != self.canonical_json:
             raise ValueError("execution authority contract is not canonical")
 
@@ -986,6 +1192,17 @@ class ExecutionAuthorityContract:
             return False
         generation = workspace.get("generation")
         if not isinstance(generation, Mapping) or generation.get("observed") is not True:
+            return False
+        if not _valid_workspace_generation_identity(generation.get("identity")):
+            return False
+
+        execution_policy = data.get("execution_policy")
+        if not valid_execution_policy_contract(execution_policy):
+            return False
+        dispatch_rate = (
+            execution_policy.get("dispatch_rate") if isinstance(execution_policy, Mapping) else None
+        )
+        if not isinstance(dispatch_rate, Mapping) or dispatch_rate.get("observed") is not True:
             return False
 
         runtime = data.get("runtime")
@@ -1063,6 +1280,7 @@ __all__ = [
     "runtime_execution_identity_contract",
     "runtime_execution_proves_effective_model",
     "valid_constructor_model_contract",
+    "valid_execution_policy_contract",
     "valid_runtime_execution_identity_contract",
     "verifier_authority_contract",
 ]

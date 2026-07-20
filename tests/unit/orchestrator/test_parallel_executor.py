@@ -1419,7 +1419,10 @@ def test_unprotected_tail_pipe_is_form_mismatch_not_command_proof() -> None:
 def test_atomic_verifier_classifies_masked_test_command_as_form_mismatch() -> None:
     """Masked test commands are contract mismatches, not fabricated work."""
     profile = load_profile("code").model_copy(
-        update={"evidence_schema": EvidenceSchema(required=("commands_run",))}
+        update={
+            "evidence_schema": EvidenceSchema(required=("commands_run",)),
+            "must_produce": ("commands_run",),
+        }
     )
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/workspace"),

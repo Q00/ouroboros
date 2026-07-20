@@ -7,11 +7,12 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, Literal
 
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_HEARTBEAT_SECONDS = 30.0
 RATE_LIMIT_MAX_WAIT_SECONDS = 120.0
+RATE_LIMIT_TOKEN_ESTIMATION_VERSION = 1
 DEFAULT_ANTHROPIC_RPM_CEILING = 40
 DEFAULT_ANTHROPIC_TPM_CEILING = 32_000
 _TOKEN_ESTIMATE_DIVISOR = 4
@@ -223,11 +224,98 @@ class RateLimitGate:
             total_waited += sleep_seconds
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedDispatchRatePolicy:
+    """Immutable settings used by both dispatch behavior and authority identity."""
+
+    backend: str
+    owner: Literal["ouroboros", "runtime"]
+    observed: bool
+    self_governs_rate_limit: bool
+    requests_per_minute: int | None
+    tokens_per_minute: int | None
+    window_seconds: float = RATE_LIMIT_WINDOW_SECONDS
+    heartbeat_seconds: float = RATE_LIMIT_HEARTBEAT_SECONDS
+    max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS
+    token_estimation_version: int = RATE_LIMIT_TOKEN_ESTIMATION_VERSION
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        backend: str,
+        self_governs_rate_limit: bool,
+        requests_per_minute: int | None,
+        tokens_per_minute: int | None,
+    ) -> ResolvedDispatchRatePolicy:
+        normalized_backend = backend.strip() or "unknown"
+        if self_governs_rate_limit:
+            # Ouroboros deliberately installs a dormant gate, but the runtime's
+            # internal limiter is not yet exposed as a durable identity contract.
+            return cls(
+                backend=normalized_backend,
+                owner="runtime",
+                observed=False,
+                self_governs_rate_limit=True,
+                requests_per_minute=None,
+                tokens_per_minute=None,
+            )
+        return cls(
+            backend=normalized_backend,
+            owner="ouroboros",
+            observed=True,
+            self_governs_rate_limit=False,
+            requests_per_minute=(
+                requests_per_minute
+                if requests_per_minute is not None and requests_per_minute > 0
+                else None
+            ),
+            tokens_per_minute=(
+                tokens_per_minute
+                if tokens_per_minute is not None and tokens_per_minute > 0
+                else None
+            ),
+        )
+
+    @property
+    def gate_enabled(self) -> bool:
+        return self.owner == "ouroboros" and (
+            self.requests_per_minute is not None or self.tokens_per_minute is not None
+        )
+
+    def build_gate(self) -> RateLimitGate:
+        return build_rate_limit_gate(
+            self.backend,
+            request_limit=self.requests_per_minute if self.owner == "ouroboros" else None,
+            token_limit=self.tokens_per_minute if self.owner == "ouroboros" else None,
+            window_seconds=self.window_seconds,
+            max_wait_seconds=self.max_wait_seconds,
+            heartbeat_seconds=self.heartbeat_seconds,
+        )
+
+    def to_contract_data(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "backend": self.backend,
+            "owner": self.owner,
+            "observed": self.observed,
+            "self_governs_rate_limit": self.self_governs_rate_limit,
+            "requests_per_minute": self.requests_per_minute,
+            "tokens_per_minute": self.tokens_per_minute,
+            "gate_enabled": self.gate_enabled,
+            "window_seconds": self.window_seconds,
+            "heartbeat_seconds": self.heartbeat_seconds,
+            "max_wait_seconds": self.max_wait_seconds,
+            "token_estimation_version": self.token_estimation_version,
+        }
+
+
 def build_rate_limit_gate(
     runtime_backend: str,
     *,
     request_limit: int | None,
     token_limit: int | None,
+    window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
     max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS,
     heartbeat_seconds: float = RATE_LIMIT_HEARTBEAT_SECONDS,
     sleep: Callable[[float], Any] | None = None,
@@ -241,6 +329,7 @@ def build_rate_limit_gate(
         runtime_backend=runtime_backend,
         request_limit=request_limit,
         token_limit=token_limit,
+        window_seconds=window_seconds,
     )
     return RateLimitGate(
         bucket,
@@ -267,10 +356,12 @@ __all__ = [
     "DEFAULT_ANTHROPIC_TPM_CEILING",
     "RATE_LIMIT_HEARTBEAT_SECONDS",
     "RATE_LIMIT_MAX_WAIT_SECONDS",
+    "RATE_LIMIT_TOKEN_ESTIMATION_VERSION",
     "RATE_LIMIT_WINDOW_SECONDS",
     "RateLimitBackoff",
     "RateLimitGate",
     "RateLimitSnapshot",
+    "ResolvedDispatchRatePolicy",
     "SharedRateLimitBucket",
     "build_rate_limit_gate",
     "estimate_runtime_request_tokens",

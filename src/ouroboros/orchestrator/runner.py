@@ -64,6 +64,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.backend_limits import (
+    BackendConcurrencyLimits,
     plan_fan_out_concurrency,
     resolve_backend_limits,
 )
@@ -122,6 +123,7 @@ from ouroboros.orchestrator.policy import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.rate_limit import ResolvedDispatchRatePolicy
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -1223,7 +1225,10 @@ class OrchestratorRunner:
                 break
         return current_seed_id, tuple(cohort)
 
-    def _plan_parallel_workers(self) -> int:
+    def _plan_parallel_workers(
+        self,
+        limits: BackendConcurrencyLimits | None = None,
+    ) -> int:
         """Return the effective fan-out worker count for the connected backend.
 
         Ouroboros caps delivery fan-out to the connected backend's known
@@ -1232,8 +1237,8 @@ class OrchestratorRunner:
         runtimes — serialize by default and are raised only via
         ``OUROBOROS_MAX_CONCURRENCY``.
         """
-        limits = resolve_backend_limits(self._adapter.runtime_backend)
-        return plan_fan_out_concurrency(self._max_parallel_workers, limits)
+        resolved_limits = limits or resolve_backend_limits(self._adapter.runtime_backend)
+        return plan_fan_out_concurrency(self._max_parallel_workers, resolved_limits)
 
     @property
     def mcp_manager(self) -> MCPClientManager | None:
@@ -4706,7 +4711,14 @@ class OrchestratorRunner:
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).
-        effective_workers = self._plan_parallel_workers()
+        delivery_limits = resolve_backend_limits(self._adapter.runtime_backend)
+        effective_workers = self._plan_parallel_workers(delivery_limits)
+        dispatch_rate_policy = ResolvedDispatchRatePolicy.resolve(
+            backend=self._adapter.runtime_backend,
+            self_governs_rate_limit=bool(getattr(self._adapter, "self_governs_rate_limit", False)),
+            requests_per_minute=delivery_limits.requests_per_minute,
+            tokens_per_minute=delivery_limits.tokens_per_minute,
+        )
         if effective_workers < self._max_parallel_workers:
             self._console.print(
                 f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
@@ -4766,6 +4778,7 @@ class OrchestratorRunner:
             workspace_authority_identity=(
                 workspace_identity if isinstance(workspace_identity, Mapping) else None
             ),
+            dispatch_rate_policy=dispatch_rate_policy,
         )
 
         # Check for cancellation before starting parallel execution

@@ -85,7 +85,10 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
-from ouroboros.orchestrator.backend_limits import resolve_backend_limits
+from ouroboros.orchestrator.backend_limits import (
+    BackendConcurrencyLimits,
+    resolve_backend_limits,
+)
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
 from ouroboros.orchestrator.decomposition_params import (
@@ -290,8 +293,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
     RateLimitBackoff,
-    RateLimitGate,
-    build_rate_limit_gate,
+    ResolvedDispatchRatePolicy,
     estimate_runtime_request_tokens,
 )
 from ouroboros.orchestrator.runtime_param_negotiation import (
@@ -907,6 +909,7 @@ class ParallelACExecutor:
         session_signal_hub: SessionSignalHub | None = None,
         resolved_routing_authority: ResolvedRuntimeAuthority | None = None,
         workspace_authority_identity: Mapping[str, object] | None = None,
+        dispatch_rate_policy: ResolvedDispatchRatePolicy | None = None,
     ):
         """Initialize executor.
 
@@ -1004,7 +1007,11 @@ class ParallelACExecutor:
         self._checkpoint_store = checkpoint_store
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
         self._execution_counters_lock = asyncio.Lock()
-        self._dispatch_rate_gate = self._build_dispatch_rate_gate(adapter)
+        self._dispatch_rate_policy = dispatch_rate_policy or self._resolve_dispatch_rate_policy(
+            adapter
+        )
+        self._validate_dispatch_rate_policy(adapter, self._dispatch_rate_policy)
+        self._dispatch_rate_gate = self._dispatch_rate_policy.build_gate()
         # Param degradations already surfaced this run, keyed by (param, support),
         # so the operator is told once rather than on every dispatch.
         self._announced_param_degradations: set[tuple[str, str]] = set()
@@ -1035,6 +1042,7 @@ class ParallelACExecutor:
             model_router=self._model_router,
             cross_harness_redispatch=self._cross_harness_redispatch_enabled,
             shadow_replay_enabled=self._shadow_replay_enabled,
+            dispatch_rate_policy=self._dispatch_rate_policy.to_contract_data(),
         )
         workspace = task_cwd or getattr(adapter, "working_directory", None) or os.getcwd()
         self._execution_authority = ExecutionAuthorityContract.build(
@@ -1054,8 +1062,11 @@ class ParallelACExecutor:
         return self._execution_authority
 
     @staticmethod
-    def _build_dispatch_rate_gate(adapter: AgentRuntime) -> RateLimitGate:
-        """Build the shared dispatch rate gate for non-self-governing backends.
+    def _resolve_dispatch_rate_policy(
+        adapter: AgentRuntime,
+        limits: BackendConcurrencyLimits | None = None,
+    ) -> ResolvedDispatchRatePolicy:
+        """Resolve one immutable policy for behavior and authority identity.
 
         Ouroboros — not the runtime — paces delivery within the backend's
         declared RPM/TPM budget. Native adapters that already run their own
@@ -1067,16 +1078,25 @@ class ParallelACExecutor:
         """
         backend_attr = getattr(adapter, "runtime_backend", "")
         backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
-
-        if getattr(adapter, "self_governs_rate_limit", False):
-            return build_rate_limit_gate(backend, request_limit=None, token_limit=None)
-
-        limits = resolve_backend_limits(backend)
-        return build_rate_limit_gate(
-            backend,
-            request_limit=limits.requests_per_minute,
-            token_limit=limits.tokens_per_minute,
+        self_governs = bool(getattr(adapter, "self_governs_rate_limit", False))
+        resolved_limits = limits or resolve_backend_limits(backend)
+        return ResolvedDispatchRatePolicy.resolve(
+            backend=backend,
+            self_governs_rate_limit=self_governs,
+            requests_per_minute=resolved_limits.requests_per_minute,
+            tokens_per_minute=resolved_limits.tokens_per_minute,
         )
+
+    @staticmethod
+    def _validate_dispatch_rate_policy(
+        adapter: AgentRuntime,
+        policy: ResolvedDispatchRatePolicy,
+    ) -> None:
+        backend_attr = getattr(adapter, "runtime_backend", "")
+        backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
+        self_governs = bool(getattr(adapter, "self_governs_rate_limit", False))
+        if policy.backend != backend or policy.self_governs_rate_limit is not self_governs:
+            raise ValueError("dispatch rate policy disagrees with the active runtime")
 
     async def _await_dispatch_rate_budget(
         self,

@@ -153,6 +153,8 @@ async def test_alternate_runtime_preserves_verification_policy(
         assert alt_executor._run_verify_commands is False
         assert alt_executor._verify_command_timeout_seconds == 7
         assert alt_executor._ac_retry_attempts == 0
+        assert alt_executor._dispatch_rate_policy.backend == "codex_cli"
+        assert alt_executor._dispatch_rate_policy.self_governs_rate_limit is True
         return _succeeded()
 
     monkeypatch.setattr(

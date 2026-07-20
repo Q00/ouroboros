@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from types import MethodType
 from unittest.mock import AsyncMock, MagicMock
@@ -10,9 +11,11 @@ from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, RuntimeHandle
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ResolvedRuntimeAuthority,
+    build_execution_policy_contract,
 )
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
+from ouroboros.orchestrator.rate_limit import ResolvedDispatchRatePolicy
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
@@ -92,6 +95,39 @@ class _SlottedRuntime:
             yield self.handler
 
 
+def _generation(label: str = "generation-a") -> dict[str, object]:
+    return {
+        "version": 1,
+        "kind": "test-snapshot-v1",
+        "digest": "sha256:" + hashlib.sha256(label.encode()).hexdigest(),
+    }
+
+
+def _policy(*, backend: str = "test-runtime", **overrides: object) -> dict[str, object]:
+    policy = build_execution_policy_contract(
+        decomposition_mode="preflight",
+        max_decomposition_depth=3,
+        max_concurrent=2,
+        execution_profile=None,
+        fat_harness_mode=False,
+        run_verify_commands=True,
+        verify_command_timeout_seconds=600,
+        ac_retry_attempts=2,
+        reasoning_effort=None,
+        model_router=None,
+        cross_harness_redispatch=False,
+        shadow_replay_enabled=False,
+        dispatch_rate_policy=ResolvedDispatchRatePolicy.resolve(
+            backend=backend,
+            self_governs_rate_limit=False,
+            requests_per_minute=None,
+            tokens_per_minute=None,
+        ).to_contract_data(),
+    )
+    policy.update(overrides)
+    return policy
+
+
 def _contract(
     *,
     runtime: _Runtime | None = None,
@@ -105,8 +141,8 @@ def _contract(
         adapter=runtime or _Runtime(),
         verifier=verifier,  # type: ignore[arg-type]
         workspace=workspace,
-        execution_policy=policy or {"retry_attempts": 2},
-        workspace_generation=generation or {"tree": "generation-a"},
+        execution_policy=policy if policy is not None else _policy(),
+        workspace_generation=generation if generation is not None else _generation(),
         runtime_handle=runtime_handle,
     )
 
@@ -244,14 +280,93 @@ def test_undeclared_custom_verifier_is_process_local() -> None:
 def test_workspace_and_policy_drift_change_authority() -> None:
     baseline = _contract()
     assert baseline.fingerprint != _contract(workspace="/tmp/workspace-b").fingerprint
-    assert baseline.fingerprint != _contract(policy={"retry_attempts": 3}).fingerprint
+    assert baseline.fingerprint != _contract(policy=_policy(ac_retry_attempts=3)).fingerprint
 
 
 def test_workspace_generation_drift_changes_authority() -> None:
     assert (
-        _contract(generation={"tree": "a"}).fingerprint
-        != _contract(generation={"tree": "b"}).fingerprint
+        _contract(generation=_generation("a")).fingerprint
+        != _contract(generation=_generation("b")).fingerprint
     )
+
+
+def test_empty_workspace_generation_is_unobserved_and_not_portable() -> None:
+    contract = _contract(generation={})
+    assert contract.data["workspace"]["generation"] == {"observed": False}
+    assert contract.portable_across_processes is False
+
+
+def test_malformed_workspace_generation_is_rejected() -> None:
+    with pytest.raises(ValueError, match="workspace generation identity is invalid"):
+        _contract(generation={"version": 1, "kind": "test", "digest": "not-a-digest"})
+
+
+@pytest.mark.parametrize("missing_key", sorted(_policy()))
+def test_incomplete_execution_policy_is_rejected(missing_key: str) -> None:
+    policy = _policy()
+    del policy[missing_key]
+    with pytest.raises(ValueError, match="invalid execution policy"):
+        _contract(policy=policy)
+
+
+def test_dispatch_rate_policy_drift_changes_executor_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    runtime.self_governs_rate_limit = False  # type: ignore[attr-defined]
+
+    monkeypatch.setenv("OUROBOROS_TEST_RUNTIME_RPM", "1")
+    first = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+    )
+    monkeypatch.setenv("OUROBOROS_TEST_RUNTIME_RPM", "9")
+    second = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    first_policy = first.execution_authority.data["execution_policy"]["dispatch_rate"]
+    second_policy = second.execution_authority.data["execution_policy"]["dispatch_rate"]
+    assert first_policy["requests_per_minute"] == 1
+    assert second_policy["requests_per_minute"] == 9
+    assert first.execution_authority.fingerprint != second.execution_authority.fingerprint
+
+
+def test_self_governing_rate_policy_is_explicit_and_not_portable(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    runtime.self_governs_rate_limit = True  # type: ignore[attr-defined]
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+    )
+    rate_policy = executor.execution_authority.data["execution_policy"]["dispatch_rate"]
+    assert rate_policy["owner"] == "runtime"
+    assert rate_policy["observed"] is False
+    assert executor._dispatch_rate_gate.enabled is False
+    assert executor.execution_authority.portable_across_processes is False
+
+
+def test_dispatch_rate_backend_must_match_runtime_backend() -> None:
+    policy = _policy()
+    rate_policy = dict(policy["dispatch_rate"])  # type: ignore[arg-type]
+    rate_policy["backend"] = "foreign-runtime"
+    policy["dispatch_rate"] = rate_policy
+    with pytest.raises(ValueError, match="disagrees with the runtime backend"):
+        _contract(policy=policy)
+
+
+def test_dispatch_rate_self_governance_must_match_runtime() -> None:
+    runtime = _Runtime()
+    runtime.self_governs_rate_limit = True  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="disagrees with runtime self-governance"):
+        _contract(runtime=runtime, policy=_policy())
 
 
 def test_unobserved_workspace_or_runtime_is_not_reusable() -> None:
@@ -266,7 +381,7 @@ def test_unobserved_workspace_or_runtime_is_not_reusable() -> None:
         adapter=UnobservedRuntime(),
         verifier=None,
         workspace=None,
-        execution_policy={},
+        execution_policy=_policy(backend="legacy"),
     )
     assert contract.portable_across_processes is False
 
@@ -413,8 +528,8 @@ def test_bound_runtime_authority_is_used_without_raw_mapping_injection() -> None
         adapter=runtime,
         verifier=None,
         workspace="/tmp/workspace-a",
-        workspace_generation={"tree": "a"},
-        execution_policy={},
+        workspace_generation=_generation("a"),
+        execution_policy=_policy(),
         resolved_routing=bound,
     )
     assert contract.data["runtime"]["execution_identity"]["identity"]["profile"] == "persisted"
@@ -440,8 +555,8 @@ def test_bound_runtime_authority_rejects_a_different_adapter_instance() -> None:
             adapter=replacement,
             verifier=None,
             workspace="/tmp/workspace-a",
-            workspace_generation={"tree": "a"},
-            execution_policy={},
+            workspace_generation=_generation("a"),
+            execution_policy=_policy(),
             resolved_routing=bound,
         )
 
@@ -466,8 +581,8 @@ def test_bound_runtime_authority_rejects_same_adapter_identity_drift() -> None:
             adapter=runtime,
             verifier=None,
             workspace="/tmp/workspace-a",
-            workspace_generation={"tree": "a"},
-            execution_policy={},
+            workspace_generation=_generation("a"),
+            execution_policy=_policy(),
             resolved_routing=bound,
         )
 
