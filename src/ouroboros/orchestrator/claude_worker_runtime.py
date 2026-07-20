@@ -133,6 +133,20 @@ class ClaudeWorkerTransport:
         # command builder just appends the flags. Empty ⇒ no ``--add-dir`` at all.
         self._add_dirs = _resolve_add_dirs(context_reference_dirs, cwd=cwd)
 
+    def execution_identity_contract(self) -> dict[str, object]:
+        """Declare static command policy; authority binds executable bytes separately."""
+        return {
+            "version": 1,
+            "configuration": {
+                "cwd": self._cwd,
+                "timeout": self._timeout,
+                "disallowed_tools": list(self._disallowed_tools),
+                "persist_sessions": self._persist_sessions,
+                "add_dirs": list(self._add_dirs),
+                "child_environment_policy_version": 1,
+            },
+        }
+
     @staticmethod
     def _permission_args(permission_mode: str | None) -> list[str]:
         normalized = (permission_mode or "").strip().lower()

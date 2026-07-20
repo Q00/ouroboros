@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, RuntimeHandle
+from ouroboros.orchestrator.claude_worker_runtime import ClaudeWorkerTransport
+from ouroboros.orchestrator.codex_mcp_runtime import CodexMcpWorkerTransport
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ResolvedRuntimeAuthority,
@@ -17,6 +19,7 @@ from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.rate_limit import ResolvedDispatchRatePolicy
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.worker_runtime import LeaderDrivenWorkerRuntime
 
 
 class _Runtime:
@@ -147,6 +150,26 @@ def _contract(
     )
 
 
+def _worker_contract(
+    transport: object,
+    *,
+    backend: str,
+    llm_backend: str,
+) -> ExecutionAuthorityContract:
+    runtime = LeaderDrivenWorkerRuntime(
+        transport=transport,  # type: ignore[arg-type]
+        runtime_backend=backend,
+        llm_backend=llm_backend,
+    )
+    return ExecutionAuthorityContract.build(
+        adapter=runtime,
+        verifier=None,
+        workspace="/tmp/workspace-a",
+        workspace_generation=_generation(),
+        execution_policy=_policy(backend=backend),
+    )
+
+
 def test_runtime_profile_drift_changes_authority() -> None:
     assert (
         _contract(runtime=_Runtime(profile="a")).fingerprint
@@ -244,6 +267,193 @@ def test_instance_level_execution_override_is_process_local() -> None:
     overridden = _contract(runtime=runtime)
     assert baseline.fingerprint != overridden.fingerprint
     assert overridden.portable_across_processes is False
+
+    runtime.execute_task = None  # type: ignore[method-assign]
+    non_callable = _contract(runtime=runtime)
+    assert baseline.fingerprint != non_callable.fingerprint
+    assert non_callable.portable_across_processes is False
+
+    runtime_with_handler = _Runtime()
+    runtime_with_handler._handler = lambda: "one"  # type: ignore[attr-defined]
+    handler_contract = _contract(runtime=runtime_with_handler)
+    assert (
+        handler_contract.data["runtime"]["implementation"]["instance_overrides"]["_handler"]["mode"]
+        == "callable"
+    )
+    assert handler_contract.portable_across_processes is False
+
+
+def test_bundled_worker_transport_policy_changes_authority() -> None:
+    claude_first = _worker_contract(
+        ClaudeWorkerTransport(
+            cli_path="/usr/bin/true",
+            timeout=1,
+            disallowed_tools=("tool-a",),
+            persist_sessions=False,
+        ),
+        backend="claude_mcp",
+        llm_backend="claude",
+    )
+    claude_second = _worker_contract(
+        ClaudeWorkerTransport(
+            cli_path="/usr/bin/false",
+            timeout=9,
+            disallowed_tools=("tool-b",),
+            persist_sessions=True,
+        ),
+        backend="claude_mcp",
+        llm_backend="claude",
+    )
+    codex_first = _worker_contract(
+        CodexMcpWorkerTransport(cli_path="/usr/bin/true", idle_timeout=1),
+        backend="codex_mcp",
+        llm_backend="codex",
+    )
+    codex_second = _worker_contract(
+        CodexMcpWorkerTransport(cli_path="/usr/bin/false", idle_timeout=9),
+        backend="codex_mcp",
+        llm_backend="codex",
+    )
+
+    assert claude_first.fingerprint != claude_second.fingerprint
+    assert codex_first.fingerprint != codex_second.fingerprint
+    transport = claude_first.data["runtime"]["implementation"]["composition"]["components"][
+        "transport"
+    ]
+    assert transport["mode"] == "declared"
+    assert transport["executable"]["observed"] is True
+
+
+def test_bundled_transport_identity_is_stable_and_binds_instance_override() -> None:
+    transport = ClaudeWorkerTransport(cli_path="/usr/bin/true")
+    runtime = LeaderDrivenWorkerRuntime(
+        transport=transport,
+        runtime_backend="claude_mcp",
+        llm_backend="claude",
+    )
+
+    def build() -> ExecutionAuthorityContract:
+        return ExecutionAuthorityContract.build(
+            adapter=runtime,
+            verifier=None,
+            workspace="/tmp/workspace-a",
+            workspace_generation=_generation(),
+            execution_policy=_policy(backend="claude_mcp"),
+        )
+
+    first = build()
+    assert first.fingerprint == build().fingerprint
+
+    transport.spawn = lambda **_: None  # type: ignore[method-assign]
+    overridden = build()
+    assert first.fingerprint != overridden.fingerprint
+    component = overridden.data["runtime"]["implementation"]["composition"]["components"][
+        "transport"
+    ]
+    assert component["stability"] == "process_local"
+
+    transport.spawn = None  # type: ignore[method-assign]
+    non_callable = build()
+    assert first.fingerprint != non_callable.fingerprint
+    component = non_callable.data["runtime"]["implementation"]["composition"]["components"][
+        "transport"
+    ]
+    assert component["instance_overrides"]["spawn"]["mode"] == "non_callable"
+
+
+def test_undeclared_transport_fails_closed_without_colliding() -> None:
+    class OpaqueTransport:
+        backend_name = "opaque"
+
+        async def spawn(self, **_: object) -> object:
+            raise NotImplementedError
+
+        async def resume(self, **_: object) -> object:
+            raise NotImplementedError
+
+    first = _worker_contract(
+        OpaqueTransport(),
+        backend="opaque",
+        llm_backend="opaque",
+    )
+    second = _worker_contract(
+        OpaqueTransport(),
+        backend="opaque",
+        llm_backend="opaque",
+    )
+
+    assert first.fingerprint != second.fingerprint
+    component = first.data["runtime"]["implementation"]["composition"]["components"]["transport"]
+    assert component["mode"] == "process_local"
+    assert first.portable_across_processes is False
+
+
+def test_malformed_transport_identity_fails_closed_without_leaking() -> None:
+    class MalformedTransport:
+        backend_name = "malformed"
+
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {"version": True, "configuration": {"api_token": "sentinel-secret"}}
+
+        async def spawn(self, **_: object) -> object:
+            raise NotImplementedError
+
+        async def resume(self, **_: object) -> object:
+            raise NotImplementedError
+
+    contract = _worker_contract(
+        MalformedTransport(),
+        backend="malformed",
+        llm_backend="malformed",
+    )
+    component = contract.data["runtime"]["implementation"]["composition"]["components"]["transport"]
+    assert component["mode"] == "process_local"
+    assert "sentinel-secret" not in contract.canonical_json
+
+
+def test_sensitive_transport_identity_fails_closed_without_leaking() -> None:
+    class SensitiveTransport:
+        backend_name = "sensitive"
+
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {
+                "version": 1,
+                "configuration": {"api_token": "sentinel-secret"},
+            }
+
+        async def spawn(self, **_: object) -> object:
+            raise NotImplementedError
+
+        async def resume(self, **_: object) -> object:
+            raise NotImplementedError
+
+    contract = _worker_contract(
+        SensitiveTransport(),
+        backend="sensitive",
+        llm_backend="sensitive",
+    )
+
+    component = contract.data["runtime"]["implementation"]["composition"]["components"]["transport"]
+    assert component["mode"] == "process_local"
+    assert "identity_digest" not in component
+    assert "sentinel-secret" not in contract.canonical_json
+
+
+def test_codex_transport_live_pool_is_excluded_from_static_identity() -> None:
+    transport = CodexMcpWorkerTransport(cli_path="/usr/bin/true")
+    baseline = _worker_contract(
+        transport,
+        backend="codex_mcp",
+        llm_backend="codex",
+    )
+    transport._pool["session"] = object()  # type: ignore[assignment]
+    changed_live_state = _worker_contract(
+        transport,
+        backend="codex_mcp",
+        llm_backend="codex",
+    )
+
+    assert baseline.fingerprint == changed_live_state.fingerprint
 
 
 def test_unobservable_slotted_instance_state_is_process_local() -> None:

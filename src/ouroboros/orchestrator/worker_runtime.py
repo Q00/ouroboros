@@ -16,7 +16,7 @@ the SAME pool code — only the transport differs.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import os
@@ -73,6 +73,16 @@ class LeaderDrivenWorkerTransport(Protocol):
     @property
     def backend_name(self) -> str:
         """Canonical backend id stamped into the emitted ``RuntimeHandle``."""
+        ...
+
+    def execution_identity_contract(self) -> Mapping[str, object]:
+        """Return the versioned static execution policy.
+
+        Shape: ``{"version": 1, "configuration": {...}}``. The configuration
+        owns all execution-relevant static state, including delegated-client
+        identity, but excludes credentials and live session state. Legacy
+        transports remain usable but receive process-local authority.
+        """
         ...
 
     async def spawn(
@@ -147,6 +157,10 @@ class LeaderDrivenWorkerRuntime:
         self._model_override_support = model_override_support
         self._targeted_resume = targeted_resume
         self._provider_name = runtime_backend
+
+    def execution_components(self) -> Mapping[str, object]:
+        """Declare the transport as this runtime's execution composition boundary."""
+        return {"transport": self._transport}
 
     # -- AgentRuntime Protocol properties ---------------------------------
 

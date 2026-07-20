@@ -23,6 +23,7 @@ import shutil
 from typing import Any
 import uuid
 
+from ouroboros.core.security import is_sensitive_field
 from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
@@ -394,6 +395,10 @@ def _callable_entrypoint_contract(target: object) -> dict[str, object]:
     return _callable_implementation_contract(implementation)
 
 
+def _qualified_type(value: object) -> str:
+    return f"{type(value).__module__}.{type(value).__qualname__}"
+
+
 def _file_content_digest(path: str | os.PathLike[str]) -> str | None:
     try:
         digest = hashlib.sha256()
@@ -608,29 +613,12 @@ def _runtime_skill_dispatcher_contract(adapter: object) -> dict[str, object]:
     }
 
 
-def _runtime_implementation_contract(adapter: object) -> dict[str, object]:
-    """Bind the runtime class hierarchy without guessing execution-critical hooks."""
+def _class_implementation_contract(adapter: object) -> dict[str, object]:
+    """Bind one object's class hierarchy without inspecting its instance state."""
     classes: list[str] = []
-    instance_callables: dict[str, object] = {}
     members: dict[str, object] = {}
     modules: dict[str, object] = {}
     durable = True
-    try:
-        instance_state = vars(adapter)
-    except TypeError:
-        instance_state = {}
-        durable = False
-        instance_state_observed = False
-    else:
-        instance_state_observed = True
-    for attribute_name, value in instance_state.items():
-        if not callable(value):
-            continue
-        instance_callables[attribute_name] = _callable_entrypoint_contract(value)
-        # Instance-level executable behavior may carry closure or mutable state
-        # that a class/module digest cannot prove portable. Bind it for audit,
-        # but fail closed for cross-process composition.
-        durable = False
     for runtime_class in type(adapter).__mro__:
         if runtime_class is object:
             continue
@@ -669,13 +657,18 @@ def _runtime_implementation_contract(adapter: object) -> dict[str, object]:
         }
         try:
             source_path = inspect.getsourcefile(runtime_class)
-        except TypeError:
+        except (OSError, TypeError):
             source_path = None
         if source_path is None:
             durable = False
             modules[qualified_name] = {"observed": False}
             continue
-        realpath = str(Path(source_path).resolve(strict=False))
+        try:
+            realpath = str(Path(source_path).resolve(strict=False))
+        except (OSError, RuntimeError):
+            durable = False
+            modules[qualified_name] = {"observed": False}
+            continue
         digest = _file_content_digest(realpath)
         if digest is None:
             durable = False
@@ -685,13 +678,201 @@ def _runtime_implementation_contract(adapter: object) -> dict[str, object]:
             "observed": True,
             "content_digest": digest,
         }
-    contract: dict[str, object] = {
+    return {
         "stability": "durable" if durable and classes else "process_local",
         "classes": classes,
-        "instance_callables": instance_callables,
-        "instance_state_observed": instance_state_observed,
         "members": members,
         "modules": modules,
+    }
+
+
+def _safe_class_implementation_contract(value: object) -> dict[str, object]:
+    try:
+        return _class_implementation_contract(value)
+    except Exception as exc:
+        return {
+            "stability": "process_local",
+            "observed": False,
+            "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
+        }
+
+
+def _reject_sensitive_identity_fields(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if is_sensitive_field(key):
+                raise ValueError("component identity contains a sensitive field")
+            _reject_sensitive_identity_fields(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_sensitive_identity_fields(item)
+
+
+def _instance_executable_overrides(value: object) -> dict[str, object]:
+    try:
+        instance_state = vars(value)
+    except TypeError:
+        return {}
+    missing = object()
+    overrides: dict[str, object] = {}
+    for name, item in instance_state.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if callable(item):
+            overrides[name] = {
+                "mode": "callable",
+                "implementation": _callable_entrypoint_contract(item),
+            }
+            continue
+        class_member = inspect.getattr_static(type(value), name, missing)
+        if class_member is missing or not (
+            callable(class_member) or isinstance(class_member, (classmethod, staticmethod))
+        ):
+            continue
+        overrides[name] = {"mode": "non_callable", "type": _qualified_type(item)}
+    return overrides
+
+
+def _declared_component_contract(value: object) -> dict[str, object]:
+    implementation = _safe_class_implementation_contract(value)
+    try:
+        executable = _runtime_executable_contract(value)
+    except Exception as exc:
+        executable = {
+            "required": True,
+            "observed": False,
+            "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
+        }
+    provider_descriptor = inspect.getattr_static(
+        type(value),
+        "execution_identity_contract",
+        None,
+    )
+    instance_overrides = _instance_executable_overrides(value)
+    if provider_descriptor is None:
+        return {
+            "mode": "process_local",
+            "stability": "process_local",
+            "type": _qualified_type(value),
+            "instance_nonce": uuid.uuid4().hex,
+            "reason": "identity_not_declared",
+            "implementation": implementation,
+            "executable": executable,
+        }
+    try:
+        provider = object.__getattribute__(value, "execution_identity_contract")
+        identity = provider()
+        if not isinstance(identity, Mapping):
+            raise ValueError("component identity is not a mapping")
+        projected = _project_explicit_identity(
+            dict(identity),
+            field="component execution identity",
+        )
+        _reject_sensitive_identity_fields(projected)
+        if not isinstance(projected, dict) or set(projected) != {"version", "configuration"}:
+            raise ValueError("component identity has an invalid envelope")
+        version = projected.get("version")
+        configuration = projected.get("configuration")
+        if (
+            isinstance(version, bool)
+            or version != 1
+            or not isinstance(configuration, dict)
+            or not configuration
+        ):
+            raise ValueError("component identity has an invalid version or configuration")
+        encoded = _canonical_json(projected, field="component execution identity")
+        if len(encoded) > _MAX_IDENTITY_JSON_CHARS:
+            raise ValueError("component identity exceeds its budget")
+    except Exception as exc:
+        return {
+            "mode": "process_local",
+            "stability": "process_local",
+            "type": _qualified_type(value),
+            "instance_nonce": uuid.uuid4().hex,
+            "reason": f"identity_error:{type(exc).__module__}.{type(exc).__qualname__}",
+            "implementation": implementation,
+            "executable": executable,
+        }
+    durable = (
+        not instance_overrides
+        and implementation.get("stability") == "durable"
+        and (executable.get("required") is not True or executable.get("observed") is True)
+    )
+    contract: dict[str, object] = {
+        "mode": "declared",
+        "stability": "durable" if durable else "process_local",
+        "type": _qualified_type(value),
+        "identity_digest": _sha256(encoded),
+        "instance_overrides": instance_overrides,
+        "implementation": implementation,
+        "executable": executable,
+    }
+    if not durable:
+        contract["instance_nonce"] = uuid.uuid4().hex
+    return contract
+
+
+def _runtime_composition_contract(adapter: object) -> dict[str, object]:
+    provider_descriptor = inspect.getattr_static(
+        type(adapter),
+        "execution_components",
+        None,
+    )
+    if provider_descriptor is None:
+        return {"version": 1, "mode": "none", "stability": "durable", "components": {}}
+    try:
+        provider = object.__getattribute__(adapter, "execution_components")
+        components = provider()
+        if not isinstance(components, Mapping) or len(components) > _MAX_IDENTITY_ITEMS:
+            raise ValueError("runtime execution components are invalid")
+        if not all(isinstance(name, str) and name for name in components):
+            raise ValueError("runtime execution component names are invalid")
+        contracts = {
+            name: _declared_component_contract(component) for name, component in components.items()
+        }
+    except Exception as exc:
+        return {
+            "version": 1,
+            "mode": "declared",
+            "stability": "process_local",
+            "instance_nonce": uuid.uuid4().hex,
+            "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            "components": {},
+        }
+    durable = all(contract.get("stability") == "durable" for contract in contracts.values())
+    result: dict[str, object] = {
+        "version": 1,
+        "mode": "declared",
+        "stability": "durable" if durable else "process_local",
+        "components": contracts,
+    }
+    if not durable:
+        result["instance_nonce"] = uuid.uuid4().hex
+    return result
+
+
+def _runtime_implementation_contract(adapter: object) -> dict[str, object]:
+    """Bind runtime code plus explicitly owned execution components."""
+    class_contract = _class_implementation_contract(adapter)
+    instance_overrides = _instance_executable_overrides(adapter)
+    durable = class_contract.get("stability") == "durable"
+    try:
+        vars(adapter)
+    except TypeError:
+        durable = False
+        instance_state_observed = False
+    else:
+        instance_state_observed = True
+    if instance_overrides:
+        durable = False
+    composition = _runtime_composition_contract(adapter)
+    durable = durable and composition.get("stability") == "durable"
+    contract: dict[str, object] = {
+        **class_contract,
+        "stability": "durable" if durable else "process_local",
+        "instance_overrides": instance_overrides,
+        "instance_state_observed": instance_state_observed,
+        "composition": composition,
     }
     if contract["stability"] == "process_local":
         contract["instance_nonce"] = uuid.uuid4().hex

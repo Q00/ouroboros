@@ -126,6 +126,21 @@ class CodexMcpWorkerTransport:
         # across turns so codex-reply reaches the SAME (process-bound) server.
         self._pool: dict[str, MCPSessionActor] = {}
 
+    def execution_identity_contract(self) -> dict[str, object]:
+        """Declare static server policy while excluding the live session pool."""
+        return {
+            "version": 1,
+            "configuration": {
+                "connect_timeout": self._connect_timeout,
+                "idle_timeout": self._idle_timeout,
+                "disabled_mcp_servers": list(self._disabled_mcp_servers),
+                "index_sessions": self._index_sessions,
+                "codex_home": self._codex_home,
+                "resume_scope": "process_bound_pool_v1",
+                "child_environment_policy_version": 1,
+            },
+        }
+
     def _server_config(self) -> MCPServerConfig:
         # Strip ouroboros MCP env vars so the spawned codex server cannot recurse
         # back into the ouroboros MCP server (#185 child-env discipline).
