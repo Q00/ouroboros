@@ -754,6 +754,27 @@ _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS = 48
 # the full multi-hour parked-cadence budget.
 _DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS = 10.0
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
+# Directories excluded from the verify_command no-mutation fingerprint: VCS
+# metadata, installed dependencies, and tool caches legitimately churn while a
+# verify_command runs (a test run writes ``__pycache__``/``.pytest_cache``; git
+# read commands touch ``.git/index``) and are not acceptance-relevant source of
+# truth. Every other path -- source AND build outputs a contract may assert on
+# -- participates, so a verifier that mutates the delivered tree is caught. The
+# command itself still runs over the COMPLETE live tree, so these directories
+# remain fully visible to it (unlike a shadow-replay snapshot).
+_VERIFY_MUTATION_IGNORE_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+    }
+)
 _DURABLE_CONTEXT_MAX_AC_CONTENT_CHARS = 2000
 _DURABLE_CONTEXT_MAX_TOOL_NAMES = 64
 _DURABLE_CONTEXT_MAX_FILE_PATHS = 128
@@ -7896,41 +7917,16 @@ class ParallelACExecutor:
         parent_verify_gate_outcome: _VerifyGateOutcome | None = None
         if parent_has_contract and self._run_verify_commands:
             assert ac_spec is not None  # narrowed by parent_has_contract
-            live_cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-            gate_kwargs: dict[str, Any] = {
-                "spec": ac_spec,
-                "aggregate_id": execution_id or session_id,
-                "verify_key": f"decomposed_parent:{node_identity.node_id}:{retry_attempt}",
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "identity_metadata": node_identity.to_event_metadata(),
-            }
-            if ac_spec.verify_command:
-                # R14-2: a command-bearing parent gate runs the same class of
-                # arbitrary, possibly-mutating shell as the leaf/batch gates and
-                # over the same shared workspace. Grade it against a frozen
-                # snapshot so it can neither observe nor cause a cross-gate
-                # mutation. ``isolated_workspace`` is a best-effort snapshot (as in
-                # shadow-replay): on the rare environmental failure to freeze a
-                # tree that in production always exists, degrade to the prior
-                # in-place grading rather than fabricate an attestation failure.
-                with isolated_workspace(live_cwd) as snapshot_cwd:
-                    if snapshot_cwd is None:
-                        log.warning(
-                            "parallel_executor.ac.verify_gate.isolation_unavailable",
-                            session_id=session_id,
-                            execution_id=execution_id,
-                            node_id=node_identity.node_id,
-                            cwd=live_cwd,
-                        )
-                    parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
-                        cwd=snapshot_cwd if snapshot_cwd is not None else live_cwd,
-                        **gate_kwargs,
-                    )
-            else:
-                parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
-                    cwd=live_cwd, **gate_kwargs
-                )
+            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+            parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
+                spec=ac_spec,
+                cwd=cwd,
+                aggregate_id=execution_id or session_id,
+                verify_key=f"decomposed_parent:{node_identity.node_id}:{retry_attempt}",
+                execution_id=execution_id,
+                session_id=session_id,
+                identity_metadata=node_identity.to_event_metadata(),
+            )
             parent = ParentVerifyOutcome(
                 has_verify_command=True,
                 passed=parent_verify_gate_outcome.passed,
@@ -11449,6 +11445,38 @@ Respond with either ATOMIC or the structured JSON object only.
             return durable_outcome, False
         return None, intent_count > 0
 
+    @staticmethod
+    def _verify_workspace_mutation_fingerprint(cwd: str) -> str:
+        """Fingerprint the acceptance-relevant workspace tree under ``cwd``.
+
+        Used by the no-mutation contract to detect whether a ``verify_command``
+        mutated the shared workspace. Records ``(relpath, mode, size, mtime_ns)``
+        for every file outside :data:`_VERIFY_MUTATION_IGNORE_DIRS` (VCS metadata,
+        installed dependencies, and tool caches that legitimately churn), so any
+        create/delete/modify/chmod of an acceptance-relevant file changes the
+        fingerprint. Deterministic (records are sorted) and independent of walk
+        order. Returns ``""`` when ``cwd`` is not a directory (e.g. a stub
+        adapter), which the caller treats as "no observable mutation".
+        """
+        if not os.path.isdir(cwd):
+            return ""
+        records: list[str] = []
+        for current, dirnames, filenames in os.walk(cwd, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d not in _VERIFY_MUTATION_IGNORE_DIRS]
+            for name in filenames:
+                path = os.path.join(current, name)
+                rel = os.path.relpath(path, cwd)
+                try:
+                    st = os.lstat(path)
+                    records.append(f"{rel}\x00{st.st_mode}\x00{st.st_size}\x00{st.st_mtime_ns}")
+                except OSError:
+                    records.append(f"{rel}\x00<unreadable>")
+        digest = hashlib.sha256()
+        for record in sorted(records):
+            digest.update(record.encode("utf-8", "surrogatepass"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
     async def _run_verify_gate_single_shot(
         self,
         *,
@@ -11500,7 +11528,36 @@ Respond with either ATOMIC or the structured JSON object only.
             session_id=session_id,
             identity_metadata=identity_metadata,
         )
+        # No-mutation contract (blockers R15-2/R15-3): the command runs over the
+        # COMPLETE live tree so every dependency/build/VCS input a contract may
+        # reference is present (a shadow-replay snapshot strips those and would
+        # mis-grade). To keep every accepted verifier a pure observer of the
+        # settled state -- unable to corrupt the delivered artifact or invalidate
+        # a sibling gate -- fingerprint the acceptance-relevant tree around the run
+        # and fail closed if the command mutated it. Folding the verdict in BEFORE
+        # the outcome is persisted keeps crash recovery consistent: recovery
+        # consumes this same failed outcome, never a stale PASS the command later
+        # invalidated by its own side effect.
+        fingerprint_before = self._verify_workspace_mutation_fingerprint(cwd)
         outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+        fingerprint_after = self._verify_workspace_mutation_fingerprint(cwd)
+        if outcome.passed and fingerprint_after != fingerprint_before:
+            log.warning(
+                "parallel_executor.ac.verify_gate.workspace_mutated",
+                session_id=session_id,
+                execution_id=execution_id,
+                verify_key=verify_key,
+            )
+            outcome = _VerifyGateOutcome(
+                passed=False,
+                reason=(
+                    "verify_command mutated the shared workspace; a verify command "
+                    "must be a pure observer of the settled state (a mutation can "
+                    "invalidate a sibling gate or corrupt the delivered artifact)"
+                ),
+                output_tail=outcome.output_tail,
+                missing_artifacts=outcome.missing_artifacts,
+            )
         await self._event_emitter.emit_ac_verify_outcome(
             aggregate_id=aggregate_id,
             verify_key=verify_key,
@@ -11623,102 +11680,6 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
 
-    async def _apply_verify_gate_isolated(
-        self,
-        *,
-        seed: Seed,
-        ac_index: int,
-        result: ACExecutionResult,
-        session_id: str,
-        execution_id: str,
-    ) -> ACExecutionResult:
-        """Apply the batch verify gate over a private, frozen workspace snapshot.
-
-        R14-2: a ``verify_command`` is arbitrary shell that may MUTATE the shared
-        workspace. Every batch / escalation / alt-harness gate finalizes
-        sequentially over the one settled tree, so a later command's side effects
-        could invalidate acceptance an earlier gate already granted
-        (order-dependent, non-reproducible) and could corrupt the delivered
-        artifact. Grade every command-bearing gate against an isolated copy of the
-        settled workspace so no verifier can observe or cause a cross-gate
-        mutation: each gate sees the identical settled state and the delivered
-        tree is never touched by a verifier.
-
-        A gate that only re-checks an already-recorded command outcome, or whose
-        contract is purely ``expected_artifacts`` (idempotent, read-only), needs
-        no sandbox and grades the live delivered tree directly -- the artifact leg
-        must reflect what will actually be shipped. Only a fresh command RUN is
-        sandboxed.
-        """
-        if not self._run_verify_commands:
-            return result
-        spec = (
-            seed.acceptance_criteria[ac_index]
-            if 0 <= ac_index < len(seed.acceptance_criteria)
-            else None
-        )
-        needs_command_run = (
-            isinstance(spec, AcceptanceCriterionSpec)
-            and bool(spec.verify_command)
-            and not isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
-        )
-        if not needs_command_run:
-            return await self._apply_verify_gate(
-                seed=seed,
-                ac_index=ac_index,
-                result=result,
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-        live_cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-        with isolated_workspace(live_cwd) as snapshot_cwd:
-            if snapshot_cwd is None:
-                # The settled tree could not be frozen (copy failure or a symlink
-                # escaping the snapshot). Running the possibly-mutating command in
-                # the shared live workspace could silently invalidate a sibling
-                # gate, so fail a would-be-accepted result closed rather than grade
-                # against an unsafe tree. An already-failing result keeps its
-                # failure -- its recovery command cannot be run safely either.
-                log.warning(
-                    "parallel_executor.ac.verify_gate.isolation_unavailable",
-                    session_id=session_id,
-                    execution_id=execution_id,
-                    ac_index=ac_index,
-                    cwd=live_cwd,
-                )
-                if not result.success:
-                    return result
-                from ouroboros.orchestrator.failure_taxonomy import FailureClass
-
-                reason = (
-                    "verify gate could not isolate an immutable snapshot of the "
-                    "settled workspace; refusing to run verify_command in the shared "
-                    "live workspace where it could invalidate a sibling gate"
-                )
-                return replace(
-                    result,
-                    success=False,
-                    error=reason,
-                    final_message=reason,
-                    outcome=ACExecutionOutcome.FAILED,
-                    atomic_verifier_verdict=VerifierVerdict(
-                        passed=False,
-                        reasons=(reason,),
-                        failure_class=FailureClass.EVIDENCE_MISSING.value,
-                    ),
-                    verify_gate_outcome=_VerifyGateOutcome(
-                        passed=False, reason=reason, output_tail=""
-                    ),
-                )
-            return await self._apply_verify_gate(
-                seed=seed,
-                ac_index=ac_index,
-                result=result,
-                session_id=session_id,
-                execution_id=execution_id,
-                verify_workspace=snapshot_cwd,
-            )
-
     async def _apply_verify_gate(
         self,
         *,
@@ -11727,7 +11688,6 @@ Respond with either ATOMIC or the structured JSON object only.
         result: ACExecutionResult,
         session_id: str,
         execution_id: str,
-        verify_workspace: str | None = None,
     ) -> ACExecutionResult:
         """Gate a successful AC on its success contract (PR-V V1).
 
@@ -11748,11 +11708,7 @@ Respond with either ATOMIC or the structured JSON object only.
         ):
             return result
 
-        # ``verify_workspace``, when provided by ``_apply_verify_gate_isolated``,
-        # is a private frozen snapshot of the settled tree (R14-2); the command
-        # and every artifact check run there so a verifier can neither observe
-        # nor cause a cross-gate mutation. When absent, grade the live tree.
-        cwd = verify_workspace or self._task_cwd or self._adapter.working_directory or os.getcwd()
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         cached_outcome = result.verify_gate_outcome
         if isinstance(cached_outcome, _VerifyGateOutcome):
             outcome = _revalidate_cached_verify_gate_outcome(
@@ -13471,7 +13427,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         elif not candidate.forced_frontier_routing:
             candidate = replace(candidate, forced_frontier_routing=True)
-        candidate = await self._apply_verify_gate_isolated(
+        candidate = await self._apply_verify_gate(
             seed=seed,
             ac_index=ac_idx,
             result=candidate,
@@ -13689,7 +13645,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         # normalize mocked/custom runtimes at the orchestration
                         # boundary so durable replay still records the truth.
                         candidate = replace(candidate, forced_frontier_routing=True)
-                    candidate = await self._apply_verify_gate_isolated(
+                    candidate = await self._apply_verify_gate(
                         seed=seed,
                         ac_index=ac_idx,
                         result=candidate,
@@ -13934,7 +13890,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             elif not candidate.forced_frontier_routing:
                 candidate = replace(candidate, forced_frontier_routing=True)
-            candidate = await self._apply_verify_gate_isolated(
+            candidate = await self._apply_verify_gate(
                 seed=seed,
                 ac_index=ac_idx,
                 result=candidate,
@@ -14135,7 +14091,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 continue
             result = results[position]
             if isinstance(result, ACExecutionResult):
-                gated = await self._apply_verify_gate_isolated(
+                gated = await self._apply_verify_gate(
                     seed=seed,
                     ac_index=ac_idx,
                     result=result,
@@ -14245,7 +14201,7 @@ Respond with either ATOMIC or the structured JSON object only.
             for retry_position, ac_idx in enumerate(retry_idxs):
                 gated = retry_results[retry_position]
                 if isinstance(gated, ACExecutionResult):
-                    gated = await self._apply_verify_gate_isolated(
+                    gated = await self._apply_verify_gate(
                         seed=seed,
                         ac_index=ac_idx,
                         result=gated,
@@ -14393,7 +14349,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             # get, so an
                             # alternate 'success' with a failing verify_command or
                             # missing expected artifact is not accepted as success.
-                            finalized_alt = await self._apply_verify_gate_isolated(
+                            finalized_alt = await self._apply_verify_gate(
                                 seed=seed,
                                 ac_index=ac_idx,
                                 result=alt,
@@ -14527,7 +14483,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             elif not atomic_candidate.forced_frontier_routing:
                 atomic_candidate = replace(atomic_candidate, forced_frontier_routing=True)
-            atomic_candidate = await self._apply_verify_gate_isolated(
+            atomic_candidate = await self._apply_verify_gate(
                 seed=seed,
                 ac_index=ac_idx,
                 result=atomic_candidate,

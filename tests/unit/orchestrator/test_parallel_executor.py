@@ -12331,9 +12331,13 @@ class TestParallelACExecutor:
     ) -> None:
         """A cached atomic verify outcome prevents duplicate shell side effects."""
         (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
-        counter = tmp_path / "verify-count.txt"
+        # The run counter lives OUTSIDE the workspace: a verify_command must be a
+        # pure observer of the settled tree (no-mutation contract), so writing the
+        # counter into ``cwd`` would itself trip the mutation guard. An absolute
+        # sibling path measures single-shot without mutating the graded tree.
+        counter = tmp_path.parent / (tmp_path.name + "-verify-count.txt")
         command = (
-            "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
+            f'python3 -c "from pathlib import Path; p=Path({str(counter)!r}); '
             "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
             'raise SystemExit(0 if n == 0 else 7)"'
         )
@@ -12477,31 +12481,23 @@ class TestParallelACExecutor:
         assert finalized.success is False
 
     @pytest.mark.asyncio
-    async def test_isolated_verify_gate_grades_immutable_snapshot_not_shared_mutation(
-        self, tmp_path: Any
-    ) -> None:
-        """R14-2: batch verify gates grade a frozen snapshot, not the shared live tree.
+    async def test_verify_command_that_mutates_workspace_fails_closed(self, tmp_path: Any) -> None:
+        """No-mutation contract (R15 B2/B3): a verify_command that mutates the
+        settled workspace is failed closed even when it exits 0.
 
-        A verify_command is arbitrary shell that may mutate the workspace. Batch
-        gates finalize sequentially over one settled tree, so a later command's
-        side effects must not invalidate acceptance an earlier gate already
-        granted, nor corrupt the delivered artifact. Each command-bearing gate
-        runs against a private frozen snapshot: mutations are discarded and every
-        gate observes the identical settled state regardless of order.
+        A verifier must be a pure observer of the settled state so it can neither
+        corrupt the delivered artifact nor silently invalidate a sibling gate. The
+        command grades the COMPLETE live tree (no snapshot), and the failure is
+        folded into the DURABLE outcome so crash recovery consumes the FAIL rather
+        than a stale PASS the command itself invalidated by its side effect.
         """
-        marker = tmp_path / "marker.txt"
-        marker.write_text("good\n", encoding="utf-8")
-
-        assert_good = AcceptanceCriterionSpec(
-            description="marker stays good", verify_command="grep -q good marker.txt"
+        (tmp_path / "marker.txt").write_text("good\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="mutating verifier",
+            verify_command="printf 'bad\\n' > marker.txt",  # exits 0 but MUTATES
         )
-        mutating = AcceptanceCriterionSpec(
-            description="verifier mutates the shared tree",
-            verify_command="printf 'bad\\n' > marker.txt",
-        )
-        seed = _make_seed(assert_good, mutating)
-
-        event_store, _ = _make_replaying_event_store()
+        seed = _make_seed(spec)
+        event_store, appended = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=SimpleNamespace(
                 runtime_backend="codex_cli",
@@ -12514,59 +12510,7 @@ class TestParallelACExecutor:
             task_cwd=str(tmp_path),
         )
 
-        async def _gate(idx: int) -> ACExecutionResult:
-            return await executor._apply_verify_gate_isolated(
-                seed=seed,
-                ac_index=idx,
-                result=ACExecutionResult(ac_index=idx, ac_content="ac", success=True),
-                session_id="s",
-                execution_id="e",
-            )
-
-        # Run the MUTATING gate FIRST, then the assertion gate: order must not
-        # matter because neither touches the shared live tree.
-        mutated_first = await _gate(1)
-        good_after = await _gate(0)
-
-        assert mutated_first.success is True  # the mutating command exits 0
-        assert good_after.success is True  # still sees good in its own snapshot
-        # The delivered workspace is untouched by either verifier.
-        assert marker.read_text(encoding="utf-8") == "good\n"
-
-    @pytest.mark.asyncio
-    async def test_isolated_verify_gate_fails_closed_when_snapshot_unavailable(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
-        """R14-2: an un-snapshottable settled tree fails a would-be PASS closed.
-
-        Rather than run a possibly-mutating verify_command against the shared live
-        workspace (where it could invalidate a sibling gate), a workspace that
-        cannot be frozen fails a successful result closed.
-        """
-        import contextlib as _contextlib
-
-        @_contextlib.contextmanager
-        def _no_snapshot(_cwd: str) -> Any:
-            yield None
-
-        monkeypatch.setattr(
-            "ouroboros.orchestrator.parallel_executor.isolated_workspace", _no_snapshot
-        )
-        seed = _make_seed(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
-        event_store, _ = _make_replaying_event_store()
-        executor = ParallelACExecutor(
-            adapter=SimpleNamespace(
-                runtime_backend="codex_cli",
-                working_directory=str(tmp_path),
-                permission_mode="acceptEdits",
-            ),
-            event_store=event_store,
-            console=MagicMock(),
-            enable_decomposition=False,
-            task_cwd=str(tmp_path),
-        )
-
-        gated = await executor._apply_verify_gate_isolated(
+        gated = await executor._apply_verify_gate(
             seed=seed,
             ac_index=0,
             result=ACExecutionResult(ac_index=0, ac_content="ac", success=True),
@@ -12575,7 +12519,58 @@ class TestParallelACExecutor:
         )
 
         assert gated.success is False
-        assert "could not isolate" in (gated.error or "")
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is False
+        assert "mutat" in (gated.verify_gate_outcome.reason or "").lower()
+        # The durable outcome records the FAIL, so a recovery consumption cannot
+        # resurrect the command's exit-0 PASS.
+        outcomes = [e for e in appended if e.type == "execution.ac.verify.outcome"]
+        assert outcomes
+        assert outcomes[-1].data["verify_gate_outcome"]["passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_verify_command_grades_complete_live_tree_not_stripped_snapshot(
+        self, tmp_path: Any
+    ) -> None:
+        """R15/B2: verify_command grades the COMPLETE live tree.
+
+        Contracts that depend on dependency/build/VCS directories a shadow-replay
+        snapshot would strip (``.git``, ``node_modules``, ``dist``, ...) still see
+        them, because the command runs over the live workspace, not a filtered
+        copy.
+        """
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "probe").write_text("dep\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="depends on node_modules",
+            verify_command="test -f node_modules/probe",
+        )
+        seed = _make_seed(spec)
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+
+        gated = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=ACExecutionResult(ac_index=0, ac_content="ac", success=True),
+            session_id="s",
+            execution_id="e",
+        )
+
+        # The command sees node_modules/probe in the live tree -> passes. A
+        # snapshot excluding node_modules would have failed this valid contract.
+        assert gated.success is True
+        assert (tmp_path / "node_modules" / "probe").exists()
 
     @pytest.mark.asyncio
     async def test_completed_recovery_reuses_durable_verify_outcome_without_command_replay(
