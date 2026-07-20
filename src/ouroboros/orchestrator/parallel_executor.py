@@ -43,6 +43,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 import uuid
 
@@ -754,25 +755,39 @@ _DEFERRED_DURABLE_WRITE_MAX_ATTEMPTS = 48
 # the full multi-hour parked-cadence budget.
 _DEFERRED_DURABLE_WRITE_DRAIN_TIMEOUT_SECONDS = 10.0
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
-# Directories excluded from the verify_command no-mutation fingerprint: VCS
-# metadata, installed dependencies, and tool caches legitimately churn while a
-# verify_command runs (a test run writes ``__pycache__``/``.pytest_cache``; git
-# read commands touch ``.git/index``) and are not acceptance-relevant source of
-# truth. Every other path -- source AND build outputs a contract may assert on
-# -- participates, so a verifier that mutates the delivered tree is caught. The
-# command itself still runs over the COMPLETE live tree, so these directories
-# remain fully visible to it (unlike a shadow-replay snapshot).
-_VERIFY_MUTATION_IGNORE_DIRS = frozenset(
+# The verify_command no-mutation fingerprint is COMPREHENSIVE: it content-hashes
+# every acceptance-relevant file -- including dependency, build, and VCS
+# directories (``node_modules``, ``.venv``, ``dist``, ``build``, ``.git`` refs/
+# objects) a contract may read as an input -- so any create/delete/modify a
+# verifier performs is detected, and a content change that preserves size/mtime
+# cannot slip through. Only directories the verify TOOLING itself regenerates as
+# it runs are excluded (a ``pytest`` verify writes ``__pycache__``/
+# ``.pytest_cache``; those are the tool's own cache, never acceptance source of
+# truth) -- excluding them prevents false-positive mutation flags on a
+# legitimate verify command. The command still runs over the COMPLETE live tree,
+# so every excluded directory remains fully visible to it.
+_VERIFY_FINGERPRINT_IGNORE_DIRS = frozenset(
     {
-        ".git",
-        "node_modules",
-        ".venv",
-        "venv",
         "__pycache__",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
         ".tox",
+    }
+)
+# Transient git bookkeeping that even read-only git commands (``git status``/
+# ``git diff``) legitimately rewrite -- excluded so a pure git-reading verifier
+# is not falsely flagged, while every meaningful ``.git`` object/ref (which a
+# real git mutation like ``git commit`` changes) still participates.
+_VERIFY_FINGERPRINT_TRANSIENT_GIT_BASENAMES = frozenset(
+    {
+        "index",
+        "ORIG_HEAD",
+        "FETCH_HEAD",
+        "COMMIT_EDITMSG",
+        "MERGE_HEAD",
+        "MERGE_MSG",
+        "packed-refs.lock",
     }
 )
 _DURABLE_CONTEXT_MAX_AC_CONTENT_CHARS = 2000
@@ -11447,35 +11462,74 @@ Respond with either ATOMIC or the structured JSON object only.
 
     @staticmethod
     def _verify_workspace_mutation_fingerprint(cwd: str) -> str:
-        """Fingerprint the acceptance-relevant workspace tree under ``cwd``.
+        """Comprehensive content fingerprint of the workspace tree under ``cwd``.
 
         Used by the no-mutation contract to detect whether a ``verify_command``
-        mutated the shared workspace. Records ``(relpath, mode, size, mtime_ns)``
-        for every file outside :data:`_VERIFY_MUTATION_IGNORE_DIRS` (VCS metadata,
-        installed dependencies, and tool caches that legitimately churn), so any
-        create/delete/modify/chmod of an acceptance-relevant file changes the
-        fingerprint. Deterministic (records are sorted) and independent of walk
-        order. Returns ``""`` when ``cwd`` is not a directory (e.g. a stub
-        adapter), which the caller treats as "no observable mutation".
+        mutated any acceptance-relevant input. CONTENT-hashes every file (regular
+        files by their bytes, symlinks by their target) together with its mode,
+        so a create/delete/modify/chmod -- even one that preserves size and
+        mtime -- changes the fingerprint. Dependency, build, and VCS directories
+        (``node_modules``/``.venv``/``dist``/``build``/``.git``) participate, so a
+        verifier that removes or rewrites a dependency or committed input is
+        caught. Only the verify tooling's own regenerable caches
+        (:data:`_VERIFY_FINGERPRINT_IGNORE_DIRS`) and transient git bookkeeping
+        (:data:`_VERIFY_FINGERPRINT_TRANSIENT_GIT_BASENAMES`, plus ``.git/logs``
+        and ``*.lock``) are skipped, since a legitimate verify command churns
+        those. Deterministic (records sorted); returns ``""`` when ``cwd`` is not
+        a directory (e.g. a stub adapter), which the caller treats as "no
+        observable mutation".
         """
         if not os.path.isdir(cwd):
             return ""
-        records: list[str] = []
+        records: list[bytes] = []
         for current, dirnames, filenames in os.walk(cwd, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d not in _VERIFY_MUTATION_IGNORE_DIRS]
+            dirnames[:] = [d for d in dirnames if d not in _VERIFY_FINGERPRINT_IGNORE_DIRS]
             for name in filenames:
                 path = os.path.join(current, name)
                 rel = os.path.relpath(path, cwd)
+                if ParallelACExecutor._is_transient_git_fingerprint_path(rel):
+                    continue
+                rel_bytes = rel.encode("utf-8", "surrogatepass")
                 try:
                     st = os.lstat(path)
-                    records.append(f"{rel}\x00{st.st_mode}\x00{st.st_size}\x00{st.st_mtime_ns}")
+                    if stat.S_ISLNK(st.st_mode):
+                        payload = b"L" + os.readlink(path).encode("utf-8", "surrogatepass")
+                    elif stat.S_ISREG(st.st_mode):
+                        file_hash = hashlib.sha256()
+                        with open(path, "rb") as handle:
+                            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                                file_hash.update(chunk)
+                        payload = b"F" + file_hash.digest()
+                    else:
+                        payload = b"O"  # fifo/socket/device: identity by path+mode
+                    records.append(
+                        rel_bytes + b"\x00" + str(st.st_mode).encode("ascii") + b"\x00" + payload
+                    )
                 except OSError:
-                    records.append(f"{rel}\x00<unreadable>")
+                    records.append(rel_bytes + b"\x00<unreadable>")
         digest = hashlib.sha256()
         for record in sorted(records):
-            digest.update(record.encode("utf-8", "surrogatepass"))
+            digest.update(record)
             digest.update(b"\n")
         return digest.hexdigest()
+
+    @staticmethod
+    def _is_transient_git_fingerprint_path(rel: str) -> bool:
+        """Whether ``rel`` is transient git bookkeeping excluded from the fingerprint.
+
+        Matches ``.git`` churn that even read-only git commands rewrite (the index,
+        reflogs, and lock files), so a verify command that merely inspects git
+        state is not falsely flagged as mutating the workspace. Meaningful git
+        state (refs, objects, ``HEAD``) is NOT matched and still participates.
+        """
+        parts = rel.split(os.sep)
+        if not parts or parts[0] != ".git":
+            return False
+        if rel.endswith(".lock"):
+            return True
+        if len(parts) >= 2 and parts[1] == "logs":
+            return True
+        return len(parts) == 2 and parts[1] in _VERIFY_FINGERPRINT_TRANSIENT_GIT_BASENAMES
 
     async def _run_verify_gate_single_shot(
         self,

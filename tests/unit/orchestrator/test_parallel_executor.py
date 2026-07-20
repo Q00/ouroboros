@@ -12573,6 +12573,46 @@ class TestParallelACExecutor:
         assert (tmp_path / "node_modules" / "probe").exists()
 
     @pytest.mark.asyncio
+    async def test_verify_command_deleting_dependency_is_failed_closed(self, tmp_path: Any) -> None:
+        """R16/B2: the mutation fingerprint is comprehensive, covering dependency
+        directories. A verifier that deletes an acceptance input under
+        ``node_modules`` (or ``.git``/``.venv``) is detected and failed closed,
+        not accepted as PASS.
+        """
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "probe").write_text("dep\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="verifier deletes a dependency input",
+            verify_command="rm node_modules/probe",  # exits 0 but MUTATES a dep
+        )
+        seed = _make_seed(spec)
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+
+        gated = await executor._apply_verify_gate(
+            seed=seed,
+            ac_index=0,
+            result=ACExecutionResult(ac_index=0, ac_content="ac", success=True),
+            session_id="s",
+            execution_id="e",
+        )
+
+        assert gated.success is False
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is False
+        assert "mutat" in (gated.verify_gate_outcome.reason or "").lower()
+
+    @pytest.mark.asyncio
     async def test_completed_recovery_reuses_durable_verify_outcome_without_command_replay(
         self, tmp_path: Any
     ) -> None:
