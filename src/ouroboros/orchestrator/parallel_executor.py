@@ -7140,6 +7140,20 @@ class ParallelACExecutor:
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
 
+        # Every stage and coordinator reconciliation has now settled, so the
+        # shared workspace is FINAL. Re-verify each accepted command-bearing AC's
+        # ``verify_command`` over this final tree as the authoritative acceptance
+        # (a per-attempt gate that a later stage or reconciliation invalidated is
+        # corrected here) and (re)emit the terminal outcome only now, so no
+        # accepted verdict predates the final workspace. Runs BEFORE the drain so
+        # its correctness-bearing markers are flushed on the same exit path.
+        all_results = await self._apply_final_workspace_acceptance(
+            seed=seed,
+            results=all_results,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
         # Give any deferred correctness-bearing writes (ladder resolution,
         # decomposition attestation — scheduled disproportionately near the
         # END of a run) a bounded final shot BEFORE returning control toward
@@ -11361,6 +11375,19 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         return f"acgate:{execution_scope}:{ac_index}:{retry_attempt}"
 
+    @staticmethod
+    def _ac_final_verify_gate_key(*, execution_scope: str, ac_index: int) -> str:
+        """Single-shot key for the global FINAL-workspace acceptance gate.
+
+        Distinct from the per-attempt :meth:`_ac_verify_gate_key` so the final
+        gate runs the ``verify_command`` once more over the settled final tree
+        (after every stage and coordinator reconciliation) instead of consuming a
+        provisional per-attempt outcome. Attempt-independent: the final workspace
+        is a property of the whole run, not of any one attempt, and this single
+        run is what crash recovery consumes on a cold restart.
+        """
+        return f"acgate_final:{execution_scope}:{ac_index}"
+
     def _verify_gate_command_digest(self, spec: AcceptanceCriterionSpec) -> str:
         """Bind a durable verify outcome to the exact command/contract that ran.
 
@@ -11733,6 +11760,146 @@ Respond with either ATOMIC or the structured JSON object only.
                 output_tail=tail,
             )
         return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
+
+    async def _apply_final_workspace_acceptance(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+    ) -> list[ACExecutionResult]:
+        """Re-verify every accepted command-bearing AC over the TRUE final workspace.
+
+        Per-batch, decomposition-parent, and sibling-flip gates all run before
+        later stages and coordinator reconciliation, so a ``verify_command`` that
+        passed earlier can be silently invalidated by a later workspace mutation.
+        This global pass runs ONCE, after every stage and reconciliation has
+        settled (the shared tree is now final), and re-runs each currently-accepted
+        AC's ``verify_command`` over that final tree as the AUTHORITATIVE
+        acceptance -- (re)emitting the terminal ``outcome_finalized`` marker only
+        now, so no accepted verdict predates the final workspace. Because it also
+        re-checks results restored by crash recovery, a stale per-attempt success
+        cannot survive a restart: the final gate always has the last word.
+
+        The command is a pure observer of the settled tree (enforced by the
+        no-mutation contract in :meth:`_run_verify_gate_single_shot`), so
+        re-evaluating it here does not perturb the delivered workspace. The final
+        gate keys the single-shot oracle on :meth:`_ac_final_verify_gate_key`, so
+        a cold restart consumes this one final outcome rather than re-running the
+        command.
+        """
+        if not self._run_verify_commands:
+            return results
+        execution_scope = execution_id or session_id
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        updated = list(results)
+        for position, result in enumerate(updated):
+            ac_index = result.ac_index
+            if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
+                continue
+            spec = seed.acceptance_criteria[ac_index]
+            if not isinstance(spec, AcceptanceCriterionSpec) or not spec.verify_command:
+                continue
+            # Only an AC that is currently ACCEPTED needs a final-workspace
+            # re-check; a failed/blocked/invalid/externally-satisfied AC is already
+            # terminal and is never resurrected here.
+            if result.outcome != ACExecutionOutcome.SUCCEEDED:
+                continue
+            try:
+                final_outcome = await self._run_verify_gate_single_shot(
+                    spec=spec,
+                    cwd=cwd,
+                    aggregate_id=execution_scope,
+                    verify_key=self._ac_final_verify_gate_key(
+                        execution_scope=execution_scope, ac_index=ac_index
+                    ),
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    identity_metadata={"ac_index": ac_index, "gate": "final_workspace_acceptance"},
+                )
+            except AmbiguousACExecutionError as exc:
+                # The final gate's durable single-shot chain is ambiguous (an
+                # intent with no recorded outcome, or unreadable history): the
+                # non-idempotent command may have partially run. Fail THIS AC
+                # closed rather than trusting an unverifiable final acceptance;
+                # the rest of the run still finalizes.
+                final_outcome = _VerifyGateOutcome(
+                    passed=False,
+                    reason=f"final-workspace verify gate is ambiguous: {exc}",
+                    output_tail="",
+                )
+            if final_outcome.passed:
+                accepted = replace(result, verify_gate_outcome=final_outcome)
+                updated[position] = accepted
+                await self._emit_ac_outcome_finalized(
+                    result=accepted,
+                    root_ac_index=ac_index,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                continue
+
+            # The FINAL workspace fails the contract -> flip to FAILED. This is the
+            # authoritative verdict; a passing per-attempt gate that a later stage
+            # invalidated is now corrected.
+            from ouroboros.events.base import BaseEvent
+            from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+            reason = f"Final-workspace verify gate failed: {final_outcome.reason}"
+            detail = reason
+            if final_outcome.output_tail:
+                detail = (
+                    f"{reason}\n--- verify_command output (tail) ---\n{final_outcome.output_tail}"
+                )
+            failed = replace(
+                result,
+                success=False,
+                error=detail,
+                final_message=detail,
+                outcome=ACExecutionOutcome.FAILED,
+                atomic_verifier_verdict=VerifierVerdict(
+                    passed=False,
+                    reasons=(reason,),
+                    failure_class=FailureClass.EVIDENCE_MISSING.value,
+                ),
+                verify_gate_outcome=final_outcome,
+            )
+            updated[position] = failed
+            await self._safe_emit_event(
+                BaseEvent(
+                    type="execution.verify.failed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_scope,
+                    data={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "ac_index": ac_index,
+                        "ac_content": ac_text(spec),
+                        "verify_command": spec.verify_command,
+                        "expected_artifacts": list(spec.expected_artifacts),
+                        "missing_artifacts": list(final_outcome.missing_artifacts),
+                        "reason": final_outcome.reason,
+                        "failure_class": FailureClass.EVIDENCE_MISSING.value,
+                        "output_tail": final_outcome.output_tail,
+                        "gate": "final_workspace_acceptance",
+                    },
+                )
+            )
+            await self._emit_ac_outcome_finalized(
+                result=failed,
+                root_ac_index=ac_index,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            log.warning(
+                "parallel_executor.ac.final_workspace_verify_failed",
+                session_id=session_id,
+                execution_id=execution_id,
+                ac_index=ac_index,
+                reason=final_outcome.reason,
+            )
+        return updated
 
     async def _apply_verify_gate(
         self,

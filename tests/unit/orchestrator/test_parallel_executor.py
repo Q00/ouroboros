@@ -12613,6 +12613,89 @@ class TestParallelACExecutor:
         assert "mutat" in (gated.verify_gate_outcome.reason or "").lower()
 
     @pytest.mark.asyncio
+    async def test_final_workspace_acceptance_flips_stale_pass_to_failed(
+        self, tmp_path: Any
+    ) -> None:
+        """R16/B1: acceptance is re-verified over the TRUE final workspace.
+
+        An AC accepted by an earlier per-attempt gate is re-run over the final
+        tree; if a later stage or coordinator reconciliation invalidated its
+        verified file, the final-workspace gate flips it to FAILED so no accepted
+        verdict predates the final workspace.
+        """
+        marker = tmp_path / "marker.txt"
+        marker.write_text("good\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="marker stays good", verify_command="grep -q good marker.txt"
+        )
+        seed = _make_seed(spec)
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        accepted = ACExecutionResult(
+            ac_index=0,
+            ac_content="ac",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        )
+        # A later stage invalidates the file the earlier gate verified.
+        marker.write_text("bad\n", encoding="utf-8")
+
+        results = await executor._apply_final_workspace_acceptance(
+            seed=seed, results=[accepted], session_id="s", execution_id="e"
+        )
+
+        assert results[0].success is False
+        assert results[0].outcome == ACExecutionOutcome.FAILED
+        assert "final-workspace" in (results[0].error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_final_workspace_acceptance_confirms_valid_pass(self, tmp_path: Any) -> None:
+        """R16/B1: an AC still satisfied at the final workspace stays accepted."""
+        (tmp_path / "marker.txt").write_text("good\n", encoding="utf-8")
+        spec = AcceptanceCriterionSpec(
+            description="marker stays good", verify_command="grep -q good marker.txt"
+        )
+        seed = _make_seed(spec)
+        event_store, appended = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+        accepted = ACExecutionResult(
+            ac_index=0,
+            ac_content="ac",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        )
+
+        results = await executor._apply_final_workspace_acceptance(
+            seed=seed, results=[accepted], session_id="s", execution_id="e"
+        )
+
+        assert results[0].success is True
+        assert results[0].outcome == ACExecutionOutcome.SUCCEEDED
+        # The authoritative terminal marker is (re)published only after this gate.
+        finalized = [e for e in appended if e.type == "execution.ac.outcome_finalized"]
+        assert finalized and finalized[-1].data["success"] is True
+
+    @pytest.mark.asyncio
     async def test_completed_recovery_reuses_durable_verify_outcome_without_command_replay(
         self, tmp_path: Any
     ) -> None:
