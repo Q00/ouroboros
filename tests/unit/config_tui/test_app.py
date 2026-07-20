@@ -177,6 +177,66 @@ async def test_blank_execution_model_env_shows_the_effective_automatic_choice(
 
 
 @pytest.mark.asyncio
+async def test_reopened_custom_execute_pin_survives_catalog_refresh_and_unrelated_save(
+    app_env, monkeypatch
+) -> None:
+    """A saved custom Execute pin must not be replaced just because it is unknown.
+
+    ``terra`` represents a valid model ID supplied by a newer Codex version or
+    a proxy.  Reopening the TUI performs an initial same-backend refresh before
+    the user saves another field, so that refresh must retain the persisted ID.
+    """
+    app_env["execution"] = {"default_model": "terra"}
+    applied: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))
+
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        execute = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert execute.value == "terra"
+
+        # This mirrors the initial same-agent catalog refresh that may happen
+        # while mounting, but with a catalog that does not advertise terra.
+        pilot.app._refresh_stage_model_options(Stage.EXECUTE)
+        assert execute.value == "terra"
+
+        # Save an unrelated field after reopening the settings app.
+        evaluate = pilot.app.query_one(f"#stage-model-{Stage.EVALUATE.value}", Select)
+        evaluate.value = "claude-haiku-4-5-20251001"
+        await pilot.pause()
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert applied["evaluation.semantic_model"] == "claude-haiku-4-5-20251001"
+    assert "execution.default_model" not in applied
+
+
+@pytest.mark.asyncio
+async def test_nonempty_execution_model_env_does_not_overwrite_saved_pin_on_unrelated_save(
+    app_env, monkeypatch
+) -> None:
+    """The process-only Execute override must remain process-only on Save."""
+    app_env["execution"] = {"default_model": "terra"}
+    monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "gpt-5-codex")
+    applied: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: applied.update(values))
+
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        execute = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert execute.value == "gpt-5-codex"
+
+        evaluate = pilot.app.query_one(f"#stage-model-{Stage.EVALUATE.value}", Select)
+        evaluate.value = "claude-haiku-4-5-20251001"
+        await pilot.pause()
+        pilot.app.action_save()
+        await pilot.pause()
+
+    assert applied["evaluation.semantic_model"] == "claude-haiku-4-5-20251001"
+    assert "execution.default_model" not in applied
+
+
+@pytest.mark.asyncio
 async def test_runtime_env_override_drives_inherited_stage_cards(app_env, monkeypatch) -> None:
     monkeypatch.setenv("OUROBOROS_RUNTIME", "codex")
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync .claude-plugin/ version fields with hatch-vcs (git tag) version.
+"""Sync plugin version fields with hatch-vcs (git tag) version.
 
 Usage:
     python scripts/sync-plugin-version.py          # dry-run
@@ -17,6 +17,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
+CODEX_PLUGIN_JSON = ROOT / ".codex-plugin" / "plugin.json"
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
 
 
@@ -151,6 +152,7 @@ def main() -> None:
     targets = [
         (PLUGIN_JSON, None),
         (MARKETPLACE_JSON, "plugins.0"),
+        (CODEX_PLUGIN_JSON, None),
     ]
 
     changed = False

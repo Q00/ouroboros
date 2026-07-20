@@ -292,6 +292,15 @@ class SettingsApp(App[None]):
         self._fetch_pending: set[str] = set()
         # Last concrete model per stage, restored when a search is cancelled.
         self._last_model_value: dict[str, str | None] = {}
+        # Backend whose catalog populated each stage model Select.  A refresh
+        # for the *same* backend must retain an arbitrary persisted pin even
+        # when it is absent from the shipped/discovered catalog; changing the
+        # backend is the point at which that pin becomes incompatible.
+        self._stage_model_backends: dict[Stage, str] = {}
+        # Effective model values rendered from active environment overrides.
+        # They are display state, not user edits: an unrelated Save must never
+        # copy a temporary override into config.yaml.
+        self._env_display_models: dict[Stage, str] = {}
         # What the "default" sentinel resolves to per backend (config-file
         # hint, e.g. hermes → gpt-5.5). Cached: file reads once per backend.
         self._default_hints: dict[str, str | None] = {}
@@ -311,6 +320,21 @@ class SettingsApp(App[None]):
         if value is None:
             value = get_value(self._defaults, key)
         return value
+
+    @staticmethod
+    def _env_model_override(field: SettingField) -> str | None:
+        """Return an active model override, preserving Execute's empty clear.
+
+        ``None`` means no environment value is in effect.  The empty string is
+        meaningful only for Execute, where it deliberately masks a saved pin.
+        """
+        for name in field.env_vars:
+            if name not in os.environ:
+                continue
+            value = os.environ[name].strip()
+            if value or field.empty_env_overrides:
+                return value
+        return None
 
     def _runtime_options(self, *, include_inherit: bool) -> list[tuple[str, str]]:
         # Option labels must stay static: Textual's Select does not re-render
@@ -546,16 +570,19 @@ class SettingsApp(App[None]):
         # ``OUROBOROS_EXECUTION_MODEL=`` deliberately clears a saved pin.
         # Render the effective runtime-owned choice instead of displaying the
         # dormant persisted value as though it will be used in this session.
-        if model_field is not None and model_field.empty_env_overrides:
-            for name in model_field.env_vars:
-                if name in os.environ:
-                    current_model = os.environ[name].strip()
-                    break
+        env_override = self._env_model_override(model_field) if model_field is not None else None
+        if env_override is not None:
+            current_model = env_override
         # Execute has no shipped model pin: display the implicit behavior as an
         # explicit default-model choice without persisting anything merely because
         # the user saves an unrelated setting.
         if stage is Stage.EXECUTE and not current_model:
             current_model = DEFAULT_MODEL_SENTINEL
+
+        if model_field is not None:
+            self._stage_model_backends[stage] = effective_backend
+            if env_override is not None:
+                self._env_display_models[stage] = current_model
 
         with Container(classes="stage-card", id=f"stage-card-{stage.value}"):
             yield Static(
@@ -712,9 +739,20 @@ class SettingsApp(App[None]):
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
         current = model_select.value
         current_str = None if _is_blank(current) else str(current)
-        keep = current_str if current_str and current_str in self._all_models(backend) else None
+        previous_backend = self._stage_model_backends.get(stage)
+        # Keep a non-catalog value while refreshing the same backend.  This is
+        # how a saved pin such as ``terra`` survives reopening the settings UI
+        # before a provider happens to advertise it.  A real agent change still
+        # resets an incompatible pin to the new backend's default.
+        keep = (
+            current_str
+            if current_str
+            and (current_str in self._all_models(backend) or previous_backend == backend)
+            else None
+        )
         options = self._model_options(backend, keep, include_automatic=stage is Stage.EXECUTE)
         model_select.set_options(options)
+        self._stage_model_backends[stage] = backend
         concrete = [v for _, v in options if v not in (SEARCH_SENTINEL, CUSTOM_SENTINEL)]
         if keep:
             model_select.value = keep
@@ -832,6 +870,14 @@ class SettingsApp(App[None]):
                         record(model_field.key, custom)
                 elif not _is_blank(model_value):
                     model_text = str(model_value)
+                    # A non-empty environment pin is rendered into the Select
+                    # so people can see what this process will use.  It is not
+                    # a config edit, though: preserve the saved pin whenever
+                    # the user saves an unrelated setting.  (The same guard
+                    # also covers Execute's intentional empty override, whose
+                    # displayed value is the automatic sentinel.)
+                    if self._env_display_models.get(stage) == model_text:
+                        continue
                     if stage is Stage.EXECUTE and model_text == DEFAULT_MODEL_SENTINEL:
                         # A blank ``OUROBOROS_EXECUTION_MODEL`` masks the saved
                         # pin.  Saving an unrelated UI change must not turn

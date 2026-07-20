@@ -7,7 +7,7 @@ doc_metadata:
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
-Ouroboros can use **OpenAI Codex CLI** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local Codex execution surface that the adapter talks to. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable.
+Ouroboros can use **OpenAI Codex** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local execution surface that the adapter talks to; on macOS, setup also detects the executable bundled with the ChatGPT app when it is not on your `PATH`. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable. By default, Ouroboros uses the model currently selected by Codex and supplies only the role's reasoning effort.
 
 No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
@@ -15,7 +15,7 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
 ## Prerequisites
 
-- **Codex CLI** installed and on your `PATH` (see [install steps](#installing-codex-cli) below)
+- **Codex CLI** installed and on your `PATH`, or the bundled executable from the macOS ChatGPT app (see [install steps](#installing-codex-cli) below)
 - An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`). See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
 - **Python >= 3.12**
 
