@@ -78,7 +78,11 @@ class SynapseSignalHandler:
             name=_TOOL_NAME,
             description=(
                 "Send one audited Ouroboros Synapse intent signal to an exact active "
-                "AC session attempt. A queued result does not mean the signal was applied."
+                "AC session attempt. Shipped runtime adapters currently advertise at most "
+                "inform and after_turn. redirect and replace remain forward-compatible, "
+                "capability-gated modes and fail closed when unsupported; redirect may use "
+                "an explicit after_turn fallback. A queued result does not mean the signal "
+                "was applied."
             ),
             parameters=(
                 MCPToolParameter(
@@ -99,7 +103,11 @@ class SynapseSignalHandler:
                 MCPToolParameter(
                     name="mode",
                     type=ToolInputType.STRING,
-                    description="Requested Synapse delivery mode.",
+                    description=(
+                        "Requested Synapse delivery mode. Inspect "
+                        "ouroboros_session_signal_targets for the selected attempt's live "
+                        "capabilities before sending."
+                    ),
                     enum=tuple(mode.value for mode in SessionSignalMode),
                 ),
                 MCPToolParameter(

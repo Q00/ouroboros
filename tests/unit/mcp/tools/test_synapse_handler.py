@@ -70,6 +70,23 @@ def test_definition_exposes_clean_room_vocabulary() -> None:
     assert params["contract_effect"].enum == ("additive", "specification_change")
 
 
+def test_definition_distinguishes_shipped_support_from_forward_compatible_modes() -> None:
+    definition = SynapseSignalHandler(_Mailbox()).definition  # type: ignore[arg-type]
+    schema = definition.to_input_schema()
+
+    assert "currently advertise at most inform and after_turn" in definition.description
+    assert "redirect and replace remain forward-compatible" in definition.description
+    assert "fail closed when unsupported" in definition.description
+    assert "redirect may use an explicit after_turn fallback" in definition.description
+    assert schema["properties"]["mode"]["enum"] == [
+        "inform",
+        "after_turn",
+        "redirect",
+        "replace",
+    ]
+    assert "Inspect ouroboros_session_signal_targets" in schema["properties"]["mode"]["description"]
+
+
 @pytest.mark.asyncio
 async def test_valid_request_returns_queued_not_applied() -> None:
     mailbox = _Mailbox()
