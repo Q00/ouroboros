@@ -2351,6 +2351,31 @@ class TestAsyncJobHandlers:
         handler = StartEvolveStepHandler()
         assert handler.definition.name == "ouroboros_start_evolve_step"
 
+    def test_start_evolve_step_inherits_seed_yaml_text_schema(self) -> None:
+        """Background evolve exposes the shared YAML-text client guidance."""
+        evolve_seed = next(
+            parameter
+            for parameter in EvolveStepHandler().definition.parameters
+            if parameter.name == "seed_content"
+        )
+        start_definition = StartEvolveStepHandler().definition
+        start_seed = next(
+            parameter
+            for parameter in start_definition.parameters
+            if parameter.name == "seed_content"
+        )
+
+        assert evolve_seed.type == ToolInputType.STRING
+        assert start_seed.type == ToolInputType.STRING
+        assert start_seed.description == evolve_seed.description
+        assert "YAML-formatted string" in start_seed.description
+        assert "not JSON-shaped text or an object literal" in start_seed.description
+        assert "before Ouroboros receives it" in start_seed.description
+        assert start_definition.to_input_schema()["properties"]["seed_content"] == {
+            "type": "string",
+            "description": evolve_seed.description,
+        }
+
     def test_evolve_step_has_no_fixed_mcp_timeout_by_default(self) -> None:
         """evolve_step uses progress-aware controls rather than a hard 2h wall clock."""
         handler = EvolveStepHandler()
