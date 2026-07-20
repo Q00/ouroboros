@@ -7896,16 +7896,41 @@ class ParallelACExecutor:
         parent_verify_gate_outcome: _VerifyGateOutcome | None = None
         if parent_has_contract and self._run_verify_commands:
             assert ac_spec is not None  # narrowed by parent_has_contract
-            cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-            parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
-                spec=ac_spec,
-                cwd=cwd,
-                aggregate_id=execution_id or session_id,
-                verify_key=f"decomposed_parent:{node_identity.node_id}:{retry_attempt}",
-                execution_id=execution_id,
-                session_id=session_id,
-                identity_metadata=node_identity.to_event_metadata(),
-            )
+            live_cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+            gate_kwargs: dict[str, Any] = {
+                "spec": ac_spec,
+                "aggregate_id": execution_id or session_id,
+                "verify_key": f"decomposed_parent:{node_identity.node_id}:{retry_attempt}",
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "identity_metadata": node_identity.to_event_metadata(),
+            }
+            if ac_spec.verify_command:
+                # R14-2: a command-bearing parent gate runs the same class of
+                # arbitrary, possibly-mutating shell as the leaf/batch gates and
+                # over the same shared workspace. Grade it against a frozen
+                # snapshot so it can neither observe nor cause a cross-gate
+                # mutation. ``isolated_workspace`` is a best-effort snapshot (as in
+                # shadow-replay): on the rare environmental failure to freeze a
+                # tree that in production always exists, degrade to the prior
+                # in-place grading rather than fabricate an attestation failure.
+                with isolated_workspace(live_cwd) as snapshot_cwd:
+                    if snapshot_cwd is None:
+                        log.warning(
+                            "parallel_executor.ac.verify_gate.isolation_unavailable",
+                            session_id=session_id,
+                            execution_id=execution_id,
+                            node_id=node_identity.node_id,
+                            cwd=live_cwd,
+                        )
+                    parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
+                        cwd=snapshot_cwd if snapshot_cwd is not None else live_cwd,
+                        **gate_kwargs,
+                    )
+            else:
+                parent_verify_gate_outcome = await self._run_verify_gate_single_shot(
+                    cwd=live_cwd, **gate_kwargs
+                )
             parent = ParentVerifyOutcome(
                 has_verify_command=True,
                 passed=parent_verify_gate_outcome.passed,
@@ -8540,20 +8565,27 @@ class ParallelACExecutor:
                     and isinstance(ac_spec, AcceptanceCriterionSpec)
                     and ac_spec.verify_command
                 ):
-                    if recovered_verify_outcome is None:
-                        raise AmbiguousACExecutionError(
-                            "Completed AC recovery is missing its non-idempotent verify-command "
-                            "outcome; refusing to replay the command"
-                        ) from completed
-                    # The completed lifecycle's cached PASS is not self-authorizing:
-                    # require the durable single-shot verify chain (exactly one
-                    # intent + matching outcome) to back it, so an orphan or
-                    # corrupted completion cannot manufacture command-backed
-                    # acceptance. The durable oracle outcome is authoritative.
+                    # R14-1: a command-bearing AC DEFERS its (non-idempotent)
+                    # verify_command out of the atomic leaf to the batch-completion
+                    # gate (R13-1), so a completed leaf lifecycle never carries a
+                    # cached command outcome -- ``completed.verify_gate_outcome`` is
+                    # structurally absent here, and even a stale/fabricated one is
+                    # not self-authorizing. The single authority is the durable
+                    # finalization oracle, consulted under the shared per-attempt
+                    # key:
+                    #   * a recorded outcome -> consume it (this attempt was already
+                    #     graded durably), never replaying the command;
+                    #   * an intent with no outcome -> the command may have run with
+                    #     side effects before the crash; ambiguous, fail closed;
+                    #   * no durable record at all -> the deferred finalization gate
+                    #     never started for this attempt, so the command has provably
+                    #     NOT run. This is NOT ambiguous: leave the outcome
+                    #     unresolved and let the batch-completion gate run the
+                    #     single-shot oracle ONCE over the settled workspace.
                     execution_scope = execution_id or session_id
                     (
                         durable_verify_outcome,
-                        _intent_only,
+                        intent_without_outcome,
                     ) = await self._load_persisted_verify_decision(
                         aggregate_id=execution_scope,
                         verify_key=self._ac_verify_gate_key(
@@ -8563,13 +8595,20 @@ class ParallelACExecutor:
                         ),
                         command_digest=self._verify_gate_command_digest(ac_spec),
                     )
-                    if durable_verify_outcome is None:
+                    if durable_verify_outcome is not None:
+                        recovered_verify_outcome = durable_verify_outcome
+                    elif intent_without_outcome:
                         raise AmbiguousACExecutionError(
-                            "Completed AC recovery lacks the durable verify intent/outcome chain "
-                            "backing its verify-command result; refusing to trust a completion "
-                            "that cannot prove its acceptance evidence"
+                            "Completed AC recovery found a durable verify intent with no "
+                            "matching outcome; the non-idempotent verify-command may have "
+                            "partially run -- refusing to trust or replay it"
                         ) from completed
-                    recovered_verify_outcome = durable_verify_outcome
+                    else:
+                        # Finalization has not started for this attempt; defer the
+                        # single authoritative run to the batch-completion gate
+                        # instead of failing closed on a legitimately-unverified
+                        # deferred completion.
+                        recovered_verify_outcome = None
                 log.info(
                     "parallel_executor.ac.completed_recovered",
                     ac_index=ac_index,
@@ -11584,6 +11623,102 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
 
+    async def _apply_verify_gate_isolated(
+        self,
+        *,
+        seed: Seed,
+        ac_index: int,
+        result: ACExecutionResult,
+        session_id: str,
+        execution_id: str,
+    ) -> ACExecutionResult:
+        """Apply the batch verify gate over a private, frozen workspace snapshot.
+
+        R14-2: a ``verify_command`` is arbitrary shell that may MUTATE the shared
+        workspace. Every batch / escalation / alt-harness gate finalizes
+        sequentially over the one settled tree, so a later command's side effects
+        could invalidate acceptance an earlier gate already granted
+        (order-dependent, non-reproducible) and could corrupt the delivered
+        artifact. Grade every command-bearing gate against an isolated copy of the
+        settled workspace so no verifier can observe or cause a cross-gate
+        mutation: each gate sees the identical settled state and the delivered
+        tree is never touched by a verifier.
+
+        A gate that only re-checks an already-recorded command outcome, or whose
+        contract is purely ``expected_artifacts`` (idempotent, read-only), needs
+        no sandbox and grades the live delivered tree directly -- the artifact leg
+        must reflect what will actually be shipped. Only a fresh command RUN is
+        sandboxed.
+        """
+        if not self._run_verify_commands:
+            return result
+        spec = (
+            seed.acceptance_criteria[ac_index]
+            if 0 <= ac_index < len(seed.acceptance_criteria)
+            else None
+        )
+        needs_command_run = (
+            isinstance(spec, AcceptanceCriterionSpec)
+            and bool(spec.verify_command)
+            and not isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+        )
+        if not needs_command_run:
+            return await self._apply_verify_gate(
+                seed=seed,
+                ac_index=ac_index,
+                result=result,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+        live_cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        with isolated_workspace(live_cwd) as snapshot_cwd:
+            if snapshot_cwd is None:
+                # The settled tree could not be frozen (copy failure or a symlink
+                # escaping the snapshot). Running the possibly-mutating command in
+                # the shared live workspace could silently invalidate a sibling
+                # gate, so fail a would-be-accepted result closed rather than grade
+                # against an unsafe tree. An already-failing result keeps its
+                # failure -- its recovery command cannot be run safely either.
+                log.warning(
+                    "parallel_executor.ac.verify_gate.isolation_unavailable",
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    ac_index=ac_index,
+                    cwd=live_cwd,
+                )
+                if not result.success:
+                    return result
+                from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+                reason = (
+                    "verify gate could not isolate an immutable snapshot of the "
+                    "settled workspace; refusing to run verify_command in the shared "
+                    "live workspace where it could invalidate a sibling gate"
+                )
+                return replace(
+                    result,
+                    success=False,
+                    error=reason,
+                    final_message=reason,
+                    outcome=ACExecutionOutcome.FAILED,
+                    atomic_verifier_verdict=VerifierVerdict(
+                        passed=False,
+                        reasons=(reason,),
+                        failure_class=FailureClass.EVIDENCE_MISSING.value,
+                    ),
+                    verify_gate_outcome=_VerifyGateOutcome(
+                        passed=False, reason=reason, output_tail=""
+                    ),
+                )
+            return await self._apply_verify_gate(
+                seed=seed,
+                ac_index=ac_index,
+                result=result,
+                session_id=session_id,
+                execution_id=execution_id,
+                verify_workspace=snapshot_cwd,
+            )
+
     async def _apply_verify_gate(
         self,
         *,
@@ -11592,6 +11727,7 @@ Respond with either ATOMIC or the structured JSON object only.
         result: ACExecutionResult,
         session_id: str,
         execution_id: str,
+        verify_workspace: str | None = None,
     ) -> ACExecutionResult:
         """Gate a successful AC on its success contract (PR-V V1).
 
@@ -11612,7 +11748,11 @@ Respond with either ATOMIC or the structured JSON object only.
         ):
             return result
 
-        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        # ``verify_workspace``, when provided by ``_apply_verify_gate_isolated``,
+        # is a private frozen snapshot of the settled tree (R14-2); the command
+        # and every artifact check run there so a verifier can neither observe
+        # nor cause a cross-gate mutation. When absent, grade the live tree.
+        cwd = verify_workspace or self._task_cwd or self._adapter.working_directory or os.getcwd()
         cached_outcome = result.verify_gate_outcome
         if isinstance(cached_outcome, _VerifyGateOutcome):
             outcome = _revalidate_cached_verify_gate_outcome(
@@ -13331,7 +13471,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         elif not candidate.forced_frontier_routing:
             candidate = replace(candidate, forced_frontier_routing=True)
-        candidate = await self._apply_verify_gate(
+        candidate = await self._apply_verify_gate_isolated(
             seed=seed,
             ac_index=ac_idx,
             result=candidate,
@@ -13549,7 +13689,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         # normalize mocked/custom runtimes at the orchestration
                         # boundary so durable replay still records the truth.
                         candidate = replace(candidate, forced_frontier_routing=True)
-                    candidate = await self._apply_verify_gate(
+                    candidate = await self._apply_verify_gate_isolated(
                         seed=seed,
                         ac_index=ac_idx,
                         result=candidate,
@@ -13794,7 +13934,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             elif not candidate.forced_frontier_routing:
                 candidate = replace(candidate, forced_frontier_routing=True)
-            candidate = await self._apply_verify_gate(
+            candidate = await self._apply_verify_gate_isolated(
                 seed=seed,
                 ac_index=ac_idx,
                 result=candidate,
@@ -13995,7 +14135,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 continue
             result = results[position]
             if isinstance(result, ACExecutionResult):
-                gated = await self._apply_verify_gate(
+                gated = await self._apply_verify_gate_isolated(
                     seed=seed,
                     ac_index=ac_idx,
                     result=result,
@@ -14105,7 +14245,7 @@ Respond with either ATOMIC or the structured JSON object only.
             for retry_position, ac_idx in enumerate(retry_idxs):
                 gated = retry_results[retry_position]
                 if isinstance(gated, ACExecutionResult):
-                    gated = await self._apply_verify_gate(
+                    gated = await self._apply_verify_gate_isolated(
                         seed=seed,
                         ac_index=ac_idx,
                         result=gated,
@@ -14253,7 +14393,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             # get, so an
                             # alternate 'success' with a failing verify_command or
                             # missing expected artifact is not accepted as success.
-                            finalized_alt = await self._apply_verify_gate(
+                            finalized_alt = await self._apply_verify_gate_isolated(
                                 seed=seed,
                                 ac_index=ac_idx,
                                 result=alt,
@@ -14387,7 +14527,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             elif not atomic_candidate.forced_frontier_routing:
                 atomic_candidate = replace(atomic_candidate, forced_frontier_routing=True)
-            atomic_candidate = await self._apply_verify_gate(
+            atomic_candidate = await self._apply_verify_gate_isolated(
                 seed=seed,
                 ac_index=ac_idx,
                 result=atomic_candidate,

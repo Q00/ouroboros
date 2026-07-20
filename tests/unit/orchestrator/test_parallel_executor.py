@@ -12477,6 +12477,107 @@ class TestParallelACExecutor:
         assert finalized.success is False
 
     @pytest.mark.asyncio
+    async def test_isolated_verify_gate_grades_immutable_snapshot_not_shared_mutation(
+        self, tmp_path: Any
+    ) -> None:
+        """R14-2: batch verify gates grade a frozen snapshot, not the shared live tree.
+
+        A verify_command is arbitrary shell that may mutate the workspace. Batch
+        gates finalize sequentially over one settled tree, so a later command's
+        side effects must not invalidate acceptance an earlier gate already
+        granted, nor corrupt the delivered artifact. Each command-bearing gate
+        runs against a private frozen snapshot: mutations are discarded and every
+        gate observes the identical settled state regardless of order.
+        """
+        marker = tmp_path / "marker.txt"
+        marker.write_text("good\n", encoding="utf-8")
+
+        assert_good = AcceptanceCriterionSpec(
+            description="marker stays good", verify_command="grep -q good marker.txt"
+        )
+        mutating = AcceptanceCriterionSpec(
+            description="verifier mutates the shared tree",
+            verify_command="printf 'bad\\n' > marker.txt",
+        )
+        seed = _make_seed(assert_good, mutating)
+
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+
+        async def _gate(idx: int) -> ACExecutionResult:
+            return await executor._apply_verify_gate_isolated(
+                seed=seed,
+                ac_index=idx,
+                result=ACExecutionResult(ac_index=idx, ac_content="ac", success=True),
+                session_id="s",
+                execution_id="e",
+            )
+
+        # Run the MUTATING gate FIRST, then the assertion gate: order must not
+        # matter because neither touches the shared live tree.
+        mutated_first = await _gate(1)
+        good_after = await _gate(0)
+
+        assert mutated_first.success is True  # the mutating command exits 0
+        assert good_after.success is True  # still sees good in its own snapshot
+        # The delivered workspace is untouched by either verifier.
+        assert marker.read_text(encoding="utf-8") == "good\n"
+
+    @pytest.mark.asyncio
+    async def test_isolated_verify_gate_fails_closed_when_snapshot_unavailable(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        """R14-2: an un-snapshottable settled tree fails a would-be PASS closed.
+
+        Rather than run a possibly-mutating verify_command against the shared live
+        workspace (where it could invalidate a sibling gate), a workspace that
+        cannot be frozen fails a successful result closed.
+        """
+        import contextlib as _contextlib
+
+        @_contextlib.contextmanager
+        def _no_snapshot(_cwd: str) -> Any:
+            yield None
+
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.parallel_executor.isolated_workspace", _no_snapshot
+        )
+        seed = _make_seed(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            task_cwd=str(tmp_path),
+        )
+
+        gated = await executor._apply_verify_gate_isolated(
+            seed=seed,
+            ac_index=0,
+            result=ACExecutionResult(ac_index=0, ac_content="ac", success=True),
+            session_id="s",
+            execution_id="e",
+        )
+
+        assert gated.success is False
+        assert "could not isolate" in (gated.error or "")
+
+    @pytest.mark.asyncio
     async def test_completed_recovery_reuses_durable_verify_outcome_without_command_replay(
         self, tmp_path: Any
     ) -> None:
@@ -12634,56 +12735,74 @@ class TestParallelACExecutor:
         assert counter.read_text(encoding="utf-8") == "1"
 
     @pytest.mark.asyncio
-    async def test_completed_recovery_without_verify_outcome_refuses_command_replay(
-        self,
+    async def test_completed_recovery_without_verify_record_defers_to_finalization(
+        self, tmp_path: Any
     ) -> None:
-        """Legacy completion without a cached command verdict fails closed."""
+        """R14-1: a deferred completion with no durable verify record is NOT ambiguous.
+
+        The command-bearing verify_command is deferred out of the atomic leaf
+        (R13-1), so a completed leaf lifecycle legitimately carries no verify
+        outcome and no intent. Recovery must not fail closed on that normal state:
+        the command has provably NOT run, so it leaves the outcome unresolved and
+        lets the batch-completion gate run the single-shot oracle ONCE over the
+        settled workspace. Verification is neither skipped nor duplicated.
+        """
+        event_store, _ = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=SimpleNamespace(
                 runtime_backend="codex_cli",
-                working_directory="/tmp/project",
+                working_directory=str(tmp_path),
                 permission_mode="acceptEdits",
             ),
-            event_store=AsyncMock(),
+            event_store=event_store,
             console=MagicMock(),
             enable_decomposition=False,
         )
         executor._execute_atomic_ac = AsyncMock(
             side_effect=CompletedACExecutionError(
                 "already completed",
-                result_summary="legacy completion",
-                session_id="legacy-provider-session",
+                result_summary="deferred completion",
+                session_id="deferred-provider-session",
             )
         )
 
-        with pytest.raises(
-            AmbiguousACExecutionError,
-            match="missing its non-idempotent verify-command outcome",
-        ):
-            await executor._execute_single_ac(
-                ac_index=0,
-                ac_content="Run the command once",
-                session_id="session-missing-verify-outcome",
-                tools=[],
-                tool_catalog=None,
-                system_prompt="system",
-                seed_goal="Ship",
-                ac_spec=AcceptanceCriterionSpec(
-                    description="Run the command once",
-                    verify_command="apply-once",
-                ),
-            )
+        recovered = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Run the command once",
+            session_id="session-deferred-verify",
+            execution_id="session-deferred-verify",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship",
+            ac_spec=AcceptanceCriterionSpec(
+                description="Run the command once",
+                verify_command="apply-once",
+            ),
+        )
+
+        # No durable verify record -> the command has provably not run; recovery
+        # defers grading to the batch-completion gate rather than failing closed.
+        assert recovered.success is True
+        assert recovered.verify_gate_outcome is None
 
     @pytest.mark.asyncio
-    async def test_completed_recovery_requires_durable_verify_chain(self) -> None:
-        """R8 blocker #2: a completion with a cached PASS but NO durable verify
-        intent/outcome chain fails closed — an orphan completion cannot
-        manufacture command-backed acceptance."""
+    async def test_completed_recovery_ignores_uncorroborated_cached_pass(
+        self, tmp_path: Any
+    ) -> None:
+        """R14-1/R8 blocker #2: a completion's cached PASS is not self-authorizing.
+
+        A completion may carry a cached PASS verdict with NO durable verify
+        intent/outcome chain backing it (orphan/fabricated). Recovery discards
+        that uncorroborated verdict and defers to the batch-completion gate, so a
+        forged completion cannot manufacture command-backed acceptance: the real
+        verify_command must still pass at finalization over the settled workspace.
+        """
         event_store, _ = _make_replaying_event_store()
         executor = ParallelACExecutor(
             adapter=SimpleNamespace(
                 runtime_backend="codex_cli",
-                working_directory="/tmp/project",
+                working_directory=str(tmp_path),
                 permission_mode="acceptEdits",
             ),
             event_store=event_store,
@@ -12706,23 +12825,168 @@ class TestParallelACExecutor:
             )
         )
 
-        with pytest.raises(
-            AmbiguousACExecutionError, match="lacks the durable verify intent/outcome chain"
-        ):
+        recovered = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Run the command once",
+            session_id="session-orphan-completion",
+            execution_id="session-orphan-completion",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship",
+            ac_spec=AcceptanceCriterionSpec(
+                description="Run the command once",
+                verify_command="apply-once",
+            ),
+        )
+
+        # The uncorroborated cached PASS is discarded, not trusted: the outcome is
+        # unresolved, forcing the finalization gate to grade the real command.
+        assert recovered.verify_gate_outcome is None
+
+    @pytest.mark.asyncio
+    async def test_completed_recovery_intent_without_outcome_fails_closed(
+        self, tmp_path: Any
+    ) -> None:
+        """R14-1: an intent with no matching outcome is ambiguous and fails closed.
+
+        If a durable verify intent was persisted but its outcome was never
+        recorded, the non-idempotent verify_command may have run with side effects
+        before the crash. Recovery must refuse to trust or replay it.
+        """
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        ac_spec = AcceptanceCriterionSpec(
+            description="Run the command once",
+            verify_command="apply-once",
+        )
+        execution_scope = "session-intent-only"
+        appended_events.append(
+            BaseEvent(
+                type="execution.ac.verify.intent",
+                aggregate_type="execution",
+                aggregate_id=execution_scope,
+                data={
+                    "verify_key": executor._ac_verify_gate_key(
+                        execution_scope=execution_scope, ac_index=0, retry_attempt=0
+                    ),
+                    "verify_command_digest": executor._verify_gate_command_digest(ac_spec),
+                },
+            )
+        )
+        executor._execute_atomic_ac = AsyncMock(
+            side_effect=CompletedACExecutionError(
+                "already completed",
+                result_summary="partial completion",
+                session_id="intent-only-provider-session",
+            )
+        )
+
+        with pytest.raises(AmbiguousACExecutionError, match="intent with no matching outcome"):
             await executor._execute_single_ac(
                 ac_index=0,
                 ac_content="Run the command once",
-                session_id="session-orphan-completion",
-                execution_id="session-orphan-completion",
+                session_id=execution_scope,
+                execution_id=execution_scope,
                 tools=[],
                 tool_catalog=None,
                 system_prompt="system",
                 seed_goal="Ship",
-                ac_spec=AcceptanceCriterionSpec(
-                    description="Run the command once",
-                    verify_command="apply-once",
-                ),
+                ac_spec=ac_spec,
             )
+
+    @pytest.mark.asyncio
+    async def test_completed_recovery_consumes_deferred_finalization_outcome(
+        self, tmp_path: Any
+    ) -> None:
+        """R14-1 blocker: a deferred completion IS recoverable once finalization ran.
+
+        The reviewer's probe: a leaf completed and persisted ``session.completed``
+        with ``verify_gate_outcome=None`` (deferred), then the batch-completion gate
+        durably wrote both verify intent AND outcome, then the process restarted.
+        Recovery must consume the finalization oracle's outcome -- not reproduce
+        ``AmbiguousACExecutionError`` -- because the completion legitimately carries
+        no leaf-cached verdict under the deferral design.
+        """
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=SimpleNamespace(
+                runtime_backend="codex_cli",
+                working_directory=str(tmp_path),
+                permission_mode="acceptEdits",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        ac_spec = AcceptanceCriterionSpec(
+            description="Run the command once",
+            verify_command="apply-once",
+        )
+        execution_scope = "session-deferred-finalized"
+        verify_key = executor._ac_verify_gate_key(
+            execution_scope=execution_scope, ac_index=0, retry_attempt=0
+        )
+        command_digest = executor._verify_gate_command_digest(ac_spec)
+        appended_events.extend(
+            [
+                BaseEvent(
+                    type="execution.ac.verify.intent",
+                    aggregate_type="execution",
+                    aggregate_id=execution_scope,
+                    data={"verify_key": verify_key, "verify_command_digest": command_digest},
+                ),
+                BaseEvent(
+                    type="execution.ac.verify.outcome",
+                    aggregate_type="execution",
+                    aggregate_id=execution_scope,
+                    data={
+                        "verify_key": verify_key,
+                        "verify_command_digest": command_digest,
+                        "verify_gate_outcome": {
+                            "passed": True,
+                            "reason": None,
+                            "output_tail": "",
+                            "missing_artifacts": [],
+                        },
+                    },
+                ),
+            ]
+        )
+        # A DEFERRED completion: session.completed carried no leaf verdict.
+        executor._execute_atomic_ac = AsyncMock(
+            side_effect=CompletedACExecutionError(
+                "already completed",
+                result_summary="deferred completion",
+                session_id="deferred-finalized-provider-session",
+            )
+        )
+
+        recovered = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Run the command once",
+            session_id=execution_scope,
+            execution_id=execution_scope,
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship",
+            ac_spec=ac_spec,
+        )
+
+        # The durable finalization outcome is consumed -- recovery succeeds.
+        assert recovered.success is True
+        assert recovered.verify_gate_outcome is not None
+        assert recovered.verify_gate_outcome.passed is True
 
     @pytest.mark.asyncio
     async def test_verify_gate_recovers_failed_artifact_result_when_contract_passes(
