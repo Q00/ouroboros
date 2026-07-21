@@ -130,12 +130,13 @@ _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
     r"|[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r")\b"
 )
-# ``token `` and ``secret_`` are useful only as direct value prefixes. Looking
-# for them after every delimiter would treat ordinary persistence keys such as
+# ``api-``, ``token ``, and ``secret_`` are useful only as direct value
+# prefixes. Looking for them after every delimiter would classify natural text
+# such as ``API-first`` and ordinary persistence keys such as
 # ``quoted_secret_preview`` as credentials. Provider-shaped prefixes remain
 # detectable after a delimiter (for example ``branch-ghp_...``).
 _DELIMITED_CREDENTIAL_PREFIXES = tuple(
-    prefix for prefix in SENSITIVE_PREFIXES if prefix not in {"bearer ", "token ", "secret_"}
+    prefix for prefix in SENSITIVE_PREFIXES if prefix not in {"api-", "token ", "secret_"}
 )
 
 

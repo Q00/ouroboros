@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from functools import wraps
 import gc
 import hashlib
@@ -870,6 +871,38 @@ def test_credential_markers_never_egress_via_authority_metadata() -> None:
     )
 
     assert all(credential not in contract.canonical_json for contract in contracts)
+
+
+def test_credential_shaped_runtime_capabilities_fail_closed_without_egress() -> None:
+    credential = "ghp_" + "a" * 36
+    runtime = _Runtime()
+    runtime.capabilities = replace(  # type: ignore[attr-defined]
+        FULL_CAPABILITIES,
+        enforceable_reasoning_efforts=frozenset({credential}),
+    )
+
+    contract = _contract(runtime=runtime)
+
+    capabilities = contract.data["runtime"]["capabilities"]
+    assert capabilities["observed"] is False
+    assert contract.portable_across_processes is False
+    assert credential not in contract.canonical_json
+
+
+def test_raising_runtime_capabilities_fail_closed_without_egress() -> None:
+    credential = "ghp_" + "b" * 36
+
+    class RaisingCapabilitiesRuntime(_Runtime):
+        @property
+        def capabilities(self) -> object:
+            raise RuntimeError(credential)
+
+    contract = _contract(runtime=RaisingCapabilitiesRuntime())
+
+    capabilities = contract.data["runtime"]["capabilities"]
+    assert capabilities["observed"] is False
+    assert contract.portable_across_processes is False
+    assert credential not in contract.canonical_json
 
 
 def test_raising_runtime_identity_provider_blocks_construction_without_leaking() -> None:
@@ -2235,6 +2268,44 @@ def test_delegated_skill_interceptor_configuration_changes_authority(tmp_path) -
     assert first.fingerprint != second.fingerprint
 
 
+def test_populated_delegated_skill_handler_cache_changes_authority(tmp_path) -> None:
+    class FirstHandler:
+        async def handle(self, _arguments: object) -> None:
+            return None
+
+    class SecondHandler:
+        async def handle(self, _arguments: object) -> None:
+            return None
+
+    runtime = PiRuntime(cli_path="/usr/bin/true", cwd=tmp_path)
+    runtime._interceptor._builtin_mcp_handlers = {"ouroboros_help": FirstHandler()}
+    first = ExecutionAuthorityContract.build(
+        adapter=runtime,
+        verifier=None,
+        executor=_ExecutionOwner(),
+        workspace=str(tmp_path),
+        workspace_generation=_generation(),
+        execution_policy=_policy(backend="pi"),
+    )
+
+    runtime._interceptor._builtin_mcp_handlers["ouroboros_help"] = SecondHandler()
+    second = ExecutionAuthorityContract.build(
+        adapter=runtime,
+        verifier=None,
+        executor=_ExecutionOwner(),
+        workspace=str(tmp_path),
+        workspace_generation=_generation(),
+        execution_policy=_policy(backend="pi"),
+    )
+
+    component = first.data["runtime"]["skill_dispatcher"]["component"]
+    handler_cache = component["builtin_mcp_handler_cache"]
+    assert handler_cache["state"] == "populated"
+    assert handler_cache["stability"] == "process_local"
+    assert first.portable_across_processes is False
+    assert first.fingerprint != second.fingerprint
+
+
 def test_self_governing_rate_policy_is_explicit_and_not_portable(tmp_path) -> None:
     runtime = _Runtime()
     runtime.working_directory = str(tmp_path)
@@ -2265,6 +2336,51 @@ def test_dispatch_rate_self_governance_must_match_runtime() -> None:
     runtime.self_governs_rate_limit = True  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="disagrees with runtime self-governance"):
         _contract(runtime=runtime, policy=_policy())
+
+
+def test_dispatch_rate_policy_uses_normalized_runtime_backend(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.runtime_backend = " test-runtime "  # type: ignore[attr-defined]
+    runtime.working_directory = str(tmp_path)
+    policy = ResolvedDispatchRatePolicy.resolve(
+        backend="test-runtime",
+        self_governs_rate_limit=False,
+        requests_per_minute=None,
+        tokens_per_minute=None,
+    )
+
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        dispatch_rate_policy=policy,
+    )
+
+    assert executor._dispatch_rate_policy.backend == "test-runtime"
+
+
+def test_dispatch_rate_policy_uses_unknown_for_sensitive_runtime_backend(tmp_path) -> None:
+    credential = "ghp_" + "c" * 36
+    runtime = _Runtime()
+    runtime.runtime_backend = credential  # type: ignore[attr-defined]
+    runtime.working_directory = str(tmp_path)
+    policy = ResolvedDispatchRatePolicy.resolve(
+        backend="unknown",
+        self_governs_rate_limit=False,
+        requests_per_minute=None,
+        tokens_per_minute=None,
+    )
+
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        dispatch_rate_policy=policy,
+    )
+
+    assert executor._dispatch_rate_policy.backend == "unknown"
+    assert executor.execution_authority.portable_across_processes is False
+    assert credential not in executor.execution_authority.canonical_json
 
 
 def test_unobserved_workspace_or_runtime_is_not_reusable() -> None:
@@ -2342,6 +2458,22 @@ def test_runtime_transcript_verdict_type_drift_changes_authority(
     changed = _contract().fingerprint
 
     assert baseline != changed
+
+
+def test_runtime_transcript_verdict_post_init_drift_changes_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _contract()
+
+    def accept_failed_verdict(self: VerifierVerdict) -> None:
+        object.__setattr__(self, "passed", True)
+
+    monkeypatch.setattr(VerifierVerdict, "__post_init__", accept_failed_verdict)
+    changed = _contract()
+
+    assert VerifierVerdict(passed=False, reasons=("missing evidence",)).passed is True
+    assert baseline.portable_across_processes is True
+    assert baseline.fingerprint != changed.fingerprint
 
 
 def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:

@@ -151,6 +151,8 @@ class TestSensitiveDetection:
         assert is_sensitive_value("hello world") is False
         assert is_sensitive_value("model-gpt-4") is False
         assert is_sensitive_value("quoted_secret_preview") is False
+        assert is_sensitive_value("Implement token budget accounting") is False
+        assert is_sensitive_value("Adopt an API-first design") is False
         assert is_sensitive_value(123) is False
 
     def test_diagnostic_text_with_embedded_secret_remains_sensitive(self) -> None:

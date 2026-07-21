@@ -381,3 +381,23 @@ def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_key
     assert "unprefixed-provider-credential-1234567890" not in str(persisted)
     assert secret not in str(sanitized)
     assert secret not in str(persisted)
+
+
+def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
+    """Natural-language data must not be mistaken for credential metadata."""
+    payload = {
+        "goal": "Implement token budget accounting",
+        "criterion": "Adopt an API-first design",
+    }
+
+    sanitized = sanitize_event_data_for_persistence(payload)
+    persisted = BaseEvent(
+        type="test.event.created",
+        aggregate_type="test",
+        aggregate_id="event-semantic-text",
+        data=payload,
+    ).to_db_dict()["payload"]
+
+    assert sanitized == payload
+    assert persisted["goal"] == payload["goal"]
+    assert persisted["criterion"] == payload["criterion"]

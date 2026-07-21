@@ -261,6 +261,7 @@ from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ResolvedRuntimeAuthority,
     build_execution_policy_contract,
+    runtime_routing_labels_contract,
 )
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
@@ -1109,6 +1110,12 @@ class ParallelACExecutor:
         return self._execution_authority
 
     @staticmethod
+    def _dispatch_rate_backend(adapter: AgentRuntime) -> str:
+        """Use the same normalized/unobserved backend label as the runner."""
+        backend = runtime_routing_labels_contract(adapter).get("runtime_backend")
+        return backend if isinstance(backend, str) and backend else "unknown"
+
+    @staticmethod
     def _resolve_dispatch_rate_policy(
         adapter: AgentRuntime,
         limits: BackendConcurrencyLimits | None = None,
@@ -1123,8 +1130,7 @@ class ParallelACExecutor:
         ``~/.ouroboros/backend_limits.yaml``, or ``OUROBOROS_<BACKEND>_RPM/TPM``),
         so the default behavior is unchanged.
         """
-        backend_attr = getattr(adapter, "runtime_backend", "")
-        backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
+        backend = ParallelACExecutor._dispatch_rate_backend(adapter)
         self_governs = bool(getattr(adapter, "self_governs_rate_limit", False))
         resolved_limits = limits or resolve_backend_limits(backend)
         return ResolvedDispatchRatePolicy.resolve(
@@ -1141,8 +1147,7 @@ class ParallelACExecutor:
     ) -> None:
         if type(policy) is not ResolvedDispatchRatePolicy:
             raise ValueError("dispatch rate policy must use the canonical policy type")
-        backend_attr = getattr(adapter, "runtime_backend", "")
-        backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
+        backend = ParallelACExecutor._dispatch_rate_backend(adapter)
         self_governs = bool(getattr(adapter, "self_governs_rate_limit", False))
         if policy.backend != backend or policy.self_governs_rate_limit is not self_governs:
             raise ValueError("dispatch rate policy disagrees with the active runtime")

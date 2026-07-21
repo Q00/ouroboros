@@ -40,9 +40,9 @@ from ouroboros.orchestrator.model_routing import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
-from ouroboros.orchestrator.verifier import Verifier
+from ouroboros.orchestrator.verifier import Verifier, VerifierVerdict
 
-EXECUTION_AUTHORITY_VERSION = 5
+EXECUTION_AUTHORITY_VERSION = 6
 EXECUTION_AUTHORITY_BOUNDARY_VERSION = 2
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
@@ -873,24 +873,41 @@ class ResolvedRuntimeAuthority:
 
 
 def _runtime_capabilities_contract(adapter: object) -> dict[str, object]:
-    capabilities = runtime_capabilities_for(adapter)
-    return {
-        "skill_dispatch": capabilities.skill_dispatch,
-        "targeted_resume": capabilities.targeted_resume,
-        "structured_output": capabilities.structured_output,
-        "system_prompt_support": capabilities.system_prompt_support.value,
-        "tool_restriction_support": capabilities.tool_restriction_support.value,
-        "permission_mode_support": capabilities.permission_mode_support.value,
-        "reasoning_effort_support": capabilities.reasoning_effort_support.value,
-        "enforceable_reasoning_efforts": (
-            sorted(capabilities.enforceable_reasoning_efforts)
-            if capabilities.enforceable_reasoning_efforts is not None
-            else None
-        ),
-        "model_override_support": capabilities.model_override_support.value,
-        "subagent_orchestration": capabilities.subagent_orchestration.value,
-        "session_signals": capabilities.session_signals.to_event_data(),
-    }
+    """Return a capability snapshot only when provider values are safe to bind.
+
+    Runtime capabilities affect dispatch behavior, but the adapter owns their
+    values. A malformed getter or credential-bearing value must therefore make
+    this baseline process-local rather than enter canonical authority JSON.
+    """
+    try:
+        capabilities = runtime_capabilities_for(adapter)
+        identity = _canonical_explicit_identity(
+            {
+                "skill_dispatch": capabilities.skill_dispatch,
+                "targeted_resume": capabilities.targeted_resume,
+                "structured_output": capabilities.structured_output,
+                "system_prompt_support": capabilities.system_prompt_support.value,
+                "tool_restriction_support": capabilities.tool_restriction_support.value,
+                "permission_mode_support": capabilities.permission_mode_support.value,
+                "reasoning_effort_support": capabilities.reasoning_effort_support.value,
+                "enforceable_reasoning_efforts": (
+                    sorted(capabilities.enforceable_reasoning_efforts)
+                    if capabilities.enforceable_reasoning_efforts is not None
+                    else None
+                ),
+                "model_override_support": capabilities.model_override_support.value,
+                "subagent_orchestration": capabilities.subagent_orchestration.value,
+                "session_signals": capabilities.session_signals.to_event_data(),
+            },
+            field="runtime capabilities",
+        )
+    except Exception:
+        return {
+            "version": 1,
+            "observed": False,
+            "instance_nonce": _process_local_runtime_nonce(adapter),
+        }
+    return {"version": 1, "observed": True, "identity": identity}
 
 
 def _opaque_type_identity_digest(value: object) -> str:
@@ -1262,6 +1279,47 @@ def _callable_entrypoint_contract(target: object) -> dict[str, object]:
     return _callable_leaf_implementation_contract(target)
 
 
+def _transcript_verdict_type_contract(value: type[object]) -> dict[str, object]:
+    """Bind the result type's acceptance-relevant construction semantics.
+
+    The transcript verifier constructs :class:`VerifierVerdict` directly.
+    Its generated comparison/repr methods do not affect whether a failed
+    transcript becomes accepted, but construction, invariant enforcement, and
+    frozen-state enforcement do.  Bind that finite semantic surface explicitly
+    rather than walking every generated dataclass helper: the latter makes a
+    normally portable baseline depend on synthetic ``__eq__`` plumbing that is
+    not an execution authority.
+
+    A substituted result type is deliberately not treated as a durable
+    equivalent.  It may implement a different acceptance protocol, so the
+    surrounding transcript verifier must fail closed to process-local.
+    """
+    if value is not VerifierVerdict:
+        raise ValueError("runtime transcript verifier result type is not canonical")
+
+    required_members = ("__init__", "__post_init__", "__setattr__")
+    members: dict[str, object] = {}
+    missing = object()
+    for member_name in required_members:
+        raw_member = inspect.getattr_static(value, member_name, missing)
+        if isinstance(raw_member, (classmethod, staticmethod)):
+            raw_member = raw_member.__func__
+        if raw_member is missing or not inspect.isfunction(raw_member):
+            raise ValueError("runtime transcript verifier result member is not inspectable")
+        implementation = _callable_implementation_contract(raw_member)
+        if implementation.get("stability") != "durable":
+            raise ValueError("runtime transcript verifier result member is not durable")
+        members[_sha256(member_name)] = implementation
+
+    return {
+        "stability": "durable",
+        "type": _opaque_type_identity_digest(value),
+        "member_digest": _sha256(
+            _canonical_json(members, field="runtime transcript verifier result members")
+        ),
+    }
+
+
 def _callable_dependency_implementation_contract(target: object) -> dict[str, object]:
     """Bind a transcript verifier and the Python helpers it actually invokes.
 
@@ -1277,17 +1335,18 @@ def _callable_dependency_implementation_contract(target: object) -> dict[str, ob
     active: set[int] = set()
     function_count = 0
 
-    def global_contract(value: object) -> dict[str, object]:
+    def global_contract(value: object, *, global_name: str) -> dict[str, object]:
         """Return a safe identity for a non-function global used by a verifier."""
         if isinstance(value, type):
-            # A transcript verifier often uses standard-library types such as
-            # ``pathlib.Path``.  Requiring a full member-by-member class graph
-            # for those types turns an otherwise durable verifier process-local
-            # simply because a standard-library base is implemented in C or
-            # exposes a descriptor we cannot walk.  The type identity itself is
-            # sufficient for this boundary: replacing ``VerifierVerdict`` (or
-            # any other imported type) changes the opaque digest, while raw
-            # module/class labels never enter authority JSON.
+            if global_name == "VerifierVerdict":
+                return {
+                    "mode": "verdict_type",
+                    "implementation": _transcript_verdict_type_contract(value),
+                }
+            # Standard-library and supporting types often expose C-backed or
+            # synthetic members that cannot be walked portably. Their opaque
+            # type identity still detects a replacement without mistaking
+            # generated implementation plumbing for acceptance authority.
             return {"mode": "type", "identity_digest": _opaque_type_identity_digest(value)}
         if isinstance(value, re.Pattern):
             return {
@@ -1383,7 +1442,7 @@ def _callable_dependency_implementation_contract(target: object) -> dict[str, ob
                 if inspect.ismethod(dependency) or inspect.isfunction(dependency):
                     dependencies.append(collect(dependency, depth=depth + 1))
                 else:
-                    dependencies.append(global_contract(dependency))
+                    dependencies.append(global_contract(dependency, global_name=global_name))
             return {
                 "implementation": implementation,
                 "defaults_digest": defaults_digest,
@@ -2087,6 +2146,58 @@ def _instance_executable_overrides(value: object) -> dict[str, object]:
     return overrides
 
 
+def _builtin_mcp_handler_cache_contract(value: object) -> dict[str, object] | None:
+    """Bind a populated ``SkillInterceptor`` handler cache process-locally.
+
+    The cache changes the callable that performs local skill dispatch, but is
+    mutable runtime state rather than a portable Foundation-A component. Its
+    opaque binding detects handler replacement or implementation drift without
+    serializing tool names, handler state, or provider data.
+    """
+    missing = object()
+    try:
+        descriptor = inspect.getattr_static(value, "_builtin_mcp_handlers", missing)
+    except Exception:
+        return None
+    if descriptor is missing:
+        return None
+
+    def unobserved() -> dict[str, object]:
+        return {
+            "state": "unobserved",
+            "stability": "process_local",
+            "instance_nonce": _process_local_runtime_nonce(value),
+        }
+
+    try:
+        cache = object.__getattribute__(value, "_builtin_mcp_handlers")
+        if cache is None:
+            return {"state": "empty", "stability": "durable"}
+        if not isinstance(cache, Mapping) or len(cache) > _MAX_IDENTITY_ITEMS:
+            return unobserved()
+
+        bindings: dict[str, object] = {}
+        for tool_name, handler in cache.items():
+            if not isinstance(tool_name, str) or not tool_name or is_sensitive_value(tool_name):
+                return unobserved()
+            handle = object.__getattribute__(handler, "handle")
+            if not callable(handle):
+                return unobserved()
+            tool_digest = _sha256(tool_name)
+            bindings[tool_digest] = {
+                "implementation": _callable_entrypoint_contract(handle),
+                "instance_nonce": _process_local_runtime_nonce(handler),
+            }
+        return {
+            "state": "populated",
+            "stability": "process_local",
+            "binding_digest": _sha256(_canonical_json(bindings, field="builtin MCP handler cache")),
+            "instance_nonce": _process_local_runtime_nonce(value),
+        }
+    except Exception:
+        return unobserved()
+
+
 def _declared_component_contract(value: object) -> dict[str, object]:
     implementation = _safe_class_implementation_contract(value)
     try:
@@ -2144,10 +2255,12 @@ def _declared_component_contract(value: object) -> dict[str, object]:
             "implementation": implementation,
             "executable": executable,
         }
+    handler_cache = _builtin_mcp_handler_cache_contract(value)
     durable = (
         not instance_overrides
         and implementation.get("stability") == "durable"
         and (executable.get("required") is not True or executable.get("observed") is True)
+        and (handler_cache is None or handler_cache.get("stability") == "durable")
     )
     contract: dict[str, object] = {
         "mode": "declared",
@@ -2158,6 +2271,8 @@ def _declared_component_contract(value: object) -> dict[str, object]:
         "implementation": implementation,
         "executable": executable,
     }
+    if handler_cache is not None:
+        contract["builtin_mcp_handler_cache"] = handler_cache
     if not durable:
         contract["instance_nonce"] = _process_local_runtime_nonce(value)
     return contract
@@ -2919,6 +3034,9 @@ class ExecutionAuthorityContract:
         ):
             return False
         if runtime.get("llm_backend_unobserved") is True:
+            return False
+        capabilities = runtime.get("capabilities")
+        if not isinstance(capabilities, Mapping) or capabilities.get("observed") is not True:
             return False
         for field_name in ("permission_mode", "constructor_model", "execution_identity"):
             value = runtime.get(field_name)
