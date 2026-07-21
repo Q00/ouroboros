@@ -1,6 +1,7 @@
 """Tests for keyword-detector.py — setup gate and routing behavior."""
 
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -325,3 +326,56 @@ class TestMainGate:
         out = capsys.readouterr().out
         assert "/ouroboros:setup" not in out
         assert "/ouroboros:resume-session" in out
+
+
+class TestHookProtocol:
+    """UserPromptSubmit input and output follow the shared hook JSON protocol."""
+
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_json_payload_detection_uses_only_prompt_field(self, _first, capsys):
+        payload = {
+            "session_id": "ooo status",
+            "prompt": "hello world",
+            "hook_event_name": "UserPromptSubmit",
+        }
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        assert capsys.readouterr().out == ""
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_json_payload_match_emits_structured_context(self, _first, _mcp, capsys):
+        payload = {
+            "session_id": "test-session",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        assert output == {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": (
+                    "<skill-suggestion>\n🎯 MATCHED SKILLS:\n"
+                    '- /ouroboros:status - Detected "ooo status"\n'
+                    "</skill-suggestion>"
+                ),
+            }
+        }
+
+    @patch.object(_mod, "is_mcp_configured", return_value=False)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_raw_text_fallback_remains_supported(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = "ooo qa"
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:qa" in context
+        assert "ooo qa" in context
