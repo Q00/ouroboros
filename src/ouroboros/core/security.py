@@ -86,6 +86,58 @@ SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
 )
 
+# A full value that is a credential should be treated differently from an
+# otherwise useful diagnostic sentence that happens to contain one.  The
+# latter must retain enough context for replay/debugging after the embedded
+# secret is redacted, rather than becoming an opaque marker.
+_SECRET_FLAG_PATTERN = re.compile(
+    r"(?i)(--(?:"
+    r"api[-_]?key"
+    r"|(?:access|auth|bearer|github|gh|refresh)[-_]?token"
+    r"|token"
+    r"|password"
+    r"|(?:client[-_]?)?secret"
+    r"|credentials?"
+    r"|private[-_]?key"
+    r")(?:=|\s+))"
+    r"(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;]+)"
+)
+_SECRET_LABEL_PATTERN = re.compile(
+    r"(?i)(\b(?:"
+    r"api[-_]?key"
+    r"|(?:access|auth|bearer|github|gh|refresh)[-_]?token"
+    r"|token"
+    r"|password"
+    r"|(?:client[-_]?)?secret"
+    r"|credentials?"
+    r"|private[-_]?key"
+    r"|(?:aws[-_])?secret[-_]access[-_]key"
+    r"|authorization"
+    r")\b\s*[:=]\s*)"
+    r"(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\n]+)"
+)
+_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
+    r"\b(?:"
+    r"gh[pousr]_[A-Za-z0-9_]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}"
+    r"|hf_[A-Za-z0-9]{20,}"
+    r"|xox[abpr]-[A-Za-z0-9-]{20,}"
+    r"|sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}"
+    r"|AIza[A-Za-z0-9_-]{35}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r")\b"
+)
+# ``token `` and ``secret_`` are useful only as direct value prefixes. Looking
+# for them after every delimiter would treat ordinary persistence keys such as
+# ``quoted_secret_preview`` as credentials. Provider-shaped prefixes remain
+# detectable after a delimiter (for example ``branch-ghp_...``).
+_DELIMITED_CREDENTIAL_PREFIXES = tuple(
+    prefix for prefix in SENSITIVE_PREFIXES if prefix not in {"bearer ", "token ", "secret_"}
+)
+
 
 def mask_api_key(api_key: str, visible_chars: int = 4) -> str:
     """Mask an API key for safe logging/display.
@@ -200,31 +252,54 @@ def is_sensitive_value(value: Any) -> bool:
     normalized_value = value[start:end]
     value_lower = normalized_value.lower()
 
-    # Provider labels and other configuration values sometimes include a
-    # human-readable prefix (for example ``claude:ghp_...``). A startswith-only
-    # check would allow the credential portion to survive authority contracts,
-    # events, and mismatch diagnostics. Treat a known marker at the beginning
-    # of a non-alphanumeric token as sensitive as well. We intentionally do
-    # not scan through an alphanumeric word: ``monkey`` is not a secret merely
-    # because it contains ``key``-like text.
-    def has_token_marker(marker: str) -> bool:
+    if any(value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES):
+        return True
+    if any(pattern.match(normalized_value) for pattern in SENSITIVE_VALUE_PATTERNS):
+        return True
+
+    # Provider labels sometimes prefix a credential (for example
+    # ``claude:ghp_...``). Keep this detector fail-closed for every caller:
+    # authority construction and logging must reject a secret even when it is
+    # embedded in diagnostic prose. Persistence can retain safe prose through
+    # the dedicated ``redact_sensitive_text`` path below.
+
+    def follows_credential_delimiter(position: int) -> bool:
+        if position <= 0:
+            return False
+        preceding = normalized_value[position - 1]
+        return not preceding.isalnum() or unicodedata.category(preceding).startswith(("C", "M"))
+
+    def has_delimited_credential_prefix(prefix: str) -> bool:
         search_from = 0
-        lowered_marker = marker.lower()
+        lowered_prefix = prefix.lower()
         while True:
-            position = value_lower.find(lowered_marker, search_from)
+            position = value_lower.find(lowered_prefix, search_from)
             if position < 0:
                 return False
-            if position == 0 or not value_lower[position - 1].isalnum():
+            if follows_credential_delimiter(position):
                 return True
             search_from = position + 1
 
-    if any(has_token_marker(prefix) for prefix in SENSITIVE_PREFIXES):
+    if any(has_delimited_credential_prefix(prefix) for prefix in _DELIMITED_CREDENTIAL_PREFIXES):
         return True
     return any(
-        match.start() == 0 or not normalized_value[match.start() - 1].isalnum()
+        follows_credential_delimiter(match.start())
         for pattern in SENSITIVE_VALUE_PATTERNS
         for match in pattern.finditer(normalized_value)
     )
+
+
+def redact_sensitive_text(value: str, *, replacement: str = "[redacted]") -> str:
+    """Redact credential-shaped tokens while retaining surrounding context.
+
+    This is appropriate for durable diagnostic/event text. Callers decide
+    whether the surrounding text makes the value an identity that must be
+    replaced wholesale, or a diagnostic that can retain its non-secret context.
+    """
+    redacted = _SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", value)
+    redacted = _SECRET_LABEL_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", redacted)
+    redacted = _BEARER_PATTERN.sub(f"Bearer {replacement}", redacted)
+    return _HIGH_CONFIDENCE_SECRET_PATTERN.sub(replacement, redacted)
 
 
 def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:

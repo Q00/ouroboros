@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ouroboros.orchestrator.session import (
+    SESSION_START_IDENTITY_PROGRESS_KEY,
     SessionRepository,
     SessionStatus,
     SessionTracker,
 )
+from ouroboros.persistence.event_store import EventStore
 
 
 class TestSessionStatus:
@@ -200,6 +203,33 @@ class TestSessionRepository:
         assert result.is_ok
         event = mock_event_store.append.call_args[0][0]
         assert event.data["seed_goal"] == "Ship the OpenCode runtime"
+
+    @pytest.mark.asyncio
+    async def test_durable_replay_preserves_benign_seed_goal_with_token_word(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Natural-language goals must survive durable event sanitization verbatim."""
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'session.db'}")
+        await store.initialize()
+        try:
+            repository = SessionRepository(store)
+            goal = "Implement token rotation for session auth"
+
+            created = await repository.create_session(
+                execution_id="exec_token_goal",
+                seed_id="seed_token_goal",
+                session_id="orch_token_goal",
+                seed_goal=goal,
+            )
+            assert created.is_ok
+
+            restored = await repository.reconstruct_session("orch_token_goal")
+
+            assert restored.is_ok
+            assert restored.value.progress[SESSION_START_IDENTITY_PROGRESS_KEY]["seed_goal"] == goal
+        finally:
+            await store.close()
 
     @pytest.mark.asyncio
     async def test_create_session_with_custom_id(

@@ -20,6 +20,7 @@ from ouroboros.core.security import (
     is_sensitive_value,
     mask_api_key,
     mask_sensitive_value,
+    redact_sensitive_text,
     sanitize_for_logging,
     truncate_input,
     validate_api_key_format,
@@ -149,7 +150,20 @@ class TestSensitiveDetection:
         """Normal values are not flagged."""
         assert is_sensitive_value("hello world") is False
         assert is_sensitive_value("model-gpt-4") is False
+        assert is_sensitive_value("quoted_secret_preview") is False
         assert is_sensitive_value(123) is False
+
+    def test_diagnostic_text_with_embedded_secret_remains_sensitive(self) -> None:
+        """Global credential detection remains fail-closed for diagnostics."""
+        text = "command: deploy --api-key sk-live-SECRET123"
+        assert is_sensitive_value(text) is True
+        assert redact_sensitive_text(text) == "command: deploy --api-key [redacted]"
+
+    def test_compact_assignment_with_embedded_secret_remains_sensitive(self) -> None:
+        """Identity/configuration consumers must reject compact secret values."""
+        value = "key=" + "AIza" + "A" * 35
+        assert is_sensitive_value(value) is True
+        assert redact_sensitive_text(value) == "key=[redacted]"
 
 
 class TestMaskSensitiveValue:

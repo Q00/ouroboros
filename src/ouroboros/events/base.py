@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from ouroboros.core.security import is_sensitive_value
+from ouroboros.core.security import is_sensitive_value, redact_sensitive_text
 
 _EXCLUDED_PERSISTENCE_KEYS = frozenset(
     {
@@ -104,12 +104,15 @@ def sanitize_event_data_for_persistence(value: Any) -> Any:
         sanitized: dict[Any, Any] = {}
         for key, item in value.items():
             normalized_key = str(key)
-            if _should_exclude_from_persistence(normalized_key) or is_sensitive_value(
-                normalized_key
-            ):
+            if _should_exclude_from_persistence(normalized_key):
                 continue
             if _is_sensitive_persistence_key(normalized_key):
                 sanitized[key] = "<REDACTED>"
+                continue
+            # A dynamic key may itself be a raw credential.  Check it after
+            # recognizing ordinary credential *field names*, which must be
+            # preserved as redacted fields for consumers and replay tooling.
+            if is_sensitive_value(normalized_key):
                 continue
             sanitized[key] = sanitize_event_data_for_persistence(item)
         return sanitized
@@ -117,8 +120,18 @@ def sanitize_event_data_for_persistence(value: Any) -> Any:
         return [sanitize_event_data_for_persistence(item) for item in value]
     if isinstance(value, tuple):
         return [sanitize_event_data_for_persistence(item) for item in value]
-    if isinstance(value, str) and is_sensitive_value(value):
-        return "<REDACTED>"
+    if isinstance(value, str):
+        redacted = redact_sensitive_text(value)
+        # Authority/configuration values must remain fail-closed when they are
+        # credential-shaped. Diagnostic text is different: retain its useful
+        # command or key/value context after removing the embedded secret.
+        # The separators avoid treating a compact identity such as
+        # ``branch-ghp_...`` as diagnostic prose.
+        if redacted != value and ("=" in value or any(char.isspace() for char in value)):
+            return redacted
+        if is_sensitive_value(value):
+            return "<REDACTED>"
+        return redacted
     return value
 
 
