@@ -47,6 +47,7 @@ replayable execution contract on your choice of runtime backend.
 - [Execution vs. Evaluation Contract](./guides/execution-vs-evaluation.md) - Task completion, AC verdict, and drift terminology boundaries
 - [Shared `ooo` Skill Dispatch Router](./guides/ooo-skill-dispatch-router.md) - Runtime setup boundary for Codex CLI, Hermes, and OpenCode skill dispatch
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
+- [InfraNodus Advisory Gateway Example](../examples/infranodus-gateway/README.md) - A minimum-privilege MCP adapter that keeps graph analysis advisory and Ouroboros authoritative
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
 
