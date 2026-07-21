@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import json
 from pathlib import Path
@@ -1393,11 +1393,27 @@ def build_interview_question_advisory_subagents(
                 lane_answer_contract,
                 _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
             )
+            raw_known_tools = raw_lane.get("known_data_tools")
+            known_tools = (
+                [str(tool) for tool in raw_known_tools if str(tool).strip()]
+                if isinstance(raw_known_tools, (list, tuple))
+                else []
+            )
+            known_tools_hint = (
+                (
+                    "## Known Data Tools Hint\n"
+                    "Prefer these host-known data MCP tools before free discovery: "
+                    f"{', '.join(known_tools)}\n"
+                )
+                if known_tools
+                else ""
+            )
             extra = (
                 "## Data Access Policy\n"
                 f"```json\n{data_policy_json}\n```\n"
                 "## Answer Contract\n"
                 f"```json\n{answer_contract_json}\n```\n"
+                f"{known_tools_hint}"
                 "For this lane the generic Output section below is superseded: "
                 "return EXACTLY one JSON object matching the answer contract's "
                 "response_model_schema. It exists so the confirming user can "
@@ -1488,6 +1504,9 @@ forwarding anything back to ouroboros_interview."""
             lane_context["data_policy"] = dict(data_policy)
         if isinstance(lane_answer_contract, Mapping):
             lane_context["answer_contract"] = dict(lane_answer_contract)
+        raw_lane_known_tools = raw_lane.get("known_data_tools")
+        if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
+            lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
         payloads.append(
             build_subagent_payload(
                 tool_name="ouroboros_interview",
@@ -2686,6 +2705,7 @@ class FanoutRecord:
     expected_keys: tuple[str, ...]
     synthesizer_input: dict[str, Any]
     required_keys: tuple[str, ...] = ()
+    received_results: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2696,6 +2716,7 @@ class FanoutRecord:
             "expected_keys": list(self.expected_keys),
             "required_keys": list(self.required_keys),
             "synthesizer_input": self.synthesizer_input,
+            "received_results": self.received_results,
         }
 
     @classmethod
@@ -2711,6 +2732,7 @@ class FanoutRecord:
             if isinstance(raw_required, (list, tuple))
             else expected_keys
         )
+        raw_received = data.get("received_results")
         return cls(
             fanout_id=str(data["fanout_id"]),
             kind=str(data["kind"]),
@@ -2719,6 +2741,7 @@ class FanoutRecord:
             expected_keys=expected_keys,
             synthesizer_input=dict(raw_input) if isinstance(raw_input, Mapping) else {},
             required_keys=required_keys,
+            received_results=dict(raw_received) if isinstance(raw_received, Mapping) else {},
         )
 
 
@@ -2789,20 +2812,31 @@ class FanoutRegistry:
             synthesizer_input=synthesizer_input,
             required_keys=tuple(required_keys if required_keys is not None else expected_keys),
         )
+        self.save(record)
+        return resolved_id
+
+    def save(self, record: FanoutRecord) -> None:
+        """Persist ``record`` (best-effort), overwriting any prior state.
+
+        Used both by :meth:`register` and by partial-submission accumulation:
+        ``submit_fanout_results`` merges newly submitted lane results into the
+        record's ``received_results`` and re-saves, so a later resubmission of
+        only the remaining lanes completes the fan-out as the public contract
+        documents.
+        """
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            self._path(resolved_id).write_text(
+            self._path(record.fanout_id).write_text(
                 json.dumps(record.to_dict(), ensure_ascii=False),
                 encoding="utf-8",
             )
         except OSError as exc:
             log.warning(
                 "fanout.registry.persist_failed",
-                fanout_id=resolved_id,
-                kind=kind,
+                fanout_id=record.fanout_id,
+                kind=record.kind,
                 error=str(exc),
             )
-        return resolved_id
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
@@ -2820,6 +2854,43 @@ class FanoutRegistry:
             return FanoutRecord.from_dict(data)
         except (KeyError, TypeError, ValueError):
             return None
+
+
+def _lane_answer_contract_violations(
+    contracts: Mapping[str, Any],
+    provided: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate submitted lane outputs against their registered answer contracts.
+
+    Returns one ``{"lane_id", "contract_id", "errors"}`` entry per violating
+    lane. Lanes without a registered contract are not checked; a submitted
+    output that is not a JSON object is itself a violation when a contract
+    exists (the contract's response_model_schema describes an object form).
+    """
+    violations: list[dict[str, Any]] = []
+    for lane_id, contract in contracts.items():
+        if lane_id not in provided or not isinstance(contract, Mapping):
+            continue
+        schema = contract.get("response_model_schema")
+        if not isinstance(schema, Mapping):
+            continue
+        contract_id = str(contract.get("contract_id") or "")
+        output = provided[lane_id]
+        if not isinstance(output, Mapping):
+            violations.append(
+                {
+                    "lane_id": lane_id,
+                    "contract_id": contract_id,
+                    "errors": ["lane output is not a JSON object"],
+                }
+            )
+            continue
+        errors = sorted(
+            error.message for error in Draft202012Validator(dict(schema)).iter_errors(dict(output))
+        )
+        if errors:
+            violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})
+    return violations
 
 
 def _fanout_identity_synthesis(aggregated_outputs: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2930,20 +3001,32 @@ def register_question_advisory_fanout(
     """
     expected_keys: list[str] = []
     required_keys: list[str] = []
+    lane_answer_contracts: dict[str, Any] = {}
     for payload in payloads:
         payload_dict = payload.to_dict()
         lane_id = _payload_lane_id(payload_dict)
         if lane_id and lane_id not in expected_keys:
             expected_keys.append(lane_id)
             context = payload_dict.get("context")
-            if isinstance(context, Mapping) and bool(context.get("required")):
-                required_keys.append(lane_id)
+            if isinstance(context, Mapping):
+                if bool(context.get("required")):
+                    required_keys.append(lane_id)
+                # Persist the lane's answer contract so re-entry can validate
+                # the submitted output against it BEFORE synthesis — a data
+                # lane result is otherwise arbitrary content flowing toward
+                # user confirmation and persisted interview state.
+                answer_contract = context.get("answer_contract")
+                if isinstance(answer_contract, Mapping):
+                    lane_answer_contracts[lane_id] = dict(answer_contract)
+    synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
+    if lane_answer_contracts:
+        synthesizer_input["lane_answer_contracts"] = lane_answer_contracts
     return registry.register(
         kind=FANOUT_KIND_QUESTION_ADVISORY,
         session_id=session_id,
         correlation_key=correlation_key,
         expected_keys=expected_keys,
-        synthesizer_input={"lane_ids": list(expected_keys)},
+        synthesizer_input=synthesizer_input,
         fanout_id=fanout_id,
         required_keys=required_keys,
     )
@@ -2995,16 +3078,23 @@ def submit_fanout_results(
             "expected_correlation_key": record.correlation_key,
         }
 
-    provided: dict[str, Any] = {}
+    submitted: dict[str, Any] = {}
     for result in results:
         key = result.get("key")
         if key is None:
             continue
-        provided[str(key)] = result.get("content")
+        submitted[str(key)] = result.get("content")
+
+    # Accumulate across calls: earlier partial submissions were persisted on
+    # the record, so "submit lane A, then submit the remaining lane B" reaches
+    # completion exactly as the partial-retry contract documents. The latest
+    # submission wins on a per-key conflict.
+    provided: dict[str, Any] = {**record.received_results, **submitted}
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
     missing_required = [key for key in record.required_keys if key not in provided]
     if missing_required:
+        registry.save(replace(record, received_results=provided))
         return {
             "status": "partial",
             "fanout_id": fanout_id,
@@ -3054,12 +3144,20 @@ def submit_fanout_results(
     if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
         # Advisory lanes are independent advice with no gating synthesizer, so
         # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize.
+        # order and hand them back for the host to synthesize. Lanes that
+        # declared an answer contract (data_context) are validated against it
+        # FIRST: a violating output is excluded from the aggregation and
+        # surfaced under ``contract_violations`` instead of flowing unchecked
+        # toward user confirmation and persisted interview state.
+        raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
+        contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
+        contract_violations = _lane_answer_contract_violations(contracts, provided)
+        violating_lanes = {item["lane_id"] for item in contract_violations}
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
             for lane_id in lane_ids
-            if lane_id in provided
+            if lane_id in provided and lane_id not in violating_lanes
         ]
         outcome = _fanout_identity_synthesis(aggregated)
         return {
@@ -3068,6 +3166,7 @@ def submit_fanout_results(
             "kind": record.kind,
             "correlation_key": record.correlation_key,
             "missing_optional_keys": missing_optional,
+            "contract_violations": contract_violations,
             "result": outcome,
         }
 

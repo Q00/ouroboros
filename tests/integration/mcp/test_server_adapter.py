@@ -578,6 +578,29 @@ class TestCreateOuroborosServer:
         assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
         assert signal.mailbox.delivery_queue is runtime_context.synapse
 
+    def test_interview_and_submit_fanout_share_one_state_backed_registry(self, tmp_path) -> None:
+        """Advisory producers and re-entry must read/write the same records.
+
+        The interview handler registers question-advisory fan-outs; the
+        ``ouroboros_submit_fanout_results`` handler validates submissions
+        against those persisted records. Both must resolve to one shared
+        registry rooted under the server's interview state dir, otherwise a
+        stamped ``fanout_id`` can never be redeemed (Q00/ouroboros#1671).
+        """
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
+
+        server = create_ouroboros_server(state_dir=str(tmp_path))
+        interview = server._tool_handlers["ouroboros_interview"]
+        submit = server._tool_handlers["ouroboros_submit_fanout_results"]
+
+        assert isinstance(interview, InterviewHandler)
+        assert isinstance(submit, SubmitFanoutResultsHandler)
+        registry = interview._resolved_fanout_registry()
+        assert registry is not None
+        assert submit._registry is registry
+        assert registry.directory == tmp_path / "fanout"
+
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""
         from ouroboros.mcp.tools.auto_handler import AutoHandler, StartAutoHandler

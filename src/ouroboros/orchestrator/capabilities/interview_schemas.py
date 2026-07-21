@@ -514,12 +514,16 @@ def _data_context_answer_contract() -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["source", "query_summary", "value"],
+                    # observed_at is required: executed data evidence is
+                    # point-in-time by nature, and an aggregate without its
+                    # observation timestamp loses that meaning by the time it
+                    # reaches the confirming user and persisted state.
+                    "required": ["source", "query_summary", "value", "observed_at"],
                     "properties": {
                         "source": {"type": "string", "maxLength": 120},
                         "query_summary": {"type": "string", "maxLength": 300},
                         "value": {"type": "string", "maxLength": 400},
-                        "observed_at": {"type": "string", "maxLength": 40},
+                        "observed_at": {"type": "string", "minLength": 1, "maxLength": 40},
                     },
                 },
             },
@@ -573,6 +577,29 @@ def _data_context_answer_contract() -> dict[str, Any]:
                             "required": ["proposed_queries"],
                         },
                     ]
+                },
+            },
+            {
+                # confidence is tied to what was actually executed:
+                # "reported_by_tool" without a single executed evidence item
+                # (e.g. a proposal-only response) is a category error.
+                "if": {"properties": {"confidence": {"const": "reported_by_tool"}}},
+                "then": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+            },
+            {
+                # Executed evidence must carry its point-in-time warning to the
+                # confirming user: at least one caveat is required whenever any
+                # evidence item exists.
+                "if": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+                "then": {
+                    "properties": {"caveats": {"minItems": 1}},
+                    "required": ["caveats"],
                 },
             },
         ],
@@ -728,7 +755,14 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review", "call_mcp"],
+                    "minLength": 1,
+                    "description": (
+                        "Open capability identifier so v1 stays forward-compatible "
+                        "with additive lanes (Q00/ouroboros#1671). Well-known values: "
+                        "inspect_code, web_research, run_lateral_review, call_mcp. "
+                        "Hosts dispatch unsupported capabilities and return the "
+                        "no-op finding per lane_compatibility_rules."
+                    ),
                 },
             },
             "lanes": {
@@ -736,33 +770,38 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "object",
-                    "additionalProperties": False,
+                    # Additive lane evolution is the v1 compatibility promise:
+                    # unknown lane ids, capabilities, and lane-specific blocks
+                    # (data_policy arrived exactly this way) must validate.
+                    "additionalProperties": True,
                     "required": ["lane_id", "purpose", "capability", "required"],
                     "properties": {
                         "lane_id": {
                             "type": "string",
-                            "enum": [
-                                "code_context",
-                                "web_context",
-                                "data_context",
-                                "ambiguity_contrarian",
-                                "answer_simplifier",
-                                "architecture_implications",
-                            ],
+                            "minLength": 1,
+                            "description": (
+                                "Open lane identifier (see lane_compatibility_rules). "
+                                "Well-known values: code_context, web_context, "
+                                "data_context, ambiguity_contrarian, answer_simplifier, "
+                                "architecture_implications."
+                            ),
                         },
                         "purpose": {"type": "string", "minLength": 1},
                         "capability": {
                             "type": "string",
-                            "enum": [
-                                "inspect_code",
-                                "web_research",
-                                "run_lateral_review",
-                                "call_mcp",
-                            ],
+                            "minLength": 1,
+                            "description": (
+                                "Open capability identifier; unsupported capabilities "
+                                "are dispatched and answered with the no-op finding."
+                            ),
                         },
                         "persona": {
                             "type": "string",
-                            "enum": ["researcher", "contrarian", "simplifier", "architect"],
+                            "minLength": 1,
+                            "description": (
+                                "Open persona identifier. Well-known values: "
+                                "researcher, contrarian, simplifier, architect."
+                            ),
                         },
                         "required": {"type": "boolean"},
                         "data_policy": {
@@ -792,13 +831,13 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             "additionalProperties": True,
                             "required": ["contract_id", "response_model_schema"],
                             "properties": {
-                                "contract_id": {"const": "data_evidence_answer.v1"},
+                                "contract_id": {"type": "string", "minLength": 1},
                             },
                             "description": (
-                                "Structured report form for data lanes: no grade "
-                                "clause, every answer requires user confirmation; "
-                                "the form exists so the confirming user decides "
-                                "with full context."
+                                "Structured lane answer form (data_context ships "
+                                "data_evidence_answer.v1). Lane outputs are "
+                                "validated against response_model_schema at fanout "
+                                "re-entry; violations surface as contract_violations."
                             ),
                         },
                     },

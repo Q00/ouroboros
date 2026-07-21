@@ -246,6 +246,32 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    subagent primitive at all (then use `sequential_fallback`).
    Preserve the original question text while advisory children run.
 
+   **Submitting fan-out results back (re-entry)**:
+   When the originating `meta` carries a `fanout_id` (e.g.
+   `meta.question_advisory_fanout_id`, or a `fanout_id` in a lateral persona
+   panel dispatch), after all advisory/persona subagents return, call
+   `ouroboros_submit_fanout_results` with:
+   - `fanout_id`: the stamped id from that meta,
+   - `correlation_key`: the stamped `result_correlation_key`
+     (`context.lane_id`, `context.persona`, or `code_facts`),
+   - `results`: one `{ "key": <correlation value>, "content": <child output> }`
+     per subagent, where `key` is that child's correlation value (its lane id,
+     persona, or `code_facts`).
+   A complete set returns the correlated synthesis to continue with; a partial
+   set returns `status="partial"` with `missing_keys` so you can resubmit the
+   remaining lanes (partial submissions accumulate server-side). Only
+   `required: true` lanes gate completion: once every required lane is
+   submitted the fanout completes, and optional lanes that never arrived are
+   listed as `missing_optional_keys` on the complete outcome — proceed to
+   synthesis without them. Still submit a no-op finding for every lane you
+   dispatched (including no-op and unsupported-capability lanes) rather than
+   dropping it. Lanes that carry an `answer_contract` are validated at
+   re-entry; violations come back under `contract_violations` and that lane's
+   output is excluded from the returned synthesis. Sequential hosts submit
+   after processing payloads one-by-one — same tool, same contract. Continue
+   the interview from the returned synthesis; keep the user-facing question
+   visible throughout.
+
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
    as a required lightweight subagent review for that turn. The interview just

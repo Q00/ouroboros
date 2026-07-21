@@ -5050,7 +5050,6 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
     proposer = {
         **noop,
         "data_needed": True,
-        "confidence": "reported_by_tool",
         "proposed_queries": [
             {
                 "tool_name": "clickhouse_query",
@@ -5061,6 +5060,73 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         ],
     }
     validator.validate(proposer)
+    # confidence is tied to execution: reported_by_tool without a single
+    # executed evidence item (proposal-only response) is a contract violation.
+    assert list(validator.iter_errors({**proposer, "confidence": "reported_by_tool"}))
+    executed = {
+        **noop,
+        "data_needed": True,
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "clickhouse_query",
+                "query_summary": "count distinct MAU by plan tier",
+                "value": "78% of MAU are on the free tier",
+                "observed_at": "2026-07-22T02:00:00+09:00",
+            }
+        ],
+        "caveats": ["Point-in-time aggregate; may change after re-query."],
+    }
+    validator.validate(executed)
+    # Executed evidence must carry its observation timestamp and at least one
+    # point-in-time caveat.
+    missing_observed_at = {
+        **executed,
+        "evidence": [{k: v for k, v in executed["evidence"][0].items() if k != "observed_at"}],
+    }
+    assert list(validator.iter_errors(missing_observed_at))
+    missing_caveats = {k: v for k, v in executed.items() if k != "caveats"}
+    assert list(validator.iter_errors(missing_caveats))
+
+
+def test_question_advisory_v1_schema_accepts_unknown_lanes_and_capabilities() -> None:
+    """v1 forward-compatibility is real, not just prose.
+
+    Bot-review probe (PR #1703): the previous closed enums rejected any
+    additive lane, contradicting ``lane_compatibility_rules``. A host or
+    engine one lane ahead of this schema must still validate.
+    """
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    schema = fanout["request_model_schema"]
+
+    question = "Which users need this first?"
+    request = {
+        "contract_id": fanout["contract_id"],
+        "session_id": "sess-123",
+        "question_identity": stable_code_investigation_question_identity(question),
+        "question": question,
+        "phase": "answer",
+        "user_question_first": True,
+        "advisory_goal": "help_human_answer_interview_question",
+        "parallel_preference": fanout["parallel_preference"],
+        "sequential_fallback": dict(fanout["sequential_fallback"]),
+        "allowed_capabilities": ["inspect_code", "future_capability"],
+        "lanes": [
+            *fanout["lanes"],
+            {
+                "lane_id": "future_lane",
+                "purpose": "A lane added after this schema shipped.",
+                "capability": "future_capability",
+                "required": False,
+                "future_block": {"anything": True},
+            },
+        ],
+        "synthesis_contract": dict(fanout["synthesis_contract"]),
+        "mcp_tool_capability": metadata,
+    }
+
+    Draft202012Validator(schema).validate(request)
 
 
 def test_question_advisory_v1_contract_carries_lane_compatibility_rules() -> None:

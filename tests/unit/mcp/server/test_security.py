@@ -235,12 +235,14 @@ class TestInputValidator:
         assert result.is_err
         assert "Shell metacharacter" in str(result.error)
 
-    def test_validate_allows_fanout_results_punctuation_as_freetext(self) -> None:
-        """Fan-out re-entry carries child subagent outputs verbatim.
+    def test_validate_exempts_fanout_result_content_from_lexical_checks(self) -> None:
+        """Fan-out re-entry content carries child subagent outputs verbatim.
 
-        Real advisory prose routinely contains ';' / '|' (found by live
-        re-entry with real subagents, Q00/ouroboros#1671): the submission
-        must not be rejected as shell input.
+        Real advisory/code findings legitimately contain ';', '|',
+        'subprocess', and '../' (found by live re-entry with real subagents,
+        Q00/ouroboros#1671): the ``results[*].content`` subtree must pass all
+        lexical checks — shell metacharacters, dangerous patterns, and path
+        traversal alike.
         """
         validator = InputValidator()
         result = validator.validate(
@@ -256,12 +258,38 @@ class TestInputValidator:
                             "finding": "logs exist; that does not make them usable",
                             "suggested_options": ["read local logs; exclude analytics || fallback"],
                         },
-                    }
+                    },
+                    {
+                        "key": "code_context",
+                        "content": {
+                            "finding": (
+                                "the CLI shells out via subprocess.run and reads "
+                                "open('../config/settings.yaml')"
+                            ),
+                            "evidence": ["src/cli/main.py uses os.system for legacy hooks"],
+                        },
+                    },
                 ],
             },
         )
 
         assert result.is_ok
+
+    def test_validate_still_checks_fanout_routing_fields(self) -> None:
+        """Only the content subtree is exempt — routing fields stay validated."""
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_submit_fanout_results",
+            {
+                "session_id": "s1",
+                "fanout_id": "fanout_abc; rm -rf /tmp/nope",
+                "correlation_key": "context.lane_id",
+                "results": [{"key": "code_context", "content": "ok"}],
+            },
+        )
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)
 
     def test_validate_allows_user_preferences_punctuation_as_freetext(self) -> None:
         """Operator-supplied user_preferences carry freetext, never shell input."""

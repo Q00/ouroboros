@@ -43,6 +43,9 @@ from ouroboros.mcp.tools.subagent import (
 from ouroboros.orchestrator.capabilities import (
     stable_code_investigation_question_identity,
 )
+from ouroboros.orchestrator.capabilities.interview_schemas import (
+    _interview_question_advisory_fanout_metadata,
+)
 
 # --------------------------------------------------------------------------- #
 # build_fanout_subagents
@@ -418,13 +421,28 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     session_id = "sess-advisory-contract"
     fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
 
+    # data_context carries an answer contract, so its submitted output must be
+    # contract-conforming JSON (free-text lanes keep plain string outputs).
+    def _lane_content(key: str) -> Any:
+        if key == "data_context":
+            return {
+                "lane_id": "data_context",
+                "data_needed": False,
+                "finding": "No data evidence is needed for this question.",
+                "confidence": "no_evidence",
+                "evidence": [],
+                "proposed_queries": [],
+                "requires_user_confirmation": True,
+            }
+        return f"{key}-advice"
+
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
         {
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": key, "content": f"{key}-advice"} for key in lane_keys],
+            "results": [{"key": key, "content": _lane_content(key)} for key in lane_keys],
         }
     )
     assert submit_result.is_ok, submit_result
@@ -432,9 +450,10 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
+    assert out["contract_violations"] == []
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
-    assert [item["output"] for item in aggregated] == [f"{key}-advice" for key in lane_keys]
+    assert [item["output"] for item in aggregated] == [_lane_content(key) for key in lane_keys]
 
 
 @pytest.mark.asyncio
@@ -591,6 +610,140 @@ def test_advisory_missing_required_lane_is_still_partial(tmp_path: Any) -> None:
     assert out["missing_required_keys"] == ["answer_simplifier"]
     # missing_keys keeps listing every missing lane (backward-compatible).
     assert out["missing_keys"] == ["data_context", "answer_simplifier"]
+
+
+def test_partial_submissions_accumulate_across_calls(tmp_path: Any) -> None:
+    """Submit required lane A, then only the remaining lane B -> complete.
+
+    Each call used to rebuild the provided set from that request alone, so the
+    documented "resubmit the remaining lanes" retry contract could never
+    complete. Received results now persist on the record between calls.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-optional-lanes",
+        payloads=_mixed_advisory_payloads(),
+    )
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-optional-lanes",
+        correlation_key="context.lane_id",
+        results=[{"key": "ambiguity_contrarian", "content": "contrarian-advice"}],
+        fanout_id=fanout_id,
+    )
+    assert first["status"] == "partial"
+    assert first["missing_required_keys"] == ["answer_simplifier"]
+
+    second = submit_fanout_results(
+        registry,
+        session_id="sess-optional-lanes",
+        correlation_key="context.lane_id",
+        results=[{"key": "answer_simplifier", "content": "simplifier-advice"}],
+        fanout_id=fanout_id,
+    )
+    assert second["status"] == "complete"
+    aggregated = second["result"]["aggregated_outputs"]
+    assert [item["lane_id"] for item in aggregated] == [
+        "ambiguity_contrarian",
+        "answer_simplifier",
+    ]
+    assert aggregated[0]["output"] == "contrarian-advice"
+
+
+def test_data_lane_output_is_validated_against_answer_contract(tmp_path: Any) -> None:
+    """A contract-violating data_context output must not flow to synthesis.
+
+    Bot-review probe (PR #1703): raw PII-shaped evidence with
+    ``requires_user_confirmation=false`` previously aggregated as-is under
+    ``status="complete"``. The lane's answer contract is persisted at
+    registration and enforced at re-entry: violations surface under
+    ``contract_violations`` and the violating lane is excluded from the
+    aggregation.
+    """
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-contract",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-contract", payloads=payloads
+    )
+
+    violating_data_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "user rows follow",
+        "confidence": "reported_by_tool",
+        "evidence": [],  # reported_by_tool without executed evidence
+        "proposed_queries": [],
+        "requires_user_confirmation": False,  # contract forbids skipping the user
+        "raw_rows": ["alice@example.com", "bob@example.com"],
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-contract",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": violating_data_output},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "complete"
+    violations = out["contract_violations"]
+    assert [item["lane_id"] for item in violations] == ["data_context"]
+    assert violations[0]["contract_id"] == "data_evidence_answer.v1"
+    assert violations[0]["errors"]
+    aggregated_lanes = [item["lane_id"] for item in out["result"]["aggregated_outputs"]]
+    assert "data_context" not in aggregated_lanes
+
+
+def test_contract_conforming_data_lane_output_aggregates(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-contract-ok",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-contract-ok", payloads=payloads
+    )
+
+    conforming = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-contract-ok",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": conforming},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+    aggregated_lanes = [item["lane_id"] for item in out["result"]["aggregated_outputs"]]
+    assert "data_context" in aggregated_lanes
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
