@@ -104,6 +104,17 @@ class _FailingHelperVerifier(_HelperVerifierBase):
         return False
 
 
+class _SelfReferentialVerifier:
+    def __init__(self) -> None:
+        self.helper = self
+
+    def verification_identity_contract(self) -> dict[str, object]:
+        return {"judge": "self-referential"}
+
+    def __call__(self, **_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=True)
+
+
 class _BypassDispatchRateExecutor(ParallelACExecutor):
     async def _await_dispatch_rate_budget(
         self,
@@ -531,6 +542,17 @@ def test_callable_verifier_helper_override_changes_authority() -> None:
     assert passing.fingerprint != failing.fingerprint
     assert passing.data["verifier"]["implementation"]["stability"] == "durable"
     assert failing.data["verifier"]["implementation"]["stability"] == "durable"
+
+
+def test_self_referential_callable_verifier_fails_closed_without_recursing() -> None:
+    first = _contract(verifier=_SelfReferentialVerifier())
+    second = _contract(verifier=_SelfReferentialVerifier())
+
+    assert first.fingerprint != second.fingerprint
+    assert first.portable_across_processes is False
+    implementation = first.data["verifier"]["implementation"]
+    assert implementation["stability"] == "process_local"
+    assert implementation["instance_overrides"]["helper"]["mode"] == "callable"
 
 
 def test_undeclared_custom_verifier_is_process_local() -> None:

@@ -384,26 +384,33 @@ def _callable_implementation_contract(target: object) -> dict[str, object]:
     }
 
 
-def _callable_entrypoint_contract(target: object) -> dict[str, object]:
-    """Fingerprint the code actually invoked for functions, methods, and callables."""
+def _callable_leaf_implementation_contract(target: object) -> dict[str, object]:
+    """Fingerprint one callable entrypoint without following nested callable state."""
     if inspect.ismethod(target):
         implementation = target.__func__
     elif inspect.isfunction(target) or inspect.isbuiltin(target):
         implementation = target
     else:
+        implementation = type(target).__call__
+    return _callable_implementation_contract(implementation)
+
+
+def _callable_entrypoint_contract(target: object) -> dict[str, object]:
+    """Fingerprint the code actually invoked for functions, methods, and callables."""
+    if not (inspect.ismethod(target) or inspect.isfunction(target) or inspect.isbuiltin(target)):
         class_contract = _safe_class_implementation_contract(target)
         instance_overrides = _instance_executable_overrides(target)
         durable = class_contract.get("stability") == "durable" and not instance_overrides
         contract: dict[str, object] = {
             **class_contract,
             "stability": "durable" if durable else "process_local",
-            "entrypoint": _callable_implementation_contract(type(target).__call__),
+            "entrypoint": _callable_leaf_implementation_contract(target),
             "instance_overrides": instance_overrides,
         }
         if not durable:
             contract["instance_nonce"] = uuid.uuid4().hex
         return contract
-    return _callable_implementation_contract(implementation)
+    return _callable_leaf_implementation_contract(target)
 
 
 def _qualified_type(value: object) -> str:
@@ -745,7 +752,7 @@ def _instance_declared_method_overrides(value: object) -> dict[str, object]:
         if callable(item):
             overrides[name] = {
                 "mode": "callable",
-                "implementation": _callable_entrypoint_contract(item),
+                "implementation": _callable_leaf_implementation_contract(item),
             }
         else:
             overrides[name] = {"mode": "non_callable", "type": _qualified_type(item)}
@@ -801,7 +808,7 @@ def _instance_executable_overrides(value: object) -> dict[str, object]:
         if callable(item):
             overrides[name] = {
                 "mode": "callable",
-                "implementation": _callable_entrypoint_contract(item),
+                "implementation": _callable_leaf_implementation_contract(item),
             }
             continue
         class_member = inspect.getattr_static(type(value), name, missing)
