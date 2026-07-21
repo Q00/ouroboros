@@ -10,7 +10,10 @@ jobs:
   test:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Python 3.12 and 3.13 complete the full coverage suite more slowly than
+    # 3.14. Keep the complete matrix as a required gate rather than cancelling
+    # otherwise-progressing runs at the former 15-minute job limit.
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
